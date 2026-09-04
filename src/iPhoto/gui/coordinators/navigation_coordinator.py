@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -19,7 +19,7 @@ from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 
 if TYPE_CHECKING:
-    from iPhoto.gui.coordinators.playback_coordinator import PlaybackCoordinator
+    from iPhoto.gui.coordinators.contracts import DetailNavigationPort
 
 
 class NavigationCoordinator(QObject):
@@ -45,21 +45,32 @@ class NavigationCoordinator(QObject):
         self._facade = facade
         self._pinned_items_service = pinned_items_service
 
-        self._playback_coordinator: Optional[PlaybackCoordinator] = None
+        self._detail_navigation: DetailNavigationPort | None = None
 
         self._suppress_tree_refresh = False
         self._tree_refresh_suppression_reason: Optional[Literal["edit", "operation"]] = None
+        self._pending_navigation: tuple[str, tuple[Any, ...]] | None = None
+        self._navigation_flush_scheduled = False
 
         self._connect_signals()
 
-    def set_playback_coordinator(self, coordinator: PlaybackCoordinator) -> None:
-        self._playback_coordinator = coordinator
+    def set_detail_navigation_port(self, detail: DetailNavigationPort) -> None:
+        """Bind the narrow Detail port used by Gallery navigation."""
+        self._detail_navigation = detail
 
     def _connect_signals(self) -> None:
-        self._sidebar.albumSelected.connect(self.open_album)
-        self._sidebar.pinnedItemSelected.connect(self.open_pinned_item)
-        self._sidebar.allPhotosSelected.connect(self.open_all_photos)
-        self._sidebar.staticNodeSelected.connect(self._handle_static_node)
+        self._sidebar.albumSelected.connect(
+            lambda path: self._schedule_navigation("album", path)
+        )
+        self._sidebar.pinnedItemSelected.connect(
+            lambda pinned_item: self._schedule_navigation("pinned_item", pinned_item)
+        )
+        self._sidebar.allPhotosSelected.connect(
+            lambda: self._schedule_navigation("all_photos")
+        )
+        self._sidebar.staticNodeSelected.connect(
+            lambda name: self._schedule_navigation("static_node", name)
+        )
         self._sidebar.bindLibraryRequested.connect(self._handle_bind_library)
 
         self._gallery_vm.route_requested.connect(self._handle_route_requested)
@@ -131,6 +142,39 @@ class NavigationCoordinator(QObject):
             )
             return
 
+        if pinned_item.kind == "pet":
+            pet_service = getattr(self._context.library, "pet_service", None)
+            if pet_service is None:
+                self._logger.warning(
+                    "Pinned pet '%s' requested without an active Pet service",
+                    pinned_item.item_id,
+                )
+                return
+            try:
+                query = pet_service.build_pet_query(pinned_item.item_id)
+                entity_exists = pet_service.has_pet(pinned_item.item_id)
+            except Exception:
+                self._logger.warning(
+                    "Failed to open pinned pet '%s' (%s)",
+                    pinned_item.label,
+                    pinned_item.item_id,
+                    exc_info=True,
+                )
+                return
+            if not query.asset_ids and not entity_exists:
+                self._handle_missing_pinned_item(
+                    pinned_item,
+                    library_root=library_root,
+                    message=f"Pinned pet '{pinned_item.label}' is no longer available and will be removed from the sidebar.",
+                )
+                return
+            self._gallery_vm.open_pinned_people_query(
+                query,
+                kind="pet",
+                entity_id=pinned_item.item_id,
+            )
+            return
+
         if pinned_item.kind == "group":
             try:
                 query = people_service.build_group_query(pinned_item.item_id)
@@ -178,9 +222,38 @@ class NavigationCoordinator(QObject):
             library_root=library_root,
         )
 
+    def _schedule_navigation(self, kind: str, *args: Any) -> None:
+        self._pending_navigation = (kind, args)
+        if self._navigation_flush_scheduled:
+            return
+        self._navigation_flush_scheduled = True
+        QTimer.singleShot(0, self._flush_scheduled_navigation)
+
+    def _flush_scheduled_navigation(self) -> None:
+        pending = self._pending_navigation
+        self._pending_navigation = None
+        self._navigation_flush_scheduled = False
+        if pending is None:
+            return
+
+        kind, args = pending
+        if kind == "album":
+            self.open_album(args[0])
+        elif kind == "pinned_item":
+            self.open_pinned_item(args[0])
+        elif kind == "all_photos":
+            self.open_all_photos()
+        elif kind == "static_node":
+            self._handle_static_node(args[0])
+        else:
+            self._logger.warning("Ignoring unknown queued navigation kind %r", kind)
+
     def open_all_photos(self) -> None:
+        self._logger.info("open_all_photos: begin")
         self._reset_playback()
+        self._logger.info("open_all_photos: reset_done")
         self._gallery_vm.open_all_photos()
+        self._logger.info("open_all_photos: gallery_vm_done")
 
     def open_recently_deleted(self) -> None:
         self._reset_playback()
@@ -251,8 +324,8 @@ class NavigationCoordinator(QObject):
             self._router.show_detail()
 
     def _handle_detail_requested(self, row: int) -> None:
-        if self._playback_coordinator is not None:
-            self._playback_coordinator.play_asset(row)
+        if self._detail_navigation is not None:
+            self._detail_navigation.play_asset(row)
 
     def _handle_map_assets_changed(self, assets: list, root: Path) -> None:
         map_view = self._router.map_view()
@@ -279,8 +352,8 @@ class NavigationCoordinator(QObject):
         return False
 
     def _reset_playback(self) -> None:
-        if self._playback_coordinator is not None:
-            self._playback_coordinator.reset_for_gallery()
+        if self._detail_navigation is not None:
+            self._detail_navigation.reset_for_gallery()
 
     def suppress_tree_refresh_for_edit(self) -> None:
         self._suppress_tree_refresh = True

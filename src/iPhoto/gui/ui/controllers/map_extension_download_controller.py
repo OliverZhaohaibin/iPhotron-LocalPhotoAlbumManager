@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QProcess, QThreadPool, Qt
@@ -27,6 +28,7 @@ from iPhoto.gui.ui.tasks.map_extension_download_worker import (
 )
 from maps.map_sources import (
     apply_pending_osmand_extension_install,
+    bundled_osmand_extension_archive,
     default_osmand_extension_root,
     default_pending_osmand_extension_root,
     has_installed_osmand_extension,
@@ -105,6 +107,7 @@ class MapExtensionDownloadController:
         context: RuntimeEntryContract,
         *,
         package_root: Path,
+        on_bundled_install_ready: Callable[[], None] | None = None,
     ) -> None:
         self._parent = parent
         self._context = context
@@ -114,20 +117,33 @@ class MapExtensionDownloadController:
         self._latest_result: MapExtensionDownloadResult | None = None
         self._active_worker: MapExtensionDownloadWorker | None = None
         self._temporarily_hidden_windows: list[QWidget] = []
+        self._startup_prompt: QMessageBox | None = None
+        self._on_bundled_install_ready = on_bundled_install_ready
+        self._bundled_install_inflight = False
 
     def _tr(self, source_text: str) -> str:
         return QCoreApplication.translate("MapExtension", source_text, None)
 
-    def maybe_prompt_on_startup(self) -> None:
-        if not supports_map_extension_download():
-            return
+    def maybe_prompt_on_startup(self) -> bool:
+        """Prepare the extension on first map use.
+
+        Returns ``True`` while a bundled archive is being installed, allowing
+        the caller to defer capability detection until the worker finishes.
+        """
+
         if has_installed_osmand_extension(self._package_root):
-            return
+            return False
         if has_pending_osmand_extension_install(self._package_root):
             self._recover_pending_install_on_startup()
-            return
+            return False
+        bundled_archive = bundled_osmand_extension_archive(self._package_root)
+        if bundled_archive is not None:
+            self._start_bundled_install(bundled_archive)
+            return True
+        if not supports_map_extension_download():
+            return False
         if not bool(self._context.settings.get(_SHOW_STARTUP_PROMPT_KEY, True)):
-            return
+            return False
 
         message_box = QMessageBox(self._parent)
         message_box.setIcon(QMessageBox.Icon.Question)
@@ -143,14 +159,21 @@ class MapExtensionDownloadController:
         message_box.addButton(self._tr("Not Now"), QMessageBox.ButtonRole.RejectRole)
         do_not_show_checkbox = QCheckBox(self._tr("Do not show again"), message_box)
         message_box.setCheckBox(do_not_show_checkbox)
-        message_box.exec()
+        self._startup_prompt = message_box
 
-        if message_box.clickedButton() is download_button:
-            self.start_download(source="startup")
-            return
+        def _finished(_result: int) -> None:
+            try:
+                if message_box.clickedButton() is download_button:
+                    self.start_download(source="startup")
+                elif do_not_show_checkbox.isChecked():
+                    self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
+            finally:
+                self._startup_prompt = None
+                message_box.deleteLater()
 
-        if do_not_show_checkbox.isChecked():
-            self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
+        message_box.finished.connect(_finished)
+        message_box.open()
+        return False
 
     def set_package_root(self, package_root: Path | None) -> None:
         """Update the active maps package root used for prompt/download checks."""
@@ -177,6 +200,7 @@ class MapExtensionDownloadController:
 
         self._download_inflight = True
         self._latest_result = None
+        self._bundled_install_inflight = False
         self._hide_blocking_top_level_windows()
         self._progress_dialog = _MapExtensionProgressDialog(self._parent)
         self._progress_dialog.show()
@@ -187,6 +211,29 @@ class MapExtensionDownloadController:
             MapExtensionDownloadRequest(
                 package_root=self._package_root,
                 platform=sys.platform,
+            )
+        )
+        worker.signals.progress.connect(self._handle_progress)
+        worker.signals.ready.connect(self._handle_ready)
+        worker.signals.error.connect(self._handle_error)
+        worker.signals.finished.connect(self._handle_finished)
+        self._active_worker = worker
+        QThreadPool.globalInstance().start(worker, -1)
+
+    def _start_bundled_install(self, archive_path: Path) -> None:
+        if self._download_inflight:
+            return
+        self._download_inflight = True
+        self._latest_result = None
+        self._bundled_install_inflight = True
+        self._progress_dialog = _MapExtensionProgressDialog(self._parent)
+        self._progress_dialog.show()
+
+        worker = MapExtensionDownloadWorker(
+            MapExtensionDownloadRequest(
+                package_root=self._package_root,
+                platform=sys.platform,
+                local_archive_path=archive_path,
             )
         )
         worker.signals.progress.connect(self._handle_progress)
@@ -227,6 +274,12 @@ class MapExtensionDownloadController:
             self._progress_dialog.deleteLater()
             self._progress_dialog = None
 
+        if self._bundled_install_inflight:
+            callback = self._on_bundled_install_ready
+            if callback is not None:
+                callback()
+            return
+
         restart_now = QMessageBox.question(
             self._parent,
             self._tr("Restart Required"),
@@ -254,6 +307,7 @@ class MapExtensionDownloadController:
 
     def _handle_finished(self) -> None:
         self._download_inflight = False
+        self._bundled_install_inflight = False
         self._active_worker = None
 
     def _recover_pending_install_on_startup(self) -> None:

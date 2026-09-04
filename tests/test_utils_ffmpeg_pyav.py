@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
+from iPhoto.errors import ExternalToolTimeoutError
 from iPhoto.utils import ffmpeg
 
 def test_extract_frame_with_pyav_returns_none_when_av_missing(monkeypatch):
@@ -37,7 +38,13 @@ def test_extract_frame_with_pyav_opens_container(mock_av, tmp_path):
     result = ffmpeg.extract_frame_with_pyav(video_path, at=1.0)
 
     # Assertions
-    mock_av.open.assert_called_with(str(video_path))
+    mock_av.open.assert_called_with(
+        str(video_path),
+        timeout=(
+            ffmpeg._PYAV_FRAME_TIMEOUT_SECONDS,
+            ffmpeg._PYAV_FRAME_TIMEOUT_SECONDS,
+        ),
+    )
     assert mock_container.seek.called
     assert result == mock_image
 
@@ -154,6 +161,41 @@ def test_extract_frame_with_pyav_exception_returns_none(mock_av, tmp_path):
     mock_av.open.side_effect = Exception("Boom")
     result = ffmpeg.extract_frame_with_pyav(tmp_path / "video.mp4")
     assert result is None
+
+
+@patch("iPhoto.utils.ffmpeg.av")
+def test_extract_frame_with_pyav_propagates_open_timeout(mock_av, tmp_path):
+    """A PyAV I/O timeout is terminal for the frame request."""
+
+    mock_av.open.side_effect = TimeoutError("timed out")
+
+    with pytest.raises(ExternalToolTimeoutError, match="PyAV frame extraction timed out"):
+        ffmpeg.extract_frame_with_pyav(tmp_path / "stalled.mp4")
+
+
+@patch("iPhoto.utils.ffmpeg.av")
+def test_extract_frame_with_pyav_enforces_total_decode_deadline(
+    mock_av,
+    monkeypatch,
+    tmp_path,
+):
+    """Repeated successful reads cannot exceed the total decode deadline."""
+
+    mock_container = MagicMock()
+    mock_av.open.return_value.__enter__.return_value = mock_container
+    mock_stream = MagicMock()
+    mock_stream.time_base = 1 / 30
+    mock_container.streams.video = [mock_stream]
+    mock_frame = MagicMock(pts=0)
+    mock_container.decode.return_value = [mock_frame]
+    monkeypatch.setattr(
+        ffmpeg.time,
+        "monotonic",
+        MagicMock(side_effect=[0.0, ffmpeg._PYAV_FRAME_TIMEOUT_SECONDS]),
+    )
+
+    with pytest.raises(ExternalToolTimeoutError, match="PyAV frame extraction timed out"):
+        ffmpeg.extract_frame_with_pyav(tmp_path / "slow.mp4", at=1.0)
 
 
 @patch("iPhoto.utils.ffmpeg.av")

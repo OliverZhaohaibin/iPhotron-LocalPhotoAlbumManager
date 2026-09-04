@@ -215,10 +215,18 @@ def test_repair_app_bundle_native_widget_links_rewrites_qt_frameworks(tmp_path) 
     app_bundle = tmp_path / "main.app"
     macos_root = app_bundle / "Contents" / "MacOS"
     native_widget = (
-        macos_root / "maps" / "tiles" / "extension" / "bin" / "osmand_native_widget.dylib"
+        app_bundle
+        / "Contents"
+        / "Resources"
+        / "maps"
+        / "tiles"
+        / "extension"
+        / "bin"
+        / "osmand_native_widget.dylib"
     )
     native_widget.parent.mkdir(parents=True)
     native_widget.write_bytes(b"widget")
+    macos_root.mkdir(parents=True)
     for qt_name in ("QtCore", "QtGui", "QtWidgets"):
         (macos_root / qt_name).write_bytes(qt_name.encode("utf-8"))
 
@@ -284,7 +292,14 @@ def test_repair_app_bundle_native_widget_links_fails_for_missing_app_qt_target(
     app_bundle = tmp_path / "main.app"
     macos_root = app_bundle / "Contents" / "MacOS"
     native_widget = (
-        macos_root / "maps" / "tiles" / "extension" / "bin" / "osmand_native_widget.dylib"
+        app_bundle
+        / "Contents"
+        / "Resources"
+        / "maps"
+        / "tiles"
+        / "extension"
+        / "bin"
+        / "osmand_native_widget.dylib"
     )
     native_widget.parent.mkdir(parents=True)
     native_widget.write_bytes(b"widget")

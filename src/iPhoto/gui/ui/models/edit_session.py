@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 from PySide6.QtCore import QObject, Signal
 
 from ....core.light_resolver import LIGHT_KEYS
-from ....core.color_resolver import COLOR_KEYS, COLOR_RANGES, ColorStats
+from ....core.color_resolver import COLOR_KEYS, ColorStats
 from ....core.curve_resolver import DEFAULT_CURVE_POINTS
 from ....core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from ....core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
@@ -96,17 +97,18 @@ class EditSession(QObject):
         self._values["BW_Grain"] = 0.0
         self._ranges["BW_Grain"] = (0.0, 1.0)
 
-        # Cropping parameters are stored in normalised image space so the
-        # session can persist non-destructive crop boxes alongside colour
-        # adjustments.  ``Crop_*`` values are clamped to ``[0.0, 1.0]``.
+        # Crop coordinates live in the logical post-transform image plane.
+        # Perspective/straighten can project valid pixels outside [0, 1], so
+        # centres and dimensions must survive the session without unit-square
+        # clamping; the crop controller validates them against the real quad.
         self._values["Crop_CX"] = 0.5
-        self._ranges["Crop_CX"] = (0.0, 1.0)
+        self._ranges["Crop_CX"] = (-math.inf, math.inf)
         self._values["Crop_CY"] = 0.5
-        self._ranges["Crop_CY"] = (0.0, 1.0)
+        self._ranges["Crop_CY"] = (-math.inf, math.inf)
         self._values["Crop_W"] = 1.0
-        self._ranges["Crop_W"] = (0.0, 1.0)
+        self._ranges["Crop_W"] = (0.0, math.inf)
         self._values["Crop_H"] = 1.0
-        self._ranges["Crop_H"] = (0.0, 1.0)
+        self._ranges["Crop_H"] = (0.0, math.inf)
 
         # Perspective correction sliders operate in a symmetric range so they
         # can skew in both directions.  The shader interprets the normalised

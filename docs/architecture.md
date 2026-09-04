@@ -14,11 +14,14 @@ For completed migration records and verification history, see
 The vNext architecture cleanup is complete for production source code.
 
 - Production runtime code no longer imports `iPhoto.legacy` or `iPhoto.models.*`.
-- Compatibility and old domain-repository code is quarantined under
-  `src/iPhoto/legacy/` for explicit historical behavior tests only.
+- The compatibility application tree and old domain-repository implementation
+  under `src/iPhoto/legacy/` have been removed.
 - `RuntimeContext -> LibrarySession` is the active library entry path.
 - Application ports and services define the boundary used by GUI, CLI, workers,
   People, Maps, Edit, thumbnails, and lifecycle operations.
+- Gallery-to-Detail rendering has converged on one GPU-first production path.
+  Still and video opens share a generation-safe render transaction; static
+  Detail/Edit share source surfaces, GPU residency, and immutable edit state.
 - Architecture guardrails are enforced by `tools/check_architecture.py` and
   `tests/architecture`.
 
@@ -38,11 +41,12 @@ architecture convergence status.
   then best-effort writes GPS metadata to original media through ExifTool and
   reports warnings on failure.
 - **Rebuildable facts vs durable choices.** Scan rows, thumbnails, Live Photo
-  materialization, and People runtime snapshots can be rebuilt. Favorites,
+  materialization, and People/Pets runtime snapshots can be rebuilt. Favorites,
   hidden/trash state, pinned items, covers, ordering, manual metadata, People
-  names, groups, covers, hidden flags, and manual faces are durable user state.
-- **Optional bounded contexts.** People AI and Maps native/runtime extensions
-  are optional and must degrade gracefully when missing.
+  names/groups/manual faces, and Pets names/covers/hidden/rejected decisions are
+  durable user state.
+- **Optional bounded contexts.** People AI, Pets AI, and Maps native/runtime
+  extensions are optional and must degrade gracefully when missing.
 - **Cross-platform desktop first.** macOS, Windows, and Linux are supported
   through runtime adapters and platform-specific rendering choices.
 
@@ -82,6 +86,7 @@ graph TB
         Scanner["Filesystem Scanner Adapter"]
         Thumbnails["Thumbnail Cache / Renderer"]
         PeopleInfra["People Runtime / State"]
+        PetsInfra["Pets Runtime / State"]
         MapsInfra["Maps Runtime Adapter"]
     end
 
@@ -109,6 +114,7 @@ graph TB
     Scanner -.implements.-> Ports
     Thumbnails -.implements.-> Ports
     PeopleInfra -.implements.-> Ports
+    PetsInfra -.implements.-> Ports
     MapsInfra -.implements.-> Ports
 ```
 
@@ -125,7 +131,7 @@ Forbidden dependency direction:
 ```text
 domain -> application/gui/infrastructure
 application -> gui/concrete cache/concrete infrastructure
-infrastructure/cache/core/io/library/people -> gui
+infrastructure/cache/core/io/library/people/pets -> gui
 production runtime -> iPhoto.legacy
 production runtime -> iPhoto.models.*
 ```
@@ -149,7 +155,8 @@ RuntimeContext
   library_session: LibrarySession | None
   open_library(root)
   close_library()
-  resume_startup_tasks()
+  resume_startup_tasks(defer_scan=False)
+  start_deferred_startup_scan()
   remember_album(root)
 ```
 
@@ -170,6 +177,11 @@ LibrarySession
   asset_operations
   thumbnails
   people
+  pets
+  recognition_mutations
+  recognition_queries
+  recognition_merges
+  recognition_edits
   maps
   map_interactions
   edit
@@ -180,9 +192,11 @@ LibrarySession
 CLI and other non-GUI callers create the same session boundary through
 `create_headless_library_session(root)`.
 
-Production GUI and CLI do not create standalone fallback services. If no active
-session exists, GUI services should fail explicitly or no-op safely according to
-their presentation responsibility.
+Production GUI and CLI do not create independently bound fallback services.
+Widgets may receive an unbound `PeopleService()` or `PetService()` as a
+presentation-safe empty object before a library session exists, but it must not
+open repositories or become a second source of library truth. Session-bound
+services fail explicitly or no-op safely according to their responsibility.
 
 `TranslationManager` is created after settings and before theme initialization.
 It reads `ui.language`, installs the active Qt translator, exposes
@@ -192,22 +206,29 @@ language has no bundled resource. The active stored language values are
 
 Desktop construction deliberately has two boundaries. The process first loads
 settings, configures graphics caches, creates `QApplication`, `RuntimeContext`,
-and the lightweight main-window shell, then calls `show()`. Only after the shell
-emits `firstPainted` may startup create hidden feature bundles, import and start
-`MainCoordinator`, resume library startup tasks, or select the initial
-collection. This is an architecture constraint rather than a timer-based
-optimization: optional feature imports must not migrate back above the first
-paint boundary.
+and the lightweight main-window shell. Before any widget that can force native
+handle creation (notably `QMenuBar`) is constructed, the hidden Detail surface
+shell and all three QRhi widgets are attached with their final parents. The
+window then calls `show()`. Only after the shell emits `firstPainted` may startup
+preload the post-paint modules, complete the Detail chrome/playback runtime,
+construct and start `DesktopCoordinatorRuntime`, probe and commit the saved
+library, select and warm the initial Gallery collection, and finally schedule
+idle startup work such as the deferred metadata scan. This is an architecture
+constraint rather than a timer-based optimization.
 
 `Ui_MainWindow.ensure_feature()` owns the on-demand lifetime of the detail,
 preview, Map, People, and Albums bundles. It caches each bundle and emits
 `featureCreated` so the window manager and coordinator can attach behavior to
 late-created widgets. Navigation may also call `ensure_feature()` if Map or the
-Albums dashboard was not constructed during the post-paint warm-up. On Windows
-and Linux, the QRhi-backed detail bundle is constructed before `show()` because
-inserting it into a visible top-level window can recreate the native window;
-preview and People remain post-paint. macOS keeps all three in the post-paint
-warm-up path.
+Albums dashboard was not constructed during the post-paint warm-up. Windows,
+macOS, and Linux share one QRhi lifecycle: the final native surface hierarchy is
+prepared pre-show, while `ensure_feature("detail")` completes its non-native UI
+and QtMultimedia runtime post-paint. Platform allowlists, post-show surface
+creation, parentless surface warm-up, and hide/show workarounds are forbidden.
+The pre-show hierarchy is part of shell construction: failure is terminal and
+non-recoverable for that process. Startup-generation retry applies only after a
+valid visible shell exists; it must not claim to reconstruct the native
+hierarchy after `QMenuBar` has already created the top-level handle.
 
 ## Layer Boundaries
 
@@ -223,6 +244,31 @@ FFmpeg, GUI helpers, or runtime singletons.
 events, and port protocols. Application code depends on ports and domain values.
 It must not import GUI modules, concrete persistence modules, Qt workers,
 widgets, or process-wide repository singletons.
+
+`LibrarySession.recognition_edits` owns explicit single-detection reassignment,
+pending-candidate identity merge, and identity rename requests from Detail.
+Requests capture the asset, native detection reference, and expected identity
+state. Rename requests also carry the normalized name observed when the editor
+opened. The service re-reads annotations under the shared recognition mutation
+lease and uses that name as a compare-and-set guard before dispatching through
+the existing People/Pets services and journal. Inline naming and Info Panel
+share the same reassignment operation.
+
+The inline selection policy lives in `domain/recognition_edits.py`. Only an
+independent, non-manual `candidate` identity is merged as a whole. Manual,
+unassigned, `eligible`, confirmed, redirected, and legacy annotations are edited
+one detection at a time. Typed text remains an explicit identity rename, and
+selecting the current identity is a no-op. Single-detection assignments override
+identity redirects when reading both automatic and manual annotations; moving
+back to the native kind clears that override as part of recoverable state sync.
+Source display names may fill a missing canonical name only when source and
+effective identity are the same. Move and delete runtime commits retain any
+cleared assignment target so recovery can refresh only groups containing the
+native identities or the previous target; legacy commits without this metadata
+retain the full-refresh fallback.
+Targeted group lookup expands every native or assignment identity through the
+durable redirect map, so mutations of source detections also refresh groups that
+were remapped to their canonical People/Pets identities.
 
 Current public boundary names include:
 
@@ -244,6 +290,8 @@ Current public boundary names include:
 | `MapRuntimePort` | Maps extension availability and runtime adapter selection. |
 | `PeopleAssetRepositoryPort` | Asset-index reads and face-status updates used by the People bounded context. |
 | `PeopleIndexPort` | People scan candidate enqueue, snapshot commit, and People/group queries. |
+| `PetAssetRepositoryPort` | Asset-index reads plus `pet_status` updates/counts used by the Pets bounded context. |
+| `PetIndexPort` | Pets candidate enqueue and rebuildable snapshot commit boundary. |
 | `PinnedStateRepositoryPort` | Pinned sidebar state persistence across libraries. |
 | `TaskSchedulerPort` | Background task submission and cancellation boundary. |
 | `ThumbnailRendererPort` | Thumbnail/preview generation without GUI ownership. |
@@ -267,9 +315,19 @@ future side design. The active query path is SQL-first and windowed:
   window: `read_gallery_collection_window()` returns tile-rendering fields, and
   `read_thumbnail_hint_window()` returns only paths and existing full-thumbnail
   keys without repeating the collection count.
-- `GalleryViewportDemand` is the contract between scrolling, sparse row loading,
-  and thumbnail scheduling. It separates visible rows, the full-thumbnail guard,
-  far speculative full-thumbnail work, and the wider micro-thumbnail warm range.
+- `AssetViewportDemand` is the per-surface contract between scrolling, sparse row
+  loading, and thumbnail scheduling. Gallery and Filmstrip keep independent
+  generations, visible rows, full-thumbnail guards, speculative work, display
+  buckets, and micro-thumbnail warm ranges.
+- Active surface demands are leases. Sparse row windows may be disjoint, while
+  the global micro cache remains bounded. Gallery and Filmstrip both resolve to
+  one canonical 512px full-thumbnail key, so their independent leases share the
+  same L1 QPixmap and L2 artifact. Hiding a surface suspends its viewport publishers
+  and releases only its exclusive pins and queued work. Late viewport query results
+  for a released surface are discarded.
+- Filmstrip keeps visible and two-screen full-thumbnail guard demand at 512px,
+  but does not add far-speculative full work. Gallery retains its wider
+  full-prefetch policy, and Filmstrip micro warm-up remains unchanged.
 - Delegates consume one `GalleryTileSnapshot` through `TILE_SNAPSHOT`. A paint
   miss must remain memory-only; it schedules bounded background work and paints
   an available micro thumbnail or placeholder instead of reading SQLite or L2.
@@ -296,6 +354,16 @@ GUI modules or own product workflow decisions.
 coordinators, menus, shortcuts, Qt workers, and signal adapters. GUI code calls
 session/application surfaces and does not directly write durable state or call
 concrete repository singletons.
+
+The static media pipeline is a GUI/rendering boundary rather than an application
+workflow service. `DetailRenderCoordinator` owns the active still/video
+transaction and its single terminal state. `DetailStillRequestScheduler`
+deduplicates one source revision and decode level, while platform decoders
+produce detached neutral RGBA8888/sRGB surfaces. `PhotoRenderSessionHandle`
+shares the current source texture, available LODs, `ColorStats`, and immutable
+`EditRenderState` between Detail and Edit. Sidecar persistence still enters
+through the session edit surface; it does not become part of the neutral source
+cache key.
 
 User-visible GUI text goes through the Qt translation boundary. New strings
 should use `iPhoto.gui.i18n.tr(context, source_text)` or
@@ -327,11 +395,15 @@ It is not a legacy manager facade.
 
 - `people/`: optional face detection/clustering runtime, People repositories,
   stable People state, manual faces, groups, covers, and People service API.
+- `pets/`: optional YOLOX/DINOv2 detection and identity clustering runtime,
+  rebuildable pet repository, durable pet state, and session-bound Pet service.
+  The People & Pets dashboard composes both services without merging their
+  runtime tables. See [`docs/misc/PETS_RECOGNITION_RUNTIME.md`](misc/PETS_RECOGNITION_RUNTIME.md).
 - `src/maps`: optional offline map runtime, tile parsing, OBF/native
   widget/helper integration, search, and map rendering internals. GUI map
   views construct concrete map widgets through `map_widget_factory`.
-- `core/`: editing math, filters, geometry, preview backends, export transforms,
-  raw loading, and Live Photo pairing rules.
+- `core/`: editing math, filters, geometry, export transforms, raw loading, and
+  Live Photo pairing rules.
 - `cache/index_store/`: current global SQLite index implementation used behind
   repository/session surfaces, not a public GUI/application shortcut.
 
@@ -341,12 +413,16 @@ Each library root owns a `.iPhoto/` workspace.
 
 | Path | Ownership |
 | --- | --- |
-| `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, face scan status, and related library state. |
+| `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, independent `face_status`/`pet_status`, and related library state. |
 | `.iPhoto/links.json` | Derived Live Photo compatibility materialization; repository/session Live Photo role state remains authoritative for runtime behavior. |
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
+| `.iPhoto/cache/detail-surfaces/v3/` | SQLite-indexed, rebuildable neutral RGBA8/sRGB Detail surfaces keyed by source identity, decoder contract, orientation, and LOD; trusted hits validate indexed header/stat metadata without scanning the full payload, and sidecar revision is excluded. |
 | `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
 | `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers, and manual faces. |
 | `.iPhoto/faces/thumbnails/` | Rebuildable cropped face thumbnails. |
+| `.iPhoto/pets/pet_index.db` | Rebuildable Pets detections and clustered pet records. |
+| `.iPhoto/pets/pet_state.db` | Durable Pets profiles, names, covers, hidden flags, rejected keys, and merge redirects. |
+| `.iPhoto/pets/thumbnails/` | Rebuildable cropped pet thumbnails; replaced detections are reference-pruned after a successful snapshot commit. |
 | `.ipo` sidecars | Durable non-destructive edit instructions next to source media. |
 | `.iphoto.album.json` / `.iPhoto/manifest.json` | Folder-local album metadata formats. |
 | `.iphoto.album` | Legacy album marker compatibility file. |
@@ -366,25 +442,30 @@ sequenceDiagram
     participant Paint as First Paint
     participant Runtime as RuntimeContext
     participant Feature as Feature Bundles
-    participant Coordinator as MainCoordinator
+    participant Coordinator as DesktopCoordinatorRuntime
     participant Session as LibrarySession
     participant Infra as Infrastructure
 
     UI->>Runtime: create(defer_startup=True)
+    UI->>UI: prepare final-parent native QRhi hierarchy
     UI->>UI: show lightweight window shell
     UI-->>Paint: firstPainted
-    Paint->>Feature: create deferred hidden features over event-loop turns
-    Feature->>Coordinator: import, wire, and start
-    Coordinator->>Runtime: resume_startup_tasks()
-    Runtime->>Runtime: open saved library root
+    Paint->>Feature: preload modules and complete non-native Detail features
+    Feature->>Coordinator: construct, bind, and start
+    Coordinator->>Runtime: request saved-library probe
     Runtime->>Session: create library-scoped session
-    Session->>Infra: bind SQLite/cache/people/maps/edit adapters
-    Runtime-->>Coordinator: session surfaces ready
+    Session->>Infra: bind SQLite/cache/people/pets/maps/edit adapters
+    Runtime-->>Coordinator: commit validated library and bind session surfaces
+    Coordinator->>Coordinator: select and warm first Gallery window
+    Coordinator->>Runtime: schedule deferred metadata scan as idle work
 ```
 
 Headless callers do not use the paint boundary; they create the same
-library-scoped session directly. Scan workers, geocoding, People AI, Qt
+library-scoped session directly. Scan workers, geocoding, People/Pets AI, Qt
 Multimedia, and Maps rendering remain demand-loaded by their owning workflow.
+The GUI delays the saved-library metadata scan until the first gallery warm-up
+signals readiness, with a bounded timer fallback so an empty or failed gallery
+cannot suppress scanning indefinitely.
 
 ### Open Collection
 
@@ -397,8 +478,8 @@ sequenceDiagram
     participant Query as Asset Query Surface
     participant Repo as AssetRepositoryPort
 
-    Grid->>Demand: viewport + intent + generation
-    Demand->>Store: visible and micro-warm ranges
+    Grid->>Demand: surface + viewport + intent + generation
+    Demand->>Store: disjoint visible and micro-warm ranges
     Store->>Loader: bounded async requests
     Loader->>Query: gallery window / thumbnail hints
     Query->>Repo: narrow SQL projections
@@ -412,6 +493,49 @@ remain the source of truth for persisted asset state. Explicit detail-view row
 loads are retained independently from newer viewport generations so navigation
 does not lose an in-flight target.
 
+### Gallery To Detail/Edit Rendering
+
+```mermaid
+sequenceDiagram
+    participant Gallery as Gallery
+    participant Tx as DetailRenderCoordinator
+    participant Scheduler as Still Request Scheduler
+    participant Cache as Surface Cache
+    participant Decoder as Platform Decoder
+    participant GPU as Texture Residency
+    participant Edit as Detail/Edit Session
+
+    Gallery->>Tx: begin immutable transaction
+    Tx->>Scheduler: viewport/DPR/geometry request
+    Scheduler->>Scheduler: deduplicate or promote same key
+    Scheduler->>Cache: memory then disk lookup
+    alt cache miss
+        Cache->>Decoder: viewport-aware decode
+        Decoder-->>Cache: detached neutral surface
+        Cache->>Cache: async versioned write
+    end
+    Cache-->>GPU: decoded or cached surface
+    GPU->>GPU: reuse key or upload without initial mipmaps
+    GPU-->>Tx: actual draw presented
+    Tx-->>Edit: shared PhotoRenderSessionHandle
+    Edit->>GPU: immutable shader-state updates
+```
+
+`DetailDecodeKey` contains asset/source revision, orientation, and decode level;
+it intentionally excludes `.ipo` revision. Initial quality is selected from
+physical viewport demand rather than full sensor dimensions. Zoom, crop,
+rotation, or perspective may request a higher LOD, but the prior texture stays
+visible until the replacement is drawn. Current/previous/next GPU residency is
+bounded by both three textures and 192MB. Source changes invalidate neutral
+surfaces and textures; sidecar changes replace render state only.
+
+Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
+with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,
+half-size, then full fallback sequence. All stale generations are rejected at
+thread/render boundaries. Static Edit no longer creates a second full-image
+loader or CPU preview session; Done/Cancel and fullscreen retain the same render
+session. Export remains an independent full-resolution path.
+
 ### Scan And Index
 
 ```mermaid
@@ -421,7 +545,6 @@ sequenceDiagram
     participant Scan as ScanLibraryUseCase
     participant Scanner as MediaScannerPort
     participant Repo as AssetRepositoryPort
-    participant People as PeopleIndexPort
     participant Pairing as Live Photo Pairing
 
     Trigger->>Session: scan(scope, filters)
@@ -430,7 +553,7 @@ sequenceDiagram
     Scanner-->>Scan: scan chunks
     Scan->>Repo: merge scan rows
     Scan->>Repo: append scan job/event records
-    Scan->>People: enqueue eligible rows
+    Scan->>Repo: update Face/Pet eligibility and status
     Scan->>Pairing: refresh roles/materialization
     Scan-->>Trigger: progress/result + ScanBatchCommitted
 ```
@@ -438,6 +561,28 @@ sequenceDiagram
 Scanning has one application use case. Qt workers adapt threading/progress, and
 CLI uses the same session surface without Qt. UI scan batches are ready-only and
 carry full thumbnail cache keys so visible media rows are immediately drawable.
+Metadata commits may create or update Face/Pet `pending`, `retry`, `done`, and
+`skipped` bookkeeping, but scanning does not itself activate model workers.
+Application startup, metadata-scan completion, persisted `pending`/`retry` rows,
+and an interactive rescan must not bypass the recognition feature gate.
+
+The desktop recognition activation contract is:
+
+```text
+People view shown
+    +
+People first viewport ready
+    +
+350 ms quiet delay
+    -> LibraryRuntimeController.activate_recognition_scans()
+```
+
+Recognition services and cached dashboard summaries may be bound or warmed
+without importing or initializing AI models. Once the gate has activated the
+workers for the current library, they may drain persisted eligible rows and
+consume rows committed by later metadata scans. The Face and Pet workers and
+their databases remain independent; failure or a missing optional runtime in
+one must not block the other.
 
 ### Assign Location
 
@@ -470,7 +615,7 @@ session.
 ```mermaid
 sequenceDiagram
     participant Paint as Delegate Paint
-    participant Demand as Gallery Demand
+    participant Demand as Surface Demands
     participant Thumb as Thumbnail Cache Service
     participant Worker as Visible/Guard/Far Workers
     participant L2 as Disk Cache
@@ -478,13 +623,13 @@ sequenceDiagram
 
     Paint->>Thumb: peek_full_thumbnail()
     Thumb-->>Paint: memory pixmap or miss
-    Demand->>Thumb: request_many(generation, priority)
+    Demand->>Thumb: upsert/release surface lease
     Thumb->>Worker: deduplicate/promote/schedule
     Worker->>L2: decode existing thumbnail to QImage
     Worker-->>GUI: bounded staging result
     GUI->>GUI: QImage to QPixmap within frame budget
     GUI-->>Paint: coalesced exact-row update
-    alt stale or superseded demand
+    alt surface key is no longer leased or revision is superseded
         Thumb->>Worker: cancel, back off, or discard result
     end
 ```
@@ -493,27 +638,26 @@ Visible recovery, near guard, and far speculation use separate scheduling lanes;
 far work must not consume workers reserved for urgent visible/guard requests.
 `ThumbnailRuntimePolicy` derives worker, staging, publish, and byte-budget limits
 from platform and physical memory. L1 eviction accounts for actual image bytes,
-pins active visible demand, and prefers old/far speculative entries. Disk access
+pins the union of active visible surface demand, and prefers old/far speculative
+entries. Gallery and Filmstrip naturally deduplicate at the same 512px key; the
+size-qualified key remains available to other future surfaces. Disk access
 and image decoding stay off the GUI thread; only bounded `QPixmap` publication
 runs there. Thumbnail infrastructure may apply edit state, but edit persistence
 remains behind session/edit sidecar services.
 
-## Legacy Quarantine And Removal Policy
+## Removed Legacy Application Tree
 
-`src/iPhoto/legacy/` contains quarantined compatibility modules, including old
-root compatibility paths such as `legacy/app.py` and `legacy/appctx.py`, old
-bootstrap factory shims, old domain-repository use cases, old repository
-adapters, and old model shims.
+The former `src/iPhoto/legacy/` compatibility tree, including app/appctx
+wrappers, bootstrap shims, domain-repository use cases, repository adapters,
+and model shims, has been removed.
 
 Rules:
 
 - Production runtime must not import `iPhoto.legacy`.
 - Production runtime must not import `iPhoto.models.*`.
-- No new functionality goes into quarantine modules.
-- Tests that cover historical behavior must import quarantine modules
-  explicitly.
-- The whole quarantine subtree is planned for deletion in the next major
-  release.
+- Do not restore compatibility modules or tests that target removed interfaces.
+- Historical behavior that remains a product requirement must be covered
+  through current application, session, domain, or infrastructure surfaces.
 
 ## Architecture Guardrails
 
@@ -550,12 +694,12 @@ browsing/indexing state lives in the library database and session surfaces.
 ### ADR-2: Library-Scoped Runtime
 
 One active library root owns one runtime session, one asset index, one thumbnail
-cache root, one People state root, and one Maps runtime context.
+cache root, separate People and Pets state roots, and one Maps runtime context.
 
 ### ADR-3: Application Ports Over Concrete Singletons
 
 Use cases and application services depend on ports. Concrete SQLite, ExifTool,
-FFmpeg, thumbnail, People, edit, and Maps implementations are bound through
+FFmpeg, thumbnail, People, Pets, edit, and Maps implementations are bound through
 runtime/session composition.
 
 ### ADR-4: Single Asset Repository Boundary
@@ -568,18 +712,38 @@ application code must not bypass it.
 
 Scanning is an application workflow. GUI workers, CLI commands, watchers, and
 runtime refreshes adapt the same scan/session surface so progress, cache checks,
-metadata fallback, People enqueueing, and Live Photo pairing stay consistent.
+metadata fallback, People/Pets enqueueing, and Live Photo pairing stay consistent.
 
-### ADR-6: Durable People State Split
+### ADR-6: Durable Recognition State Split
 
 People runtime scan output is rebuildable. Human-authored People state is
 durable and survives rescans, reclustering, app restarts, and model changes.
+Pets follows the same split through separate `pet_index.db` and `pet_state.db`;
+the contexts share orchestration patterns but never share detection tables or
+identity record types.
 
 ### ADR-7: Platform Rendering Behind Adapters
 
 OpenGL, QRhi/Metal, native OsmAnd widgets, helper-backed map renderers, and CPU
 fallbacks are runtime-selected adapters. Product workflows must not depend on a
-specific rendering backend.
+specific rendering backend. Detail still decode follows the same rule through
+ImageIO, WIC, Qt, and rawpy adapters; native failure may fall back to Qt without
+creating a second scheduler or presentation path.
+
+### ADR-8: GPU-First Detail With Shared Edit Sessions
+
+The current viewport, not full sensor dimensions, defines initial still-image
+quality. Neutral source surfaces, edit state, and GPU residency have separate
+identities and invalidation rules. Detail and static Edit share one GUI-owned
+render session; shader updates do not reload source pixels. The legacy Detail
+v2 full-frame cache and still Edit CPU-preview chain must not be restored.
+
+### ADR-9: Composed People And Pets Identities
+
+The dashboard, pinned sidebar, annotations, and identity groups may compose
+person and pet summaries. Canonical records remain owned by their bounded
+contexts, while cross-kind redirects and mixed identity-group membership are
+durable coordination state in the People state repository.
 
 ## Acceptance Criteria
 
@@ -595,8 +759,10 @@ The current production source satisfies the vNext architecture criteria when:
 - `infrastructure/` has no GUI imports.
 - production runtime has no `iPhoto.legacy` or `iPhoto.models.*` imports.
 - architecture checks are in CI.
+- Detail still opens use the generation-safe scheduler/cache/session path;
+  static Edit does not re-decode or re-upload the current source.
 - key product behavior remains covered: folder browsing, global indexing, Live
-  Photos, People, Maps fallback, editing, location assignment, trash,
+  Photos, People, Pets, Maps fallback, editing, location assignment, trash,
   import/move/delete/restore, and export.
 
 Recommended verification after architecture-sensitive changes:

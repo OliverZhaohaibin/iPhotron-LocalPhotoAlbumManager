@@ -139,23 +139,44 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     expected.
     """
 
-    from PySide6.QtCore import QEventLoop
+    from PySide6.QtCore import QCoreApplication, QEventLoop
 
     from .information_popup import InformationPopup
 
     popup = InformationPopup(parent, title=title, message=message)
-    popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    # Do not delete the QWidget while its signal is unwinding through a nested
+    # event loop.  Qt's offscreen platform can otherwise destroy the native
+    # object from inside ``closeEvent`` and crash before ``loop.exec`` returns.
+    popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
     popup.setPalette(_resolve_popup_palette_source(parent))
     popup.setBackgroundRole(QPalette.ColorRole.Window)
     popup.center_on(parent)
 
-    loop = QEventLoop()
-    popup.destroyed.connect(loop.quit)
+    close_state = {"closed": False}
+
+    def _mark_closed(*_args: object) -> None:
+        close_state["closed"] = True
+
+    popup.closed.connect(_mark_closed)
+    popup.destroyed.connect(_mark_closed)
     popup.show()
     popup.setPalette(_resolve_popup_palette_source(parent))
     popup.center_on(parent)
     popup.raise_()
-    loop.exec()
+    process_flags = (
+        QEventLoop.ProcessEventsFlag.AllEvents
+        | QEventLoop.ProcessEventsFlag.WaitForMoreEvents
+    )
+    while not close_state["closed"]:
+        # ``QEventLoop.exec`` can crash in Qt's offscreen platform after a
+        # large widget test run.  Pumping the application dispatcher retains
+        # this helper's blocking contract without creating a nested loop.
+        QCoreApplication.processEvents(process_flags)
+    try:
+        popup.deleteLater()
+    except RuntimeError:
+        # The parent may have been destroyed while the local loop was active.
+        pass
 
 
 def show_warning(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:

@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QFont,
+    QLinearGradient,
+    QPainter,
+)
 from PySide6.QtWidgets import (
     QFrame,
-    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -22,12 +29,7 @@ from PySide6.QtWidgets import (
 from ....gui.i18n import tr
 from ..icon import load_icon
 from ..palette import SIDEBAR_TEXT_COLOR, viewer_surface_color
-from .edit_sidebar import EditSidebar
-from .edit_topbar import SegmentedTopBar
-from .face_name_overlay import FaceNameOverlayWidget
-from .filmstrip_view import FilmstripView
 from .gl_image_viewer import GLImageViewer
-from .live_badge import LiveBadge
 from .main_window_metrics import (
     EDIT_DONE_BUTTON_BACKGROUND,
     EDIT_DONE_BUTTON_BACKGROUND_DISABLED,
@@ -40,7 +42,112 @@ from .main_window_metrics import (
     HEADER_ICON_GLYPH_SIZE,
 )
 from .video_area import VideoArea
-from .video_trim_bar import VideoTrimBar
+
+
+class _PlaybackHeaderShadow(QWidget):
+    """Paint a downward shadow without taking space in the page layout."""
+
+    SHADOW_HEIGHT = 28
+
+    def __init__(
+        self,
+        anchor: QWidget,
+        visibility_source: QWidget,
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self._anchor = anchor
+        self._visibility_source = visibility_source
+        self._header_opacity = 1.0
+        self._suppressed = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        anchor.installEventFilter(self)
+        visibility_source.installEventFilter(self)
+        parent.installEventFilter(self)
+        self._sync_to_anchor()
+        self.raise_()
+
+    def bind_opacity_effect(self, effect: QGraphicsOpacityEffect) -> None:
+        """Keep the overlay in step with the existing header fade animation."""
+
+        self._set_header_opacity(effect.opacity())
+        effect.opacityChanged.connect(self._set_header_opacity)
+
+    def set_suppressed(self, suppressed: bool) -> None:
+        """Hide the overlay while a native surface transition is in progress."""
+
+        suppressed = bool(suppressed)
+        if self._suppressed == suppressed:
+            return
+        was_suppressed = self._suppressed
+        self._suppressed = suppressed
+        self._sync_to_anchor()
+        if was_suppressed and not suppressed and not self.isHidden():
+            # Restoring is an explicit, transition-settled operation. Geometry
+            # events must never keep forcing this QWidget over the QRhi surface.
+            self.raise_()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        event_type = event.type()
+        if event_type in {
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+        }:
+            self._sync_to_anchor()
+            if (
+                event_type == QEvent.Type.Show
+                and not self._suppressed
+                and not self.isHidden()
+            ):
+                self.raise_()
+        return super().eventFilter(watched, event)
+
+    def _sync_to_anchor(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        origin = self._anchor.mapTo(parent, QPoint(0, 0))
+        available_height = max(0, parent.height() - origin.y())
+        self.setGeometry(
+            origin.x(),
+            origin.y(),
+            self._anchor.width(),
+            min(self.SHADOW_HEIGHT, available_height),
+        )
+        self.setVisible(
+            not self._suppressed and not self._visibility_source.isHidden()
+        )
+
+    def _set_header_opacity(self, opacity: float) -> None:
+        self._header_opacity = max(0.0, min(1.0, float(opacity)))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if self.height() <= 1:
+            return
+        painter = QPainter(self)
+        painter.setOpacity(self._header_opacity)
+        painter.fillRect(
+            0,
+            0,
+            self.width(),
+            1,
+            QColor(0, 0, 0, 30),
+        )
+
+        gradient = QLinearGradient(0, 1, 0, self.height())
+        gradient.setColorAt(0.00, QColor(0, 0, 0, 46))
+        gradient.setColorAt(0.08, QColor(0, 0, 0, 35))
+        gradient.setColorAt(0.22, QColor(0, 0, 0, 22))
+        gradient.setColorAt(0.42, QColor(0, 0, 0, 11))
+        gradient.setColorAt(0.68, QColor(0, 0, 0, 4))
+        gradient.setColorAt(1.00, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect().adjusted(0, 1, 0, 0), gradient)
 
 
 class DetailPageWidget(QWidget):
@@ -52,6 +159,7 @@ class DetailPageWidget(QWidget):
         parent: QWidget | None = None,
         *,
         image_viewer: GLImageViewer | None = None,
+        staged: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("detailPage")
@@ -64,66 +172,33 @@ class DetailPageWidget(QWidget):
         # Initialised in ``_build_player_area()``; set here so that
         # ``hide_rhi_init_cover()`` and ``resizeEvent`` always find the attr.
         self._rhi_init_cover: QWidget | None = None
-
-        # Edit chrome -------------------------------------------------------
-        self.edit_mode_group = QActionGroup(main_window)
-        self.edit_mode_group.setExclusive(True)
-
-        self.edit_adjust_action = QAction(main_window)
-        self.edit_adjust_action.setCheckable(True)
-        self.edit_adjust_action.setChecked(True)
-        self.edit_mode_group.addAction(self.edit_adjust_action)
-
-        self.edit_crop_action = QAction(main_window)
-        self.edit_crop_action.setCheckable(True)
-        self.edit_mode_group.addAction(self.edit_crop_action)
-
-        self.edit_compare_button = QToolButton(self)
-        self.edit_reset_button = QPushButton(self)
-        self.edit_done_button = QPushButton(self)
-        self.edit_rotate_left_button = QToolButton(self)
-        self.edit_zoom_host = QWidget(self)
-        self.edit_zoom_host_layout = QHBoxLayout(self.edit_zoom_host)
-        self.edit_zoom_host_layout.setContentsMargins(0, 0, 0, 0)
-        self.edit_zoom_host_layout.setSpacing(4)
-        self.edit_sidebar = EditSidebar()
-        self.edit_sidebar.setObjectName("editSidebar")
-
-        # Header widgets -----------------------------------------------------
-        self.back_button = QToolButton(self)
-        self.info_button = QToolButton(self)
-        self.share_button = QToolButton(self)
-        self.favorite_button = QToolButton(self)
-        self.favorite_button.setEnabled(False)
-        self.rotate_left_button = QToolButton(self)
-        self.edit_button = QPushButton(tr("DetailPage", "Edit"), self)
-        self.edit_button.setEnabled(False)
-
-        self.zoom_widget = QWidget(self)
-        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self.zoom_widget)
-        self.zoom_in_button = QToolButton(self.zoom_widget)
-        self.zoom_out_button = QToolButton(self.zoom_widget)
-
-        self.location_label = QLabel(self)
-        self.timestamp_label = QLabel(self)
+        self._edit_bundle_created = False
+        self._feature_completed = False
+        self._main_window = main_window
 
         # Viewer widgets -----------------------------------------------------
         self.player_stack = QStackedWidget(self)
         self._placeholder_default_text = self.default_placeholder_text()
         self.player_placeholder = QLabel(self._placeholder_default_text, self.player_stack)
-        self.image_viewer = image_viewer or GLImageViewer()
-        if self.image_viewer.parent() not in (None, self.player_stack):
-            self.image_viewer.setParent(None)
-        self.video_area = VideoArea()
-        self.player_bar = self.video_area.player_bar
-        self.video_trim_bar = VideoTrimBar()
-        self.video_trim_bar.hide()
-        self.face_name_overlay = FaceNameOverlayWidget()
-
-        self.filmstrip_view = FilmstripView()
-
-        self.live_badge = LiveBadge(main_window)
-        self.live_badge.hide()
+        self.image_viewer = image_viewer or GLImageViewer(
+            self.player_stack,
+            staged=staged,
+        )
+        if self.image_viewer.parent() is not self.player_stack:
+            self.image_viewer.setParent(self.player_stack)
+        try:
+            self.video_area = VideoArea(self.player_stack, staged=True)
+        except TypeError as exc:
+            # Lightweight embedders and controller tests may replace
+            # VideoArea with the historical parent-only constructor.
+            if "staged" not in str(exc):
+                raise
+            self.video_area = VideoArea(self.player_stack)
+        self.player_bar = None
+        self.video_trim_bar = None
+        self.face_name_overlay = None
+        self.filmstrip_view = None
+        self.live_badge = None
         self.badge_host: QWidget | None = None
 
         # References controllers rely on when shuffling widgets.
@@ -135,18 +210,93 @@ class DetailPageWidget(QWidget):
         self.detail_header: QWidget | None = None
         self.detail_chrome_container: QWidget | None = None
         self.detail_header_separator: QFrame | None = None
+        self.detail_header_shadow: _PlaybackHeaderShadow | None = None
         self.player_container: QWidget | None = None
         self.player_column: QWidget | None = None
+        self.detail_playback_container: QWidget | None = None
+        self._detail_playback_layout: QVBoxLayout | None = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(6)
 
-        self._build_header(main_window, layout)
         self._build_player_area()
-        self._build_edit_container(main_window, layout)
-        layout.addWidget(self.filmstrip_view)
+        self._build_player_container(self._root_layout)
+        if not staged:
+            self.complete_feature()
+
+    def complete_feature(self) -> None:
+        """Complete non-native Detail UI without moving prepared QRhi widgets."""
+
+        if self._feature_completed:
+            return
+
+        from .face_name_overlay import FaceNameOverlayWidget
+        from .filmstrip_view import FilmstripView
+        from .live_badge import LiveBadge
+        from .video_trim_bar import VideoTrimBar
+
+        complete_image_viewer = getattr(self.image_viewer, "complete_runtime", None)
+        if callable(complete_image_viewer):
+            complete_image_viewer()
+        complete_runtime = getattr(self.video_area, "complete_runtime", None)
+        if callable(complete_runtime):
+            complete_runtime()
+        self.player_bar = self.video_area.player_bar
+
+        # Header widgets -----------------------------------------------------
+        self.back_button = QToolButton(self)
+        self.info_button = QToolButton(self)
+        self.share_button = QToolButton(self)
+        self.favorite_button = QToolButton(self)
+        self.favorite_button.setEnabled(False)
+        self.rotate_left_button = QToolButton(self)
+        self.edit_button = QPushButton(tr("DetailPage", "Edit"), self)
+        self.edit_button.setEnabled(False)
+        self.zoom_widget = QWidget(self)
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self.zoom_widget)
+        self.zoom_in_button = QToolButton(self.zoom_widget)
+        self.zoom_out_button = QToolButton(self.zoom_widget)
+        self.location_label = QLabel(self)
+        self.timestamp_label = QLabel(self)
+
+        self.video_trim_bar = VideoTrimBar(self)
+        self.video_trim_bar.hide()
+        self._player_column_layout.addWidget(self.video_trim_bar)
+
+        self.face_name_overlay = FaceNameOverlayWidget(self.player_container)
+        self.face_name_overlay.set_viewer(self.image_viewer)
+        player_layout = self.player_container.layout()
+        if player_layout is not None:
+            player_layout.addWidget(self.face_name_overlay, 0, 0)
+        self.face_name_overlay.hide()
+
+        self.live_badge = LiveBadge(self._main_window)
+        self.live_badge.setParent(self.player_container)
+        self.live_badge.hide()
+        self.badge_host = self.player_container
+
+        self.filmstrip_view = FilmstripView(self)
+        self._build_header(self._main_window)
+        self._root_layout.addWidget(self.filmstrip_view)
+        self._feature_completed = True
+        self._raise_player_overlays()
         self.retranslate_ui()
+
+    def native_surfaces(self) -> tuple[QWidget, QWidget, QWidget]:
+        """Return the QRhi widgets whose final hierarchy is prepared pre-show."""
+
+        return (
+            self.image_viewer,
+            self.video_area.renderer,
+            self.video_area.edit_viewer,
+        )
+
+    def set_playback_header_shadow_suppressed(self, suppressed: bool) -> None:
+        """Control the header overlay around fullscreen surface transitions."""
+
+        if self.detail_header_shadow is not None:
+            self.detail_header_shadow.set_suppressed(suppressed)
 
     @classmethod
     def default_placeholder_text(cls) -> str:
@@ -193,7 +343,9 @@ class DetailPageWidget(QWidget):
         edit_done_button = getattr(self, "edit_done_button", None)
         if edit_done_button is not None:
             edit_done_button.setText(tr("DetailPage", "Done"))
-        self.edit_rotate_left_button.setToolTip(tr("DetailPage", "Rotate counter-clockwise"))
+        edit_rotate_left_button = getattr(self, "edit_rotate_left_button", None)
+        if edit_rotate_left_button is not None:
+            edit_rotate_left_button.setToolTip(tr("DetailPage", "Rotate counter-clockwise"))
         default_placeholder_text = self.default_placeholder_text()
         if (
             self.player_stack.currentWidget() is self.player_placeholder
@@ -201,14 +353,15 @@ class DetailPageWidget(QWidget):
         ):
             self.player_placeholder.setText(default_placeholder_text)
         self._placeholder_default_text = default_placeholder_text
-        self.player_bar.retranslate_ui()
+        if self.player_bar is not None:
+            self.player_bar.retranslate_ui()
         for child_name in ("video_trim_bar", "edit_sidebar", "face_name_overlay"):
             child = getattr(self, child_name, None)
             method = getattr(child, "retranslate_ui", None)
             if callable(method):
                 method()
 
-    def _build_header(self, main_window: QWidget, parent_layout: QVBoxLayout) -> None:
+    def _build_header(self, main_window: QWidget) -> None:
         """Create the header row containing navigation and metadata controls."""
 
         header = QWidget(self)
@@ -366,24 +519,23 @@ class DetailPageWidget(QWidget):
         header_separator.setFrameShape(QFrame.Shape.HLine)
         header_separator.setFrameShadow(QFrame.Shadow.Plain)
         header_separator.setFixedHeight(2)
-        base_surface = viewer_surface_color(self)
-        separator_tint = QColor(base_surface).darker(108)
         header_separator.setStyleSheet(
             "QFrame#detailHeaderSeparator {"
-            f"  background-color: {separator_tint.name()};"
+            "  background-color: transparent;"
             "  border: none;"
             "}"
         )
-        separator_shadow = QGraphicsDropShadowEffect(header_separator)
-        separator_shadow.setBlurRadius(14)
-        separator_shadow.setColor(QColor(0, 0, 0, 45))
-        separator_shadow.setOffset(0, 1)
-        header_separator.setGraphicsEffect(separator_shadow)
         detail_chrome_layout.addWidget(header_separator)
         self.detail_header_separator = header_separator
 
-        parent_layout.addWidget(detail_chrome_container)
+        assert self._detail_playback_layout is not None
+        self._detail_playback_layout.insertWidget(0, detail_chrome_container)
         self.detail_chrome_container = detail_chrome_container
+        self.detail_header_shadow = _PlaybackHeaderShadow(
+            header_separator,
+            detail_chrome_container,
+            self,
+        )
 
     def _build_player_area(self) -> None:
         """Create the stacked media viewer inside its container."""
@@ -396,8 +548,6 @@ class DetailPageWidget(QWidget):
         self.player_placeholder.setMinimumHeight(320)
 
         self.player_stack.addWidget(self.player_placeholder)
-        if self.image_viewer.parent() is not self.player_stack:
-            self.image_viewer.setParent(self.player_stack)
         self.player_stack.addWidget(self.image_viewer)
         self.player_stack.addWidget(self.video_area)
         self.player_stack.setCurrentWidget(self.player_placeholder)
@@ -427,39 +577,25 @@ class DetailPageWidget(QWidget):
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(0)
         player_layout.addWidget(self.player_stack, 0, 0)
-        self.face_name_overlay.setParent(player_container)
-        self.face_name_overlay.set_viewer(self.image_viewer)
-        player_layout.addWidget(self.face_name_overlay, 0, 0)
-        self.face_name_overlay.hide()
         self.player_container = player_container
 
-        # Opaque cover that hides the QRhiWidget area until its first frame
-        # has been rendered.  QRhiWidget replaces its backing-store region
+        # Persistent opaque cover that hides the QRhiWidget area until its
+        # current content has passed the platform submission barriers.
+        # QRhiWidget replaces its backing-store region
         # with its own texture; before the first render() call that texture
         # is uninitialised / transparent.  This cover occupies the same
         # grid cell as the player_stack and is raised above it so it
-        # visually hides any transparent texture.  It is removed by
-        # ``hide_rhi_init_cover()`` once any QRhiWidget child signals
-        # ``firstFrameReady``.
+        # visually hides any transparent texture. It remains in the layout for
+        # the page lifetime and is only hidden/shown, avoiding layout and
+        # stacking churn during later media transitions.
         self._rhi_init_cover = QWidget(player_container)
-        self._rhi_init_cover.setAutoFillBackground(True)
-        self._rhi_init_cover.setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground, False,
-        )
-        self._rhi_init_cover.setStyleSheet(
-            "background-color: palette(window);"
-        )
+        self._configure_rhi_init_cover(self._rhi_init_cover)
         player_layout.addWidget(self._rhi_init_cover, 0, 0)
         self._rhi_init_cover.raise_()
 
-        self.live_badge.setParent(player_container)
-        self.badge_host = player_container
-        self.live_badge.raise_()
 
-    def _build_edit_container(self, main_window: QWidget, parent_layout: QVBoxLayout) -> None:
-        """Wrap the shared viewer with the edit header and sidebar."""
-
-        del main_window  # The metrics come from module-level constants.
+    def _build_player_container(self, parent_layout: QVBoxLayout) -> None:
+        """Install the playback host without constructing optional edit chrome."""
 
         edit_container = QWidget(self)
         edit_container.setObjectName("editPage")
@@ -467,9 +603,6 @@ class DetailPageWidget(QWidget):
         edit_layout = QVBoxLayout(edit_container)
         edit_layout.setContentsMargins(0, 0, 0, 0)
         edit_layout.setSpacing(6)
-
-        self.edit_header_container = self._build_edit_header()
-        edit_layout.addWidget(self.edit_header_container)
 
         edit_body = QWidget(edit_container)
         edit_body_layout = QHBoxLayout(edit_body)
@@ -481,12 +614,54 @@ class DetailPageWidget(QWidget):
         player_column_layout.setContentsMargins(0, 0, 0, 0)
         player_column_layout.setSpacing(0)
         player_column_layout.addWidget(self.player_container, 1)
-        player_column_layout.addWidget(self.video_trim_bar)
+        self._player_column_layout = player_column_layout
 
         edit_body_layout.addWidget(self.player_column, 1)
-        edit_body_layout.addWidget(self.edit_sidebar)
         edit_layout.addWidget(edit_body, 1)
+        self._edit_layout = edit_layout
+        self._edit_body_layout = edit_body_layout
 
+        detail_playback_container = QWidget(self)
+        detail_playback_layout = QVBoxLayout(detail_playback_container)
+        detail_playback_layout.setContentsMargins(0, 0, 0, 0)
+        detail_playback_layout.setSpacing(0)
+        detail_playback_layout.addWidget(edit_container, 1)
+        self.detail_playback_container = detail_playback_container
+        self._detail_playback_layout = detail_playback_layout
+
+        parent_layout.addWidget(detail_playback_container, 1)
+
+    def ensure_edit_bundle(self) -> None:
+        """Create edit-only controls immediately before the first edit session."""
+
+        self.complete_feature()
+        if self._edit_bundle_created:
+            return
+        from .edit_sidebar import EditSidebar
+
+        self.edit_mode_group = QActionGroup(self._main_window)
+        self.edit_mode_group.setExclusive(True)
+        self.edit_adjust_action = QAction(self._main_window)
+        self.edit_adjust_action.setCheckable(True)
+        self.edit_adjust_action.setChecked(True)
+        self.edit_mode_group.addAction(self.edit_adjust_action)
+        self.edit_crop_action = QAction(self._main_window)
+        self.edit_crop_action.setCheckable(True)
+        self.edit_mode_group.addAction(self.edit_crop_action)
+        self.edit_compare_button = QToolButton(self)
+        self.edit_reset_button = QPushButton(self)
+        self.edit_done_button = QPushButton(self)
+        self.edit_rotate_left_button = QToolButton(self)
+        self.edit_zoom_host = QWidget(self)
+        self.edit_zoom_host_layout = QHBoxLayout(self.edit_zoom_host)
+        self.edit_zoom_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.edit_zoom_host_layout.setSpacing(4)
+        self.edit_sidebar = EditSidebar()
+        self.edit_sidebar.setObjectName("editSidebar")
+
+        self.edit_header_container = self._build_edit_header()
+        self._edit_layout.insertWidget(0, self.edit_header_container)
+        self._edit_body_layout.addWidget(self.edit_sidebar)
         default_sidebar_min = self.edit_sidebar.minimumWidth()
         default_sidebar_max = self.edit_sidebar.maximumWidth()
         default_sidebar_hint = max(self.edit_sidebar.sizeHint().width(), default_sidebar_min)
@@ -496,13 +671,14 @@ class DetailPageWidget(QWidget):
         self.edit_sidebar.setMinimumWidth(0)
         self.edit_sidebar.setMaximumWidth(0)
         self.edit_sidebar.hide()
-
         self.edit_header_container.hide()
-
-        parent_layout.addWidget(edit_container, 1)
+        self._edit_bundle_created = True
+        self.retranslate_ui()
 
     def _build_edit_header(self) -> QWidget:
         """Construct the toolbar shown while the edit chrome is visible."""
+
+        from .edit_topbar import SegmentedTopBar
 
         container = QWidget(self)
         container.setObjectName("editHeaderContainer")
@@ -611,16 +787,13 @@ class DetailPageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def hide_rhi_init_cover(self) -> None:
-        """Remove the opaque cover once the first QRhiWidget frame is ready."""
+        """Hide the persistent opaque cover once presentation is safe."""
         if self._rhi_init_cover is not None:
             self._rhi_init_cover.hide()
-            self._rhi_init_cover.deleteLater()
-            self._rhi_init_cover = None
-        self.face_name_overlay.raise_()
-        self.live_badge.raise_()
+        self._raise_player_overlays()
 
     def show_rhi_init_cover(self) -> None:
-        """Re-create and show the opaque init cover.
+        """Show the persistent opaque init cover.
 
         Called when the player stack is about to switch to a QRhiWidget
         that has never rendered.  The backing texture of an uninitialised
@@ -629,9 +802,9 @@ class DetailPageWidget(QWidget):
         renders its first opaque frame.
         """
         if self._rhi_init_cover is not None:
-            # Cover still exists – just make sure it is visible and on top.
             self._rhi_init_cover.show()
             self._rhi_init_cover.raise_()
+            self._raise_player_overlays()
             return
 
         player_container = self.player_container
@@ -639,17 +812,33 @@ class DetailPageWidget(QWidget):
             return
 
         self._rhi_init_cover = QWidget(player_container)
-        self._rhi_init_cover.setAutoFillBackground(True)
-        self._rhi_init_cover.setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground, False,
-        )
-        self._rhi_init_cover.setStyleSheet(
-            "background-color: palette(window);"
-        )
+        self._configure_rhi_init_cover(self._rhi_init_cover)
         layout = player_container.layout()
         if layout is not None:
             layout.addWidget(self._rhi_init_cover, 0, 0)
         self._rhi_init_cover.raise_()
+        self._raise_player_overlays()
+
+    def _configure_rhi_init_cover(self, cover: QWidget) -> None:
+        cover.setAutoFillBackground(True)
+        cover.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        cover.setStyleSheet("background-color: palette(window);")
+
+    def _raise_player_overlays(self) -> None:
+        face_name_overlay = self.face_name_overlay
+        live_badge = self.live_badge
+        if face_name_overlay is None or live_badge is None:
+            return
+        refresh_overlay = getattr(face_name_overlay, "refresh_view_state", None)
+        if callable(refresh_overlay):
+            refresh_overlay()
+        raise_overlay_controls = getattr(face_name_overlay, "raise_interactive_controls", None)
+        if callable(raise_overlay_controls):
+            raise_overlay_controls()
+        else:
+            face_name_overlay.raise_()
+        live_badge.raise_()
 
 
 __all__ = ["DetailPageWidget"]

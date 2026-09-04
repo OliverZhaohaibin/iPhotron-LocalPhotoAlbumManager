@@ -6,6 +6,7 @@ import pytest
 
 from iPhoto.bootstrap.runtime_context import RuntimeContext
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
+from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from iPhoto.events.bus import EventBus
 
 
@@ -36,7 +37,7 @@ class _FakeAssetRuntime:
 
 class _FakeFacade:
     def __init__(self) -> None:
-        self.scan_requests: list[tuple[Path, list[str], list[str]]] = []
+        self.scan_requests: list[tuple[Path, list[str], list[str], bool]] = []
 
     def scan_root_async(
         self,
@@ -44,8 +45,9 @@ class _FakeFacade:
         *,
         include,
         exclude,
+        startup: bool = False,
     ) -> None:
-        self.scan_requests.append((Path(root), list(include), list(exclude)))
+        self.scan_requests.append((Path(root), list(include), list(exclude), bool(startup)))
 
 
 class _FakeLibrary:
@@ -62,6 +64,7 @@ class _FakeLibrary:
         self.bound_asset_lifecycle_services: list[object | None] = []
         self.bound_asset_operation_services: list[object | None] = []
         self.bound_people_services: list[object | None] = []
+        self.bound_pet_services: list[object | None] = []
         self.bound_map_runtimes: list[object | None] = []
         self.bound_map_interaction_services: list[object | None] = []
         self.bound_location_services: list[object | None] = []
@@ -92,6 +95,7 @@ class _FakeLibrary:
             self.bind_map_interaction_service(None)
             self.bind_map_runtime(None)
             self.bind_people_service(None)
+            self.bind_pet_service(None)
             self.bind_asset_operation_service(None)
             self.bind_asset_lifecycle_service(None)
             self.bind_album_metadata_service(None)
@@ -111,6 +115,7 @@ class _FakeLibrary:
         self.bind_asset_lifecycle_service(library_session.asset_lifecycle)
         self.bind_asset_operation_service(library_session.asset_operations)
         self.bind_people_service(library_session.people)
+        self.bind_pet_service(library_session.pets)
         self.bind_map_runtime(library_session.maps)
         self.bind_map_interaction_service(library_session.map_interactions)
 
@@ -167,6 +172,9 @@ class _FakeLibrary:
     def bind_people_service(self, people_service: object | None) -> None:
         self.bound_people_services.append(people_service)
 
+    def bind_pet_service(self, pet_service: object | None) -> None:
+        self.bound_pet_services.append(pet_service)
+
     def bind_map_runtime(self, map_runtime: object | None) -> None:
         self.bound_map_runtimes.append(map_runtime)
 
@@ -190,7 +198,41 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     context.asset_runtime = asset_runtime
     context._container = None
     context._pending_basic_library_path = root
+    context._library_epoch = 0
     return context, library, asset_runtime
+
+
+def test_library_epoch_advances_for_open_and_close(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    context, _library, _asset_runtime = _runtime_context(library_root)
+
+    assert context.library_epoch == 0
+    context.open_library(library_root)
+    opened_epoch = context.library_epoch
+    context.close_library()
+
+    assert opened_epoch == 1
+    assert context.library_epoch == 2
+
+
+def test_new_epoch_is_visible_before_session_bind_callback(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    context, library, _asset_runtime = _runtime_context(library_root)
+    observed_epochs: list[int] = []
+    original_bind = library.bind_library_session
+
+    def observe_bind(session: object | None) -> None:
+        if session is not None:
+            observed_epochs.append(context.library_epoch)
+        original_bind(session)
+
+    library.bind_library_session = observe_bind  # type: ignore[method-assign]
+
+    context.open_library(library_root)
+
+    assert observed_epochs == [1]
 
 
 def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
@@ -219,7 +261,9 @@ def test_resume_startup_tasks_scans_when_work_dir_exists_without_index(
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
-    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+    assert context.facade.scan_requests == [
+        (library_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), True)
+    ]
 
 
 def test_resume_startup_tasks_scans_when_index_preexists_without_completed_job(
@@ -247,7 +291,30 @@ def test_resume_startup_tasks_scans_when_index_preexists_without_completed_job(
     assert library.bound_map_runtimes[-1] is not None
     assert library.bound_map_interaction_services[-1] is not None
     assert library.bound_location_services[-1] is not None
-    assert [request[0] for request in context.facade.scan_requests] == [library_root]
+    assert context.facade.scan_requests == [
+        (library_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), True)
+    ]
+
+
+def test_resume_startup_tasks_can_defer_scan_until_gallery_opens(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir(parents=True)
+    context, library, asset_runtime = _runtime_context(library_root)
+
+    context.resume_startup_tasks(defer_scan=True)
+
+    assert asset_runtime.bound_roots == [library_root]
+    assert library.bound_scan_services[-1] is not None
+    assert context.facade.scan_requests == []
+
+    context.start_deferred_startup_scan()
+    context.start_deferred_startup_scan()
+
+    assert context.facade.scan_requests == [
+        (library_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), True)
+    ]
 
 
 def test_resume_startup_tasks_skips_scan_when_scope_complete(tmp_path: Path) -> None:

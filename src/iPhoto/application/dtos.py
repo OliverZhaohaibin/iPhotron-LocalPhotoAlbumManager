@@ -25,6 +25,7 @@ class AssetDTO:
     metadata: Dict[str, Any]
     is_favorite: bool
     face_status: Optional[str] = None
+    pet_status: Optional[str] = None
 
     # Derived flags
     is_live: bool = False
@@ -33,6 +34,8 @@ class AssetDTO:
     # For UI
     micro_thumbnail: Optional[Any] = None
     thumb_cache_key: Optional[str] = None
+    thumbnail_state: str = "ready"
+    thumb_revision: Optional[str] = None
 
     @property
     def is_video(self) -> bool:

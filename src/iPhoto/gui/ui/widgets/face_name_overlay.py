@@ -2,31 +2,66 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
-    QEnterEvent,
+    QCursor,
+    QFontMetrics,
     QIcon,
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPalette,
     QPen,
     QPixmap,
     QStandardItem,
     QStandardItemModel,
 )
-from PySide6.QtWidgets import QCompleter, QLabel, QLineEdit, QListView, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCompleter,
+    QLineEdit,
+    QListView,
+    QToolTip,
+    QWidget,
+)
 
+from iPhoto.application.services.recognition_edit_service import (
+    annotation_edit_context,
+    current_identity_display_name,
+)
+from iPhoto.domain.recognition_edits import (
+    AnnotationEditContext,
+    IdentityRef,
+    IdentityRenameRequest,
+    IdentitySelectionRequest,
+    InlineSelectionScope,
+)
 from iPhoto.gui.i18n import tr
 from iPhoto.people.records import PersonSummary
 from iPhoto.people.repository import AssetFaceAnnotation
+from iPhoto.utils.image_loader import load_qpixmap
+
+from .recognition_annotations import RecognitionIdentitySuggestion
 
 _LABEL_MARGIN_X = 10
 _LABEL_MARGIN_Y = 4
 _LABEL_GAP = 8
+_CHIP_HOVER_MARGIN = 6.0
 _CIRCLE_PADDING = 10.0
 _MIN_CIRCLE_DIAMETER = 36.0
 _MANUAL_MIN_DIAMETER = 64.0
@@ -36,17 +71,27 @@ _MANUAL_HANDLE_OFFSET = 4.0
 
 
 @dataclass
-class _OverlayFaceState:
-    annotation: AssetFaceAnnotation
-    chip: "_FaceNameChip"
+class _SavedFaceLayout:
     face_rect: QRectF = field(default_factory=QRectF)
+    chip_rect: QRectF = field(default_factory=QRectF)
+    hover_rect: QRectF = field(default_factory=QRectF)
+    circle_rect: QRectF = field(default_factory=QRectF)
+    label_text: str = ""
 
 
 @dataclass(frozen=True)
 class _NameSuggestion:
-    person_id: str
+    identity_key: str
     name: str
     thumbnail_path: Path | None
+
+    @classmethod
+    def from_identity(cls, suggestion: RecognitionIdentitySuggestion) -> "_NameSuggestion":
+        return cls(
+            identity_key=suggestion.identity_key,
+            name=suggestion.name,
+            thumbnail_path=suggestion.thumbnail_path,
+        )
 
 
 @dataclass
@@ -55,36 +100,10 @@ class _ManualFaceDraft:
     diameter: float
 
 
-class _FaceNameChip(QLabel):
-    hovered = Signal(str, bool)
-    activated = Signal(str)
-
-    def __init__(self, face_id: str, text: str, parent: QWidget | None) -> None:
-        super().__init__(text, parent)
-        self._face_id = face_id
-        self.setCursor(Qt.CursorShape.IBeamCursor)
-        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setContentsMargins(_LABEL_MARGIN_X, _LABEL_MARGIN_Y, _LABEL_MARGIN_X, _LABEL_MARGIN_Y)
-        self.setStyleSheet(
-            "QLabel { background-color: rgba(255,255,255,230); border: 1px solid rgba(0,0,0,28);"
-            " border-radius: 8px; color: rgba(24,24,24,230); font-size: 13px; }"
-        )
-
-    def enterEvent(self, event: QEnterEvent) -> None:
-        self.hovered.emit(self._face_id, True)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:  # type: ignore[override]
-        self.hovered.emit(self._face_id, False)
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.activated.emit(self._face_id)
-            event.accept()
-            return
-        super().mousePressEvent(event)
+@dataclass
+class _OverlayFaceState:
+    annotation: AssetFaceAnnotation
+    layout: _SavedFaceLayout = field(default_factory=_SavedFaceLayout)
 
 
 class _FaceNameEditor(QLineEdit):
@@ -96,34 +115,80 @@ class _FaceNameEditor(QLineEdit):
         self._closing = False
         self._suppress_cancel_once = False
         self._suggestions: list[_NameSuggestion] = []
+        self._selected_identity_key: str | None = None
+        self._selected_identity_name: str | None = None
+        self._applying_theme_styles = False
         self._model = QStandardItemModel(self)
         self._completer = QCompleter(self._model, self)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
         popup = QListView(self)
         popup.setUniformItemSizes(True)
-        popup.setStyleSheet(
-            "QListView { background-color: rgba(255,255,255,246); border: 1px solid rgba(0,0,0,40);"
-            " border-radius: 12px; padding: 6px; outline: none; }"
-            "QListView::item { min-height: 40px; padding: 6px 8px; border-radius: 8px; }"
-            "QListView::item:selected { background-color: rgba(33,108,255,32); color: rgba(18,18,18,235); }"
-        )
         self._completer.setPopup(popup)
+        self._completer.activated[QModelIndex].connect(
+            self._handle_completion_activated
+        )
+        self.textEdited.connect(self._clear_selected_identity)
         self.setCompleter(self._completer)
         self.setFrame(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setClearButtonEnabled(False)
-        self.setStyleSheet(
-            "QLineEdit { background-color: rgba(255,255,255,244); border: 1px solid rgba(0,0,0,40);"
-            " border-radius: 8px; padding: 4px 10px; color: rgba(16,16,16,235);"
-            " selection-background-color: rgba(32,110,255,140); }"
+        self._apply_theme_styles()
+
+    @staticmethod
+    def _rgba(color: QColor, alpha: int) -> str:
+        return f"rgba({color.red()},{color.green()},{color.blue()},{alpha})"
+
+    def _apply_theme_styles(self) -> None:
+        if self._applying_theme_styles:
+            return
+        app = QApplication.instance()
+        palette = app.palette() if app is not None else self.palette()
+        surface = palette.color(QPalette.ColorRole.Base)
+        text = palette.color(QPalette.ColorRole.Text)
+        border = palette.color(QPalette.ColorRole.WindowText)
+        accent = palette.color(QPalette.ColorRole.Highlight)
+        selected_text = palette.color(QPalette.ColorRole.HighlightedText)
+
+        popup = self._completer.popup()
+        popup_style = (
+                f"QListView {{ background-color: {self._rgba(surface, 246)};"
+                f" color: {self._rgba(text, 235)}; border: 1px solid {self._rgba(border, 40)};"
+                " border-radius: 12px; padding: 6px; outline: none; }"
+                "QListView::item { min-height: 40px; padding: 6px 8px; border-radius: 8px; }"
+                f"QListView::item:selected {{ background-color: {self._rgba(accent, 70)};"
+                f" color: {self._rgba(selected_text, 255)}; }}"
         )
+        editor_style = (
+            f"QLineEdit {{ background-color: {self._rgba(surface, 244)};"
+            f" border: 1px solid {self._rgba(border, 40)}; border-radius: 8px;"
+            f" padding: 4px 10px; color: {self._rgba(text, 235)};"
+            f" selection-background-color: {self._rgba(accent, 140)}; }}"
+        )
+        self._applying_theme_styles = True
+        try:
+            if popup is not None and popup.styleSheet() != popup_style:
+                popup.setStyleSheet(popup_style)
+            if self.styleSheet() != editor_style:
+                self.setStyleSheet(editor_style)
+        finally:
+            self._applying_theme_styles = False
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ) and hasattr(self, "_completer"):
+            self._apply_theme_styles()
 
     def set_name_suggestions(self, suggestions: list[_NameSuggestion]) -> None:
         self._suggestions = list(suggestions)
+        self._clear_selected_identity()
         self._model.clear()
         for suggestion in self._suggestions:
             item = QStandardItem(suggestion.name)
+            item.setData(suggestion.identity_key, Qt.ItemDataRole.UserRole)
             if suggestion.thumbnail_path is not None and suggestion.thumbnail_path.exists():
                 icon = _icon_for_thumbnail(suggestion.thumbnail_path)
                 if not icon.isNull():
@@ -131,16 +196,78 @@ class _FaceNameEditor(QLineEdit):
             self._model.appendRow(item)
 
     def suggestion_person_id(self) -> str | None:
+        identity_key = self.suggestion_identity_key()
+        if identity_key is None:
+            return None
+        if identity_key.startswith("person:"):
+            return identity_key.removeprefix("person:")
+        if identity_key.startswith("pet:"):
+            return None
+        return identity_key
+
+    def selected_identity_key(self) -> str | None:
+        """Return only an explicitly activated completion.
+
+        Saved identity labels use this stricter form because silently treating a
+        typed duplicate name as a selection would change the operation scope.
+        Manual face creation keeps the looser exact-name matching exposed by
+        :meth:`suggestion_identity_key` for backwards compatibility.
+        """
+
+        text = self.text().strip()
+        if (
+            self._selected_identity_key
+            and self._selected_identity_name is not None
+            and self._selected_identity_name.strip().casefold() == text.casefold()
+        ):
+            return self._selected_identity_key
+        return None
+
+    def suggestion_identity_key(self) -> str | None:
+        selected_identity_key = self.selected_identity_key()
+        if selected_identity_key is not None:
+            return selected_identity_key
         normalized = self.text().strip().casefold()
         matches = [
-            suggestion.person_id
+            suggestion.identity_key
             for suggestion in self._suggestions
             if suggestion.name.strip().casefold() == normalized
         ]
         return matches[0] if len(matches) == 1 else None
 
+    def _handle_completion_activated(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        identity_key = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(identity_key, str) or not identity_key:
+            return
+        name = str(index.data() or "").strip()
+        if not name:
+            return
+        # A custom QCompleter popup can emit ``activated`` before the line edit
+        # receives the completed text (and on some platforms it never inserts
+        # it).  Persist the chosen display value ourselves so the identity key
+        # cannot be mistaken for a plain typed-name submission.
+        self.setText(name)
+        self._selected_identity_key = identity_key
+        self._selected_identity_name = name
+
+    def _clear_selected_identity(self) -> None:
+        self._selected_identity_key = None
+        self._selected_identity_name = None
+
+    def _accept_current_completion(self) -> bool:
+        self._handle_completion_activated(self._completer.currentIndex())
+        popup = self._completer.popup()
+        if popup is not None:
+            popup.hide()
+        return self.selected_identity_key() is not None
+
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            popup = self._completer.popup()
+            if popup is not None and popup.isVisible():
+                self._accept_current_completion()
             self._closing = True
             self.commitRequested.emit()
             event.accept()
@@ -175,7 +302,10 @@ class _FaceNameEditor(QLineEdit):
 
 
 class FaceNameOverlayWidget(QWidget):
-    renameSubmitted = Signal(str, object)
+    renameSubmitted = Signal(object)
+    unassignedRenameSubmitted = Signal(object, str)
+    annotationReassignmentSubmitted = Signal(object)
+    candidateIdentityMergeSubmitted = Signal(object)
     manualFaceSubmitted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -186,12 +316,15 @@ class FaceNameOverlayWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
         self._viewer: QWidget | None = None
+        self._event_surface: QWidget | None = None
         self._annotations: list[AssetFaceAnnotation] = []
         self._states: dict[str, _OverlayFaceState] = {}
         self._active = False
         self._hovered_face_id: str | None = None
         self._editing_face_id: str | None = None
         self._editor: _FaceNameEditor | None = None
+        self._editing_context: AnnotationEditContext | None = None
+        self._editing_expected_name: str | None = None
         self._name_suggestions: list[_NameSuggestion] = []
         self._manual_draft: _ManualFaceDraft | None = None
         self._manual_editor: _FaceNameEditor | None = None
@@ -199,71 +332,118 @@ class FaceNameOverlayWidget(QWidget):
         self._drag_mode: str | None = None
         self._drag_origin_point = QPointF()
         self._drag_origin_center = QPointF()
+        self._saved_hover_sync_queued = False
+        self._saved_hover_sync_generation = 0
+        self._queued_saved_hover_reason = ""
+        self._queued_saved_hover_generation = 0
+        self._saved_hover_app_filter_installed = False
+        self._saved_hover_sync_timer = QTimer(self)
+        self._saved_hover_sync_timer.setSingleShot(True)
+        self._saved_hover_sync_timer.setInterval(0)
+        self._saved_hover_sync_timer.timeout.connect(
+            self._flush_queued_saved_hover_sync
+        )
+        self._saved_hover_poll_timer = QTimer(self)
+        self._saved_hover_poll_timer.setInterval(40)
+        self._saved_hover_poll_timer.timeout.connect(self._poll_saved_hover_from_cursor)
+        self._saved_press_face_id: str | None = None
+        self._cursor_override_active = False
+        self._cursor_guard_widgets: dict[QWidget, QCursor | None] = {}
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() not in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ):
+            return
+        for editor in (self._editor, self._manual_editor):
+            if editor is not None:
+                editor._apply_theme_styles()
 
     def set_viewer(self, viewer: object | None) -> None:
         previous = self._viewer
         if previous is viewer:
             return
+        self._teardown_saved_hover_tracking()
         if isinstance(previous, QWidget):
             previous.removeEventFilter(self)
-            signal = getattr(previous, "viewTransformChanged", None)
-            if signal is not None:
-                try:
-                    signal.disconnect(self._relayout)
-                except (RuntimeError, TypeError):
-                    pass
+            self._disconnect_viewer_signal(previous, "viewTransformChanged")
+            self._disconnect_viewer_signal(previous, "firstFrameReady")
         self._viewer = viewer if isinstance(viewer, QWidget) else None
         if self._viewer is not None:
+            self._viewer.setMouseTracking(True)
             self._viewer.installEventFilter(self)
-            signal = getattr(self._viewer, "viewTransformChanged", None)
-            if signal is not None:
-                signal.connect(self._relayout)
+            self._connect_viewer_signal(self._viewer, "viewTransformChanged")
+            self._connect_viewer_signal(self._viewer, "firstFrameReady")
+        self._refresh_event_surface_filter()
+        self.refresh_view_state()
+
+    def refresh_view_state(self) -> None:
         self._relayout()
+        self._sync_saved_hover_from_cursor("refresh")
 
     def set_overlay_active(self, active: bool) -> None:
         self._active = bool(active)
-        if not self._viewer_has_image_content() and self._manual_draft is None:
-            self.setHidden(True)
-            for state in self._states.values():
-                state.chip.hide()
-            return
         if not self._active and self._manual_draft is None:
-            self._hovered_face_id = None
+            self._set_hovered_face_id(None)
             self._cancel_editing()
+        if not self._viewer_has_image_content() and self._manual_draft is None:
+            self._set_hovered_face_id(None)
+            self.setHidden(True)
+            self._set_saved_hover_tracking_enabled(False)
+            return
         self._sync_child_visibility()
         self.update()
 
     def set_annotations(self, annotations: list[AssetFaceAnnotation]) -> None:
-        self._hovered_face_id = None
+        self._set_hovered_face_id(None)
         self._cancel_editing()
         self.clear_manual_face_draft()
-        self._clear_chips()
+        self._clear_saved_states()
         self._annotations = list(annotations)
-        parent = self.parentWidget() or self
         for annotation in self._annotations:
-            chip = _FaceNameChip(annotation.face_id, self._display_name(annotation), parent)
-            chip.hide()
-            chip.hovered.connect(self._handle_chip_hovered)
-            chip.activated.connect(self._start_editing)
-            self._states[annotation.face_id] = _OverlayFaceState(annotation=annotation, chip=chip)
+            self._states[annotation.face_id] = _OverlayFaceState(annotation=annotation)
+        self._refresh_event_surface_filter()
         self._relayout()
         if not self._viewer_has_image_content() and self._manual_draft is None:
             self.setHidden(True)
 
     def clear_annotations(self) -> None:
-        self._hovered_face_id = None
+        self._set_hovered_face_id(None)
         self._cancel_editing()
         self.clear_manual_face_draft()
-        self._clear_chips()
+        self._clear_saved_states()
         self._annotations = []
         self._sync_child_visibility()
         self.update()
 
     def set_name_suggestions(self, suggestions: list[PersonSummary]) -> None:
+        self.set_identity_suggestions(
+            [
+                RecognitionIdentitySuggestion(
+                    identity_key=(
+                        summary.person_id
+                        if str(summary.person_id).startswith(("person:", "pet:"))
+                        else f"person:{summary.person_id}"
+                    ),
+                    name=summary.name.strip(),
+                    thumbnail_path=summary.thumbnail_path,
+                    count=int(getattr(summary, "face_count", 0) or 0),
+                )
+                for summary in suggestions
+                if isinstance(summary.name, str) and summary.name.strip()
+            ]
+        )
+
+    def set_identity_suggestions(
+        self,
+        suggestions: list[RecognitionIdentitySuggestion],
+    ) -> None:
         self._name_suggestions = [
-            _NameSuggestion(summary.person_id, summary.name.strip(), summary.thumbnail_path)
-            for summary in suggestions
-            if isinstance(summary.name, str) and summary.name.strip()
+            _NameSuggestion.from_identity(suggestion)
+            for suggestion in suggestions
+            if isinstance(suggestion.name, str) and suggestion.name.strip()
         ]
         if self._editor is not None:
             self._editor.set_name_suggestions(self._name_suggestions)
@@ -307,14 +487,27 @@ class FaceNameOverlayWidget(QWidget):
         self.update()
 
     def show_manual_error(self, message: str) -> None:
+        self.show_name_error(message)
+
+    def show_name_error(self, message: str) -> None:
         if not message:
             return
-        target = self._manual_editor.geometry().center() if self._manual_editor is not None else self.rect().center()
+        editor = self._editor or self._manual_editor
+        target = editor.geometry().center() if editor is not None else self.rect().center()
         QToolTip.showText(self.mapToGlobal(target), message, self)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._relayout()
+        self._sync_saved_hover_from_cursor("resize")
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._teardown_saved_hover_tracking()
+        super().hideEvent(event)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._teardown_saved_hover_tracking()
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         del event
@@ -324,30 +517,45 @@ class FaceNameOverlayWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         if self._active and self._hovered_face_id:
             state = self._states.get(self._hovered_face_id)
-            if state is not None and not state.face_rect.isEmpty():
-                self._paint_circle(painter, self._circle_rect_for_face(state.face_rect), 0.72)
+            if state is not None and not state.layout.circle_rect.isEmpty():
+                self._paint_circle(painter, state.layout.circle_rect, 0.72)
+        if self._active and self._viewer_has_image_content():
+            for face_id, state in self._states.items():
+                if face_id == self._editing_face_id:
+                    continue
+                if state.layout.chip_rect.isEmpty():
+                    continue
+                self._paint_saved_chip(
+                    painter,
+                    state.layout.chip_rect,
+                    state.layout.label_text,
+                )
         if self._manual_draft is not None:
             self._paint_circle(painter, self._manual_circle_rect(), 0.9)
             self._paint_button(painter, self._manual_cancel_rect(), "x")
             self._paint_button(painter, self._manual_handle_rect(), "")
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if self._handle_saved_pointer_event(watched, event):
+            return True
+
         viewer = getattr(self, "_viewer", None)
-        if watched is not viewer:
+        if watched is viewer:
+            if event.type() == QEvent.Type.MouseMove:
+                return self._handle_viewer_mouse_move(event)
+            if event.type() == QEvent.Type.MouseButtonPress:
+                return self._handle_viewer_mouse_press(event)
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                return self._handle_viewer_mouse_release(event)
+            if event.type() == QEvent.Type.Leave:
+                self._drag_mode = None
             return super().eventFilter(watched, event)
-        if event.type() == QEvent.Type.MouseMove:
-            return self._handle_viewer_mouse_move(event)
-        if event.type() == QEvent.Type.MouseButtonPress:
-            return self._handle_viewer_mouse_press(event)
-        if event.type() == QEvent.Type.MouseButtonRelease:
-            return self._handle_viewer_mouse_release(event)
-        if event.type() == QEvent.Type.Leave:
-            self._drag_mode = None
-            self._hovered_face_id = None
-            self.update()
+
         return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._handle_saved_pointer_event(self, event):
+            return
         if self._handle_manual_mouse_press(QPointF(event.position()), event):
             return
         super().mousePressEvent(event)
@@ -358,6 +566,8 @@ class FaceNameOverlayWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._handle_saved_pointer_event(self, event):
+            return
         if self._handle_manual_mouse_release(event):
             return
         super().mouseReleaseEvent(event)
@@ -365,8 +575,11 @@ class FaceNameOverlayWidget(QWidget):
     def _handle_viewer_mouse_move(self, event: QEvent) -> bool:
         if self._viewer is None or not isinstance(event, QMouseEvent):
             return False
-        point = QPointF(self._viewer.mapTo(self, event.position().toPoint()))
-        return self._handle_manual_mouse_move(point, event)
+        point = QPointF(
+            self.mapFromGlobal(self._viewer.mapToGlobal(event.position().toPoint()))
+        )
+        handled = self._handle_manual_mouse_move(point, event)
+        return handled
 
     def _handle_manual_mouse_move(self, point: QPointF, event: QMouseEvent) -> bool:
         if self._manual_draft is not None and self._drag_mode == "move" and not self._manual_busy:
@@ -389,8 +602,6 @@ class FaceNameOverlayWidget(QWidget):
             self.update()
             event.accept()
             return True
-        self._hovered_face_id = self._hit_face_id(point)
-        self.update()
         return False
 
     def _handle_viewer_mouse_press(self, event: QEvent) -> bool:
@@ -398,10 +609,14 @@ class FaceNameOverlayWidget(QWidget):
             return False
         if self._viewer is None or self._manual_draft is None or self._manual_busy:
             return False
-        point = QPointF(self._viewer.mapTo(self, event.position().toPoint()))
+        point = QPointF(
+            self.mapFromGlobal(self._viewer.mapToGlobal(event.position().toPoint()))
+        )
         return self._handle_manual_mouse_press(point, event)
 
     def _handle_manual_mouse_press(self, point: QPointF, event: QMouseEvent) -> bool:
+        if self._manual_draft is None or self._manual_busy:
+            return False
         if self._manual_cancel_rect().contains(point):
             self.clear_manual_face_draft()
             event.accept()
@@ -463,60 +678,113 @@ class FaceNameOverlayWidget(QWidget):
             painter.setPen(QColor(32, 32, 32, 220))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
-    def _clear_chips(self) -> None:
-        for state in self._states.values():
-            state.chip.deleteLater()
+    def _paint_saved_chip(self, painter: QPainter, rect: QRectF, text: str) -> None:
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8.0, 8.0)
+        painter.setPen(QPen(QColor(0, 0, 0, 28), 1.0))
+        painter.setBrush(QColor(255, 255, 255, 230))
+        painter.drawPath(path)
+        painter.setFont(self._saved_chip_font())
+        painter.setPen(QColor(24, 24, 24, 230))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _clear_saved_states(self) -> None:
+        self._saved_press_face_id = None
         self._states.clear()
 
+    def _refresh_event_surface_filter(self) -> None:
+        surface = self.parentWidget()
+        if surface is self._event_surface:
+            return
+        if self._event_surface is not None:
+            try:
+                self._event_surface.removeEventFilter(self)
+            except RuntimeError:
+                pass
+        self._event_surface = surface if isinstance(surface, QWidget) else None
+        if self._event_surface is not None:
+            self._event_surface.setMouseTracking(True)
+            self._event_surface.installEventFilter(self)
+
+    def _connect_viewer_signal(self, viewer: QWidget, name: str) -> None:
+        signal = getattr(viewer, name, None)
+        if signal is not None:
+            signal.connect(self.refresh_view_state)
+
+    def _disconnect_viewer_signal(self, viewer: QWidget, name: str) -> None:
+        signal = getattr(viewer, name, None)
+        if signal is None:
+            return
+        try:
+            signal.disconnect(self.refresh_view_state)
+        except (RuntimeError, TypeError):
+            pass
+
     def _display_name(self, annotation: AssetFaceAnnotation) -> str:
-        name = annotation.display_name
-        return (
-            name.strip()
-            if isinstance(name, str) and name.strip()
-            else tr("FaceNameOverlay", "unnamed")
-        )
+        if getattr(annotation, "promotion_state", "legacy_visible") == "candidate":
+            display_name = tr("FaceNameOverlay", "Pending confirmation")
+        else:
+            name = current_identity_display_name(annotation)
+            display_name = (
+                name.strip()
+                if isinstance(name, str) and name.strip()
+                else tr("FaceNameOverlay", "unnamed")
+            )
+        if bool(getattr(annotation, "is_stale", False)):
+            return tr(
+                "FaceNameOverlay",
+                "%1 · previous generation",
+            ).replace("%1", display_name)
+        return display_name
 
     def retranslate_ui(self) -> None:
         """Refresh overlay labels after the application language changes."""
 
-        for state in self._states.values():
-            state.chip.setText(self._display_name(state.annotation))
+        self._relayout()
         if self._manual_editor is not None:
             self._manual_editor.setPlaceholderText(tr("FaceNameOverlay", "Click to Name"))
 
     def _sync_child_visibility(self) -> None:
         viewer_ready = self._viewer_has_image_content()
         if not viewer_ready and self._manual_draft is None:
+            self._set_hovered_face_id(None)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.setHidden(True)
-            for state in self._states.values():
-                state.chip.hide()
             if self._editor is not None:
                 self._editor.hide()
+            self._set_saved_hover_tracking_enabled(False)
             return
         show_saved = self._active and viewer_ready and bool(self._states)
         show_manual = self._manual_draft is not None and viewer_ready
+        if not show_saved:
+            self._set_hovered_face_id(None)
+        elif self._editing_face_id is None and self._manual_draft is None:
+            self._ensure_viewer_allows_overlay_stacking()
         self.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
             not show_manual,
         )
         self.setHidden(not (show_saved or show_manual))
-        if self.isVisible():
-            self.raise_()
-        for state in self._states.values():
-            state.chip.setVisible(
-                show_saved
-                and not state.face_rect.isEmpty()
-                and state.annotation.face_id != self._editing_face_id
-            )
         if self._editor is not None:
             self._editor.setVisible(show_saved and self._editing_face_id is not None)
         if self._manual_editor is not None:
             self._manual_editor.setVisible(show_manual)
             self._manual_editor.setEnabled(not self._manual_busy)
+        self._set_saved_hover_tracking_enabled(
+            show_saved and self._editing_face_id is None and self._manual_draft is None
+        )
+        self.raise_interactive_controls()
+
+    def raise_interactive_controls(self) -> None:
+        if self.isVisible():
+            self.raise_()
+        if self._editor is not None and self._editor.isVisible():
+            self._editor.raise_()
+        if self._manual_editor is not None and self._manual_editor.isVisible():
+            self._manual_editor.raise_()
 
     def _viewer_has_image_content(self) -> bool:
-        viewer = self._viewer
+        viewer = getattr(self, "_viewer", None)
         if viewer is None:
             return False
         has_image_content = getattr(viewer, "has_image_content", None)
@@ -544,37 +812,51 @@ class FaceNameOverlayWidget(QWidget):
     def _relayout(self) -> None:
         self._sync_child_visibility()
         viewer_rect = self._viewer_rect()
-        if viewer_rect.isEmpty():
+        if viewer_rect.isEmpty() or (
+            not self._viewer_has_image_content() and self._manual_draft is None
+        ):
+            for state in self._states.values():
+                state.layout = _SavedFaceLayout(label_text=self._display_name(state.annotation))
             return
         for face_id, state in self._states.items():
             rect = self._map_annotation_rect(state.annotation)
-            state.face_rect = rect
+            label_text = self._display_name(state.annotation)
             if rect.isEmpty():
-                state.chip.hide()
+                state.layout = _SavedFaceLayout(label_text=label_text)
                 continue
-            state.chip.setGeometry(
+            chip_size = self._saved_chip_size(label_text)
+            chip_rect = QRectF(
                 self._chip_rect_for_face(
                     rect,
-                    state.chip.sizeHint().width(),
-                    state.chip.sizeHint().height(),
+                    chip_size.width(),
+                    chip_size.height(),
                     viewer_rect,
                 )
             )
-            if face_id != self._editing_face_id and self.isVisible():
-                state.chip.show()
-            state.chip.raise_()
+            hover_rect = chip_rect.adjusted(
+                -_CHIP_HOVER_MARGIN,
+                -_CHIP_HOVER_MARGIN,
+                _CHIP_HOVER_MARGIN,
+                _CHIP_HOVER_MARGIN,
+            ).intersected(QRectF(viewer_rect))
+            state.layout = _SavedFaceLayout(
+                face_rect=rect,
+                chip_rect=chip_rect,
+                hover_rect=hover_rect,
+                circle_rect=self._circle_rect_for_face(rect),
+                label_text=label_text,
+            )
         if self._editor is not None and self._editing_face_id is not None:
             state = self._states.get(self._editing_face_id)
-            if state is not None and not state.face_rect.isEmpty():
-                self._editor.setGeometry(
-                    self._chip_rect_for_face(
-                        state.face_rect,
-                        max(state.chip.sizeHint().width() + 12, 120),
-                        state.chip.sizeHint().height(),
-                        viewer_rect,
-                    )
+            if state is not None and not state.layout.face_rect.isEmpty():
+                chip_size = self._saved_chip_size(self._display_name(state.annotation))
+                editor_rect = self._chip_rect_for_face(
+                    state.layout.face_rect,
+                    max(chip_size.width() + 12, 120),
+                    chip_size.height(),
+                    viewer_rect,
                 )
-                self._editor.raise_()
+                self._editor.setGeometry(editor_rect)
         if self._manual_draft is not None:
             self._manual_draft.center = self._clamp_manual_center(
                 self._manual_draft.center,
@@ -587,7 +869,7 @@ class FaceNameOverlayWidget(QWidget):
             self._ensure_manual_editor()
             if self._manual_editor is not None:
                 self._manual_editor.setGeometry(self._manual_editor_rect())
-                self._manual_editor.raise_()
+        self.raise_interactive_controls()
         self.update()
 
     def _map_annotation_rect(self, annotation: AssetFaceAnnotation) -> QRectF:
@@ -619,6 +901,18 @@ class FaceNameOverlayWidget(QWidget):
     def _circle_rect_for_face(self, face_rect: QRectF) -> QRectF:
         diameter = max(face_rect.width(), face_rect.height(), _MIN_CIRCLE_DIAMETER) + _CIRCLE_PADDING
         return QRectF(face_rect.center().x() - diameter / 2.0, face_rect.center().y() - diameter / 2.0, diameter, diameter)
+
+    def _saved_chip_font(self):
+        font = self.font()
+        font.setPixelSize(13)
+        return font
+
+    def _saved_chip_size(self, text: str) -> QSize:
+        metrics = QFontMetrics(self._saved_chip_font())
+        return QSize(
+            metrics.horizontalAdvance(text) + (_LABEL_MARGIN_X * 2),
+            metrics.height() + (_LABEL_MARGIN_Y * 2),
+        )
 
     def _manual_circle_rect(self) -> QRectF:
         if self._manual_draft is None:
@@ -666,33 +960,359 @@ class FaceNameOverlayWidget(QWidget):
             min(max(center.y(), viewer_rect.top() + radius), viewer_rect.bottom() - radius),
         )
 
-    def _hit_face_id(self, point: QPointF) -> str | None:
+    def _chip_hover_rect(self, face_id: str) -> QRectF:
+        state = self._states.get(face_id)
+        return QRectF(state.layout.hover_rect) if state is not None else QRectF()
+
+    def _hit_chip_id(self, point: QPointF) -> str | None:
         hits = [
-            (_distance(self._circle_rect_for_face(state.face_rect).center(), point), face_id)
+            (_distance(state.layout.hover_rect.center(), point), face_id)
             for face_id, state in self._states.items()
-            if not state.face_rect.isEmpty()
-            and self._circle_rect_for_face(state.face_rect).adjusted(-10.0, -10.0, 10.0, 10.0).contains(point)
+            if face_id != self._editing_face_id
+            and not state.layout.hover_rect.isEmpty()
+            and state.layout.hover_rect.contains(point)
         ]
         hits.sort(key=lambda item: item[0])
         return hits[0][1] if hits else None
 
-    def _handle_chip_hovered(self, face_id: str, hovered: bool) -> None:
-        self._hovered_face_id = face_id if hovered else None
+    def _handle_saved_pointer_event(self, watched: object, event: QEvent) -> bool:
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonRelease and self._saved_press_face_id is not None:
+            if isinstance(event, QMouseEvent) and event.button() == Qt.MouseButton.LeftButton:
+                self._saved_press_face_id = None
+                event.accept()
+                return True
+        if event_type == QEvent.Type.MouseButtonPress and isinstance(event, QMouseEvent):
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            if not self._saved_hit_testing_enabled(allow_editing=True):
+                return False
+            global_pos = self._global_pos_from_event(watched, event)
+            if not self._saved_chip_layer_available(global_pos):
+                self._sync_saved_hover_from_global_pos(global_pos, "blocked-press")
+                return False
+            face_id = self._saved_face_id_at_global_pos(global_pos)
+            self._sync_saved_hover_from_global_pos(global_pos, "pointer-press")
+            if face_id is None:
+                self._saved_press_face_id = None
+                return False
+            event.accept()
+            self._start_editing(face_id)
+            self._saved_press_face_id = face_id
+            return True
+        if not self._saved_hover_enabled():
+            return False
+        if event_type == QEvent.Type.MouseMove and isinstance(event, QMouseEvent):
+            if event.buttons() == Qt.MouseButton.NoButton:
+                self._sync_saved_hover_from_mouse_event(watched, event, "pointer-move")
+            return False
+        if event_type in (QEvent.Type.Enter, QEvent.Type.HoverEnter, QEvent.Type.HoverMove):
+            if not self._sync_saved_hover_from_position_event(watched, event, "pointer-hover"):
+                self._queue_saved_hover_sync_from_cursor("pointer-hover")
+            return False
+        if event_type == QEvent.Type.Leave:
+            self._queue_saved_hover_sync_from_cursor("pointer-leave")
+            return False
+        return False
+
+    def _saved_hover_enabled(self) -> bool:
+        return self._saved_hit_testing_enabled(allow_editing=False)
+
+    def _saved_hit_testing_enabled(self, *, allow_editing: bool) -> bool:
+        return (
+            (allow_editing or getattr(self, "_editing_face_id", None) is None)
+            and getattr(self, "_manual_draft", None) is None
+            and getattr(self, "_active", False)
+            and bool(getattr(self, "_states", {}))
+            and self._viewer_has_image_content()
+            and self.isVisible()
+        )
+
+    def _global_pos_from_event(self, watched: object, event: QEvent) -> QPoint:
+        position = getattr(event, "position", None)
+        if isinstance(watched, QWidget) and callable(position):
+            return watched.mapToGlobal(position().toPoint())
+        global_position = getattr(event, "globalPosition", None)
+        if callable(global_position):
+            return global_position().toPoint()
+        return QCursor.pos()
+
+    def _saved_face_id_at_global_pos(self, global_pos: QPoint) -> str | None:
+        return self._hit_chip_id(QPointF(self.mapFromGlobal(global_pos)))
+
+    def _set_hovered_face_id(self, face_id: str | None, global_pos: QPoint | None = None) -> None:
+        states = getattr(self, "_states", {})
+        if face_id is not None and face_id not in states:
+            face_id = None
+        if getattr(self, "_hovered_face_id", None) == face_id:
+            self._apply_saved_hover_cursor(face_id is not None, global_pos)
+            return
+        self._hovered_face_id = face_id
+        self._apply_saved_hover_cursor(face_id is not None, global_pos)
         self.update()
+
+    def _update_saved_hover_from_point(self, point: QPointF) -> None:
+        self._sync_saved_hover_from_global_pos(
+            self.mapToGlobal(point.toPoint()),
+            "local-point",
+        )
+
+    def _sync_saved_hover_from_mouse_event(
+        self,
+        watched: object,
+        event: QMouseEvent,
+        reason: str,
+    ) -> None:
+        self._sync_saved_hover_from_global_pos(
+            self._global_pos_from_event(watched, event),
+            reason,
+        )
+
+    def _sync_saved_hover_from_position_event(
+        self,
+        watched: object,
+        event: QEvent,
+        reason: str,
+    ) -> bool:
+        if not callable(getattr(event, "position", None)) and not callable(
+            getattr(event, "globalPosition", None)
+        ):
+            return False
+        self._sync_saved_hover_from_global_pos(
+            self._global_pos_from_event(watched, event),
+            reason,
+        )
+        return True
+
+    def _sync_saved_hover_from_cursor(self, reason: str) -> None:
+        self._sync_saved_hover_from_global_pos(QCursor.pos(), reason)
+
+    def _sync_saved_hover_from_global_pos(
+        self,
+        global_pos: QPoint,
+        reason: str,
+        *,
+        queued: bool = False,
+    ) -> None:
+        del reason
+        if not queued:
+            self._saved_hover_sync_generation = (
+                getattr(self, "_saved_hover_sync_generation", 0) + 1
+            )
+        if (
+            getattr(self, "_editing_face_id", None) is not None
+            or getattr(self, "_manual_draft", None) is not None
+            or not getattr(self, "_active", False)
+            or not self._viewer_has_image_content()
+            or not self.isVisible()
+        ):
+            self._set_hovered_face_id(None)
+            return
+        if not self._saved_chip_layer_available(global_pos):
+            self._set_hovered_face_id(None)
+            return
+        local_pos = QPointF(self.mapFromGlobal(global_pos))
+        self._set_hovered_face_id(self._hit_chip_id(local_pos), global_pos)
+
+    def _saved_chip_layer_available(self, global_pos: QPoint) -> bool:
+        top_widget = QApplication.widgetAt(global_pos)
+        if top_widget is None:
+            return self._point_is_inside_viewer(global_pos)
+        if self._is_viewer_layer_widget(top_widget):
+            return True
+        if top_widget is self:
+            return True
+        if top_widget.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+            return True
+        return False
+
+    def _point_is_inside_viewer(self, global_pos: QPoint) -> bool:
+        viewer = self._viewer
+        if viewer is None:
+            return False
+        viewer_rect = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
+        return viewer_rect.contains(global_pos)
+
+    def _is_viewer_layer_widget(self, widget: QWidget) -> bool:
+        viewer = self._viewer
+        if viewer is None:
+            return False
+        current: QWidget | None = widget
+        while current is not None:
+            if current is viewer:
+                return True
+            current = current.parentWidget()
+        current = viewer
+        surface = self.parentWidget()
+        while current is not None and current is not surface:
+            if widget is current:
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _queue_saved_hover_sync_from_cursor(
+        self,
+        reason: str,
+        source: object | None = None,
+    ) -> None:
+        del source
+        if getattr(self, "_saved_hover_sync_queued", False):
+            return
+        self._saved_hover_sync_queued = True
+        self._queued_saved_hover_reason = reason
+        self._queued_saved_hover_generation = getattr(
+            self,
+            "_saved_hover_sync_generation",
+            0,
+        )
+        self._saved_hover_sync_timer.start()
+
+    def _flush_queued_saved_hover_sync(self) -> None:
+        self._saved_hover_sync_queued = False
+        generation = self._queued_saved_hover_generation
+        if generation != getattr(self, "_saved_hover_sync_generation", 0):
+            return
+        self._sync_saved_hover_from_global_pos(
+            QCursor.pos(),
+            self._queued_saved_hover_reason,
+            queued=True,
+        )
+
+    def _prune_stale_hover(self) -> None:
+        self._sync_saved_hover_from_cursor("prune")
+
+    def _poll_saved_hover_from_cursor(self) -> None:
+        self._sync_saved_hover_from_cursor("poll")
+
+    def _set_saved_hover_tracking_enabled(self, enabled: bool) -> None:
+        app = QApplication.instance()
+        target = bool(enabled and app is not None)
+        if target and not self._saved_hover_app_filter_installed:
+            app.installEventFilter(self)
+            self._saved_hover_app_filter_installed = True
+        elif not target and self._saved_hover_app_filter_installed:
+            try:
+                app.removeEventFilter(self) if app is not None else None
+            except RuntimeError:
+                pass
+            self._saved_hover_app_filter_installed = False
+        if target:
+            if not self._saved_hover_poll_timer.isActive():
+                self._saved_hover_poll_timer.start()
+        else:
+            self._saved_hover_poll_timer.stop()
+            self._saved_hover_sync_timer.stop()
+            self._saved_hover_sync_queued = False
+            self._saved_press_face_id = None
+            self._apply_saved_hover_cursor(False)
+
+    def _apply_saved_hover_cursor(
+        self,
+        active: bool,
+        global_pos: QPoint | None = None,
+    ) -> None:
+        app = QApplication.instance()
+        if active:
+            self._guard_widget_cursors(global_pos or QCursor.pos())
+            if app is not None:
+                cursor = QCursor(Qt.CursorShape.IBeamCursor)
+                if self._cursor_override_active:
+                    QApplication.changeOverrideCursor(cursor)
+                else:
+                    QApplication.setOverrideCursor(cursor)
+                    self._cursor_override_active = True
+            return
+        self._restore_guarded_widget_cursors()
+        if self._cursor_override_active and app is not None:
+            try:
+                QApplication.restoreOverrideCursor()
+            except RuntimeError:
+                pass
+        self._cursor_override_active = False
+
+    def _guard_widget_cursors(self, global_pos: QPoint) -> None:
+        for widget in self._cursor_guard_candidates(global_pos):
+            if widget not in self._cursor_guard_widgets:
+                self._cursor_guard_widgets[widget] = (
+                    QCursor(widget.cursor())
+                    if widget.testAttribute(Qt.WidgetAttribute.WA_SetCursor)
+                    else None
+                )
+            widget.setCursor(Qt.CursorShape.IBeamCursor)
+
+    def _cursor_guard_candidates(self, global_pos: QPoint) -> list[QWidget]:
+        candidates: list[QWidget] = []
+
+        def add(widget: QWidget | None) -> None:
+            if widget is not None and widget not in candidates:
+                candidates.append(widget)
+
+        add(QApplication.widgetAt(global_pos))
+        add(self._viewer)
+        add(self.parentWidget())
+        add(self)
+        surface = self.parentWidget()
+        if surface is not None:
+            for child in surface.findChildren(QWidget):
+                if not child.isVisible():
+                    continue
+                child_rect = QRect(child.mapToGlobal(QPoint(0, 0)), child.size())
+                if child_rect.contains(global_pos):
+                    add(child)
+        return candidates
+
+    def _restore_guarded_widget_cursors(self) -> None:
+        for widget, cursor in list(self._cursor_guard_widgets.items()):
+            try:
+                if cursor is None:
+                    widget.unsetCursor()
+                else:
+                    widget.setCursor(cursor)
+            except RuntimeError:
+                pass
+        self._cursor_guard_widgets.clear()
+
+    def _ensure_viewer_allows_overlay_stacking(self) -> None:
+        viewer = self._viewer
+        if viewer is None:
+            return
+        transparent_clip = bool(getattr(viewer, "_transparent_rounded_clip_enabled", False))
+        always_on_top = viewer.testAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop)
+        if not transparent_clip and not always_on_top:
+            return
+        set_transparent_rounded_clip = getattr(viewer, "set_transparent_rounded_clip", None)
+        if callable(set_transparent_rounded_clip):
+            set_transparent_rounded_clip(0.0)
+        viewer.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, False)
+
+    def _teardown_saved_hover_tracking(self) -> None:
+        self._set_hovered_face_id(None)
+        self._set_saved_hover_tracking_enabled(False)
 
     def _start_editing(self, face_id: str) -> None:
         state = self._states.get(face_id)
-        if state is None or not state.annotation.person_id:
+        if state is None:
+            return
+        if (
+            not state.annotation.person_id
+            and getattr(state.annotation, "promotion_state", "legacy_visible")
+            != "candidate"
+        ):
             return
         self._cancel_editing()
+        self._set_hovered_face_id(None)
+        self._set_saved_hover_tracking_enabled(False)
         self._editing_face_id = face_id
+        self._editing_context = annotation_edit_context(
+            getattr(state.annotation, "asset_id", ""), state.annotation
+        )
+        self._editing_expected_name = current_identity_display_name(state.annotation)
         editor = _FaceNameEditor(self.parentWidget() or self)
         editor.set_name_suggestions(self._name_suggestions)
-        editor.setText(state.annotation.display_name or "")
+        editor.setText(self._editing_expected_name or "")
         editor.commitRequested.connect(self._commit_editing)
         editor.cancelRequested.connect(self._cancel_editing)
         self._editor = editor
-        state.chip.hide()
         self._relayout()
         editor.show()
         editor.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -702,16 +1322,37 @@ class FaceNameOverlayWidget(QWidget):
         if self._editing_face_id is None or self._editor is None:
             return
         state = self._states.get(self._editing_face_id)
-        if state is None or not state.annotation.person_id:
+        if state is None:
             self._cancel_editing()
             return
+        selected_identity_key = self._editor.selected_identity_key()
         new_name = self._editor.text().strip() or None
-        state.annotation = replace(state.annotation, display_name=new_name)
-        state.chip.setText(self._display_name(state.annotation))
         person_id = state.annotation.person_id
+        if not person_id and not new_name:
+            self._cancel_editing()
+            return
+        context = self._editing_context
+        if context is None:
+            self._cancel_editing()
+            return
+        if selected_identity_key:
+            target = IdentityRef.parse(selected_identity_key)
+            self._teardown_editor(show_chip=True)
+            if target is None or target == context.current_identity:
+                return
+            request = IdentitySelectionRequest(context, target)
+            if context.selection_scope == InlineSelectionScope.CANDIDATE_IDENTITY:
+                self.candidateIdentityMergeSubmitted.emit(request)
+            else:
+                self.annotationReassignmentSubmitted.emit(request)
+            return
+        annotation = state.annotation
+        expected_name = self._editing_expected_name
         self._teardown_editor(show_chip=True)
         if person_id:
-            self.renameSubmitted.emit(person_id, new_name)
+            self.renameSubmitted.emit(IdentityRenameRequest(context, new_name, expected_name))
+        elif new_name:
+            self.unassignedRenameSubmitted.emit(annotation, new_name)
 
     def _cancel_editing(self) -> None:
         if self._editing_face_id is None and self._editor is None:
@@ -719,17 +1360,18 @@ class FaceNameOverlayWidget(QWidget):
         self._teardown_editor(show_chip=True)
 
     def _teardown_editor(self, *, show_chip: bool) -> None:
+        del show_chip
         face_id = self._editing_face_id
         editor = self._editor
         self._editing_face_id = None
+        self._editing_context = None
+        self._editing_expected_name = None
         self._editor = None
         if editor is not None:
+            editor.hide()
             editor.deleteLater()
         if face_id is not None:
-            state = self._states.get(face_id)
-            if state is not None and show_chip and self.isVisible():
-                state.chip.show()
-                state.chip.raise_()
+            self._saved_press_face_id = None
         self._relayout()
 
     def _ensure_manual_editor(self) -> None:
@@ -765,6 +1407,7 @@ class FaceNameOverlayWidget(QWidget):
             {
                 "name": trimmed,
                 "person_id": self._manual_editor.suggestion_person_id(),
+                "identity_key": self._manual_editor.suggestion_identity_key(),
                 "requested_box": requested_box,
             }
         )
@@ -795,8 +1438,8 @@ def _distance(left: QPointF, right: QPointF) -> float:
 
 
 def _icon_for_thumbnail(path: Path) -> QIcon:
-    pixmap = QPixmap(str(path))
-    if pixmap.isNull():
+    pixmap = load_qpixmap(path)
+    if pixmap is None or pixmap.isNull():
         return QIcon()
     size = 34
     scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)

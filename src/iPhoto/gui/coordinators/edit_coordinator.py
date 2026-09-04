@@ -1,17 +1,18 @@
 """Coordinator for the Edit View workflow."""
 
 from __future__ import annotations
+
 import logging
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from PySide6.QtCore import QObject, QSize, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QObject, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
     QAbstractSlider,
     QAbstractSpinBox,
+    QApplication,
     QComboBox,
     QLineEdit,
     QPlainTextEdit,
@@ -20,43 +21,43 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.application.ports import EditServicePort
-from iPhoto.gui.coordinators.view_router import ViewRouter
-from iPhoto.events.bus import EventBus
-from iPhoto.gui.ui.models.edit_session import EditSession
-from iPhoto.gui.ui.controllers.edit_history_manager import EditHistoryManager
-from iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
-from iPhoto.gui.ui.controllers.edit_preview_manager import EditPreviewManager
-from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
-from iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
-from iPhoto.gui.ui.controllers.header_controller import HeaderController
-from iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreenManager
-from iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
-from iPhoto.gui.ui.tasks.video_trim_thumbnail_worker import VideoTrimThumbnailWorker
-from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import (
-    VideoSidebarPreviewResult,
-    VideoSidebarPreviewWorker,
-)
-from iPhoto.gui.ui.controllers.edit_preview_manager import resolve_adjustment_mapping
-from iPhoto.gui.ui.palette import viewer_surface_color
-from iPhoto.gui.ui.media import MediaRestoreRequest
-from iPhoto.io.metadata import read_video_meta
-from iPhoto.media_classifier import VIDEO_EXTENSIONS
-from iPhoto.utils.logging import get_logger
-from iPhoto.utils.ffmpeg import probe_video_rotation
 from iPhoto.core.adjustment_mapping import (
     VIDEO_TRIM_IN_KEY,
     VIDEO_TRIM_OUT_KEY,
     normalise_video_trim,
+    resolve_adjustment_mapping,
 )
 from iPhoto.core.curve_resolver import DEFAULT_CURVE_POINTS
 from iPhoto.core.levels_resolver import DEFAULT_LEVELS_HANDLES
 from iPhoto.core.selective_color_resolver import DEFAULT_SELECTIVE_COLOR_RANGES
+from iPhoto.events.bus import EventBus
+from iPhoto.gui.coordinators.view_router import ViewRouter
+from iPhoto.gui.detail_profile import emit_detail_event
+from iPhoto.gui.ui.controllers.edit_fullscreen_manager import EditFullscreenManager
+from iPhoto.gui.ui.controllers.edit_history_manager import EditHistoryManager
+from iPhoto.gui.ui.controllers.edit_modes import AdjustModeState, CropModeState
+from iPhoto.gui.ui.controllers.edit_pipeline_loader import EditPipelineLoader
+from iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
+from iPhoto.gui.ui.controllers.edit_zoom_handler import EditZoomHandler
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
+from iPhoto.gui.ui.media import MediaRestoreRequest
+from iPhoto.gui.ui.models.edit_session import EditSession
+from iPhoto.gui.ui.palette import viewer_surface_color
+from iPhoto.gui.ui.tasks.video_sidebar_preview_worker import (
+    VideoSidebarPreviewResult,
+    VideoSidebarPreviewWorker,
+)
+from iPhoto.gui.ui.tasks.video_trim_thumbnail_worker import VideoTrimThumbnailWorker
+from iPhoto.io.metadata import read_video_meta
+from iPhoto.media_classifier import VIDEO_EXTENSIONS
+from iPhoto.utils.ffmpeg import probe_video_rotation
+from iPhoto.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
-    from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
     from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
+    from iPhoto.gui.ui.controllers.window_theme_controller import WindowThemeController
     from iPhoto.gui.ui.media import MediaAdjustmentCommitter, MediaSelectionSession
+    from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 
 _LOGGER = logging.getLogger(__name__)
 _APP_LOGGER = get_logger().getChild("video_trim")
@@ -68,6 +69,9 @@ class EditCoordinator(QObject):
     Manages the Edit View, including entering/exiting edit mode and applying changes.
     Replaces EditController.
     """
+
+    stillEditFinished = Signal(Path, str)
+    editUnavailable = Signal(str)
 
     def __init__(
         self,
@@ -81,6 +85,8 @@ class EditCoordinator(QObject):
         media_session: "MediaSelectionSession | None" = None,
         adjustment_committer: "MediaAdjustmentCommitter | None" = None,
         edit_service_getter: Callable[[], EditServicePort | None] | None = None,
+        render_session_controller: object | None = None,
+        zoom_handler: EditZoomHandler | None = None,
     ):
         super().__init__()
         # We need access to specific UI elements within edit_page (which is likely MainWindow.ui)
@@ -93,6 +99,8 @@ class EditCoordinator(QObject):
         self._media_session = media_session
         self._adjustment_committer = adjustment_committer
         self._edit_service_getter = edit_service_getter
+        self._render_session_controller = render_session_controller
+        self._render_session_handle = None
 
         self._transition_manager = EditViewTransitionManager(
             self._ui,
@@ -106,8 +114,6 @@ class EditCoordinator(QObject):
         self._current_source: Optional[Path] = None
         self._history_manager = EditHistoryManager(parent=self)
         self._pipeline_loader = EditPipelineLoader(self)
-        self._is_loading_edit_image = False
-        self._skip_next_preview_frame = False
         self._compare_active = False
         self._active_adjustments: dict[str, float] = {}
         self._video_color_stats = None
@@ -121,7 +127,8 @@ class EditCoordinator(QObject):
         self._video_frame_step_ms = _DEFAULT_VIDEO_FRAME_STEP_MS
 
         # Helpers / Sub-controllers (Ported from EditController)
-        self._zoom_handler = EditZoomHandler(
+        self._owns_zoom_handler = zoom_handler is None
+        self._zoom_handler = zoom_handler or EditZoomHandler(
             viewer=self._ui.edit_image_viewer,
             zoom_in_button=self._ui.zoom_in_button,
             zoom_out_button=self._ui.zoom_out_button,
@@ -151,11 +158,9 @@ class EditCoordinator(QObject):
             ui=self._ui,
             parent=self,
         )
-        self._preview_manager = EditPreviewManager(self._ui.edit_image_viewer, self)
         self._fullscreen_manager = EditFullscreenManager(
             self._ui,
             window,
-            self._preview_manager,
             parent=self,
         )
 
@@ -180,8 +185,6 @@ class EditCoordinator(QObject):
 
     def _connect_signals(self):
         # Pipeline signals
-        self._pipeline_loader.imageLoaded.connect(self._on_edit_image_loaded)
-        self._pipeline_loader.imageLoadFailed.connect(self._on_edit_image_load_failed)
         self._pipeline_loader.sidebarPreviewReady.connect(self._handle_sidebar_preview_ready)
 
         # UI wiring
@@ -258,10 +261,20 @@ class EditCoordinator(QObject):
         self._ui.edit_sidebar.aspectRatioChanged.connect(
             lambda ratio: self._active_edit_viewport().set_crop_aspect_ratio(ratio)
         )
-        self._ui.edit_image_viewer.cropInteractionStarted.connect(self.push_undo_state)
+        self._ui.edit_image_viewer.cropInteractionStarted.connect(
+            self._handle_crop_interaction_started
+        )
+        self._ui.edit_image_viewer.cropInteractionFinished.connect(
+            self._handle_crop_interaction_finished
+        )
         self._ui.edit_image_viewer.cropChanged.connect(self._handle_crop_changed)
         self._ui.edit_image_viewer.colorPicked.connect(self._handle_color_picked)
-        self._ui.video_area.cropInteractionStarted.connect(self.push_undo_state)
+        self._ui.video_area.cropInteractionStarted.connect(
+            self._handle_crop_interaction_started
+        )
+        self._ui.video_area.cropInteractionFinished.connect(
+            self._handle_crop_interaction_finished
+        )
         self._ui.video_area.cropChanged.connect(self._handle_crop_changed)
         self._ui.video_area.colorPicked.connect(self._handle_color_picked)
         self._ui.video_area.durationChanged.connect(self._handle_video_duration_changed)
@@ -299,6 +312,20 @@ class EditCoordinator(QObject):
 
         return self._session is not None
 
+    def preflight_library_rebind(self) -> bool:
+        """Refuse a user-initiated library switch while edits are unresolved."""
+
+        return self._session is None
+
+    def invalidate_library_binding(self) -> None:
+        """Safely abandon Edit before an unexpected session invalidates its handle."""
+
+        if self._session is not None:
+            self.leave_edit_mode(
+                restore_reason="library_invalidated",
+                restore_detail=False,
+            )
+
     # ------------------------------------------------------------------
     # Public transport API (used by AppShortcutManager)
     # ------------------------------------------------------------------
@@ -325,20 +352,12 @@ class EditCoordinator(QObject):
 
         if not self._session or not self._current_source:
             return False
-        adjustments = self._resolve_session_adjustments()
-        return self._fullscreen_manager.enter_fullscreen_preview(
-            self._current_source,
-            adjustments,
-        )
+        return self._fullscreen_manager.enter_fullscreen_preview()
 
     def exit_fullscreen_preview(self) -> None:
         """Exit immersive full screen preview if active."""
 
-        source = self._current_source
-        adjustments = None
-        if self._session is not None:
-            adjustments = self._resolve_session_adjustments()
-        self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
+        self._fullscreen_manager.exit_fullscreen_preview()
 
     def enter_edit_mode(self, asset_path: Path):
         """Prepares the edit view for the given asset and switches view."""
@@ -359,17 +378,39 @@ class EditCoordinator(QObject):
             is_video=asset_path.suffix.lower() in VIDEO_EXTENSIONS,
         )
 
-        # Load Adjustments
-        edit_service = self._edit_service()
-        adjustments = (
-            edit_service.read_adjustments(asset_path)
-            if edit_service is not None
-            else {}
-        )
+        render_handle = None
+        if asset_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            acquire = getattr(self._render_session_controller, "acquire_render_session", None)
+            render_handle = acquire(asset_path) if callable(acquire) else None
+            if render_handle is None:
+                _LOGGER.warning("No resident render session is available for %s", asset_path)
+                emit_detail_event(
+                    "render_session_unavailable",
+                    generation=int(
+                        getattr(self._render_session_controller, "_request_generation", 0)
+                    ),
+                    asset_id=asset_path.name,
+                )
+                self.editUnavailable.emit(
+                    "The photo is still loading. Try Edit again when it appears."
+                )
+                self._current_source = None
+                return
+            self._render_session_handle = render_handle
+            adjustments = dict(render_handle.edit_state.raw_adjustments)
+        else:
+            edit_service = self._edit_service()
+            adjustments = (
+                edit_service.read_adjustments(asset_path)
+                if edit_service is not None
+                else {}
+            )
 
         # Setup Session
         session = EditSession(self)
         session.set_values(adjustments, emit_individual=False)
+        if render_handle is not None:
+            session.set_color_stats(render_handle.edit_state.color_stats)
         session.valuesChanged.connect(self._handle_session_changed)
         self._session = session
         self._history_manager.set_session(session)
@@ -386,15 +427,11 @@ class EditCoordinator(QObject):
         # Reset Viewer State
         viewport.setCropMode(False, session.values())
         if self._is_video_source():
-            self._skip_next_preview_frame = False
             viewport.reset_zoom()
             self._start_video_edit_load(asset_path)
         else:
             viewer = self._ui.edit_image_viewer
-            current_source = viewer.current_image_source()
-            self._skip_next_preview_frame = current_source == asset_path
-            if not self._skip_next_preview_frame:
-                viewer.reset_zoom()
+            viewer.set_loading(False)
 
         # UI State
         self._compare_active = False
@@ -417,15 +454,20 @@ class EditCoordinator(QObject):
             },
         )
 
-        # Start Loading High-Res Image / Video
-        if not self._is_video_source():
-            self._start_async_edit_load(asset_path)
-
-    def _start_async_edit_load(self, source: Path):
-        if self._session is None: return
-        self._is_loading_edit_image = True
-        self._ui.edit_image_viewer.set_loading(not self._skip_next_preview_frame)
-        self._pipeline_loader.load_image(source)
+        if not self._is_video_source() and render_handle is not None:
+            sidebar_input = getattr(
+                self._render_session_controller,
+                "render_session_sidebar_input",
+                None,
+            )
+            if callable(sidebar_input):
+                image, color_stats = sidebar_input(render_handle)
+                target_height = max(64, self._ui.edit_sidebar.preview_thumbnail_height())
+                self._pipeline_loader.prepare_sidebar_preview(
+                    image,
+                    target_height=target_height,
+                    color_stats=color_stats,
+                )
 
     def _start_video_edit_load(self, source: Path) -> None:
         """Initialise video playback and trim UI for the active edit session."""
@@ -454,7 +496,7 @@ class EditCoordinator(QObject):
                 self._pending_video_duration_sec,
             )
             self._session.set_values(canonical, emit_individual=False)
-        self._ui.video_area.load_video(
+        self._ui.video_area.present_video(
             source,
             adjustments=self._resolve_session_adjustments(),
             trim_range_ms=(int(round(trim_in * 1000.0)), int(round(trim_out * 1000.0))),
@@ -472,44 +514,17 @@ class EditCoordinator(QObject):
         self._queue_video_trim_thumbnails(self._pending_video_duration_sec)
         self._ui.video_area.play()
 
-    def _on_edit_image_loaded(self, path: Path, image: QImage):
-        if self._session is None or self._current_source != path: return
-
-        try:
-            self._preview_manager.start_session(image, self._session.values())
-        except Exception:
-            _LOGGER.exception("Failed to init preview")
-            self.leave_edit_mode()
-            return
-
-        resolved = self._resolve_session_adjustments()
-        self._active_adjustments = resolved
-        self._ui.edit_image_viewer.set_image(image, resolved, image_source=path, reset_view=False)
-        self._skip_next_preview_frame = False
-        self._is_loading_edit_image = False
-        self._ui.edit_image_viewer.set_loading(False)
-
-        # Calculate target height for sidebar previews
-        target_height = self._ui.edit_sidebar.preview_thumbnail_height()
-        if target_height <= 0:
-            target_height = 64  # Fallback
-
-        self._pipeline_loader.prepare_sidebar_preview(
-            image,
-            target_height=target_height,
-            full_res_image_for_fallback=image
-        )
-
-    def _on_edit_image_load_failed(self, path: Path, msg: str):
-        _LOGGER.error(f"Failed to load edit image: {msg}")
-        self.leave_edit_mode()
-
     def _handle_sidebar_preview_ready(self, result):
         if self._session:
             self._ui.edit_sidebar.set_light_preview_image(result.image, color_stats=result.stats)
             self._ui.edit_sidebar.refresh()
 
-    def leave_edit_mode(self, *, restore_reason: str = "edit_exit"):
+    def leave_edit_mode(
+        self,
+        *,
+        restore_reason: str = "edit_exit",
+        restore_detail: bool = True,
+    ):
         """Returns to detail view."""
         source = self._current_source
         is_video_source = (
@@ -517,7 +532,8 @@ class EditCoordinator(QObject):
             and source.suffix.lower() in VIDEO_EXTENSIONS
         )
         should_restore_detail = (
-            source is not None
+            restore_detail
+            and source is not None
             and self._media_session is not None
         )
         _LOGGER.debug(
@@ -531,17 +547,24 @@ class EditCoordinator(QObject):
             },
         )
         if self._fullscreen_manager.is_in_fullscreen():
-            adjustments = None
-            if self._session is not None:
-                adjustments = self._resolve_session_adjustments()
-            self._fullscreen_manager.exit_fullscreen_preview(source, adjustments)
+            self._fullscreen_manager.exit_fullscreen_preview()
         if self._session is not None:
             self._active_edit_viewport().setCropMode(False, self._session.values())
         self._active_edit_viewport().set_eyedropper_mode(False)
         self._current_source = None
         self._session = None
-        self._preview_manager.stop_session()
-        self._zoom_handler.disconnect_controls()
+        render_handle = getattr(self, "_render_session_handle", None)
+        self._render_session_handle = None
+        if render_handle is not None:
+            finish = getattr(
+                getattr(self, "_render_session_controller", None),
+                "finish_render_session",
+                None,
+            )
+            if callable(finish):
+                finish(render_handle, committed=restore_reason == "edit_done")
+        if getattr(self, "_owns_zoom_handler", True):
+            self._zoom_handler.disconnect_controls()
         self._header_controller.restore_detail_mode()
         self._video_color_stats = None
         pending_duration_sec = self._pending_video_duration_sec
@@ -576,7 +599,7 @@ class EditCoordinator(QObject):
             animate=True,
             show_filmstrip=show_filmstrip,
         )
-        if should_restore_detail:
+        if should_restore_detail and is_video_source:
             self._media_session.request_restore(
                 MediaRestoreRequest(
                     path=source,
@@ -584,6 +607,12 @@ class EditCoordinator(QObject):
                     duration_sec=pending_duration_sec if is_video_source else None,
                 )
             )
+        elif should_restore_detail and source is not None and not is_video_source:
+            try:
+                self.stillEditFinished.emit(source, restore_reason)
+            except RuntimeError:
+                # A handful of lightweight unit-test stubs bypass QObject.__init__.
+                pass
         _LOGGER.debug(
             "[trace][edit] leave_edit_mode:after_transition_start %s",
             {
@@ -605,6 +634,7 @@ class EditCoordinator(QObject):
             self._active_edit_viewport().crop_values(),
             emit_individual=False,
         )
+        self._flush_render_session_state()
         if self._adjustment_committer is None:
             navigation = self._navigation
             if navigation:
@@ -613,8 +643,14 @@ class EditCoordinator(QObject):
                 edit_service = self._edit_service()
                 if edit_service is None:
                     raise RuntimeError("Edit service is unavailable")
-                edit_service.write_adjustments(source, self._session.values())
-                self._asset_vm.invalidate_thumbnail(str(source))
+                commit_result = edit_service.write_adjustments(
+                    source,
+                    self._session.values(),
+                )
+                self._asset_vm.invalidate_thumbnail(
+                    str(source),
+                    desired_revision=commit_result.thumbnail_revision,
+                )
             finally:
                 if navigation:
                     navigation.resume_library_watcher()
@@ -674,18 +710,41 @@ class EditCoordinator(QObject):
 
     def _perform_deferred_update(self):
         if self._session:
-            # Always fetch the authoritative state from the session
-            current_values = self._session.values()
-            if not self._preview_updates_suspended and not self._is_video_source():
-                self._preview_manager.update_adjustments(current_values)
             self._apply_session_adjustments_to_viewer()
             self._pending_session_values = None
 
+    def _flush_render_session_state(self) -> None:
+        """Synchronise the final still-edit values before committing the session."""
+
+        session = self._session
+        handle = getattr(self, "_render_session_handle", None)
+        update = getattr(
+            getattr(self, "_render_session_controller", None),
+            "update_render_session",
+            None,
+        )
+        if session is not None and handle is not None and callable(update):
+            state = update(handle, session.values())
+            self._active_adjustments = dict(state.shader_adjustments)
+        self._pending_session_values = None
+        throttler = getattr(self, "_update_throttler", None)
+        if throttler is not None:
+            throttler.stop()
+
     def _apply_session_adjustments_to_viewer(self):
         if self._session and not self._compare_active:
-            adj = self._resolve_session_adjustments()
+            if not self._is_video_source() and self._render_session_handle is not None:
+                update = getattr(self._render_session_controller, "update_render_session", None)
+                if callable(update):
+                    state = update(self._render_session_handle, self._session.values())
+                    adj = dict(state.shader_adjustments)
+                else:
+                    adj = self._resolve_session_adjustments()
+            else:
+                adj = self._resolve_session_adjustments()
             self._active_adjustments = adj
-            self._active_edit_viewport().set_adjustments(adj)
+            if self._is_video_source() or self._render_session_handle is None:
+                self._active_edit_viewport().set_adjustments(adj)
             if self._is_video_source():
                 self._apply_video_trim_from_session()
 
@@ -696,11 +755,19 @@ class EditCoordinator(QObject):
 
     def _resolve_adjustments_for_values(self, values: dict):
         if self._is_video_source():
-            return resolve_adjustment_mapping(values, stats=self._video_color_stats)
-        try:
-            return self._preview_manager.resolve_adjustments(values)
-        except AttributeError:
-            return resolve_adjustment_mapping(values, stats=self._preview_manager.color_stats())
+            return resolve_adjustment_mapping(
+                values,
+                stats=self._video_color_stats,
+                bool_as_float=True,
+                normalize_bw_for_render=False,
+            )
+        stats = self._session.color_stats() if self._session is not None else None
+        return resolve_adjustment_mapping(
+            values,
+            stats=stats,
+            bool_as_float=True,
+            normalize_bw_for_render=True,
+        )
 
     def _video_duration_ms(self) -> int:
         return max(int(self._ui.video_area.player_bar.duration()), 0)
@@ -1187,6 +1254,34 @@ class EditCoordinator(QObject):
                 "Crop_W": float(w), "Crop_H": float(h)
             }, emit_individual=False)
 
+    def _handle_crop_interaction_started(self) -> None:
+        """Snapshot undo state and defer still-image LOD replacement."""
+
+        self.push_undo_state()
+        handle = self._render_session_handle
+        begin = getattr(
+            self._render_session_controller,
+            "begin_render_session_interaction",
+            None,
+        )
+        if handle is not None and callable(begin):
+            begin(handle)
+
+    def _handle_crop_interaction_finished(self) -> None:
+        """Publish the final crop state before allowing one LOD reevaluation."""
+
+        if self._session is not None:
+            self._perform_deferred_update()
+        self._update_throttler.stop()
+        handle = self._render_session_handle
+        end = getattr(
+            self._render_session_controller,
+            "end_render_session_interaction",
+            None,
+        )
+        if handle is not None and callable(end):
+            end(handle)
+
     def _handle_bw_params_previewed(self, params) -> None:
         """Apply transient Black & White previews without mutating session state."""
 
@@ -1560,7 +1655,6 @@ class EditCoordinator(QObject):
         self._interaction_depth += 1
         if self._interaction_depth == 1:
             self._preview_updates_suspended = True
-            self._preview_manager.cancel_pending_updates()
 
     def _handle_sidebar_interaction_finished(self) -> None:
         """Re-enable preview rendering after slider interaction completes."""
@@ -1570,7 +1664,7 @@ class EditCoordinator(QObject):
         if self._interaction_depth == 0:
             self._preview_updates_suspended = False
             if self._session is not None:
-                self._preview_manager.update_adjustments(self._session.values())
+                self._apply_session_adjustments_to_viewer()
 
     def shutdown(self):
         """Cleanup resources on app exit."""

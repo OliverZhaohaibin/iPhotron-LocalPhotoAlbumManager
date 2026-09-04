@@ -15,14 +15,18 @@ from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPain
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -31,12 +35,14 @@ from PySide6.QtWidgets import (
 
 from iPhoto.gui.i18n import formatters, tr
 from iPhoto.people.repository import AssetFaceAnnotation, PersonSummary
+from iPhoto.utils.image_loader import load_qpixmap
 from ....application.ports import MapRuntimePort
 
 from ..icons import load_icon
 from ..menus.core import MenuActionSpec, MenuContext, populate_menu
 from ..menus.style import apply_menu_style
 from .info_location_map import InfoLocationMapView
+from .flow_layout import FlowLayout
 from .main_window_metrics import TITLE_BAR_HEIGHT, WINDOW_CONTROL_BUTTON_SIZE, WINDOW_CONTROL_GLYPH_SIZE
 from .people_dashboard_dialogs import GroupPeopleDialog
 
@@ -183,8 +189,8 @@ class _FaceAvatarWidget(QLabel):
 
     def __init__(
         self,
-        annotation: AssetFaceAnnotation,
-        candidates: list[PersonSummary],
+        annotation: object,
+        candidates: list[object],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -196,7 +202,7 @@ class _FaceAvatarWidget(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._refresh_visual_state()
 
-    def set_candidates(self, candidates: list[PersonSummary]) -> None:
+    def set_candidates(self, candidates: list[object]) -> None:
         self._candidates = list(candidates)
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
@@ -226,8 +232,8 @@ class _FaceAvatarWidget(QLabel):
         context = MenuContext(
             surface="info_panel",
             selection_kind="empty",
-            entity_kind="person",
-            entity_id=self._annotation.person_id,
+            entity_kind=self._annotation_kind(),
+            entity_id=self._annotation_entity_id(),
         )
         populate_menu(
             menu,
@@ -262,7 +268,7 @@ class _FaceAvatarWidget(QLabel):
             self._not_this_label(),
             (
                 ("choose_someone_else", tr("InfoPanel", "Choose Someone Else…")),
-                ("new_person", tr("InfoPanel", "New Person…")),
+                ("new_person", tr("InfoPanel", "New Name…")),
             ),
         )
 
@@ -270,21 +276,27 @@ class _FaceAvatarWidget(QLabel):
         display_name = str(self._annotation.display_name or "").strip()
         if display_name:
             return tr("InfoPanel", "Not {name}").format(name=display_name)
-        return tr("InfoPanel", "Not This Person")
+        return tr("InfoPanel", "Not This Name")
 
     def _prompt_choose_person(self) -> None:
+        annotation_kind = self._annotation_kind()
+        annotation_entity_key = self._annotation_entity_key()
         options = [
             summary
             for summary in self._candidates
-            if summary.person_id and summary.person_id != self._annotation.person_id
+            if getattr(summary, "person_id", None)
+            and _candidate_identity_key(summary) != annotation_entity_key
+            and _candidate_kind(summary) == annotation_kind
         ]
         if not options:
             return
+        title = tr("InfoPanel", "Choose Someone Else")
+        prompt = tr("InfoPanel", "Assign to")
         host = self.window() if isinstance(self.window(), QWidget) else self
         dialog = GroupPeopleDialog(
             options,
-            title_text=tr("InfoPanel", "Choose Someone Else"),
-            prompt_text=tr("InfoPanel", "Assign this face to"),
+            title_text=title,
+            prompt_text=prompt,
             confirm_text=tr("InfoPanel", "Choose"),
             min_selection=1,
             max_selection=1,
@@ -301,8 +313,8 @@ class _FaceAvatarWidget(QLabel):
     def _prompt_new_person(self) -> None:
         host = self.window() if isinstance(self.window(), QWidget) else self
         dialog = QInputDialog(host)
-        dialog.setWindowTitle(tr("InfoPanel", "New Person"))
-        dialog.setLabelText(tr("InfoPanel", "Person name:"))
+        dialog.setWindowTitle(tr("InfoPanel", "New Name"))
+        dialog.setLabelText(tr("InfoPanel", "Name:"))
         dialog.setTextValue("")
         _style_popup_input_dialog(dialog, host)
         if dialog.exec() != QInputDialog.DialogCode.Accepted:
@@ -311,6 +323,26 @@ class _FaceAvatarWidget(QLabel):
         if not new_name:
             return
         self.newPersonRequested.emit(self._annotation, new_name)
+
+    def _annotation_kind(self) -> str:
+        entity_id = self._annotation_entity_id()
+        if isinstance(entity_id, str) and entity_id.startswith("pet:"):
+            return "pet"
+        return "pet" if getattr(self._annotation, "kind", "person") == "pet" else "person"
+
+    def _annotation_entity_id(self) -> str | None:
+        entity_id = getattr(self._annotation, "person_id", None)
+        if isinstance(entity_id, str) and entity_id:
+            return entity_id
+        return None
+
+    def _annotation_entity_key(self) -> str | None:
+        entity_id = self._annotation_entity_id()
+        if not entity_id:
+            return None
+        if entity_id.startswith(("person:", "pet:")):
+            return entity_id
+        return f"{self._annotation_kind()}:{entity_id}"
 
     def _set_menu_active(self, active: bool) -> None:
         self._is_menu_active = bool(active)
@@ -347,6 +379,21 @@ def _person_choice_label(summary: PersonSummary) -> str:
         count=formatters.format_integer(summary.face_count),
     )
 
+
+def _candidate_kind(candidate: object) -> str:
+    person_id = getattr(candidate, "person_id", "")
+    return "pet" if isinstance(person_id, str) and person_id.startswith("pet:") else "person"
+
+
+def _candidate_identity_key(candidate: object) -> str | None:
+    person_id = getattr(candidate, "person_id", None)
+    if not isinstance(person_id, str) or not person_id:
+        return None
+    if person_id.startswith(("person:", "pet:")):
+        return person_id
+    return f"{_candidate_kind(candidate)}:{person_id}"
+
+
 @dataclass
 class _FormattedMetadata:
     """Pre-formatted strings used to populate the info panel labels."""
@@ -360,6 +407,74 @@ class _FormattedMetadata:
     is_video: bool = False
 
 
+class _InfoPanelCard(QWidget):
+    """Paint the rounded Info Panel surface inside its transparent window."""
+
+    def __init__(self, corner_radius: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._corner_radius = max(0.0, float(corner_radius))
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802
+        """Draw the card background and border; the window owns only chrome."""
+
+        del event
+        if self.width() <= 0 or self.height() <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(
+            self._corner_radius,
+            min(rect.width(), rect.height()) / 2.0,
+        )
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(path, self.palette().color(QPalette.ColorRole.Window))
+
+        border_color = self.palette().color(QPalette.ColorRole.Mid)
+        border_color.setAlpha(80)
+        painter.setPen(border_color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+
+class _InfoPanelShadowSurface(QWidget):
+    """Provide a child-free rounded source for the panel shadow effect."""
+
+    def __init__(self, corner_radius: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._corner_radius = max(0.0, float(corner_radius))
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802
+        """Paint only the opaque rounded mask consumed by the shadow effect."""
+
+        del event
+        if self.width() <= 0 or self.height() <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(
+            self._corner_radius,
+            min(rect.width(), rect.height()) / 2.0,
+        )
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(path, self.palette().color(QPalette.ColorRole.Window))
+
+
 class InfoPanel(QWidget):
     """Small helper window that mirrors macOS Photos' info popover.
 
@@ -369,9 +484,16 @@ class InfoPanel(QWidget):
     """
 
     _CORNER_RADIUS = 12.0
-    _SHADOW_SIZE = 16
-    _SHADOW_MAX_ALPHA = 18
-    _SHADOW_RADIUS_GROWTH = 0.5
+    _SHADOW_BLUR_RADIUS = 24.0
+    _SHADOW_OFFSET_Y = 4.0
+    _SHADOW_ALPHA = 72
+    _SHADOW_PADDING = 28
+    _CARD_WIDTH = 304
+    _CARD_HEIGHT = 534
+    _PANEL_WIDTH = _CARD_WIDTH + 2 * _SHADOW_PADDING
+    _PANEL_HEIGHT = _CARD_HEIGHT + 2 * _SHADOW_PADDING
+    _SCREEN_HORIZONTAL_MARGIN = 40
+    _SCREEN_VERTICAL_MARGIN = 80
     _DEFAULT_LOCATION_FALLBACK_TEXT = "Install the map extension to use Assign a Location."
     dismissed = Signal()
     manualFaceAddRequested = Signal()
@@ -395,26 +517,27 @@ class InfoPanel(QWidget):
             Qt.WindowType.Window
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
-        self.setMinimumWidth(320)
+        self.setAutoFillBackground(False)
 
         self._metadata: Optional[dict[str, Any]] = None
         self._current_rel: Optional[str] = None
-        self._asset_faces: list[AssetFaceAnnotation] = []
+        self._asset_faces: list[object] = []
         self._asset_face_signature: tuple[tuple[object, ...], ...] | None = None
-        self._face_action_candidates: list[PersonSummary] = []
+        self._face_action_candidates: list[object] = []
         self._drag_active = False
         self._drag_offset = None
         self._centered = False
-        self._post_show_reflow_queued = False
-        self._post_show_reflow_recenter = False
         self._content_update_depth = 0
         self._content_update_previous_updates_enabled: bool | None = None
         self._pending_geometry_refresh = False
         self._pending_geometry_recenter = False
+        self._shutdown_requested = False
         self._location_capability_enabled = False
         self._location_preview_enabled = False
         self._location_fallback_text = self._DEFAULT_LOCATION_FALLBACK_TEXT
@@ -425,9 +548,36 @@ class InfoPanel(QWidget):
         self._location_confirm_queued = False
         self._location_busy = False
         self._last_location_map_target: tuple[float, float] | None = None
+        self._shell_screen_key: tuple[object, ...] | None = None
+
+        # -- transparent window chrome -----------------------------------
+        layout = QGridLayout(self)
+        layout.setContentsMargins(
+            self._SHADOW_PADDING,
+            self._SHADOW_PADDING,
+            self._SHADOW_PADDING,
+            self._SHADOW_PADDING,
+        )
+        layout.setSpacing(0)
+
+        self._shadow_surface = _InfoPanelShadowSurface(self._CORNER_RADIUS, self)
+        layout.addWidget(self._shadow_surface, 0, 0)
+
+        self._card = _InfoPanelCard(self._CORNER_RADIUS, self)
+        card_layout = QVBoxLayout(self._card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        layout.addWidget(self._card, 0, 0)
+        self._card.raise_()
+
+        shadow = QGraphicsDropShadowEffect(self._shadow_surface)
+        shadow.setBlurRadius(self._SHADOW_BLUR_RADIUS)
+        shadow.setOffset(0, self._SHADOW_OFFSET_Y)
+        shadow.setColor(QColor(0, 0, 0, self._SHADOW_ALPHA))
+        self._shadow_surface.setGraphicsEffect(shadow)
 
         # -- title bar -----------------------------------------------------
-        self._title_bar = QWidget(self)
+        self._title_bar = QWidget(self._card)
         self._title_bar.setFixedHeight(TITLE_BAR_HEIGHT)
         title_layout = QHBoxLayout(self._title_bar)
         title_layout.setContentsMargins(16, 10, 12, 6)
@@ -455,7 +605,7 @@ class InfoPanel(QWidget):
         self._close_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._close_button.setToolTip(self._tr("Close"))
         self._apply_close_button_style()
-        self._close_button.clicked.connect(self.close)
+        self._close_button.clicked.connect(self.dismiss)
         title_layout.addWidget(
             self._close_button, 0, Qt.AlignmentFlag.AlignRight,
         )
@@ -469,68 +619,94 @@ class InfoPanel(QWidget):
         self._summary_label = self._make_content_label()
         self._exposure_label = self._make_content_label()
 
-        # -- root layout ---------------------------------------------------
-        s = self._SHADOW_SIZE
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, s, s)
-        layout.setSpacing(0)
-        layout.addWidget(self._title_bar)
+        card_layout.addWidget(self._title_bar)
 
-        content = QWidget(self)
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(16, 8, 16, 16)
-        content_layout.setSpacing(12)
-        content_layout.addWidget(self._filename_label)
-        content_layout.addWidget(self._timestamp_label)
+        self._body_scroll = QScrollArea(self._card)
+        self._body_scroll.setObjectName("infoPanelBodyScroll")
+        self._body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._body_scroll.setWidgetResizable(True)
+        self._body_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._body_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        self._body_scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._body_scroll.setStyleSheet(
+            "QScrollArea#infoPanelBodyScroll { background: transparent; border: none; }"
+            "QScrollArea#infoPanelBodyScroll > QWidget > QWidget { background: transparent; }"
+        )
 
-        metadata_frame = QWidget(self)
-        metadata_layout = QVBoxLayout(metadata_frame)
-        metadata_layout.setContentsMargins(0, 0, 0, 0)
-        metadata_layout.setSpacing(6)
-        metadata_layout.addWidget(self._camera_label)
-        metadata_layout.addWidget(self._lens_label)
-        metadata_layout.addWidget(self._summary_label)
-        content_layout.addWidget(metadata_frame)
+        self._body_content = QWidget(self._body_scroll)
+        self._body_content.setObjectName("infoPanelBodyContent")
+        self._body_content.setMinimumSize(0, 0)
+        self._body_content.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self._content_layout = QVBoxLayout(self._body_content)
+        self._content_layout.setContentsMargins(16, 8, 16, 16)
+        self._content_layout.setSpacing(12)
+        self._content_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self._content_layout.addWidget(self._filename_label)
+        self._content_layout.addWidget(self._timestamp_label)
 
-        separator = QFrame(self)
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        content_layout.addWidget(separator)
+        self._metadata_frame = QWidget(self._body_content)
+        self._metadata_layout = QVBoxLayout(self._metadata_frame)
+        self._metadata_layout.setContentsMargins(0, 0, 0, 0)
+        self._metadata_layout.setSpacing(6)
+        self._metadata_layout.addWidget(self._camera_label)
+        self._metadata_layout.addWidget(self._lens_label)
+        self._metadata_layout.addWidget(self._summary_label)
+        self._content_layout.addWidget(self._metadata_frame)
 
-        exposure_container = QWidget(self)
-        exposure_layout = QHBoxLayout(exposure_container)
+        self._metadata_separator = QFrame(self)
+        self._metadata_separator.setFrameShape(QFrame.HLine)
+        self._metadata_separator.setFrameShadow(QFrame.Sunken)
+        self._content_layout.addWidget(self._metadata_separator)
+
+        self._exposure_container = QWidget(self)
+        exposure_layout = QHBoxLayout(self._exposure_container)
         exposure_layout.setContentsMargins(0, 0, 0, 0)
         exposure_layout.addWidget(self._exposure_label)
-        content_layout.addWidget(exposure_container)
+        self._content_layout.addWidget(self._exposure_container)
 
         self._face_separator = QFrame(self)
         self._face_separator.setFrameShape(QFrame.HLine)
         self._face_separator.setFrameShadow(QFrame.Sunken)
-        content_layout.addWidget(self._face_separator)
+        self._content_layout.addWidget(self._face_separator)
 
-        self._face_container = QWidget(self)
-        self._face_layout = QHBoxLayout(self._face_container)
-        self._face_layout.setContentsMargins(0, 0, 0, 0)
-        self._face_layout.setSpacing(8)
-        self._face_layout.addStretch(1)
+        self._face_container = QWidget(self._body_content)
+        self._face_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self._face_layout = FlowLayout(
+            self._face_container,
+            margin=0,
+            h_spacing=8,
+            v_spacing=8,
+        )
         self._face_add_button = QToolButton(self._face_container)
         self._face_add_button.setIconSize(_FACE_ADD_ICON_SIZE)
         self._face_add_button.setFixedSize(_FACE_ADD_BUTTON_SIZE)
         self._face_add_button.setAutoRaise(True)
         self._face_add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._face_add_button.setEnabled(False)
         self._face_add_button.setStyleSheet(
             "QToolButton { padding: 0px; margin: 0px; border: none; background: transparent; }"
         )
         self._face_add_button.clicked.connect(self.manualFaceAddRequested.emit)
         self._update_face_add_button_icon()
-        content_layout.addWidget(self._face_container)
+        self._face_layout.addWidget(self._face_add_button)
+        self._content_layout.addWidget(self._face_container)
 
         self._location_separator = QFrame(self)
         self._location_separator.setFrameShape(QFrame.HLine)
         self._location_separator.setFrameShadow(QFrame.Sunken)
-        content_layout.addWidget(self._location_separator)
+        self._content_layout.addWidget(self._location_separator)
 
-        self._location_container = QWidget(self)
+        self._location_container = QWidget(self._body_content)
         self._location_layout = QVBoxLayout(self._location_container)
         self._location_layout.setContentsMargins(0, 0, 0, 0)
         self._location_layout.setSpacing(8)
@@ -593,9 +769,19 @@ class InfoPanel(QWidget):
         self._location_map = InfoLocationMapView(self._location_container)
         self._location_map.hide()
         self._location_layout.addWidget(self._location_map)
-        content_layout.addWidget(self._location_container)
+        self._content_layout.addWidget(self._location_container)
+        self._content_layout.addStretch(1)
 
-        layout.addWidget(content, 1)
+        self._body_scroll.setWidget(self._body_content)
+        body_scrollbar = self._body_scroll.verticalScrollBar()
+        body_scrollbar.rangeChanged.connect(self._sync_body_scrollbar_state)
+        body_scrollbar.valueChanged.connect(self._handle_body_scroll_value_changed)
+        card_layout.addWidget(self._body_scroll, 1)
+        self._apply_shell_size(force=True)
+        self._sync_body_scrollbar_state(
+            body_scrollbar.minimum(),
+            body_scrollbar.maximum(),
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -645,8 +831,10 @@ class InfoPanel(QWidget):
             self._set_label_text(self._exposure_label, fallback)
         self._apply_location_metadata(metadata, previous_rel=previous_rel)
         self._refresh_or_schedule_panel_geometry()
+        if previous_rel != self._current_rel:
+            self._reset_body_scroll_to_top()
 
-    def set_asset_faces(self, annotations: list[AssetFaceAnnotation]) -> None:
+    def set_asset_faces(self, annotations: list[object]) -> None:
         next_signature = tuple(self._face_signature(annotation) for annotation in annotations)
         if next_signature == self._asset_face_signature:
             self._asset_faces = list(annotations)
@@ -656,10 +844,34 @@ class InfoPanel(QWidget):
         self._rebuild_face_strip()
         self._refresh_or_schedule_panel_geometry()
 
-    def set_face_action_candidates(self, candidates: list[PersonSummary]) -> None:
+    def set_face_action_candidates(self, candidates: list[object]) -> None:
         self._face_action_candidates = list(candidates)
         for avatar in self._face_avatar_widgets():
             avatar.set_candidates(self._face_action_candidates)
+
+    def set_face_actions_enabled(self, enabled: bool) -> None:
+        """Enable recognition-backed actions after deferred binding completes."""
+
+        self._face_add_button.setEnabled(bool(enabled))
+
+    def dismiss(self) -> None:
+        """Hide the reusable panel without closing its native window surface."""
+
+        if not self.isVisible():
+            return
+        self._clear_location_results()
+        self.hide()
+        self.dismissed.emit()
+
+    def prepare_for_presentation(self) -> None:
+        """Attach stable native child surfaces before the top-level first paint."""
+
+        if self._shutdown_requested:
+            return
+        self._apply_shell_size()
+        self._refresh_panel_geometry()
+        if self._location_preview_enabled and not self._location_map.isHidden():
+            self._location_map.prepare_surface()
 
     def clear(self) -> None:
         """Reset the panel to an empty state without hiding the window."""
@@ -808,6 +1020,14 @@ class InfoPanel(QWidget):
         )
 
     def shutdown(self) -> None:
+        """Release terminal resources owned by the reusable panel.
+
+        Normal user dismissal only hides the panel.  The embedded map runtime
+        must stay alive across close/show cycles and is released explicitly by
+        the application shutdown path instead.
+        """
+
+        self._shutdown_requested = True
         self._clear_location_results()
         self._location_map.shutdown()
 
@@ -880,6 +1100,7 @@ class InfoPanel(QWidget):
     def _set_label_text(label: QLabel, text: str) -> None:
         if label.text() != text:
             label.setText(text)
+            label.setToolTip(text)
 
     def _set_label_state(self, label: QLabel, text: str, *, visible: bool) -> None:
         self._set_label_text(label, text)
@@ -887,20 +1108,21 @@ class InfoPanel(QWidget):
             label.setVisible(visible)
 
     @staticmethod
-    def _face_signature(annotation: AssetFaceAnnotation) -> tuple[object, ...]:
-        thumbnail_path = annotation.thumbnail_path
+    def _face_signature(annotation: object) -> tuple[object, ...]:
+        thumbnail_path = getattr(annotation, "thumbnail_path", None)
         return (
-            annotation.face_id,
-            annotation.person_id,
-            annotation.display_name,
-            annotation.box_x,
-            annotation.box_y,
-            annotation.box_w,
-            annotation.box_h,
-            annotation.image_width,
-            annotation.image_height,
+            getattr(annotation, "kind", "person"),
+            getattr(annotation, "face_id", None),
+            getattr(annotation, "person_id", None),
+            getattr(annotation, "display_name", None),
+            getattr(annotation, "box_x", None),
+            getattr(annotation, "box_y", None),
+            getattr(annotation, "box_w", None),
+            getattr(annotation, "box_h", None),
+            getattr(annotation, "image_width", None),
+            getattr(annotation, "image_height", None),
             str(thumbnail_path) if thumbnail_path is not None else None,
-            annotation.is_manual,
+            getattr(annotation, "is_manual", False),
         )
 
     def _face_avatar_widgets(self) -> list[_FaceAvatarWidget]:
@@ -1132,8 +1354,7 @@ class InfoPanel(QWidget):
         self._set_widget_explicitly_visible(self._location_map, True)
         current_lat, current_lon = self._location_map.current_location()
         should_update_location = (
-            self._location_map.map_widget() is None
-            or self._last_location_map_target is None
+            self._last_location_map_target is None
             or current_lat is None
             or current_lon is None
             or abs(self._last_location_map_target[0] - target[0]) > 1e-6
@@ -1144,6 +1365,9 @@ class InfoPanel(QWidget):
         if should_update_location:
             self._location_map.set_location(target[0], target[1])
             self._last_location_map_target = target
+        if self.isVisible():
+            self._location_map.prepare_surface()
+            self._location_map.schedule_deferred_content()
         self._location_container.updateGeometry()
         location_layout = self._location_container.layout()
         if location_layout is not None:
@@ -1159,13 +1383,10 @@ class InfoPanel(QWidget):
     def _available_location_map_width(self) -> int:
         width = self._location_container.width()
         if width <= 0:
-            width = max(self.width(), self.minimumWidth())
-            layout = self.layout()
-            if layout is not None:
-                margins = layout.contentsMargins()
-                width -= margins.left() + margins.right()
-            width -= 32
-        return max(self.minimumWidth() - 48, width)
+            width = self._body_scroll.viewport().width()
+            margins = self._content_layout.contentsMargins()
+            width -= margins.left() + margins.right()
+        return max(1, width)
 
     def _handle_location_editor_key_press(self, event: QKeyEvent) -> bool:
         key = event.key()
@@ -1254,14 +1475,13 @@ class InfoPanel(QWidget):
                 self._face_layout.addWidget(self._make_face_avatar(annotation))
             self._face_add_button.show()
             self._face_layout.addWidget(self._face_add_button)
-            self._face_layout.addStretch(1)
             self._face_separator.setVisible(True)
             self._face_container.setVisible(True)
         finally:
             if updates_enabled:
                 self._face_container.setUpdatesEnabled(True)
 
-    def _make_face_avatar(self, annotation: AssetFaceAnnotation) -> QLabel:
+    def _make_face_avatar(self, annotation: object) -> QLabel:
         label = _FaceAvatarWidget(annotation, self._face_action_candidates, self._face_container)
         label.deleteRequested.connect(self.faceDeleteRequested.emit)
         label.moveRequested.connect(self.faceMoveRequested.emit)
@@ -1269,42 +1489,41 @@ class InfoPanel(QWidget):
         return label
 
     def _refresh_panel_geometry(self, *, recenter: bool = False) -> None:
-        """Recompute the preferred panel geometry after content changes."""
+        """Refresh scrollable body geometry without resizing the fixed shell."""
 
         self.ensurePolished()
-        layout = self.layout()
-        if layout is not None:
-            layout.invalidate()
-            layout.activate()
-        self.updateGeometry()
-        # Qt's adjustSize() for top-level windows passes sizeHint().width() into
-        # totalHeightForWidth().  That width varies with text content, so sparse
-        # and rich metadata can accidentally produce the same total height.
-        # QLabel.updateGeometry() also skips parent-layout invalidation when the
-        # panel is hidden (isVisible() is False), leaving child layout caches
-        # stale.  Use the actual widget width instead — totalHeightForWidth()
-        # calls label.heightForWidth() directly, which is always fresh.
-        w = max(self.width(), self.minimumWidth())
-        if layout is not None and layout.hasHeightForWidth():
-            h = layout.totalHeightForWidth(w)
-            self.resize(w, h)
-        else:
-            self.adjustSize()
-            target_size = self.sizeHint().expandedTo(self.minimumSize())
-            if target_size.isValid():
-                self.resize(target_size)
+        self._metadata_layout.invalidate()
+        self._metadata_layout.activate()
+        self._face_layout.invalidate()
+        self._content_layout.invalidate()
+        self._content_layout.activate()
+        viewport_width = self._body_scroll.viewport().width()
+        if viewport_width <= 1:
+            viewport_width = max(1, self._card.width())
+        margins = self._content_layout.contentsMargins()
+        content_width = max(1, viewport_width - margins.left() - margins.right())
+        content_height = (
+            self._content_layout.totalHeightForWidth(viewport_width)
+            if self._content_layout.hasHeightForWidth()
+            else self._content_layout.sizeHint().height()
+        )
+        self._body_content.setMinimumWidth(0)
+        self._body_content.setMinimumHeight(max(0, content_height))
+        self._body_content.resize(
+            max(1, viewport_width),
+            max(self._body_scroll.viewport().height(), content_height),
+        )
+        self._body_content.updateGeometry()
+        self._location_map.prepare_for_panel_width(content_width)
         if recenter:
             self._center_over_parent()
 
     def _refresh_or_schedule_panel_geometry(self, *, recenter: bool = False) -> None:
-        """Refresh hidden layouts immediately, but coalesce visible reflows."""
+        """Refresh body layouts immediately or defer them to the active batch."""
 
         if self._content_update_depth > 0:
             self._pending_geometry_refresh = True
             self._pending_geometry_recenter = self._pending_geometry_recenter or recenter
-            return
-        if self.isVisible():
-            self._schedule_post_show_reflow(recenter=recenter)
             return
         self._refresh_panel_geometry(recenter=recenter)
 
@@ -1320,27 +1539,66 @@ class InfoPanel(QWidget):
             center.y() - self.height() // 2,
         )
 
-    def _schedule_post_show_reflow(self, *, recenter: bool) -> None:
-        """Queue a deferred geometry reflow after show or visible content updates."""
+    def _reset_body_scroll_to_top(self) -> None:
+        scrollbar = self._body_scroll.verticalScrollBar()
+        scrollbar.setValue(0)
 
-        self._post_show_reflow_recenter = self._post_show_reflow_recenter or recenter
-        if self._post_show_reflow_queued:
+    def _sync_body_scrollbar_state(self, minimum: int, maximum: int) -> None:
+        scrollbar = self._body_scroll.verticalScrollBar()
+        has_overflow = maximum > minimum
+        scrollbar.setEnabled(has_overflow)
+        if has_overflow:
+            scrollbar.setStyleSheet("")
             return
-        self._post_show_reflow_queued = True
-        QTimer.singleShot(0, self._run_post_show_reflow)
+        scrollbar.setStyleSheet(
+            "QScrollBar:vertical, QScrollBar::groove:vertical, "
+            "QScrollBar::handle:vertical, QScrollBar::add-page:vertical, "
+            "QScrollBar::sub-page:vertical, QScrollBar::add-line:vertical, "
+            "QScrollBar::sub-line:vertical, QScrollBar::up-arrow:vertical, "
+            "QScrollBar::down-arrow:vertical { background: transparent; border: none; }"
+        )
 
-    def _run_post_show_reflow(self) -> None:
-        """Finalize the layout once the initial show event has fully settled."""
+    def _handle_body_scroll_value_changed(self, _value: int) -> None:
+        self._set_widget_explicitly_visible(self._location_results, False)
+        self._location_map.refresh_after_ancestor_scroll()
 
-        self._post_show_reflow_queued = False
-        recenter = self._post_show_reflow_recenter
-        self._post_show_reflow_recenter = False
-        if self._content_update_depth > 0:
-            self._pending_geometry_refresh = True
-            self._pending_geometry_recenter = self._pending_geometry_recenter or recenter
-            return
-        self._refresh_panel_geometry(recenter=recenter)
-        self.update()
+    def _panel_screen(self):
+        if self._centered:
+            screen = QGuiApplication.screenAt(self.frameGeometry().center())
+            if screen is not None:
+                return screen
+        parent = self.parentWidget()
+        if parent is not None:
+            screen_getter = getattr(parent, "screen", None)
+            if callable(screen_getter):
+                screen = screen_getter()
+                if screen is not None:
+                    return screen
+        return QGuiApplication.primaryScreen()
+
+    def _apply_shell_size(self, *, force: bool = False) -> bool:
+        screen = self._panel_screen()
+        if screen is None:
+            target = QSize(self._PANEL_WIDTH, self._PANEL_HEIGHT)
+            screen_key: tuple[object, ...] = ("default",)
+        else:
+            available = screen.availableGeometry()
+            target = QSize(
+                max(1, min(self._PANEL_WIDTH, available.width() - self._SCREEN_HORIZONTAL_MARGIN)),
+                max(1, min(self._PANEL_HEIGHT, available.height() - self._SCREEN_VERTICAL_MARGIN)),
+            )
+            screen_key = (
+                screen.name(),
+                available.x(),
+                available.y(),
+                available.width(),
+                available.height(),
+            )
+        if not force and screen_key == self._shell_screen_key:
+            return False
+        self._shell_screen_key = screen_key
+        self.setFixedSize(target)
+        return True
 
     def _try_start_system_drag(self) -> bool:
         """Ask the window manager to move the frameless tool window if possible."""
@@ -1454,17 +1712,24 @@ class InfoPanel(QWidget):
         if event.type() == QEvent.Type.PaletteChange:
             self._apply_close_button_style()
             self._update_face_add_button_icon()
+            self._shadow_surface.update()
+            self._card.update()
+        if event.type() == QEvent.Type.FontChange:
+            self._refresh_or_schedule_panel_geometry()
         super().changeEvent(event)
 
     def showEvent(self, event: QShowEvent) -> None:
         """Centre the panel over its parent window the first time it appears."""
 
+        self.prepare_for_presentation()
         super().showEvent(event)
+        shell_changed = self._apply_shell_size()
         first_show = not self._centered
         if first_show:
             self._centered = True
-        self._refresh_panel_geometry(recenter=first_show)
-        self._schedule_post_show_reflow(recenter=first_show)
+        self._refresh_panel_geometry(recenter=first_show or shell_changed)
+        if self._location_preview_enabled:
+            self._location_map.schedule_deferred_content()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
         self._set_widget_explicitly_visible(self._location_results, False)
@@ -1477,68 +1742,23 @@ class InfoPanel(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._refresh_panel_geometry()
         if not self._location_results.isHidden():
             self._position_location_results_popup()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        """Emit a dismissal signal so the detail state stays in sync."""
+        """Convert native close requests into reusable-panel dismissal."""
 
-        self.shutdown()
-        self.dismissed.emit()
-        super().closeEvent(event)
-
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        """Draw drop shadow and an anti-aliased rounded rectangle."""
-
-        del event
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        s = self._SHADOW_SIZE
-        content_rect = QRectF(self.rect()).adjusted(0, 0, -s, -s)
-        radius = min(
-            self._CORNER_RADIUS,
-            min(content_rect.width(), content_rect.height()) / 2.0,
-        )
-
-        # -- drop shadow (right + bottom only) -----------------------------
-        shadow_steps = s
-        for i in range(shadow_steps):
-            alpha = int(self._SHADOW_MAX_ALPHA * (1 - i / shadow_steps) ** 2)
-            if alpha <= 0:
-                continue
-            shadow_color = QColor(0, 0, 0, alpha)
-            spread = float(i)
-            shadow_rect = content_rect.adjusted(spread, spread, spread, spread)
-            shadow_path = QPainterPath()
-            shadow_path.addRoundedRect(
-                shadow_rect,
-                radius + spread * self._SHADOW_RADIUS_GROWTH,
-                radius + spread * self._SHADOW_RADIUS_GROWTH,
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.fillPath(shadow_path, shadow_color)
-
-        # -- background ----------------------------------------------------
-        path = QPainterPath()
-        path.addRoundedRect(content_rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-
-        bg_color = self.palette().color(QPalette.ColorRole.Window)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillPath(path, bg_color)
-
-        border_color = self.palette().color(QPalette.ColorRole.Mid)
-        border_color.setAlpha(80)
-        painter.setPen(border_color)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
+        event.ignore()
+        self.dismiss()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """Begin a drag when clicking on the title bar area."""
 
         if event.button() == Qt.MouseButton.LeftButton:
             local_pos = event.position().toPoint()
-            if self._title_bar.geometry().contains(local_pos):
+            title_pos = self._title_bar.mapFrom(self, local_pos)
+            if self._title_bar.rect().contains(title_pos):
                 if self._begin_drag(event):
                     event.accept()
                     return
@@ -1874,8 +2094,8 @@ def _avatar_pixmap(path: Path | None) -> QPixmap | None:
     cached = _AVATAR_PIXMAP_CACHE.get(cache_key)
     if cached is not None and not cached.isNull():
         return QPixmap(cached)
-    source = QPixmap(str(path))
-    if source.isNull():
+    source = load_qpixmap(path)
+    if source is None or source.isNull():
         return None
     size = _FACE_AVATAR_DIAMETER
     scaled = source.scaled(

@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import sys
 import time
+import weakref
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
@@ -21,35 +23,135 @@ from PySide6.QtGui import (
     QMouseEvent,
     QOpenGLContext,
     QPixmap,
+    QRhi,
     QRhiCommandBuffer,
     QRhiDepthStencilClearValue,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QRhiWidget
 
-try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
-except (ModuleNotFoundError, ImportError):  # pragma: no cover
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoFrameFormat = None  # type: ignore[assignment, misc]
+from iPhoto.gui.detail_profile import emit_detail_event, log_detail_profile
 
-from ..gl_crop_controller import CropInteractionController
 from ..render_backend import is_opengl_api, qrhi_api_name, select_qrhi_widget_api
-from ..rhi_image_renderer import RhiImageRenderer
-from ..view_transform_controller import ViewTransformController
-from . import crop_viewport, geometry
-from .adjustment_applicator import AdjustmentApplicator
-from .components import LoadingOverlay
-from .fullscreen_handler import FullscreenHandler
-from .input_handler import InputEventHandler
-from .offscreen import OffscreenRenderer
-from .resources import TextureResourceManager
-from .utils import normalise_colour
-from .zoom_controller import ZoomController
+
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoFrameFormat = None  # type: ignore[assignment, misc]
+DecodedSurface = None
+SurfaceByteBreakdown = None
+SurfaceResidencyTracker = None
+surface_resource_id = None
+CropInteractionController = None
+RhiImageRenderer = None
+ViewTransformController = None
+crop_viewport = None
+geometry = None
+AdjustmentApplicator = None
+LoadingOverlay = None
+FullscreenHandler = None
+InputEventHandler = None
+OffscreenRenderer = None
+TextureResourceManager = None
+normalise_colour = None
+ZoomController = None
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _load_viewer_runtime_dependencies() -> None:
+    """Load NumPy-backed viewer services only after the first shell paint."""
+
+    global AdjustmentApplicator, CropInteractionController, DecodedSurface
+    global FullscreenHandler, InputEventHandler, LoadingOverlay, OffscreenRenderer
+    global RhiImageRenderer, SurfaceByteBreakdown, SurfaceResidencyTracker
+    global TextureResourceManager, ViewTransformController, ZoomController
+    global crop_viewport, geometry, normalise_colour, surface_resource_id
+    if TextureResourceManager is not None:
+        return
+
+    from iPhoto.gui.detail_decode_backend import DecodedSurface as _DecodedSurface
+    from iPhoto.gui.detail_surface_residency import (
+        SurfaceByteBreakdown as _SurfaceByteBreakdown,
+    )
+    from iPhoto.gui.detail_surface_residency import (
+        SurfaceResidencyTracker as _SurfaceResidencyTracker,
+    )
+    from iPhoto.gui.detail_surface_residency import (
+        surface_resource_id as _surface_resource_id,
+    )
+
+    from ..gl_crop_controller import CropInteractionController as _CropInteractionController
+    from ..rhi_image_renderer import RhiImageRenderer as _RhiImageRenderer
+    from ..view_transform_controller import ViewTransformController as _ViewTransformController
+    from . import crop_viewport as _crop_viewport
+    from . import geometry as _geometry
+    from .adjustment_applicator import AdjustmentApplicator as _AdjustmentApplicator
+    from .components import LoadingOverlay as _LoadingOverlay
+    from .fullscreen_handler import FullscreenHandler as _FullscreenHandler
+    from .input_handler import InputEventHandler as _InputEventHandler
+    from .offscreen import OffscreenRenderer as _OffscreenRenderer
+    from .resources import TextureResourceManager as _TextureResourceManager
+    from .utils import normalise_colour as _normalise_colour
+    from .zoom_controller import ZoomController as _ZoomController
+
+    DecodedSurface = _DecodedSurface
+    SurfaceByteBreakdown = _SurfaceByteBreakdown
+    SurfaceResidencyTracker = _SurfaceResidencyTracker
+    surface_resource_id = _surface_resource_id
+    CropInteractionController = _CropInteractionController
+    RhiImageRenderer = _RhiImageRenderer
+    ViewTransformController = _ViewTransformController
+    crop_viewport = _crop_viewport
+    geometry = _geometry
+    AdjustmentApplicator = _AdjustmentApplicator
+    LoadingOverlay = _LoadingOverlay
+    FullscreenHandler = _FullscreenHandler
+    InputEventHandler = _InputEventHandler
+    OffscreenRenderer = _OffscreenRenderer
+    TextureResourceManager = _TextureResourceManager
+    normalise_colour = _normalise_colour
+    ZoomController = _ZoomController
+
+
+def _load_video_frame_types() -> None:
+    """Load QtMultimedia frame types only when a decoded frame arrives."""
+
+    global QVideoFrame, QVideoFrameFormat
+    if QVideoFrame is not None and QVideoFrameFormat is not None:
+        return
+    try:
+        from PySide6.QtMultimedia import (
+            QVideoFrame as _QVideoFrame,
+        )
+        from PySide6.QtMultimedia import (
+            QVideoFrameFormat as _QVideoFrameFormat,
+        )
+    except (ModuleNotFoundError, ImportError):  # pragma: no cover
+        return
+    QVideoFrame = _QVideoFrame
+    QVideoFrameFormat = _QVideoFrameFormat
+
+# Crop preview must not reuse the persisted [0, 1] crop mask.  Straightened or
+# perspective-corrected source pixels can project outside that logical square;
+# a deliberately oversized mask leaves the yellow overlay as the only crop
+# boundary while the shader still rejects samples outside the real texture.
+_CROP_PREVIEW_MASK_SIZE = 1_000_000.0
 gl: Any | None = None
 GLRenderer: Any | None = None
+
+
+def _crop_preview_adjustments(adjustments: Mapping[str, float]) -> dict[str, float]:
+    """Return adjustments that expose the full transformed source in Crop mode."""
+
+    preview = dict(adjustments)
+    preview.update(
+        {
+            "Crop_CX": 0.5,
+            "Crop_CY": 0.5,
+            "Crop_W": _CROP_PREVIEW_MASK_SIZE,
+            "Crop_H": _CROP_PREVIEW_MASK_SIZE,
+        }
+    )
+    return preview
 
 
 def _load_gl_module():
@@ -89,6 +191,7 @@ class GLImageViewer(QRhiWidget):
     replayRequested = Signal()
     zoomChanged = Signal(float)
     viewTransformChanged = Signal()
+    viewportMetricsChanged = Signal()
     nextItemRequested = Signal()
     prevItemRequested = Signal()
     fullscreenExitRequested = Signal()
@@ -98,9 +201,29 @@ class GLImageViewer(QRhiWidget):
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
-    """Emitted once after the first opaque frame has been rendered."""
+    """Emitted after the first opaque frame has been submitted for composition."""
 
-    def __init__(self, parent: QRhiWidget | None = None) -> None:
+    renderResourcesInvalidated = Signal()
+    """Emitted when the active QRhi resource generation is released."""
+
+    stillFramePresented = Signal(object)
+    """Emitted after a newly uploaded full-resolution still has been drawn."""
+
+    stillFrameSubmitted = Signal(object, int)
+    """Emitted with content identity after a still reaches window submission."""
+
+    stillTextureAllocationFailed = Signal(object, int, str)
+    """Emitted when a queued foreground still cannot become resident."""
+
+    videoFramePresented = Signal(int, int)
+    """Emitted after a newly uploaded video frame is submitted for composition."""
+
+    def __init__(
+        self,
+        parent: QRhiWidget | None = None,
+        *,
+        staged: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
 
@@ -123,15 +246,32 @@ class GLImageViewer(QRhiWidget):
         self._renderer: Any | RhiImageRenderer | None = None
         self._gl_initialized = False
         self._first_render_done = False
+        self._first_render_submission_pending = False
         self._pending_post_load_view_transform = False
         self._post_load_view_transform_scheduled = False
 
         # 状态
         self._image: QImage | None = None
+        self._surface_residency_tracker: SurfaceResidencyTracker | None = None
+        self._tracked_surface_resources: dict[object, object] = {}
+        self._tracked_staging_resources: dict[object, object] = {}
+        self._tracked_gpu_resources: dict[object, object] = {}
+        self._still_surface_refs: OrderedDict[object, DecodedSurface] = OrderedDict()
+        self._pending_warm_surfaces: list[DecodedSurface] = []
+        self._still_generation_by_key: dict[object, int] = {}
+        self._pending_resident_activation: object | None = None
+        self._still_presentation_pending = False
+        self._content_revision = 0
+        self._rendered_content_identity: tuple[str, object, int, int] | None = None
+        self._last_composed_content_identity: tuple[str, object, int, int] | None = None
+        self._source_image_dimensions: tuple[int, int] | None = None
         self._video_frame = None
         self._pending_video_image: QImage | None = None
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
+        self._video_frame_presentation_pending = False
+        self._video_frame_content_generation = 0
+        self._video_frame_content_serial = 0
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._reset_zoom_frames_crop = True
@@ -146,6 +286,41 @@ class GLImageViewer(QRhiWidget):
         self._diag_video_render_count = 0
         self._adjustments: dict[str, Any] = {}
         self._eyedropper_active = False
+        self._auto_crop_view_locked = False
+        self._auto_crop_center_locked = False
+        self._time_base = time.monotonic()
+        self._runtime_ready = False
+        self._texture_manager = None
+        self._adjustment_applicator = None
+        self._fullscreen_handler = None
+        self._loading_overlay = None
+        self._transform_controller = None
+        self._zoom_ctrl = None
+        self._crop_controller = None
+        self._input_handler = None
+        self._pending_surface_color_override: str | None = None
+
+        # Presentation signals must describe a composed window frame, not merely
+        # a draw command recorded by ``render()``.
+        owner_ref = weakref.ref(self)
+
+        def _handle_frame_submitted() -> None:
+            owner = owner_ref()
+            if owner is not None:
+                owner._on_frame_submitted()
+
+        self._frame_submitted_handler = _handle_frame_submitted
+        self.frameSubmitted.connect(_handle_frame_submitted)
+
+        if not staged:
+            self.complete_runtime()
+
+    def complete_runtime(self) -> None:
+        """Create NumPy-backed viewer services without replacing the QRhi widget."""
+
+        if self._runtime_ready:
+            return
+        _load_viewer_runtime_dependencies()
 
         # Texture resource manager
         self._texture_manager = TextureResourceManager(
@@ -168,10 +343,11 @@ class GLImageViewer(QRhiWidget):
             set_stylesheet=self.setStyleSheet,
             request_update=self.update,
         )
+        if self._pending_surface_color_override is not None:
+            self._fullscreen_handler.set_surface_color_override(
+                self._pending_surface_color_override
+            )
         self._fullscreen_handler._apply()
-
-        # ``_time_base`` anchors the monotonic clock used by the shader grain generator.
-        self._time_base = time.monotonic()
 
         # Loading overlay component
         self._loading_overlay = LoadingOverlay(self)
@@ -206,8 +382,6 @@ class GLImageViewer(QRhiWidget):
             on_interaction_started=self.cropInteractionStarted.emit,
             on_interaction_finished=self.cropInteractionFinished.emit,
         )
-        self._auto_crop_view_locked: bool = False
-        self._auto_crop_center_locked: bool = False
         self._update_crop_perspective_state()
 
         # Input event handler
@@ -219,11 +393,43 @@ class GLImageViewer(QRhiWidget):
             on_fullscreen_toggle=self.fullscreenToggleRequested.emit,
             on_cancel_auto_crop_lock=self._cancel_auto_crop_lock,
         )
+        self._runtime_ready = True
 
     def render_backend_name(self) -> str:
         """Return the active QRhi backend name for diagnostics/tests."""
 
         return qrhi_api_name(self._rhi_api)
+
+    def render_device_name(self) -> str:
+        """Return the QRhi adapter name used to reject software benchmark runs."""
+
+        rhi = self.rhi()
+        if rhi is None:
+            return "unknown"
+        try:
+            value = rhi.driverInfo().deviceName()
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            data = getattr(value, "data", None)
+            if callable(data):
+                return bytes(data()).decode("utf-8", errors="replace")
+            return str(value)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return "unknown"
+
+    def maximum_texture_size(self) -> int:
+        """Return the active backend texture limit with a safe cold fallback."""
+
+        rhi = self.rhi()
+        if rhi is None:
+            return 8192
+        try:
+            return max(
+                1,
+                int(rhi.resourceLimit(QRhi.ResourceLimit.TextureSizeMax)),
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 8192
 
     # ------------------------------------------------------------------
     # GL context helpers (replace QOpenGLWidget.makeCurrent/doneCurrent)
@@ -301,6 +507,7 @@ class GLImageViewer(QRhiWidget):
         adjustments: Mapping[str, float] | None = None,
         *,
         image_source: object | None = None,
+        source_size: tuple[int, int] | None = None,
         reset_view: bool = True,
         force_texture_refresh: bool = False,
     ) -> None:
@@ -317,6 +524,10 @@ class GLImageViewer(QRhiWidget):
             identifier matches the one from the previous call the viewer keeps
             the existing GPU texture, avoiding redundant uploads during view
             transitions.
+        source_size:
+            Original oriented-pixel dimensions represented by a downsampled
+            viewport surface. Coordinate mapping defaults to this size while
+            rendering and uploads continue to use the actual texture size.
         reset_view:
             ``True`` preserves the historic behaviour of resetting the zoom and
             pan state.  Passing ``False`` keeps the current transform so edit
@@ -326,10 +537,24 @@ class GLImageViewer(QRhiWidget):
         self._pending_video_image = None
         self._pending_video_image_pre_rotated = False
         self._video_frame_dirty = False
+        self._video_frame_presentation_pending = False
+        self._video_frame_content_generation = 0
+        self._video_frame_content_serial = 0
         self._using_video_frame_source = False
         self._pending_video_reset_view = False
         self._pending_source_rotate90_steps = None
         self._pending_post_load_view_transform = False
+        if image is None or image.isNull():
+            self._source_image_dimensions = None
+            self._still_presentation_pending = False
+            self._rendered_content_identity = None
+        elif source_size is not None and min(source_size) > 0:
+            self._source_image_dimensions = (int(source_size[0]), int(source_size[1]))
+        elif not self._texture_manager.should_reuse_texture(image_source):
+            self._source_image_dimensions = (int(image.width()), int(image.height()))
+
+        if image is not None and not image.isNull() and image_source is not None:
+            self._still_presentation_pending = True
 
         # Check if we can reuse the existing texture
         if (
@@ -374,22 +599,178 @@ class GLImageViewer(QRhiWidget):
             # user toggles between detail and edit modes.
             self.reset_zoom()
 
+    def set_still_surface(
+        self,
+        surface: DecodedSurface,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        reset_view: bool = True,
+        generation: int = 0,
+    ) -> None:
+        """Queue one neutral surface as the atomically presented current still."""
+
+        self._remember_still_surface(surface)
+        self._still_generation_by_key[surface.decode_key] = max(0, int(generation))
+        self.set_image(
+            surface.image,
+            adjustments,
+            image_source=surface.decode_key,
+            source_size=surface.source_size,
+            reset_view=reset_view,
+        )
+
+    def warm_still_surface(
+        self,
+        surface: DecodedSurface,
+        _adjustments: Mapping[str, float] | None = None,
+        *,
+        residency_slot: str | None = None,
+        window_generation: int = 0,
+    ) -> None:
+        """Queue a previous/next texture upload without changing presentation."""
+
+        del residency_slot
+        self._remember_still_surface(surface)
+        self._still_generation_by_key[surface.decode_key] = max(0, int(window_generation))
+        if self._texture_manager.has_resident_texture(surface.decode_key):
+            self._texture_manager.touch_resident_texture(surface.decode_key)
+        else:
+            self._pending_warm_surfaces = [
+                pending for pending in self._pending_warm_surfaces
+                if pending.decode_key != surface.decode_key
+            ]
+            self._pending_warm_surfaces.append(surface)
+            self._pending_warm_surfaces = self._pending_warm_surfaces[-2:]
+            self.update()
+
+    def activate_resident_surface(
+        self,
+        key: object,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        source_size: tuple[int, int] | None = None,
+        reset_view: bool = True,
+        generation: int = 0,
+    ) -> bool:
+        """Queue a render-thread activation when *key* is already on the GPU."""
+
+        surface = self._still_surface_refs.get(key)
+        if surface is None or not self._texture_manager.has_resident_texture(key):
+            emit_detail_event("gpu_cache_miss", generation=generation, key=str(key))
+            return False
+        self._pending_resident_activation = key
+        self._still_generation_by_key[key] = max(0, int(generation))
+        self._image = surface.image
+        self._source_image_dimensions = source_size or surface.source_size
+        self._adjustments = dict(adjustments or {})
+        self._update_crop_perspective_state()
+        self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
+        self._still_presentation_pending = True
+        if reset_view:
+            self.reset_zoom()
+        emit_detail_event("gpu_cache_hit", generation=generation, key=str(key))
+        self.update()
+        return True
+
+    def clear_still_residency(self) -> None:
+        self._pending_warm_surfaces.clear()
+        self._pending_resident_activation = None
+        self._still_surface_refs.clear()
+        self._still_generation_by_key.clear()
+        tracker = self._surface_residency_tracker
+        if tracker is not None:
+            tracker.release("detail-viewer-surfaces")
+            tracker.release("detail-upload-staging")
+        self._tracked_surface_resources.clear()
+        self._tracked_staging_resources.clear()
+        self._texture_manager.clear_still_residency()
+        self._sync_gpu_residency()
+
+    def trim_still_residency(self) -> None:
+        self._pending_warm_surfaces.clear()
+        self._texture_manager.trim_still_residency()
+        self._sync_gpu_residency()
+
+    def zoom_factor(self) -> float:
+        return float(self._transform_controller.get_zoom_factor())
+
+    def _remember_still_surface(self, surface: DecodedSurface) -> None:
+        previous = self._still_surface_refs.pop(surface.decode_key, None)
+        tracker = self._surface_residency_tracker
+        if previous is not None and tracker is not None:
+            previous_resource = self._tracked_surface_resources.pop(
+                surface.decode_key,
+                surface_resource_id(previous),
+            )
+            tracker.release("detail-viewer-surfaces", previous_resource)
+        self._still_surface_refs[surface.decode_key] = surface
+        if tracker is not None:
+            self._tracked_surface_resources[surface.decode_key] = tracker.retain_surface(
+                "detail-viewer-surfaces",
+                "presentation_prefetch",
+                surface,
+                generation=self._still_generation_by_key.get(surface.decode_key, 0),
+            )
+        while len(self._still_surface_refs) > 3:
+            evicted_key, evicted = self._still_surface_refs.popitem(last=False)
+            if tracker is not None:
+                evicted_resource = self._tracked_surface_resources.pop(
+                    evicted_key,
+                    surface_resource_id(evicted),
+                )
+                tracker.release("detail-viewer-surfaces", evicted_resource)
+
+    def set_surface_residency_tracker(
+        self,
+        tracker: SurfaceResidencyTracker | None,
+    ) -> None:
+        """Bind the diagnostic-only tracker used by the owning player."""
+
+        previous = self._surface_residency_tracker
+        if previous is tracker:
+            return
+        if previous is not None:
+            previous.release("detail-viewer-surfaces")
+            previous.release("detail-upload-staging")
+            previous.release("detail-gpu-residency")
+        self._surface_residency_tracker = tracker
+        self._tracked_surface_resources.clear()
+        self._tracked_staging_resources.clear()
+        self._tracked_gpu_resources.clear()
+        if tracker is not None:
+            for surface in self._still_surface_refs.values():
+                self._tracked_surface_resources[surface.decode_key] = tracker.retain_surface(
+                    "detail-viewer-surfaces",
+                    "presentation_prefetch",
+                    surface,
+                )
+            self._sync_gpu_residency()
+
     def set_video_frame(
         self,
         frame,
         adjustments: Mapping[str, float] | None = None,
         *,
         reset_view: bool = True,
+        content_generation: int = 0,
+        content_serial: int = 0,
     ) -> None:
         """Display *frame* directly through the OpenGL shader pipeline."""
 
+        _load_video_frame_types()
         if QVideoFrame is None or frame is None or not frame.isValid():
             return
 
         starting_video_source = not self._using_video_frame_source
         if starting_video_source:
             self._texture_manager.clear_image()
+            self._source_image_dimensions = None
+            self._still_presentation_pending = False
+            self._rendered_content_identity = None
         self._using_video_frame_source = True
+        self._video_frame_content_generation = max(0, int(content_generation))
+        self._video_frame_content_serial = max(0, int(content_serial))
         self._image = None
         self._video_frame = frame
         self._pending_video_image = None
@@ -508,6 +889,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_source_rotate90_steps = None
         self._video_frame = None
         self._video_frame_dirty = False
+        self._video_frame_presentation_pending = True
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
         if self._pending_video_reset_view:
@@ -548,7 +930,12 @@ class GLImageViewer(QRhiWidget):
         """Display *pixmap* without changing the tracked image source."""
 
         if pixmap and not pixmap.isNull():
-            self.set_image(pixmap.toImage(), {}, image_source=self.current_image_source())
+            self.set_image(
+                pixmap.toImage(),
+                {},
+                image_source=self.current_image_source(),
+                source_size=self._source_image_dimensions,
+            )
         else:
             self.set_image(None, {}, image_source=None)
 
@@ -678,14 +1065,23 @@ class GLImageViewer(QRhiWidget):
     ) -> QPointF:
         """Map original image-space coordinates into the current viewport."""
 
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
-        if texture_width <= 0.0 or texture_height <= 0.0:
+        actual_width, actual_height = self._texture_dimensions()
+        texture_width = float(actual_width)
+        texture_height = float(actual_height)
+        source_width, source_height = self._source_image_dimensions or (
+            actual_width,
+            actual_height,
+        )
+        coordinate_width = float(image_width if image_width is not None else source_width)
+        coordinate_height = float(image_height if image_height is not None else source_height)
+        if min(texture_width, texture_height, coordinate_width, coordinate_height) <= 0.0:
             return QPointF()
+        texture_x = x * texture_width / coordinate_width
+        texture_y = y * texture_height / coordinate_height
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
         logical_x, logical_y = geometry.texture_point_to_logical(
-            x,
-            y,
+            texture_x,
+            texture_y,
             texture_width=texture_width,
             texture_height=texture_height,
             rotate_steps=rotate_steps,
@@ -703,11 +1099,16 @@ class GLImageViewer(QRhiWidget):
         """Map a viewport-space point back into original image coordinates."""
 
         logical_point = self._zoom_ctrl.viewport_to_image(point)
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(
-            image_height if image_height is not None else self._texture_dimensions()[1]
+        actual_width, actual_height = self._texture_dimensions()
+        texture_width = float(actual_width)
+        texture_height = float(actual_height)
+        source_width, source_height = self._source_image_dimensions or (
+            actual_width,
+            actual_height,
         )
-        if texture_width <= 0.0 or texture_height <= 0.0:
+        coordinate_width = float(image_width if image_width is not None else source_width)
+        coordinate_height = float(image_height if image_height is not None else source_height)
+        if min(texture_width, texture_height, coordinate_width, coordinate_height) <= 0.0:
             return QPointF()
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
         image_x, image_y = geometry.logical_point_to_texture(
@@ -718,7 +1119,10 @@ class GLImageViewer(QRhiWidget):
             rotate_steps=rotate_steps,
             flip_horizontal=flip_horizontal,
         )
-        return QPointF(image_x, image_y)
+        return QPointF(
+            image_x * coordinate_width / texture_width,
+            image_y * coordinate_height / texture_height,
+        )
 
     def image_rect_to_viewport(
         self,
@@ -732,16 +1136,31 @@ class GLImageViewer(QRhiWidget):
     ) -> QRectF:
         """Map an original image-space rectangle into the current viewport."""
 
-        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
-        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
-        if texture_width <= 0.0 or texture_height <= 0.0 or width <= 0.0 or height <= 0.0:
+        actual_width, actual_height = self._texture_dimensions()
+        texture_width = float(actual_width)
+        texture_height = float(actual_height)
+        source_width, source_height = self._source_image_dimensions or (
+            actual_width,
+            actual_height,
+        )
+        coordinate_width = float(image_width if image_width is not None else source_width)
+        coordinate_height = float(image_height if image_height is not None else source_height)
+        if (
+            min(texture_width, texture_height, coordinate_width, coordinate_height) <= 0.0
+            or width <= 0.0
+            or height <= 0.0
+        ):
             return QRectF()
+        texture_x = x * texture_width / coordinate_width
+        texture_y = y * texture_height / coordinate_height
+        texture_rect_width = width * texture_width / coordinate_width
+        texture_rect_height = height * texture_height / coordinate_height
         _, rotate_steps, flip_horizontal = self._rotation_parameters()
         logical_x, logical_y, logical_w, logical_h = geometry.texture_rect_to_logical(
-            x,
-            y,
-            width,
-            height,
+            texture_x,
+            texture_y,
+            texture_rect_width,
+            texture_rect_height,
             texture_width=texture_width,
             texture_height=texture_height,
             rotate_steps=rotate_steps,
@@ -757,6 +1176,9 @@ class GLImageViewer(QRhiWidget):
 
     def set_surface_color_override(self, colour: str | None) -> None:
         """Override the viewer backdrop with *colour* or restore the default."""
+        self._pending_surface_color_override = colour
+        if not self._runtime_ready:
+            return
         self._fullscreen_handler.set_surface_color_override(colour)
 
     def set_crop_framing_enabled(self, enabled: bool) -> None:
@@ -1025,6 +1447,7 @@ class GLImageViewer(QRhiWidget):
 
     def initialize(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: initialise renderer resources once."""
+        self.complete_runtime()
         if self._gl_initialized:
             return
         rhi = self.rhi()
@@ -1072,16 +1495,36 @@ class GLImageViewer(QRhiWidget):
     def releaseResources(self) -> None:  # type: ignore[override]
         """QRhiWidget override: release renderer resources."""
         self._gl_initialized = False
-        if self._renderer is not None:
-            rhi = self.rhi()
-            if self._uses_raw_gl and rhi is not None:
-                # Ensure the underlying OpenGL context is current before
-                # issuing raw GL deletes in GLRenderer.destroy_resources().
-                rhi.makeThreadLocalNativeContextCurrent()
-            self._renderer.destroy_resources()
+        if self._runtime_ready:
+            if self._renderer is not None:
+                rhi = self.rhi()
+                if self._uses_raw_gl and rhi is not None:
+                    # Ensure the underlying OpenGL context is current before
+                    # issuing raw GL deletes in GLRenderer.destroy_resources().
+                    rhi.makeThreadLocalNativeContextCurrent()
+                self._renderer.destroy_resources()
+            self._texture_manager.mark_texture_lost()
+            self._sync_gpu_residency()
+            tracker = self._surface_residency_tracker
+            if tracker is not None:
+                tracker.release("detail-upload-staging")
+            self._tracked_staging_resources.clear()
+        self._first_render_done = False
+        self._first_render_submission_pending = False
+        self._video_frame_presentation_pending = False
+        self._content_revision = 0
+        self._rendered_content_identity = None
+        self._last_composed_content_identity = None
+        if self._runtime_ready:
+            source = self._texture_manager.get_current_image_source()
+            if source is not None and not self._using_video_frame_source:
+                self._still_presentation_pending = True
+        self.renderResourcesInvalidated.emit()
+        emit_detail_event("context_rebuild", generation=0, state="released")
 
     def render(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: render the current image/video frame."""
+        self.complete_runtime()
         if not self._uses_raw_gl:
             self._render_rhi(cb)
             return
@@ -1098,7 +1541,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
         gf = self._gl_funcs
         if gf is None or self._renderer is None:
@@ -1108,7 +1552,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         output_size = self.renderTarget().pixelSize()
@@ -1146,6 +1591,11 @@ class GLImageViewer(QRhiWidget):
         gf.glClear(gl_module.GL_COLOR_BUFFER_BIT)
 
         uploaded_new_still_texture = False
+        if self._pending_resident_activation is not None:
+            key = self._pending_resident_activation
+            self._pending_resident_activation = None
+            if not self._texture_manager.activate_resident_texture(key):
+                self._texture_manager.mark_texture_lost()
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
@@ -1188,10 +1638,41 @@ class GLImageViewer(QRhiWidget):
             and not self._image.isNull()
             and self._texture_manager.needs_texture_upload()
         ):
-            self._texture_manager.upload_texture_if_needed(self._image)
+            upload_started = time.perf_counter()
+            self._upload_current_still_with_tracking()
+            log_detail_profile(
+                "gl_viewer",
+                "still.gpu_upload",
+                (time.perf_counter() - upload_started) * 1000.0,
+                path=self._still_source_name(),
+            )
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
+            current_key = self.current_image_source()
+            emit_detail_event(
+                "gpu_upload",
+                generation=self._still_generation_by_key.get(current_key, 0),
+                key=str(current_key),
+            )
+        elif self._pending_warm_surfaces:
+            warm = self._pending_warm_surfaces.pop(0)
+            if self._warm_still_with_tracking(warm):
+                emit_detail_event(
+                    "gpu_upload",
+                    generation=self._still_generation_by_key.get(warm.decode_key, 0),
+                    key=str(warm.decode_key),
+                    warm=True,
+                )
+            if self._pending_warm_surfaces:
+                self.update()
+
+        # Consume foreground failures before the no-texture early return.  On
+        # the first image there is no previous active texture, so returning
+        # first would suppress the allocation-failure signal and strand the
+        # render session forever instead of requesting a lower LOD.
+        if self._consume_still_upload_result():
+            uploaded_new_still_texture = False
         if not self._renderer.has_texture():
             if sys.platform.startswith("linux") and self._using_video_frame_source:
                 _LOGGER.warning(
@@ -1203,7 +1684,8 @@ class GLImageViewer(QRhiWidget):
                 )
             cb.endExternal()
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -1215,19 +1697,13 @@ class GLImageViewer(QRhiWidget):
 
         effective_adjustments: dict[str, float] | Mapping[str, float]
         if self._crop_controller.is_active():
-            effective_adjustments = dict(self._display_adjustments())
             # During crop interactions we want to preview the entire photo with
             # a translucent overlay.  The fragment shader drives the crop
             # window entirely from the ``Crop_*`` uniforms, therefore we
             # override those values on-the-fly instead of mutating
             # ``self._adjustments`` (which stores the persisted edit state).
-            effective_adjustments.update(
-                {
-                    "Crop_CX": 0.5,
-                    "Crop_CY": 0.5,
-                    "Crop_W": 1.0,
-                    "Crop_H": 1.0,
-                }
+            effective_adjustments = _crop_preview_adjustments(
+                self._display_adjustments()
             )
         else:
             # Convert texture-space crop to logical-space for shader
@@ -1287,7 +1763,10 @@ class GLImageViewer(QRhiWidget):
         # --- End raw OpenGL block ---
         cb.endExternal()
         cb.endPass()
-        self._emit_first_frame_ready()
+        self._queue_first_frame_ready()
+        rendered_identity = self._take_pending_content_submission()
+        if rendered_identity is not None:
+            self._rendered_content_identity = rendered_identity
         if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
 
@@ -1301,7 +1780,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         output_size = self.renderTarget().pixelSize()
@@ -1313,6 +1793,11 @@ class GLImageViewer(QRhiWidget):
         vh = max(1, output_size.height())
 
         uploaded_new_still_texture = False
+        if self._pending_resident_activation is not None:
+            key = self._pending_resident_activation
+            self._pending_resident_activation = None
+            if not self._texture_manager.activate_resident_texture(key):
+                self._texture_manager.mark_texture_lost()
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
@@ -1328,11 +1813,37 @@ class GLImageViewer(QRhiWidget):
             and not self._image.isNull()
             and self._texture_manager.needs_texture_upload()
         ):
-            self._texture_manager.upload_texture_if_needed(self._image)
+            upload_started = time.perf_counter()
+            self._upload_current_still_with_tracking()
+            log_detail_profile(
+                "gl_viewer",
+                "still.gpu_upload",
+                (time.perf_counter() - upload_started) * 1000.0,
+                path=self._still_source_name(),
+            )
             straighten, rotate_steps, _ = self._rotation_parameters()
             self._update_cover_scale(straighten, rotate_steps)
             uploaded_new_still_texture = True
+            current_key = self.current_image_source()
+            emit_detail_event(
+                "gpu_upload",
+                generation=self._still_generation_by_key.get(current_key, 0),
+                key=str(current_key),
+            )
+        elif self._pending_warm_surfaces:
+            warm = self._pending_warm_surfaces.pop(0)
+            if self._warm_still_with_tracking(warm):
+                emit_detail_event(
+                    "gpu_upload",
+                    generation=self._still_generation_by_key.get(warm.decode_key, 0),
+                    key=str(warm.decode_key),
+                    warm=True,
+                )
+            if self._pending_warm_surfaces:
+                self.update()
 
+        if self._consume_still_upload_result():
+            uploaded_new_still_texture = False
         if not self._renderer.has_texture():
             cb.beginPass(
                 self.renderTarget(),
@@ -1340,7 +1851,8 @@ class GLImageViewer(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -1349,14 +1861,8 @@ class GLImageViewer(QRhiWidget):
         view_pan = self._transform_controller.get_pan_pixels()
 
         if self._crop_controller.is_active():
-            effective_adjustments = dict(self._display_adjustments())
-            effective_adjustments.update(
-                {
-                    "Crop_CX": 0.5,
-                    "Crop_CY": 0.5,
-                    "Crop_W": 1.0,
-                    "Crop_H": 1.0,
-                }
+            effective_adjustments = _crop_preview_adjustments(
+                self._display_adjustments()
             )
         else:
             effective_adjustments = dict(self._display_adjustments())
@@ -1391,15 +1897,165 @@ class GLImageViewer(QRhiWidget):
             crop_faded=crop_faded,
         )
 
-        self._emit_first_frame_ready()
+        self._queue_first_frame_ready()
+        rendered_identity = self._take_pending_content_submission()
+        if rendered_identity is not None:
+            self._rendered_content_identity = rendered_identity
         if uploaded_new_still_texture:
             self._schedule_post_load_view_transform()
 
-    def _emit_first_frame_ready(self) -> None:
-        """Notify listeners that the first opaque frame has been rendered."""
+    def _still_source_name(self) -> str:
+        source = self._texture_manager.get_current_image_source()
+        return getattr(source, "name", str(source or ""))
+
+    def _take_pending_content_submission(
+        self,
+    ) -> tuple[str, object, int, int] | None:
+        """Bind the content drawn by this render call to its submission event."""
+
+        if self._still_presentation_pending:
+            source = self._texture_manager.get_current_image_source()
+            if source is not None:
+                self._still_presentation_pending = False
+                generation = self._still_generation_by_key.get(source, 0)
+                self._content_revision += 1
+                return ("still", source, generation, self._content_revision)
+        if self._video_frame_presentation_pending:
+            self._video_frame_presentation_pending = False
+            self._content_revision += 1
+            return (
+                "video",
+                self._video_frame_content_generation,
+                self._video_frame_content_serial,
+                self._content_revision,
+            )
+        return None
+
+    def _consume_still_upload_result(self) -> bool:
+        """Publish a foreground allocation failure and suppress false presentation."""
+
+        take_result = getattr(self._renderer, "take_still_upload_result", None)
+        if not callable(take_result):
+            return False
+        result = take_result()
+        if result is not None:
+            self._release_upload_staging(result.get("key"))
+            self._sync_gpu_residency()
+        failed = bool(
+            result is not None
+            and result.get("activate")
+            and not result.get("success")
+        )
+        if not failed:
+            return False
+        self._still_presentation_pending = False
+        failed_key = result.get("key")
+        self.stillTextureAllocationFailed.emit(
+            failed_key,
+            self._still_generation_by_key.get(failed_key, 0),
+            str(result.get("reason", "allocation_failed")),
+        )
+        return True
+
+    def _upload_current_still_with_tracking(self) -> None:
+        key = self.current_image_source()
+        image = self._image
+        if image is None:
+            return
+        self._observe_upload_staging(key, image)
+        try:
+            self._texture_manager.upload_texture_if_needed(image)
+        except Exception:
+            self._release_upload_staging(key)
+            raise
+
+    def _warm_still_with_tracking(self, surface: DecodedSurface) -> bool:
+        queued = self._texture_manager.warm_still_texture(
+            surface.decode_key,
+            surface.image,
+        )
+        if queued:
+            self._observe_upload_staging(surface.decode_key, surface.image)
+        return queued
+
+    def _observe_upload_staging(self, key: object, image: QImage) -> None:
+        tracker = self._surface_residency_tracker
+        if tracker is None or key is None or image.isNull():
+            return
+        previous = self._tracked_staging_resources.pop(key, None)
+        if previous is not None:
+            tracker.release("detail-upload-staging", previous)
+        resource_id = ("upload-staging", key, int(image.cacheKey()))
+        self._tracked_staging_resources[key] = resource_id
+        tracker.retain(
+            "detail-upload-staging",
+            "upload_queue",
+            resource_id,
+            SurfaceByteBreakdown(
+                upload_staging=max(
+                    0,
+                    int(image.bytesPerLine()) * int(image.height()),
+                )
+            ),
+            generation=self._still_generation_by_key.get(key, 0),
+        )
+
+    def _release_upload_staging(self, key: object) -> None:
+        tracker = self._surface_residency_tracker
+        resource_id = self._tracked_staging_resources.pop(key, None)
+        if tracker is not None and resource_id is not None:
+            tracker.release(
+                "detail-upload-staging",
+                resource_id,
+                generation=self._still_generation_by_key.get(key, 0),
+            )
+
+    def _sync_gpu_residency(self) -> None:
+        tracker = self._surface_residency_tracker
+        if tracker is None:
+            return
+        getter = getattr(self._renderer, "still_residency_bytes", None)
+        current = dict(getter()) if callable(getter) else {}
+        for key in tuple(self._tracked_gpu_resources):
+            if key in current:
+                continue
+            tracker.release(
+                "detail-gpu-residency",
+                self._tracked_gpu_resources.pop(key),
+                generation=self._still_generation_by_key.get(key, 0),
+            )
+        for key, byte_count in current.items():
+            resource_id = ("gpu-still", key)
+            self._tracked_gpu_resources[key] = resource_id
+            tracker.retain(
+                "detail-gpu-residency",
+                "gpu_residency",
+                resource_id,
+                SurfaceByteBreakdown(gpu_estimated=max(0, int(byte_count))),
+                generation=self._still_generation_by_key.get(key, 0),
+            )
+
+    def _queue_first_frame_ready(self) -> None:
+        """Record that an opaque draw is waiting for window submission."""
         if not self._first_render_done:
+            self._first_render_submission_pending = True
+
+    def _on_frame_submitted(self) -> None:
+        """Publish pending draw acknowledgements after window composition."""
+
+        if self._first_render_submission_pending:
+            self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
+        submission = self._rendered_content_identity
+        if submission is not None and submission != self._last_composed_content_identity:
+            self._last_composed_content_identity = submission
+            kind, identity, serial, _revision = submission
+            if kind == "still":
+                self.stillFrameSubmitted.emit(identity, serial)
+                self.stillFramePresented.emit(identity)
+            else:
+                self.videoFramePresented.emit(int(identity), serial)
 
     # --------------------------- Crop helpers ---------------------------
 
@@ -1506,6 +2162,8 @@ class GLImageViewer(QRhiWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if not self._runtime_ready:
+            return
         self._loading_overlay.update_geometry(self.size())
         if self._auto_crop_view_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_view()
@@ -1514,6 +2172,7 @@ class GLImageViewer(QRhiWidget):
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
         self.viewTransformChanged.emit()
+        self.viewportMetricsChanged.emit()
         if sys.platform.startswith("linux"):
             _LOGGER.warning(
                 "[diag][gl_viewer] resize widget=%sx%s rt=%sx%s using_video=%s dirty=%s",

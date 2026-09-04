@@ -6,11 +6,11 @@ import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for tooltip tests", exc_type=ImportError)
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
-from iPhoto.gui.ui.widgets.custom_tooltip import _TEXT_FLAGS, FloatingToolTip
+from iPhoto.gui.ui.widgets.custom_tooltip import _TEXT_FLAGS, FloatingToolTip, ToolTipEventFilter
 
 
 @pytest.fixture
@@ -66,6 +66,26 @@ def test_floating_tooltip_wraps_unbroken_text_within_max_width(
     assert tooltip.sizeHint().width() <= tooltip._MAX_WIDTH
     assert measured.width() <= text_rect.width() + 0.5
     assert measured.height() <= text_rect.height() + 0.5
+
+
+def test_tooltip_event_filter_swallows_qt_boundary_errors(
+    monkeypatch, qapp: QApplication
+) -> None:
+    del qapp
+    tooltip = FloatingToolTip()
+    event_filter = ToolTipEventFilter(tooltip)
+    hide_calls: list[int] = []
+
+    def _raise(_watched, _event) -> bool:
+        raise RuntimeError("wrapped C/C++ object has been deleted")
+
+    monkeypatch.setattr(event_filter, "_event_filter", _raise)
+    monkeypatch.setattr(tooltip, "hide_tooltip", lambda: hide_calls.append(1))
+
+    handled = event_filter.eventFilter(QWidget(), QEvent(QEvent.Type.Leave))
+
+    assert handled is False
+    assert hide_calls == [1]
 
 
 def _painted_text_bounds(tooltip: FloatingToolTip, text: str):

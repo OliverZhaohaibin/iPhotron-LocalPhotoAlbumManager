@@ -11,9 +11,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
+from ...sqlite_utils import configure_sqlite_connection
 from ...utils.logging import get_logger
 
 logger = get_logger()
+INDEX_SQLITE_BUSY_TIMEOUT_MS = 10_000
 
 
 class DatabaseManager:
@@ -55,9 +57,16 @@ class DatabaseManager:
 
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new database connection with optimised PRAGMA settings."""
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn = sqlite3.connect(
+            self.db_path,
+            timeout=INDEX_SQLITE_BUSY_TIMEOUT_MS / 1000,
+        )
+        configure_sqlite_connection(
+            conn,
+            self.db_path,
+            wal=True,
+            busy_timeout_ms=INDEX_SQLITE_BUSY_TIMEOUT_MS,
+        )
         conn.execute("PRAGMA cache_size=-8000")  # 8 MB cache
         return conn
 
@@ -137,7 +146,7 @@ class DatabaseManager:
         self,
         query: str,
         params: tuple | list | None = None,
-    ) -> None:
+    ) -> int:
         """Execute a single query within a transaction.
         
         Args:
@@ -150,15 +159,16 @@ class DatabaseManager:
         try:
             if is_nested:
                 if params:
-                    conn.execute(query, params)
+                    cursor = conn.execute(query, params)
                 else:
-                    conn.execute(query)
+                    cursor = conn.execute(query)
             else:
                 with conn:
                     if params:
-                        conn.execute(query, params)
+                        cursor = conn.execute(query, params)
                     else:
-                        conn.execute(query)
+                        cursor = conn.execute(query)
+            return max(0, int(cursor.rowcount))
         finally:
             if not is_nested:
                 conn.close()

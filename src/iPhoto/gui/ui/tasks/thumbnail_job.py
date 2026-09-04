@@ -18,6 +18,7 @@ from PySide6.QtGui import QImage
 import numpy as np
 
 from ....io import sidecar
+from ....utils.image_loader import load_qimage
 from .thumbnail_cache import safe_unlink, stat_mtime_ns, generate_cache_path, write_cache
 from .thumbnail_renderer import render_image, render_video, seek_targets
 
@@ -46,6 +47,7 @@ class ThumbnailJob(QRunnable):
         still_image_time: Optional[float],
         duration: Optional[float],
         cache_rel: Optional[str] = None,
+        generation_token: object | None = None,
     ) -> None:
         super().__init__()
         self._loader = loader
@@ -60,6 +62,7 @@ class ThumbnailJob(QRunnable):
         self._still_image_time = still_image_time
         self._duration = duration
         self._cache_rel = cache_rel
+        self._generation_token = generation_token
         self._job_root_str = str(album_root.resolve())
 
     def _make_local_key(self, stamp: int) -> Tuple[str, str, int, int, int]:
@@ -129,8 +132,8 @@ class ThumbnailJob(QRunnable):
         except OSError:
             cache_exists = False
         if cache_exists:
-            image = QImage(str(cache_path))
-            if not image.isNull():
+            image = load_qimage(cache_path)
+            if image is not None and not image.isNull():
                 loaded_from_cache = True
             else:
                 safe_unlink(cache_path)
@@ -145,10 +148,9 @@ class ThumbnailJob(QRunnable):
                 loader = getattr(self, "_loader", None)
                 if loader:
                     try:
-                        loader._delivered.emit(
+                        self._emit_delivered(
                             self._make_local_key(0),
                             None,
-                            self._rel,
                         )
                     except RuntimeError:
                         pass
@@ -176,10 +178,10 @@ class ThumbnailJob(QRunnable):
                 pass
 
         try:
-            loader._delivered.emit(
+            self._emit_delivered(
                 self._make_local_key(actual_stamp),
                 image,
-                self._rel,
+                cache_path,
             )
         except RuntimeError:  # pragma: no cover - race with QObject deletion
             pass
@@ -190,7 +192,7 @@ class ThumbnailJob(QRunnable):
             try:
                 # Use 0 as stamp for missing files, though the loader will just use the base key
                 key = self._make_local_key(0)
-                loader._delivered.emit(key, None, self._rel)
+                self._emit_delivered(key, None)
             except RuntimeError:  # pragma: no cover - race with QObject deletion
                 pass
 
@@ -199,13 +201,39 @@ class ThumbnailJob(QRunnable):
         loader = getattr(self, "_loader", None)
         if loader:
             try:
-                loader._validation_success.emit(self._make_local_key(stamp))
+                key = self._make_local_key(stamp)
+                if self._generation_token is None:
+                    loader._validation_success.emit(key)
+                else:
+                    loader._validation_success.emit(key, self._generation_token)
             except RuntimeError:
                 # pragma: no cover - race with QObject deletion
                 pass
             except AttributeError:
                 # The loader may have been deleted or not fully initialized; safe to ignore.
                 pass
+
+    def _emit_delivered(
+        self,
+        key: Tuple[str, str, int, int, int],
+        image: Optional[QImage],
+        cache_path: Optional[Path] = None,
+    ) -> None:
+        """Emit a result using the receiver's generation-aware signal shape."""
+
+        loader = getattr(self, "_loader", None)
+        if loader is None:
+            return
+        if self._generation_token is None:
+            loader._delivered.emit(key, image, self._rel)
+        else:
+            loader._delivered.emit(
+                key,
+                image,
+                self._rel,
+                self._generation_token,
+                cache_path,
+            )
 
     def _render_media(self) -> Optional[QImage]:  # pragma: no cover - worker helper
         if self._is_video:

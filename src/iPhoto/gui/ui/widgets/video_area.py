@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
+import weakref
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -34,34 +36,111 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-try:  # pragma: no cover - optional Qt module
-    from PySide6.QtMultimedia import (
-        QAudioOutput,
-        QMediaPlayer,
-        QVideoFrame,
-        QVideoSink,
-    )
-except (ModuleNotFoundError, ImportError):  # pragma: no cover - handled by main window guard
-    QMediaPlayer = None
-    QAudioOutput = None
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoSink = None  # type: ignore[assignment, misc]
-
 from ....config import (
     PLAYER_CONTROLS_HIDE_DELAY_MS,
     PLAYER_FADE_IN_MS,
     PLAYER_FADE_OUT_MS,
     VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
 )
-from ....core.adjustment_mapping import normalise_video_trim, video_requires_adjusted_preview
-from ....gui.detail_profile import log_detail_profile
-from ....utils.ffmpeg import get_linux_180_prerotate_hint, probe_video_rotation
+from ....gui.detail_pipeline import (
+    AssetSourceIdentity,
+    DetailRenderTransaction,
+    VideoPresentationState,
+)
+from ....gui.detail_profile import emit_detail_event, log_detail_profile
 from ..palette import viewer_surface_color
 from .gl_image_viewer import GLImageViewer
-from .player_bar import PlayerBar
 from .video_renderer_widget import VideoRendererWidget, _resolve_frame_rotation_cw
 
+# QtMultimedia is deliberately imported by ``complete_runtime()``.  The staged
+# startup path must be able to establish the final QRhiWidget hierarchy without
+# also starting the platform media backend before the main window is shown.
+QMediaPlayer = None
+QAudioOutput = None
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoSink = None  # type: ignore[assignment, misc]
+PlayerBar = None
+normalise_video_trim = None
+video_requires_adjusted_preview = None
+
 _log = logging.getLogger(__name__)
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _startup_hang_diag_enabled() -> bool:
+    return os.environ.get("IPHOTO_STARTUP_HANG_DIAG", "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _load_qt_multimedia_runtime() -> None:
+    """Load optional playback classes without replacing test-provided seams."""
+
+    global QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
+    if QMediaPlayer is None or QAudioOutput is None or QVideoSink is None:
+        try:
+            from PySide6.QtMultimedia import (
+                QAudioOutput as _QAudioOutput,
+            )
+            from PySide6.QtMultimedia import (
+                QMediaPlayer as _QMediaPlayer,
+            )
+            from PySide6.QtMultimedia import (
+                QVideoFrame as _QVideoFrame,
+            )
+            from PySide6.QtMultimedia import (
+                QVideoSink as _QVideoSink,
+            )
+        except (ModuleNotFoundError, ImportError):
+            return
+        if QMediaPlayer is None:
+            QMediaPlayer = _QMediaPlayer
+        if QAudioOutput is None:
+            QAudioOutput = _QAudioOutput
+        if QVideoFrame is None:
+            QVideoFrame = _QVideoFrame
+        if QVideoSink is None:
+            QVideoSink = _QVideoSink
+
+
+def _load_player_bar_class():
+    global PlayerBar
+    if PlayerBar is None:
+        from .player_bar import PlayerBar as _PlayerBar
+
+        PlayerBar = _PlayerBar
+    return PlayerBar
+
+
+def _load_video_adjustment_helpers() -> None:
+    global normalise_video_trim, video_requires_adjusted_preview
+    if normalise_video_trim is not None and video_requires_adjusted_preview is not None:
+        return
+    from ....core.adjustment_mapping import (
+        normalise_video_trim as _normalise_video_trim,
+    )
+    from ....core.adjustment_mapping import (
+        video_requires_adjusted_preview as _video_requires_adjusted_preview,
+    )
+
+    normalise_video_trim = _normalise_video_trim
+    video_requires_adjusted_preview = _video_requires_adjusted_preview
+
+
+def probe_video_rotation(*args, **kwargs):
+    """Lazy compatibility seam for tests and older callers."""
+
+    from ....utils.ffmpeg import probe_video_rotation as _probe_video_rotation
+
+    return _probe_video_rotation(*args, **kwargs)
+
+
+def get_linux_180_prerotate_hint(*args, **kwargs):
+    """Lazy compatibility seam for tests and older callers."""
+
+    from ....utils.ffmpeg import (
+        get_linux_180_prerotate_hint as _get_linux_180_prerotate_hint,
+    )
+
+    return _get_linux_180_prerotate_hint(*args, **kwargs)
 
 
 class VideoArea(QWidget):
@@ -81,7 +160,7 @@ class VideoArea(QWidget):
     controlsVisibleChanged = Signal(bool)
     fullscreenExitRequested = Signal()
     playbackStateChanged = Signal(bool)
-    playbackFinished = Signal()
+    playbackFinished = Signal(int, object, int)
     mediaLoadFailed = Signal(Path, str)
     nextItemRequested = Signal()
     prevItemRequested = Signal()
@@ -93,10 +172,19 @@ class VideoArea(QWidget):
     cropInteractionFinished = Signal()
     colorPicked = Signal(float, float, float)
     firstFrameReady = Signal()
+    mediaFirstFrameReady = Signal(int)
+    surfaceFrameSubmitted = Signal(int, int)
+    surfaceInvalidated = Signal(int, int)
+    surfaceCompositionSubmitted = Signal()
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        staged: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # Prevent the WA_TranslucentBackground cascade from the main window
@@ -105,14 +193,10 @@ class VideoArea(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setMouseTracking(True)
 
-        if QMediaPlayer is None or QVideoSink is None:
-            raise RuntimeError(
-                "PySide6.QtMultimedia is required for video playback."
-            )
-
         # --- Video Renderer Setup ---
         surface_color = viewer_surface_color(self)
         self._default_surface_color = surface_color
+        self._immersive_active = False
 
         self._surface_stack = QStackedWidget(self)
         self._renderer = VideoRendererWidget(self._surface_stack)
@@ -123,7 +207,7 @@ class VideoArea(QWidget):
         # Accept focus so keyboard navigation targets the video surface
         # without requiring the user to click a non-interactive element.
         self._renderer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._edit_viewer = GLImageViewer(self._surface_stack)
+        self._edit_viewer = GLImageViewer(self._surface_stack, staged=staged)
         self._edit_viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # In detail playback, crop framing is disabled but the crop region fills
         # the canvas (strength=1.0) so that crop-edited videos look the same as
@@ -153,8 +237,29 @@ class VideoArea(QWidget):
         self._end_hold_display_ms: int | None = None
         self._transparent_preview_enabled = False
         self._pending_video_frame: QVideoFrame | None = None
+        self._pending_video_frame_generation: int | None = None
         self._last_presented_video_frame: QVideoFrame | None = None
+        self._next_video_content_serial = 0
+        self._retained_video_content_serial = 0
+        self._surface_submitted_content_serial: dict[QWidget, int] = {
+            self._renderer: 0,
+            self._edit_viewer: 0,
+        }
         self._video_frame_dispatch_pending = False
+        self._video_frame_dispatch_generation: int | None = None
+        self._media_generation = 0
+        self._end_detection_armed_media_generation: int | None = None
+        self._position_changed_handler = None
+        self._media_status_changed_handler = None
+        self._gpu_video_frame_presented_handler = None
+        self._gpu_video_frame_presented_handlers: dict[QWidget, object] = {}
+        self._detail_request_generation = 0
+        self._presentation_committed = False
+        self._awaiting_first_gpu_frame_generation: int | None = None
+        self._pending_previous_duration_ms = 0
+        self._accept_video_frames = False
+        self._video_output_attached = False
+        self._video_frame_handler = None
         self._diag_queued_frame_count = 0
         self._diag_presented_frame_count = 0
         self._profile_load_started_at: float | None = None
@@ -169,8 +274,50 @@ class VideoArea(QWidget):
         self._renderer_zoom: float = 1.0
         self._edit_viewer_zoom: float = 1.0
 
+        # Playback-only objects are created after the first main-window paint
+        # on the staged startup path.  The QRhi widgets above already have
+        # their final parents and must never be reparented during completion.
+        self._runtime_ready = False
+        self._player = None
+        self._audio_output = None
+        self._video_sink = None
+        self._player_bar = None
+        self._fade_anim = None
+        self._hide_timer = None
+        self._overlay_margin = 48
+        self._controls_visible = False
+        self._target_opacity = 0.0
+        self._host_widget: QWidget | None = self._renderer
+        self._window_host: QWidget | None = None
+        self._controls_enabled = True
+
         self._apply_surface(surface_color)
         # --- End Video Renderer Setup ---
+
+        self._wire_edit_viewer()
+        self._renderer.nativeSizeChanged.connect(self.displaySizeChanged.emit)
+        self._bind_gpu_presentation_generation(self._media_generation)
+
+        if not staged:
+            self.complete_runtime()
+
+    def complete_runtime(self) -> None:
+        """Create playback services while preserving the prepared surfaces."""
+
+        if self._runtime_ready:
+            return
+
+        complete_edit_viewer = getattr(self._edit_viewer, "complete_runtime", None)
+        if callable(complete_edit_viewer):
+            complete_edit_viewer()
+
+        _load_video_adjustment_helpers()
+        _load_qt_multimedia_runtime()
+        player_bar_class = _load_player_bar_class()
+        if QMediaPlayer is None or QAudioOutput is None or QVideoSink is None:
+            raise RuntimeError(
+                "PySide6.QtMultimedia is required for video playback."
+            )
 
         # --- Media Player Setup ---
         self._player = QMediaPlayer(self)
@@ -180,28 +327,18 @@ class VideoArea(QWidget):
         # Route decoded frames through QVideoSink → our custom renderer.
         self._video_sink = QVideoSink(self)
         self._player.setVideoOutput(self._video_sink)
-        self._video_sink.videoFrameChanged.connect(
-            self._queue_video_frame,
-            Qt.ConnectionType.QueuedConnection,
-        )
+        self._video_output_attached = True
+        self._bind_video_sink_generation(self._media_generation)
 
-        self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
-        self._player.mediaStatusChanged.connect(self._on_media_status_changed)
         self._player.errorOccurred.connect(self._on_error_occurred)
+        self._bind_end_detection_generation(self._media_generation)
         # --- End Media Player Setup ---
 
-        self._overlay_margin = 48
-        self._player_bar = PlayerBar(self)
+        self._player_bar = player_bar_class(self)
         self._player_bar.hide()
         self._player_bar.setMouseTracking(True)
-
-        self._controls_visible = False
-        self._target_opacity = 0.0
-        self._host_widget: QWidget | None = self._renderer
-        self._window_host: QWidget | None = None
-        self._controls_enabled = True
 
         effect = QGraphicsOpacityEffect(self._player_bar)
         effect.setOpacity(0.0)
@@ -218,8 +355,7 @@ class VideoArea(QWidget):
 
         self._install_activity_filters()
         self._wire_player_bar()
-        self._wire_edit_viewer()
-        self._renderer.nativeSizeChanged.connect(self.displaySizeChanged.emit)
+        self._runtime_ready = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -234,6 +370,8 @@ class VideoArea(QWidget):
     def player_bar(self) -> PlayerBar:
         """Return the floating :class:`PlayerBar`."""
 
+        if self._player_bar is None:
+            raise RuntimeError("VideoArea playback runtime has not been completed")
         return self._player_bar
 
     @property
@@ -306,8 +444,21 @@ class VideoArea(QWidget):
             )
             return
         self._adjusted_preview_enabled = target
-        self._surface_stack.setCurrentWidget(self._edit_viewer if target else self._renderer)
-        self.setFocusProxy(self._edit_viewer if target else self._renderer)
+        target_surface = self._edit_viewer if target else self._renderer
+        required_serial = self._retained_video_content_serial
+        # A stack switch needs a fresh composition acknowledgement even when
+        # the target texture already contains the retained serial. Otherwise a
+        # rapid A -> B -> A switch can leave B owning the pending cover while
+        # its eventual submission is (correctly) rejected as no longer active.
+        self.surfaceInvalidated.emit(
+            self._detail_request_generation,
+            required_serial,
+        )
+        self._surface_stack.setCurrentWidget(target_surface)
+        self.setFocusProxy(target_surface)
+        self._gpu_video_frame_presented_handler = (
+            self._gpu_video_frame_presented_handlers.get(target_surface)
+        )
         if target:
             self._adjusted_first_frame_pending = True
             self._edit_viewer.set_adjustments(self._current_adjustments)
@@ -315,6 +466,11 @@ class VideoArea(QWidget):
                 self._edit_viewer.update()
         else:
             self._edit_mode_active = False
+        if required_serial > 0 and self._last_presented_video_frame is not None:
+            self._queue_retained_frame_for_surface(
+                target_surface,
+                content_serial=required_serial,
+            )
         _log.debug(
             "[trace][video_area] set_adjusted_preview_enabled:applied %s",
             {
@@ -370,6 +526,28 @@ class VideoArea(QWidget):
 
         self._current_adjustments = dict(adjustments or {})
         self._edit_viewer.set_adjustments(self._current_adjustments)
+
+    def apply_committed_adjustments(
+        self,
+        adjustments: Mapping[str, object] | None = None,
+    ) -> None:
+        """Update the current video adjustment state without restarting playback."""
+
+        self._current_adjustments = dict(adjustments or {})
+        adjusted_preview = video_requires_adjusted_preview(self._current_adjustments)
+        self.set_adjusted_preview_enabled(adjusted_preview)
+        self._edit_viewer.set_adjustments(self._current_adjustments)
+        rotate90_steps = 0
+        if not adjusted_preview:
+            rotate90_steps = int(
+                float(self._current_adjustments.get("Crop_Rotate90", 0.0))
+            ) % 4
+        self._renderer.set_user_rotate90_steps(rotate90_steps)
+        frame = self._last_presented_video_frame
+        if adjusted_preview and frame is not None and frame.isValid():
+            self._present_video_frame(frame)
+        self._renderer.update()
+        self.update()
 
     def set_trim_range_ms(self, trim_in_ms: int, trim_out_ms: int) -> None:
         """Update the active in/out points in milliseconds."""
@@ -490,8 +668,8 @@ class VideoArea(QWidget):
     def set_immersive_background(self, immersive: bool) -> None:
         """Switch to a pure black canvas when immersive full screen mode is active."""
 
-        colour = "#000000" if immersive else self._default_surface_color
-        self._apply_surface(colour)
+        self._immersive_active = bool(immersive)
+        self._apply_effective_surface()
 
     def set_surface_color(self, colour: str) -> None:
         """Update the surface colour used for letterbox and background areas.
@@ -501,7 +679,7 @@ class VideoArea(QWidget):
         """
 
         self._default_surface_color = colour
-        self._apply_surface(colour)
+        self._apply_effective_surface()
 
     def set_viewport_fill_enabled(self, enabled: bool) -> None:
         """Control whether preview surfaces cover the viewport instead of fitting inside it."""
@@ -533,7 +711,13 @@ class VideoArea(QWidget):
             self._surface_stack.setStyleSheet("")
         self._renderer.set_transparent_rounded_clip(corner_radius if target else 0.0)
         self._edit_viewer.set_transparent_rounded_clip(corner_radius if target else 0.0)
-        self._apply_surface(self._default_surface_color)
+        self._apply_effective_surface()
+
+    def _apply_effective_surface(self) -> None:
+        """Apply immersive black or the latest persistent theme surface."""
+
+        colour = "#000000" if self._immersive_active else self._default_surface_color
+        self._apply_surface(colour)
 
     def _apply_surface(self, colour: str) -> None:
         """Apply *colour* to the renderer letterbox, widget, and stylesheet."""
@@ -546,7 +730,7 @@ class VideoArea(QWidget):
     def show_controls(self, *, animate: bool = True) -> None:
         """Reveal the playback controls and restart the hide timer."""
 
-        if not self._controls_enabled:
+        if not self._runtime_ready or not self._controls_enabled:
             return
         self._hide_timer.stop()
         if not self._controls_visible:
@@ -564,6 +748,8 @@ class VideoArea(QWidget):
     def hide_controls(self, *, animate: bool = True) -> None:
         """Fade the playback controls out."""
 
+        if not self._runtime_ready:
+            return
         if not self._controls_visible and self._current_opacity() <= 0.0:
             return
         self._hide_timer.stop()
@@ -577,7 +763,7 @@ class VideoArea(QWidget):
     def note_activity(self) -> None:
         """Treat external events as user activity to keep controls visible."""
 
-        if not self._controls_enabled:
+        if not self._runtime_ready or not self._controls_enabled:
             return
         if self._controls_visible:
             self._restart_hide_timer()
@@ -614,7 +800,7 @@ class VideoArea(QWidget):
         """Return the currently loaded video source, if any."""
         return self._current_source
 
-    def load_video(
+    def present_video(
         self,
         path: Path,
         *,
@@ -622,92 +808,67 @@ class VideoArea(QWidget):
         trim_range_ms: tuple[int, int] | None = None,
         adjusted_preview: bool | None = None,
     ) -> None:
-        """Load a video file for playback."""
+        """Present a non-Detail video through the shared transaction contract."""
+
+        generation = self._detail_request_generation + 1
+        transaction = DetailRenderTransaction(
+            generation=generation,
+            asset_id=path.name,
+            media_kind="video",
+            source_identity=AssetSourceIdentity.create(path),
+        )
+        self.begin_load(path, generation)
+        self.commit_presentation(
+            VideoPresentationState(
+                request_generation=generation,
+                adjustments=dict(adjustments or {}),
+                trim_range_ms=trim_range_ms,
+                adjusted_preview=bool(adjusted_preview),
+                rotation_cw=0,
+                raw_width=0,
+                raw_height=0,
+                linux_180_hint=False,
+                transaction=transaction,
+            )
+        )
+
+    def begin_load(self, path: Path, request_generation: int) -> int:
+        """Set the source on the GUI thread and return its media generation."""
 
         load_started = time.perf_counter()
-        _log.debug(
-            "[trace][video_area] load_video:start %s",
-            {
-                "path": str(path),
-                "adjusted_preview_arg": adjusted_preview,
-                "adjustments_keys": sorted(dict(adjustments or {}).keys()),
-                "trim_range_ms": trim_range_ms,
-                "surface_before": self._diag_surface_name(),
-                "adjusted_preview_before": self._adjusted_preview_enabled,
-                "edit_mode_active": self._edit_mode_active,
-                "size": (self.width(), self.height()),
-                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
-            },
-        )
         prev_source = self._current_source
-        prev_duration_ms = self._current_duration_ms
+        previous_duration_ms = self._current_duration_ms
+        media_generation = self._begin_media_generation()
+        self._detach_video_output()
         if sys.platform == "darwin" and prev_source is not None:
             # AVFoundation can keep the previous audio session alive unless
             # the source is cleared before loading another clip.
-            self._player.stop()
             self._player.setSource(QUrl())
+        self._bind_video_sink_generation(self._media_generation)
+        self._attach_video_output()
+        # Do not accept a frame until rotation/trim/adjustment state is known.
+        self._accept_video_frames = False
+        self._presentation_committed = False
+        self._awaiting_first_gpu_frame_generation = None
+        self._detail_request_generation = int(request_generation)
         self._profile_load_started_at = load_started
         self._profile_load_source = path
         self._profile_first_frame_logged = False
         self._current_source = path
-        self._current_adjustments = dict(adjustments or {})
-        self._pending_video_frame = None
-        self._video_frame_dispatch_pending = False
-        self._last_presented_video_frame = None
-        if adjusted_preview is not None:
-            self.set_adjusted_preview_enabled(adjusted_preview)
-        if self._adjusted_preview_enabled:
-            self._adjusted_first_frame_pending = True
-        self._edit_viewer.set_adjustments(self._current_adjustments)
+        self._pending_previous_duration_ms = (
+            previous_duration_ms if prev_source == path else 0
+        )
+        self._current_adjustments = {}
+        self.set_adjusted_preview_enabled(False)
+        self._edit_viewer.set_adjustments({})
         self._edit_viewer.set_video_source_rotation(0)
-        self._edit_viewer.clear()
-        self._renderer.clear_frame()
-        native_rotate90_steps = 0
-        if not self._adjusted_preview_enabled and not video_requires_adjusted_preview(self._current_adjustments):
-            native_rotate90_steps = int(float(self._current_adjustments.get("Crop_Rotate90", 0.0))) % 4
-        self._renderer.set_user_rotate90_steps(native_rotate90_steps)
+        self._renderer.set_user_rotate90_steps(0)
+        self._renderer.set_container_rotation(0, 0, 0)
+        self._renderer.set_linux_180_hint(False)
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._current_duration_ms = 0
         self._end_hold_display_ms = None
-
-        # Probe the container-level display-matrix rotation from ffprobe
-        # *before* setting the source.  The renderer uses the probed value
-        # as the primary rotation source (more reliable across platforms
-        # than Qt's ``QVideoFrameFormat.rotation()``).
-        probe_started = time.perf_counter()
-        cw_deg, raw_w, raw_h = probe_video_rotation(path)
-        linux_180_hint = get_linux_180_prerotate_hint(path)
-        log_detail_profile(
-            "video_area",
-            "rotation_probe",
-            (time.perf_counter() - probe_started) * 1000.0,
-            path=path.name,
-            rotation_cw=cw_deg,
-            raw_width=raw_w,
-            raw_height=raw_h,
-            linux_180_hint=linux_180_hint,
-        )
-        self._container_rotation_cw = cw_deg
-        self._container_raw_w = raw_w
-        self._container_raw_h = raw_h
-        self._container_linux_180_hint = linux_180_hint
-        self._renderer.set_container_rotation(cw_deg, raw_w, raw_h)
-        self._renderer.set_linux_180_hint(linux_180_hint)
-        if cw_deg:
-            _log.debug(
-                "Container rotation for %s: %d° CW (raw %dx%d)",
-                path.name, cw_deg, raw_w, raw_h,
-            )
-
-        if raw_w > 0 and raw_h > 0:
-            if cw_deg in (90, 270):
-                display_width = raw_h
-                display_height = raw_w
-            else:
-                display_width = raw_w
-                display_height = raw_h
-            self.displaySizeChanged.emit(QSizeF(float(display_width), float(display_height)))
 
         set_source_started = time.perf_counter()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
@@ -717,53 +878,59 @@ class VideoArea(QWidget):
             (time.perf_counter() - set_source_started) * 1000.0,
             path=path.name,
         )
-        # Do not auto-play; let the coordinator decide.
-        # But ensure we are at start
-        if trim_range_ms is not None:
-            self.set_trim_range_ms(*trim_range_ms)
-        # Force-propagate the current duration so all observers (e.g.
-        # PlaybackCoordinator) receive a durationChanged event with the new
-        # trim range already applied.  This covers two failure modes:
-        #   (a) Qt does not re-emit durationChanged for same-source reloads
-        #       (common on macOS/AVFoundation when the file is cached).
-        #   (b) durationChanged fired synchronously inside setSource() above,
-        #       before set_trim_range_ms() had a chance to update _trim_in/out.
-        # For same-source reloads, prefer the previously confirmed full duration
-        # over the immediate post-setSource() value. Some backends momentarily
-        # return 0 or a slightly stale non-zero duration during reload, which
-        # would leave the progress bar a little longer than the actual
-        # seekable range. For a different source, the previous duration is
-        # unrelated and must not be reused.
-        # In all cases calling _on_duration_changed is safe and idempotent.
-        same_source_reload = path == prev_source
-        if same_source_reload and prev_duration_ms > 0:
-            effective_duration_ms = prev_duration_ms
-        else:
-            effective_duration_ms = self._player.duration()
-        if effective_duration_ms > 0:
-            self._on_duration_changed(effective_duration_ms)
+        emit_detail_event(
+            "video_source_set",
+            generation=self._detail_request_generation,
+            media_type="video",
+            suffix=path.suffix.lower(),
+        )
+        return media_generation
+
+    def commit_presentation(self, state: VideoPresentationState) -> bool:
+        """Apply prepared metadata and begin accepting current video frames."""
+
+        if int(state.generation) != self._detail_request_generation:
+            return False
+        self._current_adjustments = dict(state.adjustments or {})
+        adjusted_preview = bool(
+            state.adjusted_preview
+            or video_requires_adjusted_preview(self._current_adjustments)
+        )
+        self.set_adjusted_preview_enabled(adjusted_preview)
+        self._adjusted_first_frame_pending = adjusted_preview
+        self._edit_viewer.set_adjustments(self._current_adjustments)
+        native_rotate90_steps = 0
+        if not adjusted_preview:
+            native_rotate90_steps = int(
+                float(self._current_adjustments.get("Crop_Rotate90", 0.0))
+            ) % 4
+        self._renderer.set_user_rotate90_steps(native_rotate90_steps)
+        self._container_rotation_cw = int(state.rotation_cw) % 360
+        self._container_raw_w = int(state.raw_width)
+        self._container_raw_h = int(state.raw_height)
+        self._container_linux_180_hint = bool(state.linux_180_hint)
+        self._renderer.set_container_rotation(
+            self._container_rotation_cw,
+            self._container_raw_w,
+            self._container_raw_h,
+        )
+        self._renderer.set_linux_180_hint(self._container_linux_180_hint)
+        if self._container_raw_w > 0 and self._container_raw_h > 0:
+            width, height = self._container_raw_w, self._container_raw_h
+            if self._container_rotation_cw in (90, 270):
+                width, height = height, width
+            self.displaySizeChanged.emit(QSizeF(float(width), float(height)))
+        if state.trim_range_ms is not None:
+            self.set_trim_range_ms(*state.trim_range_ms)
+        duration_ms = self._pending_previous_duration_ms or self._player.duration()
+        self._pending_previous_duration_ms = 0
+        if duration_ms > 0:
+            self._on_duration_changed(duration_ms)
         self._player.setPosition(self._trim_in_ms if self._trim_in_ms > 0 else 0)
-        _log.debug(
-            "[trace][video_area] load_video:end %s",
-            {
-                "path": str(path),
-                "surface_after": self._diag_surface_name(),
-                "adjusted_preview_after": self._adjusted_preview_enabled,
-                "native_rotate90_steps": native_rotate90_steps,
-                "container_rotation_cw": self._container_rotation_cw,
-                "container_raw_size": (self._container_raw_w, self._container_raw_h),
-                "trim_ms": (self._trim_in_ms, self._trim_out_ms),
-                "size": (self.width(), self.height()),
-                "stack_size": (self._surface_stack.width(), self._surface_stack.height()),
-            },
-        )
-        log_detail_profile(
-            "video_area",
-            "load_video.total",
-            (time.perf_counter() - load_started) * 1000.0,
-            path=path.name,
-            adjusted_preview=self._adjusted_preview_enabled,
-        )
+        self._accept_video_frames = True
+        self._presentation_committed = True
+        self._awaiting_first_gpu_frame_generation = self._detail_request_generation
+        return True
 
     def play(self) -> None:
         """Start or resume playback."""
@@ -825,18 +992,31 @@ class VideoArea(QWidget):
         texture so that subsequent media transitions never flash the last
         rendered video frame.
         """
-        self._player.stop()
+        diag_enabled = _startup_hang_diag_enabled()
+        started_at = time.perf_counter()
+        if diag_enabled:
+            _log.info("VideoArea.stop: begin source=%s", self._current_source)
+
+        phase_started = time.perf_counter()
+        self._begin_media_generation()
+        self._log_stop_phase("frame_quiesce", phase_started, diag_enabled)
+
+        phase_started = time.perf_counter()
+        self._detach_video_output()
+        self._log_stop_phase("sink_detach", phase_started, diag_enabled)
+
+        # A null source already stops playback and asks the backend to release
+        # all media I/O.  Calling player.stop() first is redundant and, on the
+        # Windows backend, can deadlock while Python still owns decoded frame
+        # wrappers.  All downstream frame references were dropped above.
+        phase_started = time.perf_counter()
         self._player.setSource(QUrl())
-        self._resize_refit_timer.stop()
-        self._resize_refit_pending = False
-        self._pending_video_frame = None
-        self._last_presented_video_frame = None
-        self._video_frame_dispatch_pending = False
-        self._renderer.clear_frame()
+        self._log_stop_phase("source_clear", phase_started, diag_enabled)
+
+        phase_started = time.perf_counter()
         self._renderer.set_user_rotate90_steps(0)
         self._renderer.set_container_rotation(0, 0, 0)
         self._renderer.set_linux_180_hint(False)
-        self._edit_viewer.clear()
         self._edit_viewer.set_adjustments({})
         self._edit_viewer.set_video_source_rotation(0)
         self._current_adjustments = {}
@@ -850,15 +1030,178 @@ class VideoArea(QWidget):
         self._profile_load_started_at = None
         self._profile_load_source = None
         self._profile_first_frame_logged = False
+        self._presentation_committed = False
+        self._awaiting_first_gpu_frame_generation = None
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._suppress_trim_pause = False
         self._restart_from_trim_in_on_play = False
         self._end_hold_display_ms = None
+        self._log_stop_phase("state_reset", phase_started, diag_enabled)
+        if diag_enabled:
+            _log.info(
+                "VideoArea.stop: end elapsed_ms=%.1f",
+                (time.perf_counter() - started_at) * 1000.0,
+            )
 
-    def _queue_video_frame(self, frame: "QVideoFrame") -> None:
+    def _begin_media_generation(self) -> int:
+        """Invalidate queued frames and release every downstream frame owner."""
+
+        self._media_generation += 1
+        self._end_detection_armed_media_generation = None
+        self._bind_end_detection_generation(self._media_generation)
+        self._bind_gpu_presentation_generation(self._media_generation)
+        self._accept_video_frames = False
+        self._resize_refit_timer.stop()
+        self._resize_refit_pending = False
+        self._pending_video_frame = None
+        self._pending_video_frame_generation = None
+        self._last_presented_video_frame = None
+        self._next_video_content_serial = 0
+        self._retained_video_content_serial = 0
+        self._surface_submitted_content_serial = {
+            self._renderer: 0,
+            self._edit_viewer: 0,
+        }
+        self._video_frame_dispatch_pending = False
+        self._video_frame_dispatch_generation = None
+        self._renderer.clear_frame()
+        self._edit_viewer.clear()
+        return self._media_generation
+
+    def _bind_end_detection_generation(self, generation: int) -> None:
+        """Bind end-producing player callbacks to one media generation."""
+
+        previous_position_handler = self._position_changed_handler
+        if previous_position_handler is not None:
+            try:
+                self._player.positionChanged.disconnect(previous_position_handler)
+            except (RuntimeError, TypeError):
+                pass
+
+        previous_status_handler = self._media_status_changed_handler
+        if previous_status_handler is not None:
+            try:
+                self._player.mediaStatusChanged.disconnect(previous_status_handler)
+            except (RuntimeError, TypeError):
+                pass
+
+        def _handle_position(position: int, *, bound_generation: int = generation) -> None:
+            self._on_position_changed(position, media_generation=bound_generation)
+
+        def _handle_status(
+            status: QMediaPlayer.MediaStatus,
+            *,
+            bound_generation: int = generation,
+        ) -> None:
+            self._on_media_status_changed(status, media_generation=bound_generation)
+
+        self._position_changed_handler = _handle_position
+        self._media_status_changed_handler = _handle_status
+        self._player.positionChanged.connect(_handle_position)
+        self._player.mediaStatusChanged.connect(_handle_status)
+
+    def _end_detection_is_armed(self, media_generation: int) -> bool:
+        """Return whether end detection belongs to the current presented media."""
+
+        return (
+            int(media_generation) == self._media_generation
+            and self._end_detection_armed_media_generation == self._media_generation
+        )
+
+    def _bind_gpu_presentation_generation(self, _generation: int) -> None:
+        """Bind GPU frame completion to the media generation that queued it."""
+
+        for surface, previous in tuple(self._gpu_video_frame_presented_handlers.items()):
+            signal = surface.videoFramePresented
+            if previous is not None:
+                try:
+                    signal.disconnect(previous)
+                except (RuntimeError, TypeError):
+                    pass
+
+        owner_ref = weakref.ref(self)
+        handlers: dict[QWidget, object] = {}
+        for surface in (self._renderer, self._edit_viewer):
+            surface_ref = weakref.ref(surface)
+
+            def _handle_presented(
+                content_generation: int,
+                content_serial: int,
+                *,
+                bound_surface=surface_ref,
+            ) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if (
+                    owner is None
+                    or child is None
+                    or owner._surface_stack.currentWidget() is not child
+                ):
+                    return
+                owner._on_gpu_video_frame_presented(
+                    content_serial,
+                    media_generation=content_generation,
+                    surface=child,
+                )
+
+            handlers[surface] = _handle_presented
+            surface.videoFramePresented.connect(_handle_presented)
+        self._gpu_video_frame_presented_handlers = handlers
+        self._gpu_video_frame_presented_handler = handlers.get(
+            self._surface_stack.currentWidget()
+        )
+
+    def _bind_video_sink_generation(self, generation: int) -> None:
+        """Bind sink delivery to one media generation so old queued calls expire."""
+
+        previous = self._video_frame_handler
+        if previous is not None:
+            try:
+                self._video_sink.videoFrameChanged.disconnect(previous)
+            except (RuntimeError, TypeError):
+                pass
+
+        def _handle_frame(frame, *, bound_generation: int = generation) -> None:
+            self._queue_video_frame(frame, generation=bound_generation)
+
+        self._video_frame_handler = _handle_frame
+        self._video_sink.videoFrameChanged.connect(
+            _handle_frame,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def _attach_video_output(self) -> None:
+        if self._video_output_attached:
+            return
+        self._player.setVideoOutput(self._video_sink)
+        self._video_output_attached = True
+
+    def _detach_video_output(self) -> None:
+        if not self._video_output_attached:
+            return
+        self._player.setVideoOutput(None)
+        self._video_output_attached = False
+
+    @staticmethod
+    def _log_stop_phase(name: str, started_at: float, diag_enabled: bool) -> None:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        if diag_enabled:
+            _log.info("VideoArea.stop: phase=%s elapsed_ms=%.1f", name, elapsed_ms)
+        if elapsed_ms > 100.0:
+            _log.warning("VideoArea.stop phase %s took %.1fms", name, elapsed_ms)
+
+    def _queue_video_frame(
+        self,
+        frame: "QVideoFrame",
+        *,
+        generation: int | None = None,
+    ) -> None:
         """Coalesce video-sink frames back onto the GUI event loop."""
 
+        frame_generation = self._media_generation if generation is None else generation
+        if not self._accept_video_frames or frame_generation != self._media_generation:
+            return
         if frame is None or not frame.isValid():
             return
         queued_frame = frame
@@ -878,21 +1221,43 @@ class VideoArea(QWidget):
                 self._frame_summary(queued_frame),
             )
         self._pending_video_frame = queued_frame
-        if self._video_frame_dispatch_pending:
+        self._pending_video_frame_generation = frame_generation
+        if (
+            self._video_frame_dispatch_pending
+            and self._video_frame_dispatch_generation == frame_generation
+        ):
             return
         self._video_frame_dispatch_pending = True
+        self._video_frame_dispatch_generation = frame_generation
         # Keep latest-frame coalescing by deferring the flush to the next GUI
         # turn. The queued frame wrapper is copied above so Linux backends can
         # still retain short-lived zero-copy handles until presentation.
-        QTimer.singleShot(0, self._flush_pending_video_frame)
+        QTimer.singleShot(
+            0,
+            lambda generation=frame_generation: self._flush_pending_video_frame(generation),
+        )
 
-    def _flush_pending_video_frame(self) -> None:
+    def _flush_pending_video_frame(self, generation: int | None = None) -> None:
         """Present the latest queued frame on the active preview surface."""
 
+        frame_generation = self._media_generation if generation is None else generation
+        if (
+            frame_generation != self._media_generation
+            or not self._accept_video_frames
+            or self._video_frame_dispatch_generation != frame_generation
+        ):
+            return
         self._video_frame_dispatch_pending = False
+        self._video_frame_dispatch_generation = None
         frame = self._pending_video_frame
+        pending_generation = self._pending_video_frame_generation
         self._pending_video_frame = None
-        if frame is None or not frame.isValid():
+        self._pending_video_frame_generation = None
+        if (
+            pending_generation != frame_generation
+            or frame is None
+            or not frame.isValid()
+        ):
             return
         if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_queued_frame_count):
             _log.warning(
@@ -936,6 +1301,8 @@ class VideoArea(QWidget):
                 self._last_presented_video_frame = frame
         else:
             self._last_presented_video_frame = frame
+        self._next_video_content_serial += 1
+        self._retained_video_content_serial = self._next_video_content_serial
         self._diag_presented_frame_count += 1
         if self._diag_presented_frame_count <= 12 or self._diag_presented_frame_count % 30 == 0:
             _log.debug(
@@ -952,7 +1319,23 @@ class VideoArea(QWidget):
                     "frame": self._frame_summary(frame),
                 },
             )
-        if self._adjusted_preview_enabled:
+        active_surface = self._surface_stack.currentWidget()
+        self._submit_video_frame_to_surface(
+            frame,
+            active_surface,
+            content_serial=self._retained_video_content_serial,
+        )
+
+    def _submit_video_frame_to_surface(
+        self,
+        frame: "QVideoFrame",
+        surface: QWidget,
+        *,
+        content_serial: int,
+    ) -> None:
+        """Queue one identified frame on exactly one QRhi child surface."""
+
+        if surface is self._edit_viewer:
             resolved_rotation_cw = _resolve_frame_rotation_cw(
                 frame.surfaceFormat(),
                 container_rotation_cw=self._container_rotation_cw,
@@ -976,20 +1359,106 @@ class VideoArea(QWidget):
                 frame,
                 self._current_adjustments,
                 reset_view=reset_view,
+                content_generation=self._media_generation,
+                content_serial=content_serial,
             )
             self._surface_stack.update()
             self.update()
         else:
-            self._renderer.update_frame(frame)
+            self._renderer.update_frame(
+                frame,
+                content_generation=self._media_generation,
+                content_serial=content_serial,
+            )
 
-    def _on_position_changed(self, position: int) -> None:
+    def _queue_retained_frame_for_surface(
+        self,
+        surface: QWidget,
+        *,
+        content_serial: int,
+    ) -> None:
+        """Replay retained content without assigning it a new serial."""
+
+        frame = self._last_presented_video_frame
+        if frame is None or content_serial <= 0:
+            return
+        try:
+            retained_frame = QVideoFrame(frame) if QVideoFrame is not None else frame
+        except Exception:
+            retained_frame = frame
+        if retained_frame is None or not retained_frame.isValid():
+            return
+        self._submit_video_frame_to_surface(
+            retained_frame,
+            surface,
+            content_serial=content_serial,
+        )
+
+    def _on_gpu_video_frame_presented(
+        self,
+        content_serial: int = 0,
+        *,
+        media_generation: int | None = None,
+        surface: QWidget | None = None,
+    ) -> None:
+        """Acknowledge identified content after its active surface was submitted."""
+
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if event_generation != self._media_generation:
+            return
+        active_surface = self._surface_stack.currentWidget()
+        submitted_surface = active_surface if surface is None else surface
+        if submitted_surface is not active_surface or content_serial <= 0:
+            return
+        self._surface_submitted_content_serial[submitted_surface] = int(content_serial)
+        request_generation = self._detail_request_generation
+        if request_generation <= 0:
+            return
+        self.surfaceFrameSubmitted.emit(request_generation, int(content_serial))
+        generation = self._awaiting_first_gpu_frame_generation
+        if generation is None or generation != self._detail_request_generation:
+            return
+        self._awaiting_first_gpu_frame_generation = None
+        self._end_detection_armed_media_generation = event_generation
+        self.mediaFirstFrameReady.emit(generation)
+
+        if not self._end_detection_is_armed(event_generation):
+            return
+        position = self._player.position()
         if self._trim_out_ms > self._trim_in_ms and position >= self._trim_out_ms:
+            self._on_position_changed(position, media_generation=event_generation)
+            return
+        if self._player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._on_media_status_changed(
+                QMediaPlayer.MediaStatus.EndOfMedia,
+                media_generation=event_generation,
+            )
+
+    def _on_position_changed(
+        self,
+        position: int,
+        *,
+        media_generation: int | None = None,
+    ) -> None:
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if event_generation != self._media_generation:
+            return
+        if (
+            self._end_detection_is_armed(event_generation)
+            and self._trim_out_ms > self._trim_in_ms
+            and position >= self._trim_out_ms
+        ):
             self._enter_end_hold(
                 end_pos=self._trim_out_ms,
                 hold_pos=max(
                     self._trim_in_ms,
                     self._trim_out_ms - VIDEO_COMPLETE_HOLD_BACKSTEP_MS,
                 ),
+                media_generation=event_generation,
             )
             return
         display_position = self._display_position(position)
@@ -1034,9 +1503,25 @@ class VideoArea(QWidget):
         if not is_playing and state == QMediaPlayer.PlaybackState.StoppedState:
             self.show_controls()
 
-    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+    def _on_media_status_changed(
+        self,
+        status: QMediaPlayer.MediaStatus,
+        *,
+        media_generation: int | None = None,
+    ) -> None:
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if event_generation != self._media_generation:
+            return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            duration = self._trim_out_ms if self._trim_out_ms > self._trim_in_ms else self._player.duration()
+            if not self._end_detection_is_armed(event_generation):
+                return
+            duration = (
+                self._trim_out_ms
+                if self._trim_out_ms > self._trim_in_ms
+                else self._player.duration()
+            )
             if duration <= 0:
                 return
             position = self._player.position()
@@ -1047,6 +1532,7 @@ class VideoArea(QWidget):
             self._enter_end_hold(
                 end_pos=int(duration),
                 hold_pos=max(0, int(duration) - VIDEO_COMPLETE_HOLD_BACKSTEP_MS),
+                media_generation=event_generation,
             )
 
     def _on_error_occurred(self, _error: object, message: str) -> None:
@@ -1074,9 +1560,20 @@ class VideoArea(QWidget):
         self._player_bar.set_position(position)
         self.positionChanged.emit(position)
 
-    def _enter_end_hold(self, *, end_pos: int, hold_pos: int) -> None:
+    def _enter_end_hold(
+        self,
+        *,
+        end_pos: int,
+        hold_pos: int,
+        media_generation: int | None = None,
+    ) -> None:
         """Pause on the last frame while keeping the timeline cursor at the end."""
 
+        event_generation = (
+            self._media_generation if media_generation is None else int(media_generation)
+        )
+        if not self._end_detection_is_armed(event_generation):
+            return
         end_pos = max(0, int(end_pos))
         hold_pos = max(0, min(int(hold_pos), end_pos))
         if self._restart_from_trim_in_on_play and self._end_hold_display_ms == end_pos:
@@ -1084,6 +1581,9 @@ class VideoArea(QWidget):
             return
         if self._suppress_trim_pause:
             return
+        finished_request_generation = self._detail_request_generation
+        finished_source = self._current_source
+        finished_media_generation = event_generation
         self._suppress_trim_pause = True
         self._end_hold_display_ms = end_pos
         self._restart_from_trim_in_on_play = True
@@ -1092,7 +1592,11 @@ class VideoArea(QWidget):
         self._suppress_trim_pause = False
         self._sync_position_display(end_pos)
         self.show_controls()
-        self.playbackFinished.emit()
+        self.playbackFinished.emit(
+            finished_request_generation,
+            finished_source,
+            finished_media_generation,
+        )
 
     def _on_volume_changed(self, value: int) -> None:
         """Handle volume changes from the player bar."""
@@ -1181,7 +1685,7 @@ class VideoArea(QWidget):
 
     def leaveEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
         super().leaveEvent(event)
-        if not self._player_bar.underMouse():
+        if self._player_bar is not None and not self._player_bar.underMouse():
             self.hide_controls()
 
     def mouseMoveEvent(self, event) -> None:  # pragma: no cover - GUI behaviour
@@ -1215,7 +1719,7 @@ class VideoArea(QWidget):
         elsewhere in the window.  Space, M, and other transport shortcuts are
         handled globally by ``AppShortcutManager``.
         """
-        if self._edit_mode_active:
+        if not self._runtime_ready or self._edit_mode_active:
             super().keyPressEvent(event)
             return
 
@@ -1240,6 +1744,8 @@ class VideoArea(QWidget):
         self.hide_controls(animate=False)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # pragma: no cover - GUI behaviour
+        if not self._runtime_ready:
+            return super().eventFilter(watched, event)
         if event.type() in {
             QEvent.Type.MouseMove,
             QEvent.Type.HoverMove,
@@ -1268,9 +1774,12 @@ class VideoArea(QWidget):
             self._player_bar.scrubFinished,
         ):
             signal.connect(self._on_mouse_activity)
-        self._player_bar.seekRequested.connect(lambda _value: self._on_mouse_activity())
+        self._player_bar.seekRequested.connect(self._on_seek_activity_requested)
         self._player_bar.volumeChanged.connect(self._on_volume_changed)
         self._player_bar.muteToggled.connect(self._on_mute_toggled)
+
+    def _on_seek_activity_requested(self, _value: int) -> None:
+        self._on_mouse_activity()
 
     def _wire_edit_viewer(self) -> None:
         """Forward image-viewer style signals from the adjusted preview surface."""
@@ -1281,8 +1790,102 @@ class VideoArea(QWidget):
         self._edit_viewer.cropInteractionStarted.connect(self.cropInteractionStarted.emit)
         self._edit_viewer.cropInteractionFinished.connect(self.cropInteractionFinished.emit)
         self._edit_viewer.colorPicked.connect(self.colorPicked.emit)
-        self._edit_viewer.firstFrameReady.connect(self.firstFrameReady.emit)
-        self._renderer.firstFrameReady.connect(self.firstFrameReady.emit)
+        owner_ref = weakref.ref(self)
+        self._surface_lifecycle_handlers = []
+        for surface in (self._edit_viewer, self._renderer):
+            surface_ref = weakref.ref(surface)
+
+            def _handle_ready(*, bound_surface=surface_ref) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if owner is not None and child is not None:
+                    owner._on_surface_first_frame_ready(child)
+
+            def _handle_invalidated(*, bound_surface=surface_ref) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if owner is not None and child is not None:
+                    owner._on_surface_resources_invalidated(child)
+
+            def _handle_composed(*, bound_surface=surface_ref) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                if (
+                    owner is not None
+                    and child is not None
+                    and owner._surface_stack.currentWidget() is child
+                ):
+                    owner.surfaceCompositionSubmitted.emit()
+
+            self._surface_lifecycle_handlers.extend(
+                (_handle_ready, _handle_invalidated, _handle_composed)
+            )
+            surface.firstFrameReady.connect(_handle_ready)
+            surface.renderResourcesInvalidated.connect(_handle_invalidated)
+            surface.frameSubmitted.connect(_handle_composed)
+
+    def _on_surface_first_frame_ready(self, surface: QWidget) -> None:
+        """Publish readiness only for the currently visible QRhi child."""
+
+        if self._surface_stack.currentWidget() is surface:
+            self.firstFrameReady.emit()
+
+    def _on_surface_resources_invalidated(self, surface: QWidget) -> None:
+        """Cover and repopulate an active video surface after QRhi loss."""
+
+        self._surface_submitted_content_serial[surface] = 0
+        if self._surface_stack.currentWidget() is not surface:
+            return
+
+        request_generation = self._detail_request_generation
+        content_serial = self._retained_video_content_serial
+        self.surfaceInvalidated.emit(request_generation, content_serial)
+        frame = self._last_presented_video_frame
+        if (
+            frame is None
+            or not self._presentation_committed
+            or not self._accept_video_frames
+        ):
+            return
+        try:
+            retained_frame = QVideoFrame(frame) if QVideoFrame is not None else frame
+        except Exception:
+            retained_frame = frame
+        media_generation = self._media_generation
+        QTimer.singleShot(
+            0,
+            lambda: self._restore_frame_after_resource_loss(
+                retained_frame,
+                media_generation=media_generation,
+                surface=surface,
+                content_serial=content_serial,
+            ),
+        )
+
+    def _restore_frame_after_resource_loss(
+        self,
+        frame: "QVideoFrame",
+        *,
+        media_generation: int,
+        surface: QWidget,
+        content_serial: int,
+    ) -> None:
+        """Re-upload the retained paused frame if its generation still owns the surface."""
+
+        if (
+            media_generation != self._media_generation
+            or self._surface_stack.currentWidget() is not surface
+            or not self._presentation_committed
+            or not self._accept_video_frames
+            or frame is None
+            or not frame.isValid()
+        ):
+            return
+        self._submit_video_frame_to_surface(
+            frame,
+            surface,
+            content_serial=content_serial,
+        )
 
     def _on_edit_viewer_zoom_changed(self, factor: float) -> None:
         """Forward zoom changes from _edit_viewer only when it is the active surface."""
@@ -1297,7 +1900,7 @@ class VideoArea(QWidget):
             self.zoomChanged.emit(factor)
 
     def _on_mouse_activity(self) -> None:
-        if not self._controls_enabled:
+        if not self._runtime_ready or not self._controls_enabled:
             return
         self.mouseActive.emit()
         if self._controls_visible:
@@ -1315,6 +1918,13 @@ class VideoArea(QWidget):
         """Return the currently active video surface for focus/event handling."""
 
         return self._edit_viewer if self._adjusted_preview_enabled else self._renderer
+
+    def request_active_surface_update(self) -> None:
+        """Request another composition from the currently visible QRhi child."""
+
+        surface = self._surface_stack.currentWidget()
+        if surface is not None:
+            surface.update()
 
     def video_viewport(self) -> QWidget:
         """Return the widget that accepts keyboard focus."""
@@ -1347,7 +1957,7 @@ class VideoArea(QWidget):
             self._player_bar.hide()
 
     def _update_bar_geometry(self) -> None:
-        if not self.isVisible():
+        if self._player_bar is None or not self.isVisible():
             return
         rect = self.rect()
         available_width = max(0, rect.width() - (2 * self._overlay_margin))

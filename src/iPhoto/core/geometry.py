@@ -8,7 +8,7 @@ creating a cross-layer dependency on GUI task code.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+import math
 
 import numpy as np
 from PySide6.QtCore import Qt
@@ -16,8 +16,44 @@ from PySide6.QtGui import QImage, QPainter, QTransform
 
 from . import geo_utils
 
+_MAX_OUTPUT_AREA_MULTIPLIER = 4
+_MAX_OUTPUT_DIMENSION_MULTIPLIER = 4
 
-def apply_geometry_and_crop(image: QImage, adjustments: Dict[str, float]) -> Optional[QImage]:
+
+def _safe_output_size(
+    crop_width_px: float,
+    crop_height_px: float,
+    *,
+    source_width: int,
+    source_height: int,
+) -> tuple[int, int] | None:
+    """Return bounded output dimensions or ``None`` for unsafe crop data.
+
+    Crop coordinates may legitimately extend outside the unit square after a
+    perspective transform, but a persisted crop can also be malformed.  Keep
+    valid projected crops while preventing overflow and disproportionate image
+    allocations at this final rendering boundary.
+    """
+
+    if source_width <= 0 or source_height <= 0:
+        return None
+    if not math.isfinite(crop_width_px) or not math.isfinite(crop_height_px):
+        return None
+    if crop_width_px <= 0.0 or crop_height_px <= 0.0:
+        return None
+
+    out_width = max(1, round(crop_width_px))
+    out_height = max(1, round(crop_height_px))
+    max_dimension = max(source_width, source_height) * _MAX_OUTPUT_DIMENSION_MULTIPLIER
+    max_area = source_width * source_height * _MAX_OUTPUT_AREA_MULTIPLIER
+    if out_width > max_dimension or out_height > max_dimension:
+        return None
+    if out_width * out_height > max_area:
+        return None
+    return (out_width, out_height)
+
+
+def apply_geometry_and_crop(image: QImage, adjustments: dict[str, float]) -> QImage | None:
     """Apply geometric transformations (rotation, perspective, straighten) and crop.
 
     Replicates the OpenGL viewer's visual result on the CPU.
@@ -105,10 +141,19 @@ def apply_geometry_and_crop(image: QImage, adjustments: Dict[str, float]) -> Opt
 
     t_final = transform * QTransform().translate(-crop_x_px, -crop_y_px)
 
-    out_w = max(1, int(round(crop_w_px)))
-    out_h = max(1, int(round(crop_h_px)))
+    output_size = _safe_output_size(
+        crop_w_px,
+        crop_h_px,
+        source_width=w,
+        source_height=h,
+    )
+    if output_size is None:
+        return None
+    out_w, out_h = output_size
 
     result_img = QImage(out_w, out_h, QImage.Format.Format_ARGB32_Premultiplied)
+    if result_img.isNull():
+        return None
     result_img.fill(Qt.transparent)
 
     painter = QPainter(result_img)

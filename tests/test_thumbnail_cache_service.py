@@ -10,10 +10,11 @@ from unittest.mock import Mock, patch
 import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for thumbnail tests", exc_type=ImportError)
 from PIL import Image
-from PySide6.QtCore import QFile, QSize
+from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QImage, QPixmap
 
 from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file
+from iPhoto.infrastructure.services.thumbnail_artifact import thumbnail_revision
 from iPhoto.infrastructure.services.thumbnail_cache_service import (
     ThumbnailCacheService,
     ThumbnailDemandSnapshot,
@@ -26,6 +27,7 @@ from iPhoto.infrastructure.services.thumbnail_cache_service import (
     _CancellationToken,
 )
 from iPhoto.infrastructure.services.thumbnail_runtime_policy import ThumbnailRuntimePolicy
+from iPhoto.utils.image_loader import load_qimage
 
 
 def _reconcile(
@@ -99,10 +101,10 @@ def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> N
     size = QSize(64, 64)
 
     with patch(
-        "iPhoto.infrastructure.services.thumbnail_cache_service.image_loader.load_qimage",
+        "iPhoto.infrastructure.services.thumbnail_artifact.image_loader.load_qimage",
         return_value=image,
     ), patch(
-        "iPhoto.infrastructure.services.thumbnail_cache_service.compute_color_statistics",
+        "iPhoto.infrastructure.services.thumbnail_artifact.compute_color_statistics",
     ) as compute_stats:
         rendered = service._render_thumbnail(path, size)
 
@@ -140,6 +142,52 @@ def test_l1_l2_hit_does_not_enqueue_generation(tmp_path: Path) -> None:
     queue_generation.assert_not_called()
 
 
+def test_demand_status_reports_cache_queue_stage_failure_and_missing(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(64, 64)
+    resident = tmp_path / "resident.jpg"
+    queued = tmp_path / "queued.jpg"
+    active = tmp_path / "active.jpg"
+    staged = tmp_path / "staged.jpg"
+    failed = tmp_path / "failed.jpg"
+    missing = tmp_path / "missing.jpg"
+
+    service._memory_cache[service._cache_key(resident, size)] = QPixmap(1, 1)
+    queued_key = service._cache_key(queued, size)
+    service._queued_tasks[queued_key] = ThumbnailRequest(
+        queued,
+        size,
+        ThumbnailRequestKind.VISIBLE,
+        1,
+    )
+    service._pending_tasks.add(queued_key)
+    service._active_decode_reservations[service._cache_key(active, size)] = 1
+    service._publish_keys.add(service._cache_key(staged, size))
+    service._failure_until[service._cache_key(failed, size)] = time.monotonic() + 60.0
+
+    status = service.demand_status(
+        [resident, queued, active, staged, failed, missing],
+        size,
+    )
+
+    assert status.total == 6
+    assert status.resident == 1
+    assert status.queued == 1
+    assert status.active == 1
+    assert status.staged == 1
+    assert status.failed == 1
+    assert status.missing == 1
+    assert status.pending == 3
+    assert status.terminal == 2
+    assert status.is_terminal is False
+
+    terminal = service.demand_status([resident, failed], size)
+    assert terminal.is_terminal is True
+
+
 def test_l2_hit_is_not_read_synchronously_from_get_thumbnail(
     tmp_path: Path,
     qapp,
@@ -173,6 +221,164 @@ def test_worker_loads_l2_hit_without_rendering_source(tmp_path: Path) -> None:
     assert image is not None
     assert not image.isNull()
     render.assert_not_called()
+
+
+def test_ready_l2_hit_skips_revision_micro_and_repository_work(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    disk_file = thumbnail_cache_file(tmp_path / "thumbs", path, (512, 512))
+    disk_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), "red").save(disk_file, format="JPEG")
+
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.thumbnail_revision",
+        side_effect=AssertionError("ready L2 hits must not fingerprint"),
+    ), patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.publish_thumbnail_artifact",
+        side_effect=AssertionError("ready L2 hits must not render or encode micro"),
+    ), patch.object(
+        service,
+        "_publish_thumbnail_ready",
+        side_effect=AssertionError("ready L2 hits must not update the repository"),
+    ):
+        image = service._load_or_render_thumbnail(
+            path,
+            size,
+            None,
+            service._disk_cache_key(path),
+            "ready",
+            "persisted-revision",
+        )
+
+    assert image is not None and not image.isNull()
+
+
+def test_lagging_stale_hint_does_not_invalidate_same_published_revision(
+    tmp_path: Path,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    service._desired_revisions[key] = "revision-2"
+    service._thumbnail_states[key] = "ready"
+
+    with patch.object(service, "invalidate") as invalidate:
+        service.request_many(
+            [
+                ThumbnailRequest(
+                    path,
+                    size,
+                    ThumbnailRequestKind.VISIBLE,
+                    1,
+                    thumbnail_state="stale",
+                    thumb_revision="revision-2",
+                )
+            ],
+            generation=1,
+        )
+
+    invalidate.assert_not_called()
+    assert service._queued_tasks[key].thumbnail_state == "ready"
+
+
+def test_invalidation_prevents_old_worker_from_restoring_stale_disk_thumbnail(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "thumbs"
+    service = ThumbnailCacheService(cache_dir)
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    Image.new("RGB", (32, 32), "green").save(path)
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    disk_file = thumbnail_cache_file(cache_dir, path, (512, 512))
+    Image.new("RGB", (512, 512), "green").save(disk_file)
+    token = _CancellationToken()
+    render_started = threading.Event()
+    allow_render_to_finish = threading.Event()
+    stale_image = QImage(512, 512, QImage.Format.Format_RGB32)
+    stale_image.fill(QColor("blue"))
+    result: list[QImage | None] = []
+
+    old_revision = thumbnail_revision(path)
+
+    def render_stale(_path: Path, _size: QSize, **_kwargs) -> QImage:
+        render_started.set()
+        assert allow_render_to_finish.wait(timeout=2.0)
+        return stale_image
+
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_artifact.render_thumbnail_image",
+        side_effect=render_stale,
+    ):
+        worker = threading.Thread(
+            target=lambda: result.append(
+                service._load_or_render_thumbnail(
+                    path,
+                    size,
+                    token,
+                    None,
+                    "stale",
+                    old_revision,
+                )
+            )
+        )
+        worker.start()
+        assert render_started.wait(timeout=2.0)
+        path.with_suffix(".ipo").write_text("<iPhotoAdjustments version='1.0'/>")
+        new_revision = thumbnail_revision(path)
+        service.invalidate(path, size=size, desired_revision=new_revision)
+        allow_render_to_finish.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    assert disk_file.exists()
+    assert Image.open(disk_file).getpixel((256, 256))[1] > 100
+
+    edited_image = QImage(512, 512, QImage.Format.Format_RGB32)
+    edited_image.fill(QColor("red"))
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_artifact.render_thumbnail_image",
+        return_value=edited_image,
+    ):
+        assert service._load_or_render_thumbnail(
+            path,
+            size,
+            None,
+            None,
+            "stale",
+            new_revision,
+        ) is not None
+
+    restarted = ThumbnailCacheService(cache_dir)
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.publish_thumbnail_artifact"
+    ) as render_after_restart:
+        cached = restarted._load_or_render_thumbnail(path, size)
+
+    assert cached is not None
+    assert cached.pixelColor(256, 256).red() > cached.pixelColor(256, 256).blue()
+    render_after_restart.assert_not_called()
+
+
+def test_invalidation_discards_staged_thumbnail_for_same_asset(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    size = QSize(256, 256)
+    image = QImage(8, 8, QImage.Format.Format_RGB32)
+    service._stage_result(
+        ThumbnailLoadResult(path, size, image, 1, ThumbnailRequestKind.VISIBLE)
+    )
+
+    service.invalidate(path, size=size)
+
+    assert not service._publish_visible
+    assert service._cache_key(path, size) not in service._publish_keys
+    assert service._staging_used_bytes == 0
 
 
 def test_peek_full_thumbnail_never_touches_disk(tmp_path: Path) -> None:
@@ -235,6 +441,137 @@ def test_reconcile_demand_keeps_only_latest_visible_and_prefetch_queue(tmp_path:
     assert second_key in service._pending_tasks
     assert service._pending_generations[second_key] == 2
     assert service._pinned_keys == {second_key}
+
+
+def test_surface_leases_support_future_different_bucket_without_aliasing(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    gallery_path = tmp_path / "gallery.jpg"
+    preview_path = tmp_path / "preview.jpg"
+    gallery_size = QSize(512, 512)
+    preview_size = QSize(256, 256)
+
+    service.upsert_surface_demand(
+        "gallery",
+        ThumbnailDemandSnapshot(1, gallery_size, (gallery_path,)),
+    )
+    service.upsert_surface_demand(
+        "preview",
+        ThumbnailDemandSnapshot(1, preview_size, (preview_path,)),
+    )
+
+    gallery_key = service._cache_key(gallery_path, gallery_size)
+    preview_key = service._cache_key(preview_path, preview_size)
+    assert service._pinned_keys == {gallery_key, preview_key}
+    assert set(service._queued_tasks) == {gallery_key, preview_key}
+
+    service.release_surface_demand("preview")
+
+    assert service._pinned_keys == {gallery_key}
+    assert gallery_key in service._queued_tasks
+    assert preview_key not in service._queued_tasks
+    service.shutdown()
+
+
+def test_surface_leases_deduplicate_same_sized_visible_key(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "shared.jpg"
+    size = QSize(512, 512)
+    snapshot = ThumbnailDemandSnapshot(1, size, (path,))
+
+    service.upsert_surface_demand("gallery", snapshot)
+    service.upsert_surface_demand("filmstrip", snapshot)
+
+    key = service._cache_key(path, size)
+    assert service._pinned_keys == {key}
+    assert list(service._queued_tasks) == [key]
+    service.release_surface_demand("filmstrip")
+    assert service._pinned_keys == {key}
+    service.shutdown()
+
+
+def test_surface_bucket_change_does_not_release_l1_pool(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    with patch.object(service, "_release_all_l1_slots") as release_slots:
+        service.upsert_surface_demand(
+            "gallery",
+            ThumbnailDemandSnapshot(1, QSize(512, 512), ()),
+        )
+        service.upsert_surface_demand(
+            "preview",
+            ThumbnailDemandSnapshot(1, QSize(256, 256), ()),
+        )
+
+    release_slots.assert_not_called()
+    service.shutdown()
+
+
+def test_canonical_surface_handoff_reuses_one_resident_l1_slot(qapp, tmp_path: Path) -> None:
+    del qapp
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "shared.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    pixmap = QPixmap(512, 512)
+    pixmap.fill(QColor("blue"))
+    service._add_to_memory(key, pixmap)
+    allocations = service.memory_snapshot().slot_allocations
+    snapshot = ThumbnailDemandSnapshot(1, size, (path,))
+
+    with (
+        patch.object(service, "_start_generation") as start_generation,
+        patch.object(service, "_read_cached_thumbnail") as l2_read,
+        patch.object(service, "_store_image_in_l1") as publish_pixmap,
+        patch(
+            "iPhoto.infrastructure.services.thumbnail_cache_service.emit_perf_event"
+        ) as perf_event,
+    ):
+        service.upsert_surface_demand("gallery", snapshot)
+        service.upsert_surface_demand("filmstrip", snapshot)
+        gallery_pixmap = service.peek_full_thumbnail(path, size)
+        filmstrip_pixmap = service.peek_full_thumbnail(path, size)
+
+    assert start_generation.call_count == 0
+    l2_read.assert_not_called()
+    publish_pixmap.assert_not_called()
+    assert gallery_pixmap is filmstrip_pixmap
+    assert service._pinned_keys == {key}
+    assert service.memory_snapshot().slot_count == 1
+    assert service.memory_snapshot().slot_allocations == allocations
+    l1_hits = [
+        call
+        for call in perf_event.call_args_list
+        if call.args == ("thumbnail_cache_hit",)
+        and call.kwargs == {"tier": "L1", "key": key}
+    ]
+    assert len(l1_hits) == 2
+
+    service.release_surface_demand("gallery")
+    assert service._pinned_keys == {key}
+    service.release_surface_demand("filmstrip")
+    assert key not in service._pinned_keys
+    assert key not in (service._current_l1_demand_keys or set())
+    assert key in service._memory_cache
+    service.shutdown()
+
+
+def test_canonical_surface_concurrent_demand_starts_one_worker(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "shared.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    snapshot = ThumbnailDemandSnapshot(1, size, (path,))
+
+    with patch.object(service, "_start_generation", return_value=True) as start_generation:
+        service.upsert_surface_demand("gallery", snapshot)
+        service.upsert_surface_demand("filmstrip", snapshot)
+
+    start_generation.assert_called_once()
+    assert service._pending_tasks == {key}
+    assert service._queued_tasks == {}
+    assert service._publish_keys == set()
+    service.shutdown()
 
 
 def test_stale_worker_result_is_discarded_before_pixmap_conversion(tmp_path: Path) -> None:
@@ -867,7 +1204,7 @@ def test_l1_rejects_stale_thumbnail_writes_outside_current_demand(
     assert stale_key not in service._memory_bytes
 
 
-def test_l2_reader_opens_once_without_exists_or_read_bytes(tmp_path: Path) -> None:
+def test_l2_reader_uses_safe_shared_decoder(tmp_path: Path) -> None:
     service = ThumbnailCacheService(tmp_path / "thumbs")
     path = tmp_path / "photo.jpg"
     size = QSize(512, 512)
@@ -876,17 +1213,16 @@ def test_l2_reader_opens_once_without_exists_or_read_bytes(tmp_path: Path) -> No
     Image.new("RGB", (32, 32), "red").save(disk_file, format="JPEG")
 
     with (
-        patch.object(Path, "exists", side_effect=AssertionError("exists called")),
         patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes called")),
         patch(
-            "iPhoto.infrastructure.services.thumbnail_cache_service.QFile",
-            wraps=QFile,
-        ) as qfile,
+            "iPhoto.infrastructure.services.thumbnail_cache_service.load_qimage",
+            wraps=load_qimage,
+        ) as decode,
     ):
         image = service._load_cached_thumbnail_only(path, size)
 
     assert image is not None and not image.isNull()
-    assert qfile.call_count == 1
+    decode.assert_called_once_with(disk_file, size)
 
 
 def test_l2_512_file_decodes_directly_to_display_bucket_without_new_disk_file(
@@ -903,6 +1239,23 @@ def test_l2_512_file_decodes_directly_to_display_bucket_without_new_disk_file(
     assert image is not None
     assert image.size() == QSize(256, 256)
     assert not thumbnail_cache_file(tmp_path / "thumbs", path, (256, 256)).exists()
+
+
+def test_canonical_512_request_reuses_l2_without_variant_artifacts(tmp_path: Path) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    disk_file = thumbnail_cache_file(tmp_path / "thumbs", path, (512, 512))
+    disk_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (512, 512), "red").save(disk_file, format="JPEG")
+
+    image = service._load_cached_thumbnail_only(path, QSize(512, 512))
+
+    assert image is not None
+    assert image.size() == QSize(512, 512)
+    assert disk_file.exists()
+    assert not thumbnail_cache_file(tmp_path / "thumbs", path, (256, 256)).exists()
+    assert not thumbnail_cache_file(tmp_path / "thumbs", path, (384, 384)).exists()
+    service.shutdown()
 
 
 def test_known_l2_cache_key_drives_guard_request(tmp_path: Path) -> None:
@@ -1475,6 +1828,117 @@ def test_staging_publisher_honors_time_budget(tmp_path: Path, qapp) -> None:
     assert len(service._publish_prefetch) == 2
 
 
+def test_macos_publish_timer_yields_between_batches(tmp_path: Path, qapp) -> None:
+    policy = ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 4096)
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+
+    class FakeTimer:
+        def __init__(self) -> None:
+            self.started: list[int] = []
+            self.active = False
+            self.remaining = -1
+
+        def isActive(self) -> bool:
+            return self.active
+
+        def start(self, delay: int) -> None:
+            self.started.append(delay)
+            self.active = True
+            self.remaining = delay
+
+        def remainingTime(self) -> int:
+            return self.remaining
+
+    fake_timer = FakeTimer()
+    service._publish_timer = fake_timer
+    size = QSize(8, 8)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+
+    service._publish_prefetch.append(
+        ThumbnailLoadResult(
+            tmp_path / "prefetch.jpg",
+            size,
+            image,
+            1,
+            ThumbnailRequestKind.PREFETCH,
+        )
+    )
+    service._ensure_publish_timer()
+
+    service._publish_visible.append(
+        ThumbnailLoadResult(
+            tmp_path / "visible.jpg",
+            size,
+            image,
+            1,
+            ThumbnailRequestKind.VISIBLE,
+        )
+    )
+    service._ensure_publish_timer()
+
+    assert fake_timer.started == [8, 1]
+
+
+def test_macos_visible_publish_honors_item_budget(tmp_path: Path, qapp) -> None:
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 4096),
+        publish_max_items=2,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor("blue"))
+    service._current_generation = 1
+    paths = [tmp_path / f"visible-{index}.jpg" for index in range(3)]
+    for path in paths:
+        service._stage_result(
+            ThumbnailLoadResult(path, size, image, 1, ThumbnailRequestKind.VISIBLE)
+        )
+
+    service._drain_publish_queue()
+
+    assert len(service._memory_cache) == 2
+    assert len(service._publish_visible) == 1
+
+
+def test_visible_only_demand_discards_stale_prefetch_publish_state(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(8, 8)
+    visible = tmp_path / "visible.jpg"
+    prefetch = tmp_path / "prefetch.jpg"
+    prefetch_key = service._cache_key(prefetch, size)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor("green"))
+    service._publish_prefetch.append(
+        ThumbnailLoadResult(prefetch, size, image, 1, ThumbnailRequestKind.PREFETCH)
+    )
+    service._publish_keys.add(prefetch_key)
+    service._staging_used_bytes = service._image_bytes(image)
+    service._prefetch_pending.add(prefetch_key)
+    service._prefetch_queued[prefetch_key] = ThumbnailRequest(
+        prefetch,
+        size,
+        ThumbnailRequestKind.PREFETCH,
+        1,
+    )
+    service._prefetch_queue.append(prefetch_key)
+
+    service.reconcile_demand(
+        ThumbnailDemandSnapshot(
+            revision=2,
+            size=size,
+            visible_paths=(visible,),
+        )
+    )
+
+    assert not service._publish_prefetch
+    assert prefetch_key not in service._publish_keys
+    assert prefetch_key not in service._prefetch_queued
+
+
 def test_slow_publisher_uses_four_item_batch_budget(tmp_path: Path, qapp) -> None:
     policy = ThumbnailRuntimePolicy.detect(
         platform="linux",
@@ -1517,9 +1981,10 @@ def test_l2_reader_distinguishes_miss_read_and_decode_errors(tmp_path: Path) -> 
         cancellation=None,
         tier="L2",
     )
-    with patch("iPhoto.infrastructure.services.thumbnail_cache_service.QFile") as qfile:
-        qfile.return_value.open.return_value = False
-        qfile.return_value.errorString.return_value = "Permission denied"
+    with patch(
+        "iPhoto.infrastructure.services.thumbnail_cache_service.load_qimage",
+        side_effect=OSError("cache file is unreadable"),
+    ):
         _image, read_error, _elapsed = service._read_cached_thumbnail(
             invalid,
             path=invalid,
@@ -1787,6 +2252,65 @@ def test_pixmap_pool_rebinds_cold_slot_without_new_allocation(
     assert snapshot.slot_allocations == 2
     assert snapshot.slot_reuses == 1
     assert snapshot.slot_count == 2
+    assert service._memory_cache[incoming_key].toImage().pixelColor(0, 0).blue() > 200
+
+
+def test_macos_l1_publish_avoids_pixmap_slot_reuse(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 8 * 1024**3),
+        memory_limit_bytes=1024 * 1024,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    key = service._cache_key(tmp_path / "visible.jpg", size)
+    red = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    red.fill(QColor("red"))
+    blue = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    blue.fill(QColor("blue"))
+
+    assert service._store_image_in_l1(key, red)
+    first_slot = service._memory_cache[key]
+    with patch.object(
+        service,
+        "_overwrite_pixmap_slot",
+        side_effect=AssertionError("macOS publisher must not repaint QPixmap slots"),
+    ):
+        assert service._store_image_in_l1(key, blue)
+
+    assert service._memory_cache[key] is not first_slot
+    assert service._memory_cache[key].toImage().pixelColor(0, 0).blue() > 200
+
+
+def test_macos_visible_publish_can_overcommit_when_l1_pool_is_protected(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    tile_bytes = 8 * 8 * 4
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(platform="darwin", sysconf=lambda _name: 8 * 1024**3),
+        memory_limit_bytes=2 * tile_bytes,
+        pixmap_pool_target_ratio=1.0,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    size = QSize(8, 8)
+    pinned_key = service._cache_key(tmp_path / "pinned.jpg", size)
+    incoming_key = service._cache_key(tmp_path / "incoming.jpg", size)
+    red = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    red.fill(QColor("red"))
+    blue = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    blue.fill(QColor("blue"))
+
+    assert service._store_image_in_l1(pinned_key, red)
+    service._pinned_keys = {pinned_key}
+    service._current_l1_demand_keys = {pinned_key, incoming_key}
+
+    assert service._store_image_in_l1(incoming_key, blue, allow_overcommit=True)
+
+    assert pinned_key in service._memory_cache
+    assert incoming_key in service._memory_cache
     assert service._memory_cache[incoming_key].toImage().pixelColor(0, 0).blue() > 200
 
 

@@ -4,6 +4,110 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — Cross-Platform QRhi Startup Lifecycle
+
+- Unified Windows, macOS, and Linux startup so the hidden Detail surface shell
+  and all three QRhi widgets enter their final native parent hierarchy before
+  the top-level window is shown. Detail chrome and multimedia runtime continue
+  after first paint without post-show surface creation or reparenting.
+
+## Unreleased — Gallery Detail GPU-first Rendering
+
+### Rendering pipeline
+
+- Unified still and video Detail presentation under one immutable render
+  transaction and terminal-state coordinator; stale generations cannot publish
+  a final frame after a newer open.
+- Replaced sensor-resolution-first still loading with viewport/DPR/crop/
+  rotation/perspective/zoom-aware LOD decode and atomic replacement after the
+  new texture is actually drawn.
+- Added versioned neutral surface caching, byte-budgeted memory residency, and
+  current/previous/next GPU texture residency. Source identity is independent
+  from `.ipo` edit revision, and initial still textures do not generate mipmaps.
+- Added macOS ImageIO and Windows WIC non-RAW decoders with in-worker Qt
+  fallback; RAW uses the embedded-preview/half/full rawpy path. Windows WIC COM
+  declarations now use a fixed signed 32-bit `HRESULT` ABI across supported
+  CPython builds.
+
+### Detail/Edit session
+
+- Added `PhotoRenderSessionHandle` and immutable `EditRenderState` so static
+  Detail and Edit share source texture, LODs, color statistics, live shader
+  state, and persisted baseline.
+- Removed the still Edit full-image loader, CPU realtime preview chain, repeated
+  color-stat calculation, and static Done/Cancel media replay. Export and video
+  editing retain their independent quality/lifecycle paths.
+- Removed the legacy Detail v2/frame-cache flags, old full-frame cache coupling,
+  diagnostic duplicate scheduler path, and synchronous video compatibility
+  entry point. GPU-first is the sole production Detail path.
+
+### Verification and operations
+
+- Added generation-safe background JSONL profiling and a packaged benchmark
+  harness covering cold/disk/memory/GPU cache groups, sidecar-only changes,
+  Detail/Edit, fullscreen, LOD, memory pressure, and rapid switching.
+- Added macOS/Windows/Linux CI contract coverage for transactions, schedulers,
+  decoders, surface caches, render sessions, residency, and benchmark
+  validation. Windows and Linux packaged/manual acceptance was completed for
+  the rollout in addition to the macOS development path.
+- Stabilized full-process Qt tests by retaining one strongly owned
+  `QApplication`; this prevents cached QIcon/QPixmap resources from surviving a
+  destroyed application and crashing later QtSvg widget construction.
+
+## Unreleased — People & Pets Recognition
+
+🐾 *Adds a library-scoped Pets bounded context and composes pet identities with
+the existing People dashboard, gallery, groups, pins, and media annotations.*
+
+### Key Updates
+
+#### 🐕 Pet Detection And Clustering
+- Added optional YOLOX/ONNXRuntime pet detection, DINOv2 embeddings, and
+  species-separated identity clustering through the `pets-ai` extra.
+- Added tiled fallback detection for small cats/dogs, stable `pet_key`
+  canonicalization, detector/clustering pipeline versioning, and graceful
+  pending-state recovery when optional dependencies or models are unavailable.
+- Switched DINOv2 production loading to a fixed TorchScript artifact verified
+  by exact SHA-256 and byte size; Torch Hub is restricted to the release
+  conversion workflow. Optional offline model staging uses
+  `src/extension/models/pets/`; those ignored files are not fresh-clone assets.
+
+#### 💾 Library-Scoped Pets State
+- Added independent `pet_status` bookkeeping to `global_index.db`, rebuildable
+  `.iPhoto/pets/pet_index.db`, and durable `.iPhoto/pets/pet_state.db` state.
+- Added durable names, covers, hidden flags, rejected detections, merges, moves,
+  identity redirects, and reference-safe cleanup of replaced pet thumbnails.
+- Added `LibrarySession.pets`, Pets application ports, bootstrap composition,
+  snapshot coordination, and background `PetScanWorker` scheduling.
+
+#### 👥 People & Pets UI
+- Extended the People dashboard with pet cards, naming, merge/move, hide,
+  cover, delete-detection, pin, and gallery navigation actions.
+- Added mixed person/pet identity groups and cross-kind redirects while keeping
+  People and Pets runtime records in separate bounded contexts.
+- Added pet bounding-box/name annotations to image playback, detail overlays,
+  and information surfaces through the shared recognition annotation transport.
+
+#### 🚀 Startup And Worker Lifecycle
+- Deferred saved-library metadata scanning until the first gallery window is
+  warmed, with a bounded fallback timer.
+- Recognition services may bind and warm cached dashboard data without starting
+  model inference. Ordinary startup, metadata-scan completion, queued
+  `pending`/`retry` rows, and an interactive rescan do not activate AI workers.
+- Automatic Face/Pet scanning activates after the People surface is opened and
+  its first viewport is ready, followed by the current 350 ms quiet delay.
+  Once activated, workers may consume rows committed by later scans.
+- Hardened cancellation and shutdown waits for scanner, face, pet, thumbnail,
+  map, playback, and event-bus resources.
+
+#### 📚 Documentation
+- Updated the production architecture, security, development, packaging, and
+  localized README surfaces for Pets.
+- Added `docs/misc/PETS_RECOGNITION_RUNTIME.md` as the current maintenance
+  contract and marked the original Pets requirements as historical inputs.
+
+---
+
 ## 🚀 v6.6.8 — Gallery Scroll Performance, Async Windows & Thumbnail Demand
 
 🖼️ *A Gallery performance release focused on low-latency scrolling, sparse
@@ -20,8 +124,8 @@ memory-aware thumbnail publishing.*
   feature bundles, with `featureCreated` wiring for components that appear
   after the window shell.
 - Kept the GPU-backed detail page in the Windows pre-show phase to avoid native
-  window recreation and a visible false first window; macOS and Linux defer it
-  for the faster first-frame path.
+  window recreation and a visible false first window; Linux follows the same
+  pre-show rule, while macOS defers it for the faster first-frame path.
 - Reused the settings object loaded during early startup and avoided rewriting
   an unchanged settings file on every launch.
 
@@ -153,13 +257,15 @@ assignment, and packaged runtime coverage.*
   English literals in high-risk GUI APIs such as `setText`, `setToolTip`,
   `QAction`, dialogs, and status messages.
 - Added Apple Photos-aligned edit terminology notes under
-  `docs/requirements/i18n/` and a long-term i18n UI text guardrail under
-  `docs/misc/`.
+  `docs/requirements/i18n/` (now archived under
+  `docs/finished/requirements/i18n/`) and a long-term i18n UI text guardrail
+  under `docs/misc/`.
 
 #### 🐾 Requirements Planning
 - Added pet recognition and clustering requirements plus a development guide
-  under `docs/requirements/pets-cluster/`; these documents describe planned
-  work and do not yet represent shipped runtime behavior.
+  under `docs/requirements/pets-cluster/` (now archived under
+  `docs/finished/requirements/pets-cluster/`); these documents described
+  planned work at the time and did not yet represent shipped runtime behavior.
 
 #### 🍎 macOS Media Rendering
 - Added platform QRhi backend selection via `IPHOTO_RHI_BACKEND`; macOS now

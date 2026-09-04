@@ -152,6 +152,15 @@ class _DummyThumbnailLoader(QObject):
         del root
         return None
 
+    def invalidate(self, rel: str) -> None:
+        del rel
+
+    def evict(self, rel: str, abs_path: Path) -> None:
+        del rel, abs_path
+
+    def evict_many(self, entries: list[tuple[str, Path]]) -> None:
+        del entries
+
     def request(self, *args, **kwargs):
         del args, kwargs
         return None
@@ -164,6 +173,7 @@ class _DummyMarkerController(QObject):
     clusterActivated = Signal(list)
     markerActivated = Signal(list)
     thumbnailUpdated = Signal(str, QPixmap)
+    thumbnailInvalidated = Signal(str)
     thumbnailsInvalidated = Signal()
 
     def __init__(self, *args, **kwargs) -> None:
@@ -473,6 +483,113 @@ def test_photo_map_view_renders_markers_inside_gl_widget(
         view.close()
 
 
+def test_photo_map_view_shutdown_is_idempotent(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qapp
+    widget_instances: list[_FallbackMapWidget] = []
+    controller_instances: list[_DummyMarkerController] = []
+
+    class _RecordingMapWidget(_FallbackMapWidget):
+        def __init__(
+            self,
+            parent: QWidget | None = None,
+            *,
+            map_source: MapSourceSpec | None = None,
+        ) -> None:
+            super().__init__(parent, map_source=map_source)
+            self.shutdown_calls = 0
+            widget_instances.append(self)
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    class _RecordingMarkerController(_DummyMarkerController):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.shutdown_calls = 0
+            controller_instances.append(self)
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    def _create_widget(
+        parent: QWidget,
+        *,
+        map_source: MapSourceSpec | None,
+        package_root: Path,
+        **_kwargs,
+    ) -> MapWidgetFactoryResult:
+        resolved_source = (
+            map_source.resolved(package_root)
+            if map_source is not None
+            else MapSourceSpec.osmand_default(package_root).resolved(package_root)
+        )
+        return MapWidgetFactoryResult(
+            _RecordingMapWidget(parent, map_source=resolved_source),
+            resolved_source,
+            "legacy_python",
+            False,
+        )
+
+    monkeypatch.setattr(photo_map_view_module, "create_map_widget", _create_widget)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _RecordingMarkerController)
+
+    view = photo_map_view_module.PhotoMapView()
+    view.shutdown()
+    view.shutdown()
+
+    assert len(widget_instances) == 1
+    assert widget_instances[0].shutdown_calls == 1
+    assert len(controller_instances) == 1
+    assert controller_instances[0].shutdown_calls == 1
+
+
+def test_photo_map_view_close_event_uses_idempotent_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qapp
+    shutdown_calls: list[bool] = []
+
+    class _RecordingPhotoMapView(photo_map_view_module.PhotoMapView):
+        def shutdown(self) -> None:
+            if not getattr(self, "_shutdown_complete", False):
+                shutdown_calls.append(True)
+            super().shutdown()
+
+    def _create_widget(
+        parent: QWidget,
+        *,
+        map_source: MapSourceSpec | None,
+        package_root: Path,
+        **_kwargs,
+    ) -> MapWidgetFactoryResult:
+        resolved_source = (
+            map_source.resolved(package_root)
+            if map_source is not None
+            else MapSourceSpec.osmand_default(package_root).resolved(package_root)
+        )
+        return MapWidgetFactoryResult(
+            _FallbackMapWidget(parent, map_source=resolved_source),
+            resolved_source,
+            "legacy_python",
+            False,
+        )
+
+    monkeypatch.setattr(photo_map_view_module, "create_map_widget", _create_widget)
+    monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
+    monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
+
+    view = _RecordingPhotoMapView()
+    view.close()
+    view.close()
+
+    assert shutdown_calls == [True]
+
+
 def test_marker_callout_background_is_opaque(qapp: QApplication, tmp_path) -> None:
     del qapp
 
@@ -512,6 +629,78 @@ def test_marker_callout_background_is_opaque(qapp: QApplication, tmp_path) -> No
     assert sample.red() == 255
     assert sample.green() == 255
     assert sample.blue() == 255
+
+
+def test_marker_layer_uses_bounded_lru_and_supports_precise_removal(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    layer = photo_map_view_module._MarkerLayer()
+    layer.MAX_PIXMAPS = 2
+    first = QPixmap(2, 2)
+    first.fill(Qt.GlobalColor.red)
+    second = QPixmap(2, 2)
+    second.fill(Qt.GlobalColor.green)
+    third = QPixmap(2, 2)
+    third.fill(Qt.GlobalColor.blue)
+
+    layer.set_thumbnail("first.jpg", first)
+    layer.set_thumbnail("second.jpg", second)
+    layer.set_thumbnail("first.jpg", first)
+    layer.set_thumbnail("third.jpg", third)
+
+    assert list(layer._pixmaps) == ["first.jpg", "third.jpg"]
+
+    layer.remove_thumbnail("first.jpg")
+
+    assert list(layer._pixmaps) == ["third.jpg"]
+
+
+def test_marker_layer_pins_all_visible_thumbnails_above_history_limit(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    layer = photo_map_view_module._MarkerLayer()
+    layer.MAX_PIXMAPS = 2
+
+    def cluster(rel: str, x: float) -> photo_map_view_module._MarkerCluster:
+        asset = photo_map_view_module.GeotaggedAsset(
+            library_relative=rel,
+            album_relative=rel,
+            absolute_path=tmp_path / rel,
+            album_path=tmp_path,
+            asset_id=rel,
+            latitude=0.0,
+            longitude=0.0,
+            is_image=True,
+            is_video=False,
+            still_image_time=None,
+            duration=None,
+            location_name=None,
+            live_photo_group_id=None,
+            live_partner_rel=None,
+        )
+        return photo_map_view_module._MarkerCluster(
+            representative=asset,
+            screen_pos=QPointF(x, 100.0),
+        )
+
+    clusters = [
+        cluster("first.jpg", 100.0),
+        cluster("second.jpg", 200.0),
+        cluster("third.jpg", 300.0),
+    ]
+    pixmap = QPixmap(2, 2)
+    layer.set_clusters(clusters)
+    for item in clusters:
+        layer.set_thumbnail(item.representative.library_relative, pixmap)
+
+    assert list(layer._pixmaps) == ["first.jpg", "second.jpg", "third.jpg"]
+
+    layer.set_clusters(clusters[1:])
+
+    assert list(layer._pixmaps) == ["second.jpg", "third.jpg"]
 
 
 def test_photo_map_view_routes_marker_assets_through_interaction_service(
@@ -1095,6 +1284,13 @@ def test_native_osmand_widget_bridges_drag_release_and_wheel_events(qapp: QAppli
         assert event_target.minimumWidth() == 0
         assert event_target.minimumHeight() == 0
         assert event_target.geometry() == widget.contentsRect()
+
+        widget.hide()
+        qapp.processEvents()
+        assert widget.updatesEnabled()
+        assert event_target.updatesEnabled()
+        widget.show()
+        qapp.processEvents()
 
         press_event = QMouseEvent(
             QEvent.Type.MouseButtonPress,

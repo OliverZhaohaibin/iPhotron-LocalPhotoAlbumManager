@@ -112,3 +112,23 @@ def test_security_docs_separate_model_storage_and_download_contracts() -> None:
     assert "Explicit `IPHOTO_*_MODEL_DIR` override" in security
     assert "YOLOX detector download" in security
     assert "`torchscript_url` is `null`" in security
+
+
+def test_flatpak_docs_separate_current_identity_from_v668_legacy_bundle() -> None:
+    current_id = "io.github.oliverzhaohaibin.iPhotron"
+    legacy_id = "com.github.OliverZhaohaibin.iPhotron"
+    manifest = _read(ROOT / f"packaging/flatpak/{current_id}.yml")
+    guide = _read(DOCS / "misc/BUILD_FLATPAK.md")
+
+    assert manifest.startswith(f"id: {current_id}\n")
+    assert "app-id:" not in manifest
+    assert current_id in guide
+    assert legacy_id in guide
+    for readme in (
+        ROOT / "README.md",
+        DOCS / "readme/README_zh-CN.md",
+        DOCS / "readme/README_de.md",
+    ):
+        contents = _read(readme)
+        assert f"{legacy_id}-6.6.8-x86_64.flatpak" in contents
+        assert current_id in contents

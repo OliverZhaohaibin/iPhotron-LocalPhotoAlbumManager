@@ -1,0 +1,50 @@
+name: Flatpak Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, edit-base]
+    paths:
+      - ".github/workflows/flatpak-smoke.yml"
+      - "packaging/flatpak/**"
+      - "scripts/build_flatpak.sh"
+      - "scripts/build_nuitka_fast.sh"
+      - "tools/build_manifest.py"
+      - "tools/check_flatpak_elf_abi.py"
+      - "tests/integration/run_flatpak_smoke.sh"
+  pull_request:
+    branches: [main, edit-base]
+    paths:
+      - ".github/workflows/flatpak-smoke.yml"
+      - "packaging/flatpak/**"
+      - "scripts/build_flatpak.sh"
+      - "scripts/build_nuitka_fast.sh"
+      - "tools/build_manifest.py"
+      - "tools/check_flatpak_elf_abi.py"
+      - "tests/integration/run_flatpak_smoke.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  build-install-run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Flatpak validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            appstream \
+            binutils \
+            dbus-x11 \
+            desktop-file-utils \
+            flatpak \
+            flatpak-builder \
+            gcc
+
+      - name: Build, install, and run the real Flatpak bundle
+        run: dbus-run-session -- bash tests/integration/run_flatpak_smoke.sh

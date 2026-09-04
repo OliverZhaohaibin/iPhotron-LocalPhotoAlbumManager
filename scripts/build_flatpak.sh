@@ -2,24 +2,30 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: scripts/build_flatpak.sh --standalone-dir DIR --icon PNG --output FILE"
+  echo "Usage: scripts/build_flatpak.sh --standalone-dir DIR --standalone-manifest FILE --icon PNG --output FILE"
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 STANDALONE_DIR=""
+STANDALONE_MANIFEST=""
 ICON_PATH=""
 OUTPUT_PATH=""
 FLATPAK_BIN="${FLATPAK_BIN:-flatpak}"
 FLATPAK_BUILDER_BIN="${FLATPAK_BUILDER_BIN:-flatpak-builder}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-APP_ID="com.github.OliverZhaohaibin.iPhotron"
+READELF_BIN="${READELF_BIN:-readelf}"
+APP_ID="io.github.oliverzhaohaibin.iPhotron"
 RUNTIME_VERSION="25.08"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --standalone-dir)
       STANDALONE_DIR="$2"
+      shift 2
+      ;;
+    --standalone-manifest)
+      STANDALONE_MANIFEST="$2"
       shift 2
       ;;
     --icon)
@@ -44,12 +50,14 @@ done
 
 [[ "$(uname -s)" == "Linux" ]] || { echo "error: Flatpak builds require Linux" >&2; exit 2; }
 [[ -n "$STANDALONE_DIR" && -d "$STANDALONE_DIR" ]] || { echo "error: invalid --standalone-dir" >&2; exit 2; }
+[[ -n "$STANDALONE_MANIFEST" && -f "$STANDALONE_MANIFEST" ]] || { echo "error: invalid --standalone-manifest" >&2; exit 2; }
 [[ -n "$ICON_PATH" && -f "$ICON_PATH" ]] || { echo "error: --icon must name an existing PNG" >&2; exit 2; }
 [[ "$ICON_PATH" == *.png ]] || { echo "error: Flatpak icon must be a PNG" >&2; exit 2; }
 [[ -n "$OUTPUT_PATH" ]] || { echo "error: --output is required" >&2; exit 2; }
 [[ "$OUTPUT_PATH" == *.flatpak ]] || { echo "error: Flatpak output must use the .flatpak suffix" >&2; exit 2; }
 command -v "$FLATPAK_BIN" >/dev/null 2>&1 || { echo "error: flatpak not found" >&2; exit 2; }
 command -v "$FLATPAK_BUILDER_BIN" >/dev/null 2>&1 || { echo "error: flatpak-builder not found" >&2; exit 2; }
+command -v "$READELF_BIN" >/dev/null 2>&1 || { echo "error: readelf not found" >&2; exit 2; }
 
 ENTRYPOINT=""
 for candidate in entrypoint.bin entrypoint main.bin main; do
@@ -89,21 +97,39 @@ ARCH="$($FLATPAK_BIN --default-arch)"
 OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_PATH")" && pwd)"
 OUTPUT_PATH="$OUTPUT_DIR/$(basename "$OUTPUT_PATH")"
 [[ ! -e "$OUTPUT_PATH" ]] || { echo "error: refusing to overwrite existing $OUTPUT_PATH" >&2; exit 2; }
+ABI_REPORT_PATH="${OUTPUT_PATH}.abi-report.json"
 
 VERSION="$($PYTHON_BIN -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+EXPECTED_OUTPUT_NAME="$APP_ID-$VERSION-x86_64.flatpak"
+[[ "$(basename "$OUTPUT_PATH")" == "$EXPECTED_OUTPUT_NAME" ]] || {
+  echo "error: Flatpak output must be named $EXPECTED_OUTPUT_NAME" >&2
+  exit 2
+}
+"$PYTHON_BIN" "$ROOT_DIR/tools/check_flatpak_elf_abi.py" \
+  --root "$STANDALONE_DIR" \
+  --entrypoint "$STANDALONE_DIR/$ENTRYPOINT" \
+  --build-manifest "$STANDALONE_MANIFEST" \
+  --icon "$ICON_PATH" \
+  --max-glibc 2.42 \
+  --max-glibcxx 3.4.34 \
+  --max-cxxabi 1.3.15 \
+  --readelf-bin "$READELF_BIN" \
+  --output "$ABI_REPORT_PATH"
+
 BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/iphotron-flatpak.XXXXXX")"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 CONTEXT_DIR="$BUILD_ROOT/context"
 mkdir -p "$CONTEXT_DIR/payload"
 cp -a "$STANDALONE_DIR/." "$CONTEXT_DIR/payload/"
 cp "$ICON_PATH" "$CONTEXT_DIR/iphotron.png"
-cp "$ROOT_DIR/packaging/flatpak/com.github.OliverZhaohaibin.iPhotron.yml" "$CONTEXT_DIR/manifest.yml"
-cp "$ROOT_DIR/packaging/flatpak/com.github.OliverZhaohaibin.iPhotron.desktop" "$CONTEXT_DIR/"
-cp "$ROOT_DIR/packaging/flatpak/com.github.OliverZhaohaibin.iPhotron.metainfo.xml" "$CONTEXT_DIR/"
+cp "$ROOT_DIR/packaging/flatpak/io.github.oliverzhaohaibin.iPhotron.yml" "$CONTEXT_DIR/manifest.yml"
+cp "$ROOT_DIR/packaging/flatpak/io.github.oliverzhaohaibin.iPhotron.desktop" "$CONTEXT_DIR/"
+cp "$ROOT_DIR/packaging/flatpak/io.github.oliverzhaohaibin.iPhotron.metainfo.xml" "$CONTEXT_DIR/"
 cp "$ROOT_DIR/packaging/flatpak/iphotron-launcher" "$CONTEXT_DIR/"
 
 "$FLATPAK_BUILDER_BIN" \
   --force-clean \
+  --user \
   --install-deps-from=flathub \
   --default-branch="$VERSION" \
   --repo="$BUILD_ROOT/repo" \
@@ -112,7 +138,7 @@ cp "$ROOT_DIR/packaging/flatpak/iphotron-launcher" "$CONTEXT_DIR/"
 
 "$FLATPAK_BIN" build-bundle \
   --arch="$ARCH" \
-  --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+  --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
   "$BUILD_ROOT/repo" \
   "$OUTPUT_PATH" \
   "$APP_ID" \
@@ -129,6 +155,7 @@ cp "$ROOT_DIR/packaging/flatpak/iphotron-launcher" "$CONTEXT_DIR/"
   --native-runtime "$STANDALONE_DIR/maps/tiles/extension/bin" \
   --asset "$STANDALONE_DIR/maps/tiles" \
   --asset "$STANDALONE_DIR/iPhoto/resources/i18n" \
+  --asset "$ABI_REPORT_PATH" \
   --output "${OUTPUT_PATH}.build-manifest.json"
 
 echo "Created $OUTPUT_PATH"

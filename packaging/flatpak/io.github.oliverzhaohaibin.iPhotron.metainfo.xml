@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.github.OliverZhaohaibin.iPhotron</id>
+  <id>io.github.oliverzhaohaibin.iPhotron</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>iPhotron</name>
@@ -11,7 +11,19 @@
       non-destructive editing, Live Photo playback, People, Pets, and maps.
     </p>
   </description>
-  <launchable type="desktop-id">com.github.OliverZhaohaibin.iPhotron.desktop</launchable>
+  <developer id="io.github.oliverzhaohaibin">
+    <name>iPhoto Team</name>
+  </developer>
+  <launchable type="desktop-id">io.github.oliverzhaohaibin.iPhotron.desktop</launchable>
+  <provides>
+    <id>com.github.OliverZhaohaibin.iPhotron</id>
+  </provides>
+  <replaces>
+    <id>com.github.OliverZhaohaibin.iPhotron</id>
+  </replaces>
+  <releases>
+    <release version="6.6.8" date="2026-06-24" />
+  </releases>
   <url type="homepage">https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager</url>
   <content_rating type="oars-1.1" />
 </component>

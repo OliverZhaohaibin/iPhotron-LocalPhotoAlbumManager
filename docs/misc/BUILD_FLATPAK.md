@@ -7,18 +7,21 @@ as satisfying Flathub submission requirements.
 
 ## Prerequisites
 
-- Linux x86-64.
-- `flatpak` and `flatpak-builder`.
+- Ubuntu 24.04 x86-64 is the supported release-build baseline. Other hosts may
+  be used for development, but their standalone manifests are rejected by the
+  canonical wrapper.
+- `flatpak`, `flatpak-builder`, and GNU `readelf` from binutils.
 - The Flathub remote and the `org.freedesktop.Platform` / `org.freedesktop.Sdk`
   25.08 runtime. The build script asks `flatpak-builder` to install missing
   dependencies from Flathub.
-- A synchronized and verified `dist/entrypoint.dist` from
-  `scripts/build_nuitka_fast.sh`.
-- A PNG application icon.
+- A synchronized `dist/entrypoint.dist` and its `dist/build-manifest.json` from
+  the same Ubuntu 24.04 invocation of `scripts/build_nuitka_fast.sh`.
+- A valid 256×256 PNG application icon.
 
 The tracked manifest is
-`packaging/flatpak/com.github.OliverZhaohaibin.iPhotron.yml` and the
-application ID is `com.github.OliverZhaohaibin.iPhotron`.
+`packaging/flatpak/io.github.oliverzhaohaibin.iPhotron.yml` and the application
+ID is `io.github.oliverzhaohaibin.iPhotron`. The manifest uses the current `id`
+field rather than the deprecated `app-id` compatibility alias.
 
 ## Build
 
@@ -28,15 +31,37 @@ bash scripts/build_nuitka_fast.sh
 VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 bash scripts/build_flatpak.sh \
   --standalone-dir dist/entrypoint.dist \
-  --icon /absolute/path/to/iphotron.png \
-  --output "dist/com.github.OliverZhaohaibin.iPhotron-${VERSION}-x86_64.flatpak"
+  --standalone-manifest dist/build-manifest.json \
+  --icon /absolute/path/to/iphotron-256.png \
+  --output "dist/io.github.oliverzhaohaibin.iPhotron-${VERSION}-x86_64.flatpak"
 ```
 
-The builder validates the executable, QRhi shaders, Maps helper, and Qt XCB
-plugin before creating a temporary Flatpak build context. It installs the
-standalone under `/app/lib/iphotron`, exports `/app/bin/iphoto`, refuses to
-overwrite an existing output, and removes the temporary context on exit. The
-bundle is accompanied by a `.build-manifest.json` provenance record.
+Before staging, the builder verifies that the standalone manifest records an
+Ubuntu 24.04 x86-64 build and that its artifact hash matches the selected ELF
+entry point. It then scans every ELF file in the payload, including Python/Qt
+extensions and Maps binaries, using `readelf --version-info --wide`. The
+Freedesktop 25.08 limits are `GLIBC_2.42`, `GLIBCXX_3.4.34`, and
+`CXXABI_1.3.15`; any unreadable or newer requirement rejects the build.
+
+The builder also validates the PNG structure, CRCs, and exact 256×256 size,
+then checks the executable, QRhi shaders, Maps helper, and Qt XCB plugin. It
+installs the standalone under `/app/lib/iphotron`, exports `/app/bin/iphoto`,
+and removes the temporary context on exit. The bundle is accompanied by an
+`.abi-report.json` plus the existing `.build-manifest.json` provenance record.
+
+The same preflight can be run without building a bundle:
+
+```bash
+python3 tools/check_flatpak_elf_abi.py \
+  --root dist/entrypoint.dist \
+  --entrypoint dist/entrypoint.dist/entrypoint.bin \
+  --build-manifest dist/build-manifest.json \
+  --icon /absolute/path/to/iphotron-256.png \
+  --max-glibc 2.42 \
+  --max-glibcxx 3.4.34 \
+  --max-cxxabi 1.3.15 \
+  --output dist/flatpak-abi-report.json
+```
 
 Recognition models follow the standalone build posture: omitted by default,
 or copied from the ignored `src/extension/models` staging directory when that
@@ -65,8 +90,8 @@ application follows its existing recoverable warning/degradation path.
 
 ```bash
 flatpak install --user \
-  "dist/com.github.OliverZhaohaibin.iPhotron-${VERSION}-x86_64.flatpak"
-flatpak run com.github.OliverZhaohaibin.iPhotron
+  "dist/io.github.oliverzhaohaibin.iPhotron-${VERSION}-x86_64.flatpak"
+flatpak run io.github.oliverzhaohaibin.iPhotron
 ```
 
 Test XCB and Wayland separately. Open an arbitrary library folder, Gallery,
@@ -77,8 +102,41 @@ write-back behavior for the exact release payload.
 Run the structural checks with:
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_flatpak_packaging.py
+.venv/bin/python -m pytest -q \
+  tests/test_build_manifest.py \
+  tests/test_flatpak_elf_abi.py \
+  tests/test_flatpak_packaging.py
 ```
+
+The path-filtered `Flatpak Smoke` GitHub Actions workflow runs on Ubuntu 24.04
+with real `flatpak-builder`: it builds a minimal ELF payload with this manifest,
+creates a bundle, installs it in an isolated user Flatpak root, runs it, checks
+its output, and uninstalls it. That integration job validates the packaging
+lifecycle; the Python test remains the fast orchestration/failure-path layer.
+
+## Migration From The v6.6.8 Legacy ID
+
+The published v6.6.8 asset keeps its historical filename and legacy application
+ID, `com.github.OliverZhaohaibin.iPhotron`. Future bundles use
+`io.github.oliverzhaohaibin.iPhotron`. The new MetaInfo records the old ID in
+both `provides` and `replaces`, but independently distributed single-file
+bundles do not share a Flatpak remote and therefore cannot use an automatic
+end-of-life rebase.
+
+Before installing a new-ID bundle, uninstall the old application without
+`--delete-data`:
+
+```bash
+flatpak uninstall --user com.github.OliverZhaohaibin.iPhotron
+flatpak install --user \
+  "dist/io.github.oliverzhaohaibin.iPhotron-${VERSION}-x86_64.flatpak"
+```
+
+Flatpak stores the two IDs under separate `~/.var/app/<id>/` roots. If desired,
+copy only the old `config/iPhoto/settings.json` and verified model-cache files
+into the equivalent new-ID directories while both applications are stopped.
+Do not copy rebuildable shader or thumbnail caches. Library-local `.iPhoto`
+state and `.ipo` sidecars remain in the selected library and need no migration.
 
 The manifest/build-bundle structure follows the
 [official Flatpak builder workflow](https://docs.flatpak.org/en/latest/first-build.html).

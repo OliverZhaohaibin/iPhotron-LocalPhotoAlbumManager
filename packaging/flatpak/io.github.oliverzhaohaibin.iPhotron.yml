@@ -1,4 +1,4 @@
-app-id: com.github.OliverZhaohaibin.iPhotron
+id: io.github.oliverzhaohaibin.iPhotron
 runtime: org.freedesktop.Platform
 runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
@@ -21,9 +21,9 @@ modules:
       - install -d /app/lib/iphotron
       - cp -a payload/. /app/lib/iphotron/
       - install -Dm755 iphotron-launcher /app/bin/iphoto
-      - install -Dm644 com.github.OliverZhaohaibin.iPhotron.desktop /app/share/applications/com.github.OliverZhaohaibin.iPhotron.desktop
-      - install -Dm644 com.github.OliverZhaohaibin.iPhotron.metainfo.xml /app/share/metainfo/com.github.OliverZhaohaibin.iPhotron.metainfo.xml
-      - install -Dm644 iphotron.png /app/share/icons/hicolor/256x256/apps/com.github.OliverZhaohaibin.iPhotron.png
+      - install -Dm644 io.github.oliverzhaohaibin.iPhotron.desktop /app/share/applications/io.github.oliverzhaohaibin.iPhotron.desktop
+      - install -Dm644 io.github.oliverzhaohaibin.iPhotron.metainfo.xml /app/share/metainfo/io.github.oliverzhaohaibin.iPhotron.metainfo.xml
+      - install -Dm644 iphotron.png /app/share/icons/hicolor/256x256/apps/io.github.oliverzhaohaibin.iPhotron.png
     sources:
       - type: dir
         path: payload
@@ -31,8 +31,8 @@ modules:
       - type: file
         path: iphotron-launcher
       - type: file
-        path: com.github.OliverZhaohaibin.iPhotron.desktop
+        path: io.github.oliverzhaohaibin.iPhotron.desktop
       - type: file
-        path: com.github.OliverZhaohaibin.iPhotron.metainfo.xml
+        path: io.github.oliverzhaohaibin.iPhotron.metainfo.xml
       - type: file
         path: iphotron.png

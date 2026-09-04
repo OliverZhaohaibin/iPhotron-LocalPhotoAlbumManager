@@ -83,6 +83,28 @@ def _canonical_hash(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _build_host() -> dict[str, str]:
+    distro_id = ""
+    distro_version_id = ""
+    if platform.system() == "Linux":
+        try:
+            os_release = platform.freedesktop_os_release()
+        except OSError:
+            os_release = {}
+        distro_id = str(os_release.get("ID") or "").strip().lower()
+        distro_version_id = str(os_release.get("VERSION_ID") or "").strip()
+    libc_name, libc_version = platform.libc_ver()
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "platform_release": platform.release(),
+        "distro_id": distro_id,
+        "distro_version_id": distro_version_id,
+        "libc_name": str(libc_name or ""),
+        "libc_version": str(libc_version or ""),
+    }
+
+
 def create_manifest(
     *,
     root: Path,
@@ -106,6 +128,7 @@ def create_manifest(
         "pyside6_version": _package_version("PySide6"),
         "qt_version": _package_version("PySide6_Essentials"),
         "nuitka_version": _package_version("Nuitka"),
+        "build_host": _build_host(),
         "build_driver_sha256": _sha256_path(build_driver),
         "build_flags": sorted(str(flag) for flag in build_flags),
         "dependency_snapshot_sha256": _canonical_hash(dependencies),

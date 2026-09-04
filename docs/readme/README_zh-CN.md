@@ -49,6 +49,10 @@ chmod +x iPhotron-6.6.8-x86_64.AppImage
 flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak
 ```
 
+v6.6.8 Flatpak 保留历史文件名和应用身份；后续 Flatpak bundle 使用
+`io.github.oliverzhaohaibin.iPhotron`。迁移方法见
+[Flatpak 指南](../misc/BUILD_FLATPAK.md#migration-from-the-v668-legacy-id)。
+
 **开发者安装：**
 
 ```bash

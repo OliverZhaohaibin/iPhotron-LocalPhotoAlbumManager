@@ -113,6 +113,7 @@ def create_manifest(
     build_flags: list[str],
     native_runtime: Path | None,
     assets: list[Path],
+    artifact_tree: Path | None = None,
 ) -> dict[str, Any]:
     dependencies = _installed_distributions()
 
@@ -147,6 +148,10 @@ def create_manifest(
         "source_revision": _git_revision(root),
         "artifact_path": artifact.name,
         "artifact_sha256": _sha256_path(artifact),
+        "artifact_tree_path": artifact_tree.name if artifact_tree is not None else None,
+        "artifact_tree_sha256": (
+            _sha256_path(artifact_tree) if artifact_tree is not None else None
+        ),
         "environment": environment,
         "environment_fingerprint": _canonical_hash(environment),
     }
@@ -156,6 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--artifact-tree", type=Path)
     parser.add_argument("--build-driver", type=Path, required=True)
     parser.add_argument("--build-flag", action="append", default=[])
     parser.add_argument("--native-runtime", type=Path)
@@ -182,6 +188,9 @@ def main(argv: list[str] | None = None) -> int:
             args.native_runtime.expanduser().resolve() if args.native_runtime else None
         ),
         assets=[path.expanduser().resolve() for path in args.asset],
+        artifact_tree=(
+            args.artifact_tree.expanduser().resolve() if args.artifact_tree else None
+        ),
     )
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

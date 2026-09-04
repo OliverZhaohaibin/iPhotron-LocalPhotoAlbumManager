@@ -5,6 +5,9 @@ sdk: org.freedesktop.Sdk
 command: iphoto
 separate-locales: false
 
+build-options:
+  no-debuginfo: true
+
 finish-args:
   - --share=ipc
   - --socket=wayland

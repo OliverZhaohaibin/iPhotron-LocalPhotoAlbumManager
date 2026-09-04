@@ -26,12 +26,15 @@ def test_build_manifest_separates_environment_and_artifact_identity(tmp_path: Pa
         build_flags=["lto=yes", "profile=test"],
         native_runtime=native,
         assets=[assets],
+        artifact_tree=assets,
     )
 
     assert manifest["schema_version"] == 1
     assert manifest["artifact_sha256"] == hashlib.sha256(
         b"candidate executable"
     ).hexdigest()
+    assert manifest["artifact_tree_path"] == "assets"
+    assert len(manifest["artifact_tree_sha256"]) == 64
     assert len(manifest["environment_fingerprint"]) == 64
     assert manifest["environment"]["build_flags"] == ["lto=yes", "profile=test"]
     assert manifest["environment"]["build_host"]["system"]

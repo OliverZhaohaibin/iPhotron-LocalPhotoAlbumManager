@@ -16,6 +16,7 @@ FLATPAK_BUILDER_BIN="${FLATPAK_BUILDER_BIN:-flatpak-builder}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 READELF_BIN="${READELF_BIN:-readelf}"
 APP_ID="io.github.oliverzhaohaibin.iPhotron"
+FLATPAK_BRANCH="stable"
 RUNTIME_VERSION="25.08"
 
 while [[ $# -gt 0 ]]; do
@@ -131,7 +132,7 @@ cp "$ROOT_DIR/packaging/flatpak/iphotron-launcher" "$CONTEXT_DIR/"
   --force-clean \
   --user \
   --install-deps-from=flathub \
-  --default-branch="$VERSION" \
+  --default-branch="$FLATPAK_BRANCH" \
   --repo="$BUILD_ROOT/repo" \
   "$BUILD_ROOT/build" \
   "$CONTEXT_DIR/manifest.yml"
@@ -142,7 +143,7 @@ cp "$ROOT_DIR/packaging/flatpak/iphotron-launcher" "$CONTEXT_DIR/"
   "$BUILD_ROOT/repo" \
   "$OUTPUT_PATH" \
   "$APP_ID" \
-  "$VERSION"
+  "$FLATPAK_BRANCH"
 
 "$PYTHON_BIN" "$ROOT_DIR/tools/build_manifest.py" \
   --root "$ROOT_DIR" \
@@ -150,6 +151,7 @@ cp "$ROOT_DIR/packaging/flatpak/iphotron-launcher" "$CONTEXT_DIR/"
   --build-driver "$ROOT_DIR/scripts/build_flatpak.sh" \
   --build-flag "profile=flatpak-standalone-wrapper" \
   --build-flag "app_id=$APP_ID" \
+  --build-flag "flatpak_branch=$FLATPAK_BRANCH" \
   --build-flag "runtime=$RUNTIME_VERSION" \
   --build-flag "architecture=$ARCH" \
   --native-runtime "$STANDALONE_DIR/maps/tiles/extension/bin" \

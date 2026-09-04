@@ -9,8 +9,19 @@ import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 
+from tools.build_manifest import _sha256_path
+
 APP_ID = "io.github.oliverzhaohaibin.iPhotron"
 LEGACY_APP_ID = "com.github.OliverZhaohaibin.iPhotron"
+
+
+def _elf64_header(*, machine: int = 62) -> bytes:
+    identity = bytearray(16)
+    identity[:4] = b"\x7fELF"
+    identity[4] = 2
+    identity[5] = 1
+    identity[6] = 1
+    return bytes(identity) + struct.pack("<HHI", 2, machine, 1)
 
 
 def _executable(path: Path, contents: str) -> None:
@@ -40,7 +51,7 @@ def _fake_standalone(root: Path) -> Path:
     (standalone / "maps/tiles/extension/bin").mkdir(parents=True)
     (standalone / "PySide6/Qt/plugins/platforms").mkdir(parents=True)
     entrypoint = standalone / "entrypoint.bin"
-    entrypoint.write_bytes(b"\x7fELFflatpak-test")
+    entrypoint.write_bytes(_elf64_header() + b"flatpak-test")
     entrypoint.chmod(0o755)
     (standalone / "iPhoto/gui/ui/widgets/image.qsb").write_bytes(b"qsb")
     _executable(
@@ -59,6 +70,8 @@ def _standalone_manifest(path: Path, entrypoint: Path) -> Path:
                 "schema_version": 1,
                 "artifact_path": entrypoint.name,
                 "artifact_sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest(),
+                "artifact_tree_path": entrypoint.parent.name,
+                "artifact_tree_sha256": _sha256_path(entrypoint.parent),
                 "environment": {
                     "build_host": {
                         "system": "Linux",
@@ -89,6 +102,7 @@ def test_flatpak_manifest_declares_runtime_identity_and_required_permissions() -
     assert "runtime-version: '25.08'" in manifest
     assert "sdk: org.freedesktop.Sdk" in manifest
     assert "command: iphoto" in manifest
+    assert "no-debuginfo: true" in manifest
     assert "dest: payload" in manifest
     for permission in (
         "--socket=wayland",
@@ -122,6 +136,17 @@ def test_flatpak_manifest_declares_runtime_identity_and_required_permissions() -
     assert "Exec=iphoto" in desktop
     assert f"Icon={APP_ID}" in desktop
 
+    nuitka_script = (repo_root / "scripts/build_nuitka_fast.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "--artifact-tree" in nuitka_script
+
+    flatpak_script = (repo_root / "scripts/build_flatpak.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "--standalone-manifest" in flatpak_script
+    assert 'FLATPAK_BRANCH="stable"' in flatpak_script
+
 
 def test_flatpak_wrapper_orchestrates_staging_and_writes_reports(tmp_path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
@@ -138,6 +163,7 @@ def test_flatpak_wrapper_orchestrates_staging_and_writes_reports(tmp_path) -> No
         '#!/bin/sh\nif [ "${1:-}" = "-m" ]; then echo x86_64; else echo Linux; fi\n',
     )
     builder_record = tmp_path / "flatpak-builder-record.txt"
+    bundle_record = tmp_path / "flatpak-bundle-record.txt"
     _executable(
         fake_bin / "flatpak-builder",
         """#!/bin/sh
@@ -167,6 +193,7 @@ if [ "$1" = "--default-arch" ]; then
   exit 0
 fi
 if [ "$1" = "build-bundle" ]; then
+  printf '%s\n' "$@" > "$FLATPAK_TEST_BUNDLE_RECORD"
   touch "$5"
   exit 0
 fi
@@ -176,6 +203,7 @@ exit 2
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
     environment["FLATPAK_TEST_RECORD"] = str(builder_record)
+    environment["FLATPAK_TEST_BUNDLE_RECORD"] = str(bundle_record)
 
     command = [
         "bash",
@@ -205,7 +233,9 @@ exit 2
     builder_args = builder_record.read_text(encoding="utf-8")
     assert "--user" in builder_args
     assert "--install-deps-from=flathub" in builder_args
-    assert "--default-branch=6.6.8" in builder_args
+    assert "--default-branch=stable" in builder_args
+    bundle_args = bundle_record.read_text(encoding="utf-8").splitlines()
+    assert bundle_args[-1] == "stable"
 
     repeated = subprocess.run(
         command,

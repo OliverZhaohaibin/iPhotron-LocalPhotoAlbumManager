@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.build_manifest import _sha256_path
 from tools.check_flatpak_elf_abi import audit_payload, parse_version_needs
 
 LIMITS = {
@@ -15,6 +16,15 @@ LIMITS = {
     "GLIBCXX": "3.4.34",
     "CXXABI": "1.3.15",
 }
+
+
+def elf64_header(*, machine: int = 62) -> bytes:
+    identity = bytearray(16)
+    identity[:4] = b"\x7fELF"
+    identity[4] = 2
+    identity[5] = 1
+    identity[6] = 1
+    return bytes(identity) + struct.pack("<HHI", 2, machine, 1)
 
 
 def write_png(path: Path, *, width: int = 256, height: int = 256) -> None:
@@ -47,6 +57,8 @@ def _write_manifest(path: Path, entrypoint: Path, **host_overrides: str) -> None
                 "schema_version": 1,
                 "artifact_path": entrypoint.name,
                 "artifact_sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest(),
+                "artifact_tree_path": entrypoint.parent.name,
+                "artifact_tree_sha256": _sha256_path(entrypoint.parent),
                 "environment": {"build_host": build_host},
             }
         ),
@@ -83,7 +95,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     root = tmp_path / "entrypoint.dist"
     root.mkdir()
     entrypoint = root / "entrypoint.bin"
-    entrypoint.write_bytes(b"\x7fELFfixture")
+    entrypoint.write_bytes(elf64_header() + b"fixture")
     entrypoint.chmod(0o755)
     manifest = tmp_path / "build-manifest.json"
     _write_manifest(manifest, entrypoint)
@@ -155,7 +167,7 @@ def test_audit_rejects_newer_abi_requirement(
 def test_audit_rejects_wrong_build_host_hash_and_invalid_png(tmp_path: Path) -> None:
     root, entrypoint, manifest, icon = _fixture(tmp_path)
     _write_manifest(manifest, entrypoint, distro_version_id="rolling")
-    entrypoint.write_bytes(b"\x7fELFchanged")
+    entrypoint.write_bytes(elf64_header() + b"changed")
     icon.write_bytes(b"png")
 
     report = audit_payload(
@@ -171,6 +183,45 @@ def test_audit_rejects_wrong_build_host_hash_and_invalid_png(tmp_path: Path) -> 
     assert any("distro_version_id" in error for error in report["errors"])
     assert any("artifact_sha256" in error for error in report["errors"])
     assert any("not a PNG" in error for error in report["errors"])
+
+
+def test_audit_rejects_aarch64_elf_in_x86_64_payload(tmp_path: Path) -> None:
+    root, entrypoint, manifest, icon = _fixture(tmp_path)
+    arm_library = root / "maps-native.so"
+    arm_library.write_bytes(elf64_header(machine=183) + b"arm")
+    _write_manifest(manifest, entrypoint)
+
+    report = audit_payload(
+        root=root,
+        entrypoint=entrypoint,
+        build_manifest=manifest,
+        icon=icon,
+        limits=LIMITS,
+        readelf_bin=str(tmp_path / "readelf"),
+    )
+
+    assert report["passed"] is False
+    assert any("e_machine=183" in error for error in report["errors"])
+
+
+def test_audit_rejects_non_entrypoint_change_after_manifest_creation(tmp_path: Path) -> None:
+    root, entrypoint, manifest, icon = _fixture(tmp_path)
+    plugin = root / "qt-plugin.so"
+    plugin.write_bytes(elf64_header() + b"original")
+    _write_manifest(manifest, entrypoint)
+    plugin.write_bytes(elf64_header() + b"replacement")
+
+    report = audit_payload(
+        root=root,
+        entrypoint=entrypoint,
+        build_manifest=manifest,
+        icon=icon,
+        limits=LIMITS,
+        readelf_bin=str(tmp_path / "readelf"),
+    )
+
+    assert report["passed"] is False
+    assert any("artifact_tree_sha256" in error for error in report["errors"])
 
 
 def test_audit_rejects_legacy_manifest_without_build_host(tmp_path: Path) -> None:

@@ -71,6 +71,7 @@ done
 python tools/build_manifest.py \
   --root "$ROOT_DIR" \
   --artifact "$ARTIFACT_PATH" \
+  --artifact-tree "$ROOT_DIR/dist/entrypoint.dist" \
   --build-driver "$ROOT_DIR/scripts/build_nuitka_fast.sh" \
   --build-flag "profile=fast" \
   --build-flag "lto=yes" \

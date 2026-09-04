@@ -38,16 +38,27 @@ bash scripts/build_flatpak.sh \
 
 Before staging, the builder verifies that the standalone manifest records an
 Ubuntu 24.04 x86-64 build and that its artifact hash matches the selected ELF
-entry point. It then scans every ELF file in the payload, including Python/Qt
-extensions and Maps binaries, using `readelf --version-info --wide`. The
-Freedesktop 25.08 limits are `GLIBC_2.42`, `GLIBCXX_3.4.34`, and
-`CXXABI_1.3.15`; any unreadable or newer requirement rejects the build.
+entry point. `artifact_tree_sha256` must also match the complete standalone, so
+replacing a Qt, Maps, ONNX Runtime, or other payload file after the Nuitka build
+invalidates provenance. It then scans every ELF file using
+`readelf --version-info --wide` and verifies an ELF64, little-endian,
+`EM_X86_64` header. The Freedesktop 25.08 limits are `GLIBC_2.42`,
+`GLIBCXX_3.4.34`, and `CXXABI_1.3.15`; an unreadable file, wrong architecture,
+or newer requirement rejects the build.
 
 The builder also validates the PNG structure, CRCs, and exact 256×256 size,
 then checks the executable, QRhi shaders, Maps helper, and Qt XCB plugin. It
 installs the standalone under `/app/lib/iphotron`, exports `/app/bin/iphoto`,
 and removes the temporary context on exit. The bundle is accompanied by an
 `.abi-report.json` plus the existing `.build-manifest.json` provenance record.
+Because this manifest wraps already-compiled ELF files, it sets
+`build-options.no-debuginfo: true`; `flatpak-builder` therefore does not try to
+extract another debug extension with `eu-strip`.
+
+The Flatpak ref branch is always `stable`. Application versions such as 6.6.8
+belong in the bundle filename, AppStream release metadata, and release manifest,
+not in the Flatpak ref. A future beta or nightly channel must use an explicit
+separate branch rather than changing this stable update path.
 
 The same preflight can be run without building a bundle:
 

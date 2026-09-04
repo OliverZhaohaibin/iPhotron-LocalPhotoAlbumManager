@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 _ELF_MAGIC = b"\x7fELF"
+_ELFCLASS64 = 2
+_ELFDATA2LSB = 1
+_EM_X86_64 = 62
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _VERSION_PATTERN = re.compile(r"\bName:\s*(GLIBCXX|GLIBC|CXXABI)_([0-9]+(?:\.[0-9]+)+)\b")
 _DEFAULT_LIMITS = {
@@ -36,6 +39,25 @@ def _sha256_file(path: Path) -> str:
 def _sha256_or_unavailable(path: Path) -> str:
     try:
         return _sha256_file(path)
+    except OSError:
+        return "unavailable"
+
+
+def _sha256_tree(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(path.rglob("*"), key=lambda candidate: candidate.as_posix()):
+        if not item.is_file():
+            continue
+        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(_sha256_file(item).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _sha256_tree_or_unavailable(path: Path) -> str:
+    try:
+        return _sha256_tree(path)
     except OSError:
         return "unavailable"
 
@@ -71,6 +93,34 @@ def _is_elf(path: Path) -> bool:
             return stream.read(4) == _ELF_MAGIC
     except OSError:
         return False
+
+
+def _elf_identity(path: Path) -> tuple[dict[str, int], list[str]]:
+    relative_label = path.name
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(20)
+    except OSError as exc:
+        return {}, [f"cannot read ELF header for {relative_label}: {exc}"]
+    if len(header) < 20 or not header.startswith(_ELF_MAGIC):
+        return {}, [f"ELF header is truncated for {relative_label}"]
+
+    elf_class = int(header[4])
+    data_encoding = int(header[5])
+    byte_order = "little" if data_encoding == _ELFDATA2LSB else "big"
+    machine = int.from_bytes(header[18:20], byteorder=byte_order)
+    errors: list[str] = []
+    if elf_class != _ELFCLASS64:
+        errors.append(f"{relative_label} is not ELFCLASS64")
+    if data_encoding != _ELFDATA2LSB:
+        errors.append(f"{relative_label} is not little-endian ELF")
+    if machine != _EM_X86_64:
+        errors.append(f"{relative_label} has e_machine={machine}, expected EM_X86_64=62")
+    return {
+        "elf_class": elf_class,
+        "data_encoding": data_encoding,
+        "machine": machine,
+    }, errors
 
 
 def _discover_elf_files(root: Path) -> tuple[list[Path], list[str]]:
@@ -144,6 +194,7 @@ def _validate_png(path: Path) -> list[str]:
 
 def _validate_provenance(
     *,
+    root: Path,
     entrypoint: Path,
     manifest_path: Path,
     required_distro_id: str,
@@ -182,6 +233,17 @@ def _validate_provenance(
         errors.append("standalone entrypoint could not be hashed")
     if str(manifest.get("artifact_sha256") or "").lower() != actual_sha256:
         errors.append("standalone build manifest artifact_sha256 does not match the entrypoint")
+    if str(manifest.get("artifact_tree_path") or "") != root.name:
+        errors.append("standalone build manifest artifact_tree_path does not match the payload")
+    try:
+        actual_tree_sha256 = _sha256_tree(root)
+    except OSError as exc:
+        errors.append(f"standalone payload could not be hashed: {exc}")
+    else:
+        if str(manifest.get("artifact_tree_sha256") or "").lower() != actual_tree_sha256:
+            errors.append(
+                "standalone build manifest artifact_tree_sha256 does not match the payload"
+            )
     return manifest, errors
 
 
@@ -201,6 +263,7 @@ def audit_payload(
     entrypoint = entrypoint.resolve()
     errors = _validate_png(icon.resolve())
     manifest, provenance_errors = _validate_provenance(
+        root=root,
         entrypoint=entrypoint,
         manifest_path=build_manifest.resolve(),
         required_distro_id=required_distro_id,
@@ -219,6 +282,9 @@ def audit_payload(
     highest: dict[str, str | None] = dict.fromkeys(limits)
     file_reports: list[dict[str, Any]] = []
     for path in elf_files:
+        relative_path = path.relative_to(root)
+        identity, identity_errors = _elf_identity(path)
+        errors.extend(f"{relative_path}: {error}" for error in identity_errors)
         try:
             result = subprocess.run(  # noqa: S603 - explicit release-tool boundary
                 [readelf_bin, "--version-info", "--wide", str(path)],
@@ -228,11 +294,11 @@ def audit_payload(
                 text=True,
             )
         except OSError as exc:
-            errors.append(f"readelf failed for {path.relative_to(root)}: {exc}")
+            errors.append(f"readelf failed for {relative_path}: {exc}")
             continue
         if result.returncode != 0:
             reason = result.stderr.strip() or f"exit {result.returncode}"
-            errors.append(f"readelf failed for {path.relative_to(root)}: {reason}")
+            errors.append(f"readelf failed for {relative_path}: {reason}")
             continue
         requirements = parse_version_needs(result.stdout)
         normalized = {
@@ -241,7 +307,11 @@ def audit_payload(
             if versions
         }
         file_reports.append(
-            {"path": path.relative_to(root).as_posix(), "requirements": normalized}
+            {
+                "path": relative_path.as_posix(),
+                "elf": identity,
+                "requirements": normalized,
+            }
         )
         if path.resolve() == entrypoint and not normalized.get("GLIBC"):
             errors.append("Flatpak standalone entrypoint has no readable GLIBC version needs")
@@ -253,7 +323,7 @@ def audit_payload(
                 highest[family] = candidate
             if _version_key(candidate) > _version_key(limits[family]):
                 errors.append(
-                    f"{path.relative_to(root)} requires {family}_{candidate}, "
+                    f"{relative_path} requires {family}_{candidate}, "
                     f"above {family}_{limits[family]}"
                 )
 
@@ -273,6 +343,7 @@ def audit_payload(
         "build_manifest": build_manifest.name,
         "build_manifest_sha256": _sha256_or_unavailable(build_manifest.resolve()),
         "entrypoint_sha256": _sha256_or_unavailable(entrypoint),
+        "artifact_tree_sha256": _sha256_tree_or_unavailable(root),
         "build_host": manifest_build_host,
         "limits": limits,
         "highest_requirements": highest,

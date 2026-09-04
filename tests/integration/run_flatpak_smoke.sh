@@ -60,6 +60,7 @@ STANDALONE_MANIFEST="$SMOKE_ROOT/build-manifest.json"
 python3 "$ROOT_DIR/tools/build_manifest.py" \
   --root "$ROOT_DIR" \
   --artifact "$STANDALONE_DIR/entrypoint.bin" \
+  --artifact-tree "$STANDALONE_DIR" \
   --build-driver "$ROOT_DIR/scripts/build_nuitka_fast.sh" \
   --build-flag "profile=flatpak-ci-smoke" \
   --native-runtime "$STANDALONE_DIR/maps/tiles/extension/bin" \

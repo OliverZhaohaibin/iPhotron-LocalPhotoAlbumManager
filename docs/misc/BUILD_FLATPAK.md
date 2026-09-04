@@ -38,8 +38,12 @@ bash scripts/build_flatpak.sh \
 
 Before staging, the builder verifies that the standalone manifest records an
 Ubuntu 24.04 x86-64 build and that its artifact hash matches the selected ELF
-entry point. `artifact_tree_sha256` must also match the complete standalone, so
-replacing a Qt, Maps, ONNX Runtime, or other payload file after the Nuitka build
+entry point. The manifest source revision, `project_version` build flag, and
+Nuitka build-driver hash must match the current checkout. This prevents an old
+standalone from being labeled with the current `pyproject.toml` version.
+`artifact_tree_sha256` must also match the complete standalone, including node
+type, Unix permission bits, file contents, and symlink targets, so replacing or
+changing a Qt, Maps, ONNX Runtime, or other payload node after the Nuitka build
 invalidates provenance. It then scans every ELF file using
 `readelf --version-info --wide` and verifies an ELF64, little-endian,
 `EM_X86_64` header. The Freedesktop 25.08 limits are `GLIBC_2.42`,
@@ -63,10 +67,15 @@ separate branch rather than changing this stable update path.
 The same preflight can be run without building a bundle:
 
 ```bash
+SOURCE_REVISION="$(git rev-parse HEAD)"
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 python3 tools/check_flatpak_elf_abi.py \
   --root dist/entrypoint.dist \
   --entrypoint dist/entrypoint.dist/entrypoint.bin \
   --build-manifest dist/build-manifest.json \
+  --expected-source-revision "$SOURCE_REVISION" \
+  --expected-project-version "$VERSION" \
+  --expected-build-driver scripts/build_nuitka_fast.sh \
   --icon /absolute/path/to/iphotron-256.png \
   --max-glibc 2.42 \
   --max-glibcxx 3.4.34 \

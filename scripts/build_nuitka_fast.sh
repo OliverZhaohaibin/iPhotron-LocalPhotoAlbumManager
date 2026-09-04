@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+PROJECT_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 
 optional_model_args=()
 if [[ -d "$ROOT_DIR/src/extension/models" ]]; then
@@ -74,6 +75,7 @@ python tools/build_manifest.py \
   --artifact-tree "$ROOT_DIR/dist/entrypoint.dist" \
   --build-driver "$ROOT_DIR/scripts/build_nuitka_fast.sh" \
   --build-flag "profile=fast" \
+  --build-flag "project_version=$PROJECT_VERSION" \
   --build-flag "lto=yes" \
   --build-flag "compiler=clang" \
   --native-runtime "$ROOT_DIR/src/maps/tiles/extension/bin" \

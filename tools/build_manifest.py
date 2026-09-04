@@ -7,8 +7,10 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -30,12 +32,31 @@ def _sha256_path(path: Path) -> str:
     if path.is_file():
         return _sha256_file(path)
     digest = hashlib.sha256()
+    root_mode = stat.S_IMODE(path.lstat().st_mode)
+    digest.update(f"D\0{root_mode:o}\0.\0".encode("utf-8"))
     for item in sorted(path.rglob("*"), key=lambda candidate: candidate.as_posix()):
-        if not item.is_file():
-            continue
-        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        item_stat = item.lstat()
+        relative = item.relative_to(path).as_posix()
+        mode = stat.S_IMODE(item_stat.st_mode)
+        if stat.S_ISLNK(item_stat.st_mode):
+            kind = "L"
+            payload = os.readlink(item).encode("utf-8", errors="surrogateescape")
+        elif stat.S_ISREG(item_stat.st_mode):
+            kind = "F"
+            payload = _sha256_file(item).encode("ascii")
+        elif stat.S_ISDIR(item_stat.st_mode):
+            kind = "D"
+            payload = b""
+        else:
+            kind = "O"
+            payload = b""
+        digest.update(kind.encode("ascii"))
         digest.update(b"\0")
-        digest.update(_sha256_file(item).encode("ascii"))
+        digest.update(f"{mode:o}".encode("ascii"))
+        digest.update(b"\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
         digest.update(b"\0")
     return digest.hexdigest()
 

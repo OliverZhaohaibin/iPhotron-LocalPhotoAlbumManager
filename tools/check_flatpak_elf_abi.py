@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -45,12 +46,31 @@ def _sha256_or_unavailable(path: Path) -> str:
 
 def _sha256_tree(path: Path) -> str:
     digest = hashlib.sha256()
+    root_mode = stat.S_IMODE(path.lstat().st_mode)
+    digest.update(f"D\0{root_mode:o}\0.\0".encode("utf-8"))
     for item in sorted(path.rglob("*"), key=lambda candidate: candidate.as_posix()):
-        if not item.is_file():
-            continue
-        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        item_stat = item.lstat()
+        relative = item.relative_to(path).as_posix()
+        mode = stat.S_IMODE(item_stat.st_mode)
+        if stat.S_ISLNK(item_stat.st_mode):
+            kind = "L"
+            payload = os.readlink(item).encode("utf-8", errors="surrogateescape")
+        elif stat.S_ISREG(item_stat.st_mode):
+            kind = "F"
+            payload = _sha256_file(item).encode("ascii")
+        elif stat.S_ISDIR(item_stat.st_mode):
+            kind = "D"
+            payload = b""
+        else:
+            kind = "O"
+            payload = b""
+        digest.update(kind.encode("ascii"))
         digest.update(b"\0")
-        digest.update(_sha256_file(item).encode("ascii"))
+        digest.update(f"{mode:o}".encode("ascii"))
+        digest.update(b"\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -197,6 +217,9 @@ def _validate_provenance(
     root: Path,
     entrypoint: Path,
     manifest_path: Path,
+    expected_source_revision: str,
+    expected_project_version: str,
+    expected_build_driver: Path,
     required_distro_id: str,
     required_distro_version: str,
     required_machine: str,
@@ -226,6 +249,36 @@ def _validate_provenance(
                 f"standalone build host {key} must be {expected_value!r}, got {actual!r}"
             )
 
+    actual_revision = str(manifest.get("source_revision") or "")
+    if actual_revision != expected_source_revision:
+        errors.append(
+            "standalone source_revision does not match the current checkout: "
+            f"expected {expected_source_revision!r}, got {actual_revision!r}"
+        )
+
+    expected_driver_sha256 = _sha256_or_unavailable(expected_build_driver)
+    actual_driver_sha256 = str(environment.get("build_driver_sha256") or "").lower()
+    if expected_driver_sha256 == "unavailable":
+        errors.append(f"current Nuitka build driver cannot be hashed: {expected_build_driver}")
+    elif actual_driver_sha256 != expected_driver_sha256:
+        errors.append(
+            "standalone build_driver_sha256 does not match the current "
+            "scripts/build_nuitka_fast.sh"
+        )
+
+    build_flags = environment.get("build_flags")
+    expected_version_flag = f"project_version={expected_project_version}"
+    project_version_flags = (
+        [str(flag) for flag in build_flags if str(flag).startswith("project_version=")]
+        if isinstance(build_flags, list)
+        else []
+    )
+    if project_version_flags != [expected_version_flag]:
+        errors.append(
+            "standalone project_version does not match the current checkout: "
+            f"expected {expected_version_flag!r}, got {project_version_flags!r}"
+        )
+
     if str(manifest.get("artifact_path") or "") != entrypoint.name:
         errors.append("standalone build manifest artifact_path does not match the entrypoint")
     actual_sha256 = _sha256_or_unavailable(entrypoint)
@@ -253,6 +306,9 @@ def audit_payload(
     entrypoint: Path,
     build_manifest: Path,
     icon: Path,
+    expected_source_revision: str,
+    expected_project_version: str,
+    expected_build_driver: Path,
     limits: dict[str, str],
     readelf_bin: str,
     required_distro_id: str = "ubuntu",
@@ -266,6 +322,9 @@ def audit_payload(
         root=root,
         entrypoint=entrypoint,
         manifest_path=build_manifest.resolve(),
+        expected_source_revision=expected_source_revision,
+        expected_project_version=expected_project_version,
+        expected_build_driver=expected_build_driver.resolve(),
         required_distro_id=required_distro_id,
         required_distro_version=required_distro_version,
         required_machine=required_machine,
@@ -333,6 +392,11 @@ def audit_payload(
         if isinstance(manifest_environment, dict)
         else {}
     )
+    manifest_build_flags = (
+        manifest_environment.get("build_flags", [])
+        if isinstance(manifest_environment, dict)
+        else []
+    )
     return {
         "schema_version": 1,
         "passed": not errors,
@@ -345,6 +409,18 @@ def audit_payload(
         "entrypoint_sha256": _sha256_or_unavailable(entrypoint),
         "artifact_tree_sha256": _sha256_tree_or_unavailable(root),
         "build_host": manifest_build_host,
+        "source_revision": manifest.get("source_revision")
+        if isinstance(manifest, dict)
+        else None,
+        "build_driver_sha256": manifest_environment.get("build_driver_sha256")
+        if isinstance(manifest_environment, dict)
+        else None,
+        "build_flags": manifest_build_flags,
+        "expected_source_revision": expected_source_revision,
+        "expected_project_version": expected_project_version,
+        "expected_build_driver_sha256": _sha256_or_unavailable(
+            expected_build_driver.resolve()
+        ),
         "limits": limits,
         "highest_requirements": highest,
         "elf_file_count": len(elf_files),
@@ -359,6 +435,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--entrypoint", type=Path, required=True)
     parser.add_argument("--build-manifest", type=Path, required=True)
     parser.add_argument("--icon", type=Path, required=True)
+    parser.add_argument("--expected-source-revision", required=True)
+    parser.add_argument("--expected-project-version", required=True)
+    parser.add_argument("--expected-build-driver", type=Path, required=True)
     parser.add_argument("--max-glibc", default=_DEFAULT_LIMITS["GLIBC"])
     parser.add_argument("--max-glibcxx", default=_DEFAULT_LIMITS["GLIBCXX"])
     parser.add_argument("--max-cxxabi", default=_DEFAULT_LIMITS["CXXABI"])
@@ -374,6 +453,9 @@ def main(argv: list[str] | None = None) -> int:
         entrypoint=args.entrypoint,
         build_manifest=args.build_manifest,
         icon=args.icon,
+        expected_source_revision=args.expected_source_revision,
+        expected_project_version=args.expected_project_version,
+        expected_build_driver=args.expected_build_driver,
         limits={
             "GLIBC": args.max_glibc,
             "GLIBCXX": args.max_glibcxx,

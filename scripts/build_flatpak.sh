@@ -59,6 +59,7 @@ done
 command -v "$FLATPAK_BIN" >/dev/null 2>&1 || { echo "error: flatpak not found" >&2; exit 2; }
 command -v "$FLATPAK_BUILDER_BIN" >/dev/null 2>&1 || { echo "error: flatpak-builder not found" >&2; exit 2; }
 command -v "$READELF_BIN" >/dev/null 2>&1 || { echo "error: readelf not found" >&2; exit 2; }
+command -v git >/dev/null 2>&1 || { echo "error: git not found" >&2; exit 2; }
 
 ENTRYPOINT=""
 for candidate in entrypoint.bin entrypoint main.bin main; do
@@ -80,8 +81,15 @@ find "$STANDALONE_DIR" -type f -name '*.qsb' -print -quit | grep -q . || {
   echo "error: standalone bundle does not contain maps/tiles" >&2
   exit 2
 }
-find "$STANDALONE_DIR/maps/tiles/extension/bin" -type f -name 'osmand_render_helper*' -print -quit 2>/dev/null | grep -q . || {
-  echo "error: standalone bundle does not contain the native map helper" >&2
+MAP_HELPER=""
+while IFS= read -r candidate; do
+  if [[ -x "$candidate" ]]; then
+    MAP_HELPER="$candidate"
+    break
+  fi
+done < <(find "$STANDALONE_DIR/maps/tiles/extension/bin" -type f -name 'osmand_render_helper*' -print 2>/dev/null)
+[[ -n "$MAP_HELPER" ]] || {
+  echo "error: standalone bundle does not contain an executable native map helper" >&2
   exit 2
 }
 find "$STANDALONE_DIR" -type f -path '*/platforms/libqxcb.so' -print -quit | grep -q . || {
@@ -101,6 +109,7 @@ OUTPUT_PATH="$OUTPUT_DIR/$(basename "$OUTPUT_PATH")"
 ABI_REPORT_PATH="${OUTPUT_PATH}.abi-report.json"
 
 VERSION="$($PYTHON_BIN -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+SOURCE_REVISION="$(git rev-parse HEAD)"
 EXPECTED_OUTPUT_NAME="$APP_ID-$VERSION-x86_64.flatpak"
 [[ "$(basename "$OUTPUT_PATH")" == "$EXPECTED_OUTPUT_NAME" ]] || {
   echo "error: Flatpak output must be named $EXPECTED_OUTPUT_NAME" >&2
@@ -110,6 +119,9 @@ EXPECTED_OUTPUT_NAME="$APP_ID-$VERSION-x86_64.flatpak"
   --root "$STANDALONE_DIR" \
   --entrypoint "$STANDALONE_DIR/$ENTRYPOINT" \
   --build-manifest "$STANDALONE_MANIFEST" \
+  --expected-source-revision "$SOURCE_REVISION" \
+  --expected-project-version "$VERSION" \
+  --expected-build-driver "$ROOT_DIR/scripts/build_nuitka_fast.sh" \
   --icon "$ICON_PATH" \
   --max-glibc 2.42 \
   --max-glibcxx 3.4.34 \

@@ -57,12 +57,14 @@ Path(sys.argv[1]).write_bytes(
 PY
 
 STANDALONE_MANIFEST="$SMOKE_ROOT/build-manifest.json"
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 python3 "$ROOT_DIR/tools/build_manifest.py" \
   --root "$ROOT_DIR" \
   --artifact "$STANDALONE_DIR/entrypoint.bin" \
   --artifact-tree "$STANDALONE_DIR" \
   --build-driver "$ROOT_DIR/scripts/build_nuitka_fast.sh" \
   --build-flag "profile=flatpak-ci-smoke" \
+  --build-flag "project_version=$VERSION" \
   --native-runtime "$STANDALONE_DIR/maps/tiles/extension/bin" \
   --asset "$STANDALONE_DIR/maps/tiles" \
   --asset "$STANDALONE_DIR/iPhoto/resources/i18n" \
@@ -76,7 +78,6 @@ appstreamcli validate --explain \
 flatpak remote-add --user --if-not-exists flathub \
   https://dl.flathub.org/repo/flathub.flatpakrepo
 
-VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 OUTPUT_PATH="$SMOKE_ROOT/${APP_ID}-${VERSION}-x86_64.flatpak"
 bash "$ROOT_DIR/scripts/build_flatpak.sh" \
   --standalone-dir "$STANDALONE_DIR" \

@@ -5,6 +5,7 @@ import json
 import os
 import struct
 import subprocess
+import tomllib
 import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
@@ -62,17 +63,33 @@ def _fake_standalone(root: Path) -> Path:
     return standalone
 
 
-def _standalone_manifest(path: Path, entrypoint: Path) -> Path:
+def _standalone_manifest(path: Path, entrypoint: Path, repo_root: Path) -> Path:
+    source_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    build_driver = repo_root / "scripts/build_nuitka_fast.sh"
+    project_version = tomllib.loads(
+        (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
     manifest = path / "build-manifest.json"
     manifest.write_text(
         json.dumps(
             {
                 "schema_version": 1,
+                "source_revision": source_revision,
                 "artifact_path": entrypoint.name,
                 "artifact_sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest(),
                 "artifact_tree_path": entrypoint.parent.name,
                 "artifact_tree_sha256": _sha256_path(entrypoint.parent),
                 "environment": {
+                    "build_driver_sha256": hashlib.sha256(
+                        build_driver.read_bytes()
+                    ).hexdigest(),
+                    "build_flags": ["profile=test", f"project_version={project_version}"],
                     "build_host": {
                         "system": "Linux",
                         "machine": "x86_64",
@@ -146,12 +163,20 @@ def test_flatpak_manifest_declares_runtime_identity_and_required_permissions() -
     )
     assert "--standalone-manifest" in flatpak_script
     assert 'FLATPAK_BRANCH="stable"' in flatpak_script
+    assert "--expected-source-revision" in flatpak_script
+    assert "--expected-project-version" in flatpak_script
+    assert "--expected-build-driver" in flatpak_script
+    assert '[[ -x "$candidate" ]]' in flatpak_script
 
 
 def test_flatpak_wrapper_orchestrates_staging_and_writes_reports(tmp_path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     standalone = _fake_standalone(tmp_path)
-    standalone_manifest = _standalone_manifest(tmp_path, standalone / "entrypoint.bin")
+    standalone_manifest = _standalone_manifest(
+        tmp_path,
+        standalone / "entrypoint.bin",
+        repo_root,
+    )
     icon = tmp_path / "iphoto.png"
     _png(icon)
     output = tmp_path / f"{APP_ID}-6.6.8-x86_64.flatpak"
@@ -247,3 +272,21 @@ exit 2
     )
     assert repeated.returncode == 2
     assert "refusing to overwrite" in repeated.stderr
+
+    (standalone / "maps/tiles/extension/bin/osmand_render_helper").chmod(0o644)
+    second_output_dir = tmp_path / "second-output"
+    second_output_dir.mkdir()
+    non_executable_command = [
+        *command[:-1],
+        str(second_output_dir / output.name),
+    ]
+    non_executable = subprocess.run(
+        non_executable_command,
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert non_executable.returncode == 2
+    assert "executable native map helper" in non_executable.stderr

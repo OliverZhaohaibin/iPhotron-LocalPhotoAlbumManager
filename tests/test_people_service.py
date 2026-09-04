@@ -3019,10 +3019,6 @@ def test_qt_manual_correction_reaches_persistence_and_refreshes_label(
         if entrypoint == "inline":
             overlay._start_editing("person:FB")
             qapp.processEvents()
-            assert "only this detection" in overlay._edit_hint.text()
-            assert "rename the associated identity" in overlay._edit_hint.text()
-            assert overlay._edit_hint.isVisible()
-            assert surface.rect().contains(overlay._edit_hint.geometry())
             surface.grab().save(str(tmp_path / "inline-before.png"))
             editor = overlay._editor
             editor.setText("Bo")

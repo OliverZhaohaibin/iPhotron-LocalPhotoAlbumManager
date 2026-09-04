@@ -34,7 +34,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
-    QLabel,
     QLineEdit,
     QListView,
     QToolTip,
@@ -326,7 +325,6 @@ class FaceNameOverlayWidget(QWidget):
         self._editor: _FaceNameEditor | None = None
         self._editing_context: AnnotationEditContext | None = None
         self._editing_expected_name: str | None = None
-        self._edit_hint: QLabel | None = None
         self._name_suggestions: list[_NameSuggestion] = []
         self._manual_draft: _ManualFaceDraft | None = None
         self._manual_editor: _FaceNameEditor | None = None
@@ -754,8 +752,6 @@ class FaceNameOverlayWidget(QWidget):
             self.setHidden(True)
             if self._editor is not None:
                 self._editor.hide()
-            if self._edit_hint is not None:
-                self._edit_hint.hide()
             self._set_saved_hover_tracking_enabled(False)
             return
         show_saved = self._active and viewer_ready and bool(self._states)
@@ -771,8 +767,6 @@ class FaceNameOverlayWidget(QWidget):
         self.setHidden(not (show_saved or show_manual))
         if self._editor is not None:
             self._editor.setVisible(show_saved and self._editing_face_id is not None)
-        if self._edit_hint is not None:
-            self._edit_hint.setVisible(show_saved and self._editing_face_id is not None)
         if self._manual_editor is not None:
             self._manual_editor.setVisible(show_manual)
             self._manual_editor.setEnabled(not self._manual_busy)
@@ -786,8 +780,6 @@ class FaceNameOverlayWidget(QWidget):
             self.raise_()
         if self._editor is not None and self._editor.isVisible():
             self._editor.raise_()
-        if self._edit_hint is not None and self._edit_hint.isVisible():
-            self._edit_hint.raise_()
         if self._manual_editor is not None and self._manual_editor.isVisible():
             self._manual_editor.raise_()
 
@@ -865,17 +857,6 @@ class FaceNameOverlayWidget(QWidget):
                     viewer_rect,
                 )
                 self._editor.setGeometry(editor_rect)
-                if self._edit_hint is not None:
-                    width = min(420, viewer_rect.width())
-                    height = self._edit_hint.heightForWidth(width)
-                    x = max(
-                        viewer_rect.left(),
-                        min(editor_rect.center().x() - width // 2, viewer_rect.right() - width + 1),
-                    )
-                    y = editor_rect.bottom() + 4
-                    if y + height > viewer_rect.bottom():
-                        y = max(viewer_rect.top(), editor_rect.top() - height - 4)
-                    self._edit_hint.setGeometry(x, y, width, height)
         if self._manual_draft is not None:
             self._manual_draft.center = self._clamp_manual_center(
                 self._manual_draft.center,
@@ -1326,25 +1307,6 @@ class FaceNameOverlayWidget(QWidget):
             getattr(state.annotation, "asset_id", ""), state.annotation
         )
         self._editing_expected_name = current_identity_display_name(state.annotation)
-        hint = QLabel(self.parentWidget() or self)
-        hint.setWordWrap(True)
-        hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        hint.setStyleSheet(
-            "QLabel { background: palette(base); color: palette(text); padding: 6px;"
-            " border-radius: 6px; font-size: 11px; }"
-        )
-        scope_text = (
-            tr("FaceNameOverlay", "Choose an existing name: merge the entire pending identity.")
-            if self._editing_context.selection_scope == InlineSelectionScope.CANDIDATE_IDENTITY
-            else tr("FaceNameOverlay", "Choose an existing name: assign only this detection.")
-        )
-        typing_text = (
-            tr("FaceNameOverlay", "Type a name: rename the associated identity.")
-            if self._editing_context.current_identity is not None
-            else tr("FaceNameOverlay", "Type a name: create an identity for this detection.")
-        )
-        hint.setText(scope_text + "\n" + typing_text)
-        self._edit_hint = hint
         editor = _FaceNameEditor(self.parentWidget() or self)
         editor.set_name_suggestions(self._name_suggestions)
         editor.setText(self._editing_expected_name or "")
@@ -1353,7 +1315,6 @@ class FaceNameOverlayWidget(QWidget):
         self._editor = editor
         self._relayout()
         editor.show()
-        hint.show()
         editor.setFocus(Qt.FocusReason.MouseFocusReason)
         editor.selectAll()
 
@@ -1406,10 +1367,6 @@ class FaceNameOverlayWidget(QWidget):
         self._editing_context = None
         self._editing_expected_name = None
         self._editor = None
-        if self._edit_hint is not None:
-            self._edit_hint.hide()
-            self._edit_hint.deleteLater()
-            self._edit_hint = None
         if editor is not None:
             editor.hide()
             editor.deleteLater()

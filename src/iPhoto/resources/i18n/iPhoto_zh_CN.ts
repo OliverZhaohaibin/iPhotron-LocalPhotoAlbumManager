@@ -1490,22 +1490,6 @@
             <source>Please place the circle on the face before saving.</source>
             <translation>请先将圆圈放在人脸上再存储。</translation>
         </message>
-        <message>
-            <source>Choose an existing name: merge the entire pending identity.</source>
-            <translation>选择已有名称：合并整个待确认身份。</translation>
-        </message>
-        <message>
-            <source>Choose an existing name: assign only this detection.</source>
-            <translation>选择已有名称：仅修改当前标记的归属。</translation>
-        </message>
-        <message>
-            <source>Type a name: rename the associated identity.</source>
-            <translation>输入名称：重命名所属身份。</translation>
-        </message>
-        <message>
-            <source>Type a name: create an identity for this detection.</source>
-            <translation>输入名称：为当前标记创建新身份。</translation>
-        </message>
     </context>
     <context>
         <name>EditBW</name>

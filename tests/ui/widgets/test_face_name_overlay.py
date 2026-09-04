@@ -337,7 +337,6 @@ def test_saved_name_editor_reuses_identity_dropdown_for_all_states(
         if merging
         else overlay.candidateIdentityMergeSubmitted
     )
-    assert ("entire pending identity" in overlay._edit_hint.text()) == merging
     rename_spy = QSignalSpy(overlay.renameSubmitted)
     QTest.keyClick(overlay._editor, Qt.Key.Key_Return)
     qapp.processEvents()
@@ -1215,7 +1214,6 @@ def test_selecting_current_identity_is_strict_noop(qapp, state):
     assert all(_spy_records(spy) == [] for spy in spies)
     assert overlay._states["face-1"].annotation == record
     assert overlay._editor is None
-    assert overlay._edit_hint is None
 
 
 def test_cancel_discards_selection_and_scope_hint(qapp):
@@ -1232,7 +1230,6 @@ def test_cancel_discards_selection_and_scope_hint(qapp):
     qapp.processEvents()
     assert _spy_records(spy) == []
     assert overlay._states["face-1"].annotation == record
-    assert overlay._edit_hint is None
 
 
 @pytest.mark.parametrize("source_kind", ["person", "pet"])

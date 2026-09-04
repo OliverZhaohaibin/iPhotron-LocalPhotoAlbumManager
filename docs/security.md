@@ -6,7 +6,7 @@
 
 ## Overview
 
-iPhotron is a **local-first photo manager**. It does not upload data to any cloud service, does not require an internet connection for core functionality, and does not collect user telemetry. All library data remains on the user's local filesystem. Network-facing flows are limited to optional extension/model downloads: a user-triggered maps-extension download on platforms where a published extension archive exists, and first-use People/Pets model downloads when local AI model caches are absent.
+iPhotron is a **local-first photo manager**. It does not upload data to any cloud service, does not require an internet connection for core functionality, and does not collect user telemetry. All library data remains on the user's local filesystem. Network-facing flows are limited to optional extension and model acquisition: a user-triggered maps-extension download, InsightFace model acquisition when its selected cache is writable, and the configured YOLOX HTTPS artifact. The current DINOv2 manifest has no download URL and requires a verified pre-provisioned artifact.
 
 ---
 
@@ -19,9 +19,18 @@ iPhotron is a **local-first photo manager**. It does not upload data to any clou
 | **Read** | User-selected library folders | Scan photos/videos, read metadata (EXIF, GPS) |
 | **Write** | Library folders | Create `.iphoto.album.json` manifests, `.ipo` sidecar files |
 | **Write** | `.iPhoto/` directory at library root | Global SQLite database, thumbnail caches, and durable People/Pets state |
-| **Read/Write** | `extension/models/` or an explicit model override | Read bundled AI models and populate an allowed first-use model cache |
+| **Read** | Packaged `extension/models/` | Optional bundled/read-only People and Pets model fallback |
+| **Read/Write** | Platform user model caches | Writable runtime cache, including the default Pets download target and the Windows People cache |
+| **Read/Write** | Explicit `IPHOTO_*_MODEL_DIR` override | Operator/developer-selected model source and, when writable, acquisition target |
 | **Write** | Selected original media file | Best-effort GPS metadata write-back after an explicit Assign Location action |
 | **Read/Write** | Application settings directory | User preferences (theme, export destination) |
+
+The ignored source path `src/extension/models/` is optional local/release
+staging data, not a fresh-clone asset or the default writable Pets cache.
+The standalone-wrapper Flatpak declares `--filesystem=host:rw` because a folder
+is an album and users may select libraries outside the XDG Pictures directory.
+It also declares Wayland/fallback-X11, IPC, DRI, PulseAudio, and network access;
+network is used only by the optional acquisition flows described below.
 
 ### External Tool Access
 
@@ -41,11 +50,14 @@ extension is installed.
 | **Map rendering** | Offline (bundled OBF/vector map assets) | Render map tiles for the location view |
 | **Reverse geocoding** | Local database lookup | Convert GPS coordinates to place names (offline, via `reverse-geocoder` library) |
 | **Map extension download** | Optional HTTPS download | Fetch a published extension archive only when the user chooses the download path |
-| **People/Pets model download** | Optional HTTPS download | Populate missing local AI model caches before background recognition scans |
+| **People model acquisition** | Optional HTTPS through InsightFace | Populate a missing pack only when the selected People model root is writable |
+| **YOLOX detector download** | Optional HTTPS + hash/size validation | Populate the missing detector in the writable Pets cache |
+| **DINOv2 embedder** | No current network path | `torchscript_url` is `null`; load only a pre-provisioned artifact matching the manifest hash and size |
 
 > **Note:** No telemetry or cloud sync is performed. A network connection is only
-> needed if the user chooses to download a missing map extension or lets a
-> background People/Pets scan populate a missing model cache.
+> needed if the user chooses to download a missing map extension or allows one
+> of the configured model-acquisition paths. Merely opening the app or finishing
+> a metadata scan does not activate recognition model workers.
 
 ---
 
@@ -64,7 +76,8 @@ iPhotron does **not** encrypt data at rest. The following files are stored in pl
 | `.iPhoto/faces/face_state.db` | SQLite | Stable People decisions: names, covers, hidden flags, groups, ordering |
 | `.iPhoto/pets/pet_index.db` | SQLite | Rebuildable Pets runtime snapshot |
 | `.iPhoto/pets/pet_state.db` | SQLite | Stable Pets decisions: names, covers, hidden flags, rejected detections |
-| `extension/models/` | Model files | Local AI model cache for People and Pets recognition |
+| Platform user model cache | Model files | Writable runtime cache; Pets defaults here on every platform and People uses a versioned cache on Windows |
+| `extension/models/` | Model files | Optional packaged/read-only fallback populated from release staging |
 | Thumbnail cache | Image files | Downscaled preview images |
 | `settings.json` | JSON | Theme, language, recent library, export destination, and other application preferences |
 

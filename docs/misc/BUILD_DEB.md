@@ -16,7 +16,8 @@ runtime depends on the helper binary plus the shared libraries under
 Builds that ship People/Pets recognition must also preserve the selected AI
 runtimes from the standalone bundle. People needs `insightface` and
 `onnxruntime`; Pets needs `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Offline builds also retain the shared `extension/models` cache.
+`certifi`. Offline builds also retain any explicitly staged
+`extension/models` artifacts.
 These are added at the Nuitka stage described in
 [`BUILD_EXE.md`](BUILD_EXE.md); the `.deb` stage must not strip them from
 `/opt/iPhotron/`.
@@ -38,7 +39,7 @@ iPhotron_VERSION_amd64/
 │   └── control
 ├── opt/
 │   └── iPhotron/                 ← standalone app bundle copied here
-│       ├── iPhotron             ← main executable (name may vary by build)
+│       ├── entrypoint.bin       ← default Linux Nuitka executable
 │       └── maps/
 │           └── tiles/
 │               └── extension/
@@ -96,15 +97,26 @@ Description: Folder-native local photo album manager
 
 ## Build Steps
 
-1. **Prepare the staging tree** — copy your compiled iPhotron binary into the correct location inside the staging directory:
+1. **Prepare the staging tree** — copy the maintained Linux standalone into the correct location inside the staging directory:
 
    ```bash
    VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
    PKG_ROOT="iPhotron_${VERSION}_amd64"
    APP_ROOT="$PKG_ROOT/opt/iPhotron"
    BIN_ROOT="$PKG_ROOT/usr/local/bin"
-   APP_DIST=dist/YOUR_STANDALONE_DIR
-   APP_EXECUTABLE=YOUR_EXECUTABLE_NAME
+   APP_DIST=dist/entrypoint.dist
+   APP_EXECUTABLE=""
+
+   for candidate in entrypoint.bin entrypoint; do
+     if [ -x "$APP_DIST/$candidate" ]; then
+       APP_EXECUTABLE="$candidate"
+       break
+     fi
+   done
+   test -n "$APP_EXECUTABLE" || {
+     echo "entrypoint.bin/entrypoint not found in $APP_DIST" >&2
+     exit 2
+   }
 
    mkdir -p "$PKG_ROOT/DEBIAN" "$APP_ROOT" "$BIN_ROOT"
    cp -a "$APP_DIST/." "$APP_ROOT/"
@@ -112,8 +124,8 @@ Description: Folder-native local photo album manager
    chmod 755 "$BIN_ROOT/iPhotron"
    ```
 
-   Replace `YOUR_STANDALONE_DIR` and `YOUR_EXECUTABLE_NAME` with the actual
-   Nuitka output names produced by your Linux build.
+   `scripts/build_nuitka_fast.sh` produces `dist/entrypoint.dist`; the loop
+   accepts the two executable names used by supported Nuitka versions.
 
    Before continuing, verify that the maps extension is still present inside
    the staged app bundle:
@@ -203,6 +215,6 @@ sudo apt remove iPhotron
 | Binary not found after install | Wrong install path in staging tree, or launcher points to the wrong standalone executable | Ensure the launcher under `usr/local/bin/` points to the executable copied into `/opt/iPhotron/` |
 | Location view falls back unexpectedly after install | `maps/tiles/extension/` was not included in the package | Re-stage the standalone bundle and verify the `.deb` contents include `World_basemap_2.obf`, resources, and Linux map binaries |
 | Native maps fail with GLX/XCB startup errors | The runtime was installed correctly, but the desktop session lacks XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
-| People scan is unavailable in the installed app | The standalone build was produced without the optional face runtime | Rebuild the standalone app with `insightface`, `onnxruntime`, and `src/extension/models` included before staging the `.deb` |
+| People scan is unavailable in the installed app | The standalone build was produced without the optional face runtime or offline model staging | Rebuild with `insightface` and `onnxruntime`; if offline People support is promised, explicitly stage `src/extension/models` before building the standalone |
 | People scan starts but never creates clusters | The model cache or an InsightFace submodel/dependency is missing from `/opt/iPhotron/` | Verify `extension/models`, exclude unused `albumentations`/`pydantic` packages at the Nuitka stage, and keep InsightFace limited to detection and recognition |
 | Pets scan is unavailable in the installed app | The standalone build omitted `pets-ai` packages or `extension/models/pets` | Rebuild the standalone app with `onnxruntime`, `torch`, `torchvision`, `usearch`, `certifi`, and both Pets model files before staging the `.deb` |

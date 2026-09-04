@@ -1,0 +1,38 @@
+app-id: com.github.OliverZhaohaibin.iPhotron
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: iphoto
+separate-locales: false
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pulseaudio
+  - --share=network
+  - --filesystem=host:rw
+
+modules:
+  - name: iphotron-standalone
+    buildsystem: simple
+    build-commands:
+      - install -d /app/lib/iphotron
+      - cp -a payload/. /app/lib/iphotron/
+      - install -Dm755 iphotron-launcher /app/bin/iphoto
+      - install -Dm644 com.github.OliverZhaohaibin.iPhotron.desktop /app/share/applications/com.github.OliverZhaohaibin.iPhotron.desktop
+      - install -Dm644 com.github.OliverZhaohaibin.iPhotron.metainfo.xml /app/share/metainfo/com.github.OliverZhaohaibin.iPhotron.metainfo.xml
+      - install -Dm644 iphotron.png /app/share/icons/hicolor/256x256/apps/com.github.OliverZhaohaibin.iPhotron.png
+    sources:
+      - type: dir
+        path: payload
+        dest: payload
+      - type: file
+        path: iphotron-launcher
+      - type: file
+        path: com.github.OliverZhaohaibin.iPhotron.desktop
+      - type: file
+        path: com.github.OliverZhaohaibin.iPhotron.metainfo.xml
+      - type: file
+        path: iphotron.png

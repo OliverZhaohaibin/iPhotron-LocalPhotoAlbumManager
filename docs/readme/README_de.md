@@ -27,6 +27,10 @@
 
 **💡 Schnellinstallation:** Klicken Sie auf die Schaltflächen oben, um das neueste Installationsprogramm direkt herunterzuladen.
 
+**Neueste stabile Version:** v6.6.8. Die folgende Funktionsdokumentation
+beschreibt den aktuellen Entwicklungszweig. Als Unreleased markierte Funktionen
+sind möglicherweise nicht in den obigen v6.6.8-Installern enthalten.
+
 - **Windows:** Führen Sie das `.exe`-Installationsprogramm direkt aus.
 - **Linux:** Installationsbefehl:
 
@@ -142,7 +146,7 @@ Die Extension enthält derzeit:
 Hinweise zur Kartenlaufzeit:
 - iPhotron kann den helper-basierten OBF-Renderer und das native OsmAnd-Widget verwenden, sobald die jeweilige Plattformlaufzeit vorhanden ist.
 - Wenn neben diesem Repository ein `PySide6-OsmAnd-SDK/`-Checkout existiert, können Linux und macOS dessen Widget-Builds aus `tools/osmand_render_helper_native/dist-*` bevorzugen.
-- Das native Linux-Widget erwartet derzeit den XCB- + Desktop-OpenGL-Pfad von Qt. Bei Auswahl dieses Backends setzt iPhotron automatisch `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop` und `QT_XCB_GL_INTEGRATION=xcb_glx`.
+- Das native Linux-Widget verwendet den XCB- + Desktop-OpenGL-Pfad, wenn XCB bereits vom Benutzer, Launcher oder der Laufzeit ausgewählt wurde. iPhotron erzwingt keinen Wechsel einer Wayland-Sitzung zu XCB; nur bei bereits gesetztem `QT_QPA_PLATFORM=xcb` werden die Standardwerte `QT_OPENGL=desktop` und `QT_XCB_GL_INTEGRATION=xcb_glx` ergänzt.
 - Unter macOS verwendet die Legacy-OpenGL-Karte `QOpenGLWindow + createWindowContainer()`, um Kompositionsprobleme von `QOpenGLWidget` in transparenten Hauptfenstern zu vermeiden. Medienvorschauen nutzen standardmäßig den Metal-fähigen QRhi-Pfad, außer `IPHOTO_RHI_BACKEND=opengl` ist gesetzt.
 
 | Ohne Maps Extension | Mit Maps Extension |
@@ -187,6 +191,10 @@ DINOv2-Embeddings und zeigt Tier-Identitätskarten im selben Dashboard. Tiere
 können benannt, zusammengeführt, versteckt, angepinnt und mit einem Cover
 versehen werden. Personen und Tiere können in gemeinsamen Identity-Gruppen
 erscheinen, während Laufzeitindex und dauerhafter Zustand getrennt bleiben.
+Deutliche People-/Gesichtskonflikte unterdrücken normalerweise eine doppelte
+Tiererkennung. Die Laufzeit behält jedoch einen deutlich größeren
+Tierkörper-Erkennungsrahmen bei, der ein kleineres menschliches Gesicht enthält,
+damit ein von einer Person gehaltenes Tier nicht verworfen wird.
 
 Mehrere Personen lassen sich zu Gruppen zusammenfassen, um gemeinsame Fotos
 anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
@@ -284,6 +292,8 @@ Detaillierte technische Dokumentation (auf Englisch):
 | [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der maps-extension-Workflow für Windows, Linux und macOS |
 | [Pets Runtime](../misc/PETS_RECOGNITION_RUNTIME.md) | Aktueller Vertrag für Tiermodelle, Scan-Planung, Persistenz, Mutationssicherheit und People-&-Pets-Komposition |
 | [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, QRhi-Shader-Assets, maps-extension-Synchronisierung und Plattformlaufzeit-Hinweise |
+| [AppImage Build](../misc/BUILD_APPIMAGE.md) | Kanonischer Linux-Workflow vom Standalone-Bundle zum AppImage |
+| [Flatpak Build](../misc/BUILD_FLATPAK.md) | Kanonischer x86_64-Standalone-Wrapper für ein Flatpak-Bundle |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |
 | [Changelog](../CHANGELOG.md) | Alle Versionshinweise und Änderungen |
 
@@ -295,8 +305,8 @@ Detaillierte technische Dokumentation (auf Englisch):
 |----------|-------|
 | **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten und schreibt GPS-Daten bei expliziten Assign-Location-Aktionen. |
 | **FFmpeg / FFprobe** | Erzeugt Video-Miniaturansichten und analysiert Videoinformationen. |
-| **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning: Gesichtserkennung (`det_500m.onnx`) und Face Embeddings (`w600k_mbf.onnx`) aus `src/extension/models/buffalo_s/`. |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optionales Pets-Scanning: Katzen-/Hundeerkennung und Tier-Identitäts-Embeddings aus `src/extension/models/pets/`. |
+| **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning mit einem beschreibbaren Cache, explizitem Override oder bereitgestellten/gebündelten Modellen. |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optionales Pets-Scanning mit Benutzer-Cache, explizitem Override oder bereitgestellten/gebündelten Modellen. YOLOX kann mit Integritätsprüfung heruntergeladen werden; das aktuelle DINOv2-Artefakt muss vorab bereitgestellt werden. |
 
 > FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein. Installieren Sie
 > ExifTool zusätzlich, wenn zugewiesene GPS-Koordinaten in Originaldateien

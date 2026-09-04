@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+optional_model_args=()
+if [[ -d "$ROOT_DIR/src/extension/models" ]]; then
+  optional_model_args+=("--include-data-dir=src/extension/models=extension/models")
+fi
+
 python -m nuitka \
   --standalone \
   --python-flag=no_site \
@@ -31,7 +36,7 @@ python -m nuitka \
   --include-package=pillow_heif \
   --include-module=_pillow_heif \
   --noinclude-data-files=torch/include \
-  --include-data-dir=src/extension/models=extension/models \
+  "${optional_model_args[@]}" \
   --include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n \
   --include-data-file=src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json \
   --include-data-dir=src/maps/tiles=maps/tiles \

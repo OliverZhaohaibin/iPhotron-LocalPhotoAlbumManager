@@ -128,11 +128,17 @@ Run the structural checks with:
   tests/test_flatpak_packaging.py
 ```
 
-The path-filtered `Flatpak Smoke` GitHub Actions workflow runs on Ubuntu 24.04
-with real `flatpak-builder`: it builds a minimal ELF payload with this manifest,
-creates a bundle, installs it in an isolated user Flatpak root, runs it, checks
-its output, and uninstalls it. That integration job validates the packaging
-lifecycle; the Python test remains the fast orchestration/failure-path layer.
+Before a release, run the real Flatpak lifecycle smoke manually on Ubuntu 24.04:
+
+```bash
+dbus-run-session -- bash tests/integration/run_flatpak_smoke.sh
+```
+
+The script builds a minimal ELF payload with the production manifest, creates a
+bundle, installs it in an isolated user Flatpak root, runs it, checks its output,
+and uninstalls it. It deliberately remains a release validation rather than a
+per-PR CI job; the Python test is the fast orchestration/failure-path layer used
+by normal CI.
 
 ## Migration From The v6.6.8 Legacy ID
 

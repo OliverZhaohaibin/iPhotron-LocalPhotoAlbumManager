@@ -16,7 +16,12 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPainter, QPixmap, QWindow
-from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QWidget,
+)
 
 from iPhoto.application.ports import MapRuntimeCapabilities
 from iPhoto.gui.i18n import formatters
@@ -1897,6 +1902,12 @@ def test_info_panel_card_preserves_visible_size_inside_symmetric_shadow_margin(
         InfoPanel._CARD_WIDTH,
         InfoPanel._CARD_HEIGHT,
     )
+    assert panel._shadow_surface.geometry() == panel._card.geometry()
+    assert panel._shadow_surface.parentWidget() is panel
+    assert panel._card.parentWidget() is panel
+    assert isinstance(layout, QGridLayout)
+    assert layout.itemAt(0).widget() is panel._shadow_surface
+    assert layout.itemAt(1).widget() is panel._card
     assert panel._title_bar.width() == InfoPanel._CARD_WIDTH
     assert panel._body_scroll.width() == InfoPanel._CARD_WIDTH
     panel.close()
@@ -1908,15 +1919,60 @@ def test_info_panel_uses_qt_shadow_effect_and_disables_native_shadow(
     del qapp
     panel = InfoPanel()
 
-    effect = panel._card.graphicsEffect()
+    effect = panel._shadow_surface.graphicsEffect()
     assert isinstance(effect, QGraphicsDropShadowEffect)
     assert effect.blurRadius() == InfoPanel._SHADOW_BLUR_RADIUS
     assert effect.offset() == QPointF(0.0, InfoPanel._SHADOW_OFFSET_Y)
     assert effect.color().getRgb() == (0, 0, 0, InfoPanel._SHADOW_ALPHA)
+    assert panel._card.graphicsEffect() is None
+    assert panel._shadow_surface.findChildren(QWidget) == []
+    assert panel._shadow_surface.testAttribute(
+        Qt.WidgetAttribute.WA_TransparentForMouseEvents
+    )
     assert panel.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
     assert panel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     assert panel.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
     assert not panel.autoFillBackground()
+    panel.close()
+
+
+def test_info_panel_map_subtree_has_no_graphics_effect_ancestor(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    panel.show()
+    _process_deferred_panel_content(qapp)
+
+    map_widget = panel._location_map._map_widget
+    assert isinstance(map_widget, _FakeMiniMapWidget)
+    for descendant in (
+        map_widget,
+        panel._location_map,
+        panel._body_scroll.viewport(),
+    ):
+        current: QWidget | None = descendant
+        while current is not None and current is not panel:
+            assert current.graphicsEffect() is None
+            current = current.parentWidget()
+        assert current is panel
+    assert not panel._shadow_surface.isAncestorOf(map_widget)
     panel.close()
 
 

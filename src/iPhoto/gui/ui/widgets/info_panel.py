@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -443,6 +444,37 @@ class _InfoPanelCard(QWidget):
         painter.drawPath(path)
 
 
+class _InfoPanelShadowSurface(QWidget):
+    """Provide a child-free rounded source for the panel shadow effect."""
+
+    def __init__(self, corner_radius: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._corner_radius = max(0.0, float(corner_radius))
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802
+        """Paint only the opaque rounded mask consumed by the shadow effect."""
+
+        del event
+        if self.width() <= 0 or self.height() <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(
+            self._corner_radius,
+            min(rect.width(), rect.height()) / 2.0,
+        )
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(path, self.palette().color(QPalette.ColorRole.Window))
+
+
 class InfoPanel(QWidget):
     """Small helper window that mirrors macOS Photos' info popover.
 
@@ -519,7 +551,7 @@ class InfoPanel(QWidget):
         self._shell_screen_key: tuple[object, ...] | None = None
 
         # -- transparent window chrome -----------------------------------
-        layout = QVBoxLayout(self)
+        layout = QGridLayout(self)
         layout.setContentsMargins(
             self._SHADOW_PADDING,
             self._SHADOW_PADDING,
@@ -528,17 +560,21 @@ class InfoPanel(QWidget):
         )
         layout.setSpacing(0)
 
+        self._shadow_surface = _InfoPanelShadowSurface(self._CORNER_RADIUS, self)
+        layout.addWidget(self._shadow_surface, 0, 0)
+
         self._card = _InfoPanelCard(self._CORNER_RADIUS, self)
         card_layout = QVBoxLayout(self._card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setSpacing(0)
-        layout.addWidget(self._card)
+        layout.addWidget(self._card, 0, 0)
+        self._card.raise_()
 
-        shadow = QGraphicsDropShadowEffect(self._card)
+        shadow = QGraphicsDropShadowEffect(self._shadow_surface)
         shadow.setBlurRadius(self._SHADOW_BLUR_RADIUS)
         shadow.setOffset(0, self._SHADOW_OFFSET_Y)
         shadow.setColor(QColor(0, 0, 0, self._SHADOW_ALPHA))
-        self._card.setGraphicsEffect(shadow)
+        self._shadow_surface.setGraphicsEffect(shadow)
 
         # -- title bar -----------------------------------------------------
         self._title_bar = QWidget(self._card)
@@ -1676,6 +1712,8 @@ class InfoPanel(QWidget):
         if event.type() == QEvent.Type.PaletteChange:
             self._apply_close_button_style()
             self._update_face_add_button_icon()
+            self._shadow_surface.update()
+            self._card.update()
         if event.type() == QEvent.Type.FontChange:
             self._refresh_or_schedule_panel_geometry()
         super().changeEvent(event)

@@ -2248,15 +2248,31 @@ class FaceRepository:
         self,
         identity_refs: Iterable[IdentityRef | str],
     ) -> tuple[str, ...]:
+        group_ids = self._group_ids_for_identity_refs(identity_refs)
+        for group_id in group_ids:
+            self.refresh_group_assets(group_id)
+        return group_ids
+
+    def _group_ids_for_identity_refs(
+        self,
+        identity_refs: Iterable[IdentityRef | str],
+    ) -> tuple[str, ...]:
         if self._state_repo is None:
             return ()
-        refs = tuple(
+        refs = {
             ref
             for value in identity_refs
             if (ref := IdentityRef.parse(value)) is not None
-        )
+        }
         if not refs:
             return ()
+        canonical = self._canonical_identity_refs(
+            (ref.kind, ref.entity_id) for ref in refs
+        )
+        refs.update(
+            IdentityRef(kind, entity_id)
+            for kind, entity_id, _display_name in canonical.values()
+        )
         group_ids = set(
             self._state_repo.list_group_ids_for_people(
                 ref.entity_id for ref in refs if ref.kind == "person"
@@ -2267,8 +2283,6 @@ class FaceRepository:
                 ref.entity_id for ref in refs if ref.kind == "pet"
             )
         )
-        for group_id in sorted(group_ids):
-            self.refresh_group_assets(group_id)
         return tuple(sorted(group_ids))
 
     def _with_refreshed_identity_groups(
@@ -2333,7 +2347,11 @@ class FaceRepository:
         active_person_ids: list[str] = []
 
         if self._state_repo is not None and person_ids:
-            changed_group_ids.update(self._state_repo.list_group_ids_for_people(person_ids))
+            changed_group_ids.update(
+                self._group_ids_for_identity_refs(
+                    IdentityRef("person", person_id) for person_id in person_ids
+                )
+            )
 
         for person_id in person_ids:
             if self._rebuild_runtime_person(person_id):
@@ -2347,7 +2365,11 @@ class FaceRepository:
             for person_id in active_person_ids:
                 self._repair_person_cover(person_id)
             self._sync_person_cover_defaults()
-            remaining_group_ids = set(self._state_repo.list_group_ids_for_people(active_person_ids))
+            remaining_group_ids = set(
+                self._group_ids_for_identity_refs(
+                    IdentityRef("person", person_id) for person_id in active_person_ids
+                )
+            )
             changed_group_ids.update(remaining_group_ids)
             changed_group_ids.update(group_redirects)
             changed_group_ids.update(group_id for group_id in group_redirects.values() if group_id)

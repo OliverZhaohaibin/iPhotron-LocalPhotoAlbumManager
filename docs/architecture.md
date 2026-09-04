@@ -264,6 +264,9 @@ effective identity are the same. Move and delete runtime commits retain any
 cleared assignment target so recovery can refresh only groups containing the
 native identities or the previous target; legacy commits without this metadata
 retain the full-refresh fallback.
+Targeted group lookup expands every native or assignment identity through the
+durable redirect map, so mutations of source detections also refresh groups that
+were remapped to their canonical People/Pets identities.
 
 Current public boundary names include:
 

@@ -3410,3 +3410,174 @@ def test_legacy_people_delete_commit_keeps_full_refresh_recovery_fallback(
     assert commit is not None and commit["state_synced"]
     assert refresh_calls == [1]
     assert "photo" not in people.group_asset_ids(target_group.group_id)
+
+
+def _redirected_source_mutation_library(tmp_path, source_kind):
+    root = tmp_path / f"redirected-{source_kind}"
+    root.mkdir()
+    get_global_repository(root).write_rows(
+        [
+            {"rel": "shared.jpg", "id": "shared", "media_type": 0},
+            {"rel": "target.jpg", "id": "target", "media_type": 0},
+        ]
+    )
+    people = create_people_service(root)
+    people_repository = people.repository()
+    if source_kind == "person":
+        faces = [
+            _face_record(
+                face_id="FA", asset_id="shared", asset_rel="shared.jpg", person_id="A"
+            ),
+            _face_record(
+                face_id="FB", asset_id="shared", asset_rel="shared.jpg", person_id="B"
+            ),
+        ]
+        persons = [
+            _person_record(person_id="A", key_face_id="FA", face_count=1, name="Alice"),
+            _person_record(person_id="B", key_face_id="FB", face_count=1, name="Bob"),
+        ]
+    else:
+        faces = [
+            _face_record(
+                face_id="FA", asset_id="target", asset_rel="target.jpg", person_id="A"
+            ),
+            _face_record(
+                face_id="FB", asset_id="shared", asset_rel="shared.jpg", person_id="B"
+            ),
+        ]
+        persons = [
+            _person_record(person_id="A", key_face_id="FA", face_count=1, name="Alice"),
+            _person_record(person_id="B", key_face_id="FB", face_count=1, name="Bob"),
+        ]
+    people_repository.replace_all(faces, persons)
+    people_repository.state_repository.sync_scan_results(persons, faces)
+
+    pets = create_pet_service(root)
+    pet_repository = pets.repository()
+    if source_kind == "pet":
+        detections = [
+            _pet_detection_record(
+                detection_id="DP",
+                asset_id="shared",
+                asset_rel="shared.jpg",
+                pet_id="P",
+            ),
+            _pet_detection_record(
+                detection_id="DQ",
+                asset_id="target",
+                asset_rel="target.jpg",
+                pet_id="Q",
+            ),
+        ]
+        pet_records = [
+            _pet_record(pet_id="P", key_detection_id="DP", detection_count=1, name="Miso"),
+            _pet_record(pet_id="Q", key_detection_id="DQ", detection_count=1, name="Nori"),
+        ]
+    else:
+        detections = [
+            _pet_detection_record(
+                detection_id="DP",
+                asset_id="target",
+                asset_rel="target.jpg",
+                pet_id="P",
+            )
+        ]
+        pet_records = [
+            _pet_record(pet_id="P", key_detection_id="DP", detection_count=1, name="Miso")
+        ]
+    pet_repository.replace_all(detections, pet_records)
+
+    if source_kind == "person":
+        group = people.create_group(["person:A", "person:B"])
+        source, target = "person:A", "pet:P"
+    else:
+        group = people.create_group(["pet:P", "person:B"])
+        source, target = "pet:P", "person:A"
+    assert group is not None
+    merge = RecognitionMergeService(people, pets).merge(source, target)
+    assert merge.merged
+    assert people.group_asset_ids(group.group_id) == ["shared"]
+    return root, people, pets, group
+
+
+@pytest.mark.parametrize("source_kind", ["person", "pet"])
+@pytest.mark.parametrize("operation", ["delete", "move", "move_new"])
+def test_redirected_source_detection_mutation_refreshes_canonical_groups(
+    tmp_path, monkeypatch, source_kind, operation
+):
+    root, people, pets, group = _redirected_source_mutation_library(tmp_path, source_kind)
+    refreshed = []
+    original_refresh = FaceRepository.refresh_group_assets
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_all_group_assets",
+        lambda self: pytest.fail("redirected mutation fell back to a full group refresh"),
+    )
+    monkeypatch.setattr(
+        FaceRepository,
+        "refresh_group_assets",
+        lambda self, group_id: (
+            refreshed.append(group_id),
+            original_refresh(self, group_id),
+        )[1],
+    )
+
+    if source_kind == "person":
+        if operation == "delete":
+            result = people.coordinator.delete_face("FA")
+        elif operation == "move":
+            result = people.coordinator.move_face_to_person("FA", "B")
+        else:
+            result = people.coordinator.move_face_to_new_person("FA", "C", "Casey")
+        assert result is not None
+        assert group.group_id in result.changed_group_ids
+    elif operation == "delete":
+        assert pets.delete_detection("DP")
+    elif operation == "move":
+        assert pets.move_detection_to_pet_with_outcome("DP", "Q").succeeded
+    else:
+        assert pets.move_detection_to_new_pet("DP", "New pet")
+
+    assert set(refreshed) == {group.group_id}
+    assert people.group_asset_ids(group.group_id) == []
+
+
+@pytest.mark.parametrize("source_kind", ["person", "pet"])
+def test_redirected_source_delete_recovery_refreshes_canonical_groups(
+    tmp_path, monkeypatch, source_kind
+):
+    root, people, pets, group = _redirected_source_mutation_library(tmp_path, source_kind)
+    original_refresh = FaceRepository.refresh_group_assets
+    attempts = 0
+
+    def fail_canonical_group_once(self, group_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("injected redirected group refresh failure")
+        return original_refresh(self, group_id)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            FaceRepository,
+            "refresh_all_group_assets",
+            lambda self: pytest.fail("redirect recovery used a full group refresh"),
+        )
+        patcher.setattr(FaceRepository, "refresh_group_assets", fail_canonical_group_once)
+        with pytest.raises(OSError, match="redirected group refresh"):
+            if source_kind == "person":
+                people.coordinator.delete_face("FA")
+            else:
+                pets.delete_detection("DP")
+
+    journal = RecognitionOperationJournal(
+        ensure_work_dir(root) / "recognition" / "operations.db"
+    )
+    assert people.group_asset_ids(group.group_id) == ["shared"]
+    assert len(journal.unfinished()) == 1
+    if source_kind == "person":
+        assert people.coordinator.delete_face("missing-face") is None
+    else:
+        assert pets.rename_pet("Q", "Updated")
+    assert journal.unfinished() == ()
+    assert people.group_asset_ids(group.group_id) == []

@@ -1,6 +1,11 @@
 # 启动链路人工实机验收包
 
-更新日期：2026-07-27
+更新日期：2026-09-04
+
+> 当前启动合同以 [`docs/architecture.md`](../architecture.md) 为准。Windows、
+> macOS、Linux 均必须在 top-level `show()` 前完成隐藏 Detail shell 和三个
+> QRhi surface 的最终 native parenting；首帧之后只完成非 native Detail chrome
+> 与 multimedia runtime，不允许创建或 reparent QRhi surface。
 
 > 2026-07-22：用户报告已完成多平台人工 smoke，未发现明显 bug。由于未附
 > artifact、build fingerprint 和逐项报告，该记录为
@@ -17,6 +22,10 @@
 - 不可用存储约 3 秒进入可重试状态
 - 无遗留 helper、thread、timer、watcher、input guard 或信号连接
 - Gallery/首缩略图 P50 相对固定 baseline 改善至少 30%，P95 不退化
+- 三个 QRhi surface 在 `show()` 前已有最终 native parent；`show()` 后没有
+  surface creation、reparent、parentless warm-up 或平台特例 hide/show
+- pre-show native hierarchy 失败时本进程明确失败退出，不宣称通过 startup
+  generation retry 重建 native hierarchy
 
 ## macOS Apple Silicon / Intel
 
@@ -33,7 +42,10 @@ Metal 与 OpenGL 分开采集：
   -- /absolute/iPhotron.app/Contents/MacOS/iPhotron
 ```
 
-把 `metal` 替换为 `opengl` 采集兼容路径。验证库不可用、SQLite lock/corrupt、probe 超时、重试、启动中关窗、切库和首次地图安装。Apple Silicon 本轮由工程任务执行；Intel 保持 `pending_manual_validation`。
+把 `metal` 替换为 `opengl` 采集兼容路径。验证统一 pre-show final-parent
+hierarchy、首帧后的 Detail chrome/multimedia 完成、库不可用、SQLite
+lock/corrupt、probe 超时、重试、启动中关窗、切库和首次地图安装。Apple
+Silicon 本轮由工程任务执行；Intel 保持 `pending_manual_validation`。
 
 ## Windows
 
@@ -44,7 +56,8 @@ Metal 与 OpenGL 分开采集：
 - 延迟/离线 UNC 或 SMB
 - SQLite lock/corrupt 与 helper timeout
 - 启动中关闭、连续重试、切库
-- 单顶层窗口；结束后无 probe/helper 子进程
+- 单顶层窗口、统一 pre-show final-parent QRhi hierarchy，且结束后无
+  probe/helper 子进程
 
 收集 Windows 版本、CPU/架构、Qt backend、构建参数、Defender 状态、盘类型和事件阈值。当前状态：`pending_manual_validation`。
 
@@ -56,6 +69,7 @@ Metal 与 OpenGL 分开采集：
 - AppImage 冷/热启动（只有受控 OS cache eviction 才算正式 cold）
 - 网络 mount、卸载/不可用 mount
 - helper timeout、关窗、重试、切库
+- XCB 与 Wayland 均使用统一 pre-show final-parent QRhi hierarchy
 - Wayland 无 XWayland 时主程序可用、地图明确降级
 - XCB/GLX 地图 helper 崩溃不结束主进程
 
@@ -70,7 +84,7 @@ Metal 与 OpenGL 分开采集：
 | --- | --- | --- | --- |
 | 只读安装目录与首次模型落盘 | macOS Apple Silicon、macOS Intel、Windows `Program Files`、Linux AppImage | bundled root 保持只读；查找顺序为 override、用户 cache、bundled；缺失模型只写用户 cache；首次识别成功 | `pending_manual_validation` |
 | 模型获取与自愈 | 在线下载、离线 bundled fallback、损坏 cache、代理失败、证书失败 | 在线文件 hash/size/shape 正确；离线可用 bundled；损坏 cache 可重取；代理/证书失败给出可操作提示且不污染 cache | `pending_manual_validation` |
-| 固定 DINO Release 产物 | 使用固定 source commit 的受控构建环境和本仓库不可变 `pet-models-v1` 标签 | 生产 Torch Hub 路径已删除；仍须发布 `dinov2_vits14.pt`、记录 artifact/build manifest SHA、填写 Release HTTPS URL，并重新通过 hash/shape/packaging 门禁 | `pending_manual_validation` |
+| DINOv2 production artifact provenance | online cache 与 offline bundled artifact | production 不执行 Torch Hub；`dinov2_vits14.pt` 在加载前通过 manifest 中的 exact SHA-256、byte size 和 shape 校验；记录 artifact/build manifest SHA；损坏文件不能进入 runtime | `pending_manual_validation` |
 | 真实旧图库升级 | 含 name、cover、hidden、rejection、pet merge、跨类型 merge 的脱敏副本 | interactive 不被 backfill 阻塞；后台清空 pending/retry；durable state 不丢；失败资产明确显示 stale/source generation | `pending_manual_validation` |
 | 真实照片识别 | 多宠照片、小目标 tile、People overlap、大狗+远处小猫、重叠 cat/dog | 类别、bbox、去重和 People 优先级符合契约；旧 source annotation 与 canonical identity 显示一致 | `pending_manual_validation` |
 | Windows Live Photo 静态图方向 | Windows packaged，优先复测 `IMG_3684.HEIC` 的脱敏副本，并覆盖 iPhone Orientation 5/6/7/8 的 HEIC+MOV/JPEG+MOV | 静态图与动态视频视觉方向一致；静态图无二次 EXIF 旋转；JPEG 等 WIC 未预转正格式仍正确应用 EXIF；首次展示、Live Motion 返回静帧和连续切换均通过 | `user_verified_original_sample_pass / formal_artifact_evidence_pending` |
@@ -123,4 +137,6 @@ result: pass | fail | pending_manual_validation
 failure code and redacted reproduction:
 ```
 
-所有目标平台都为 `pass` 后，状态才能改为 `cross_platform_validated`，并把本需求目录移动到 `docs/finished/requirements`。
+所有目标平台都为 `pass` 后，状态才能改为 `cross_platform_validated`。本矩阵作为
+长期发布协议保留在 `docs/requirements/`；每次 lifecycle、profiler schema 或平台
+backend 合同变化时必须同步更新。

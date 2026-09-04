@@ -1,23 +1,29 @@
 # Startup benchmark runbook
 
-This runbook is the executable evidence protocol for the remaining Phase 2/3
-startup gates. Raw profiles and process output may contain machine-specific
-diagnostics, so write them below `benchmark-output/` and do not commit them.
+This runbook is the long-lived executable evidence protocol for startup
+performance and lifecycle regressions. It follows the current cross-platform
+QRhi startup contract in [`docs/architecture.md`](../architecture.md). Raw
+profiles and process output may contain machine-specific diagnostics, so write
+them below `benchmark-output/` and do not commit them.
 
 ## Evidence contract
 
-- The pre-optimization baseline is commit `6ff592f7`; the candidate is the
-  current startup optimization branch.
+- Choose an accepted release or commit as the baseline and record both exact
+  revisions. Baseline and candidate must both implement the unified lifecycle:
+  the hidden Detail shell and all QRhi surfaces have final native parents before
+  top-level `show()`, while Detail chrome and multimedia complete after first
+  paint. A revision with the former platform-split surface lifecycle is not an
+  eligible baseline for this gate.
 - Build the two revisions in separate worktrees with the same Python, locked
   dependencies, Nuitka version, build flags, native map runtime, and assets.
 - Use the build script generated `build-manifest.json` for every packaged run.
   Collection rejects a manifest whose source revision or executable SHA does
   not match the launched command; comparison rejects different environment
   fingerprints.
-- Apply only the startup-profile observability changes to the baseline. Do not
-  backport the startup queue, probe, coordinator, or lazy-loading changes.
-  The build-manifest generator and build-script emission are evidence tooling
-  and must be identical in both worktrees.
+- The build-manifest generator, profiler schema, and build-script emission must
+  be identical in both worktrees. If observability must be backported, limit the
+  change to event emission and record the patch; do not alter lifecycle or work
+  scheduling behavior.
 - Each platform/scenario/revision pair requires 30 cold and 30 hot runs.
 - A cold run is formal evidence only when an actual OS file-cache eviction
   method is recorded and `--confirm-controlled-cold-cache` is supplied. Merely
@@ -26,11 +32,17 @@ diagnostics, so write them below `benchmark-output/` and do not commit them.
 - Use a dedicated, backed-up benchmark library with a current index and usable
   thumbnail cache. Never clear or mutate a user's production library.
 
-The profiler writes canonical milestones for application creation, window
-show, interactivity/degradation, library readiness, first Gallery publication,
-and the first thumbnail update published to the Qt model. Every generation has
-exactly one terminal event. Sensitive path fields are replaced by a stable,
-per-install salted identifier at the JSONL writer boundary.
+The profiler writes the canonical `app_created`, `show`, `first_paint`,
+`interactive`, `library_ready`, `first_gallery_visible`, and
+`first_usable_thumbnail` milestones defined by `tools/startup_benchmark.py`.
+Every generation has exactly one terminal event. Sensitive path fields are
+replaced by a stable, per-install salted identifier at the JSONL writer
+boundary.
+
+Packaged lifecycle validation must also confirm that no QRhi surface is created
+or reparented after `show()`. Failure to prepare the pre-show native hierarchy
+is terminal for that process; a retry may restart library startup only after a
+valid visible shell and must not claim to rebuild the native hierarchy.
 
 ## Collection
 
@@ -53,7 +65,7 @@ Apple Silicon, default Metal path:
   --library /absolute/path/to/benchmark-library \
   --confirm-dedicated-library \
   --output-dir benchmark-output/macos-arm64/candidate/metal/hot \
-  -- dist/startup-optimized-low-memory-v4/entrypoint.app/Contents/MacOS/iPhotron
+  -- /absolute/iPhotron.app/Contents/MacOS/iPhotron
 ```
 
 For the OpenGL compatibility path, use `--graphics-backend opengl`. For
@@ -104,7 +116,7 @@ keeps unperformed platform checks as `pending_manual_validation`:
 
 ```bash
 .venv/bin/python tools/macos_detection_report.py \
-  --app dist/startup-optimized-low-memory-v4/entrypoint.app \
+  --app /absolute/iPhotron.app \
   --summary benchmark-output/macos-arm64/candidate/metal/hot/summary.json \
   --output-dir benchmark-output/macos-report
 ```
@@ -131,6 +143,6 @@ their P95 does not regress. P95 uses nearest-rank calculation.
 
 Reports generated on Apple Silicon explicitly retain
 `pending_manual_validation` entries for Windows packaged, Linux AppImage, and macOS
-Intel. Phase 2/3 must not be marked complete until those reports and the manual
-offline-storage/map-degradation checks have been collected on their target
-platforms.
+Intel. Cross-platform validation must not be claimed until those reports and
+the manual native-surface, offline-storage, and map-degradation checks have
+been collected on their target platforms.

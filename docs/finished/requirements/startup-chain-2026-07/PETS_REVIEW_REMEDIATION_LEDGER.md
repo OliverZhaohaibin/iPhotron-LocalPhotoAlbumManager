@@ -1,5 +1,11 @@
 # Pets 合并前审查修复台账
 
+> **状态：历史 remediation evidence，不是当前 Pets runtime contract。** 当前
+> Pets 行为以 [`PETS_RECOGNITION_RUNTIME.md`](../../../misc/PETS_RECOGNITION_RUNTIME.md)
+> 和 [`docs/architecture.md`](../../../architecture.md) 为准；仍需人工证明的项目
+> 由 [`STARTUP_MANUAL_VALIDATION_MATRIX.md`](../../../requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md)
+> 跟踪。
+
 更新日期：2026-07-28
 
 ## 状态与证据边界
@@ -191,6 +197,7 @@ Windows 实机样例 `IMG_3684.HEIC` 已确认动态视频方向正确，错误�
 ## 人工验证保留规则
 
 无法由当前主机自动证明的 packaged 权限、真实 GPU/provider、真实大图库、跨平台
-安装位置和快速关窗/切库体验，最终写入 `MANUAL_VALIDATION_MATRIX.md`，并保留
+安装位置和快速关窗/切库体验，最终写入当前
+[`STARTUP_MANUAL_VALIDATION_MATRIX.md`](../../../requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md)，并保留
 artifact SHA、build manifest、模型 hash、脱敏 fixture 与日志位置。未执行即为
 `pending_manual_validation`，不得写成 PASS。

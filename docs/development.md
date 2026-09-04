@@ -57,7 +57,7 @@ Current production development follows the vNext runtime boundary:
 
 Read these before architecture-sensitive work:
 
-- [AGENT.md](../AGENT.md)
+- [AGENTS.md](../AGENTS.md)
 - [Architecture](architecture.md)
 - [Completed vNext refactor archive](finished/refactor/vnext-2026-06/README.md)
 
@@ -84,6 +84,8 @@ Small behavior contracts that are easy to break during feature work live in
 | Large library collection queries | [LARGE_LIBRARY_QUERY_GUARDRAILS.md](misc/LARGE_LIBRARY_QUERY_GUARDRAILS.md) |
 | Gallery scrolling, sparse windows, and thumbnail demand | [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) |
 | Gallery → Detail GPU-first transactions, caches, sessions, and packaged validation | [DETAIL_OPEN_BENCHMARK_RUNBOOK.md](requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md) |
+| Startup profiling and regression evidence | [STARTUP_BENCHMARK_RUNBOOK.md](requirements/STARTUP_BENCHMARK_RUNBOOK.md) |
+| Cross-platform packaged startup validation | [STARTUP_MANUAL_VALIDATION_MATRIX.md](requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md) |
 | Trash and restore state | [TRASH_RESTORE_STATE_GUARDRAILS.md](misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |
 | Move/restore optimistic UI | [MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md) |
 | Project popups and People & Pets UI regressions | [PROJECT_POPUP_GUARDRAILS.md](misc/PROJECT_POPUP_GUARDRAILS.md) |
@@ -149,14 +151,15 @@ python tools/check_i18n_strings.py src/iPhoto/gui src/maps
 .venv/bin/python -m pytest tests/test_i18n_extract_tool.py tests/test_i18n_translation_manager.py tests/architecture/test_i18n_string_gate.py -q
 ```
 
-Process notes and terminology references live under `docs/requirements/i18n/`.
-Those files document the completed i18n rollout and Apple Photos-aligned edit
-terminology; the long-term regression contract is
+Historical process notes and terminology references live under
+`docs/finished/requirements/i18n/`. Those files document the completed i18n
+rollout and Apple Photos-aligned edit terminology; the long-term regression
+contract is
 [`docs/misc/I18N_UI_TEXT_GUARDRAILS.md`](misc/I18N_UI_TEXT_GUARDRAILS.md).
 
 The pet recognition and clustering materials under
-`docs/requirements/pets-cluster/` are historical requirements and development
-planning inputs. Production behavior is now implemented; use
+`docs/finished/requirements/pets-cluster/` are historical requirements and
+development planning inputs. Production behavior is now implemented; use
 [`docs/misc/PETS_RECOGNITION_RUNTIME.md`](misc/PETS_RECOGNITION_RUNTIME.md) and
 [`docs/architecture.md`](architecture.md) as the current runtime contracts.
 

@@ -1,4 +1,4 @@
-# AGENT.md - iPhotron Development Principles
+# AGENTS.md - iPhotron Development Principles
 
 This file is the working guide for coding agents and contributors. It reflects
 the current vNext state: the production runtime has converged on
@@ -32,8 +32,9 @@ Completed vNext migration records are archived under
 
 - **Folder-native library.** A folder is an album. Users can browse folders
   without an import step.
-- **Local-first.** Core library, browsing, editing, Live Photo, People, and Maps
-  behavior is local. Optional runtimes must degrade gracefully when unavailable.
+- **Local-first.** Core library, browsing, editing, Live Photo, People, Pets,
+  and Maps behavior is local. Optional runtimes must degrade gracefully when
+  unavailable.
 - **Non-destructive editing.** Visual edits are stored in `.ipo` sidecars.
   Original media is not overwritten by normal editing.
 - **Explicit metadata write-back only.** Assign Location is the explicit
@@ -43,8 +44,9 @@ Completed vNext migration records are archived under
 - **Rebuildable facts vs durable choices.** Scan facts, thumbnails, Live Photo
   materialization, and People runtime snapshots can be rebuilt. Favorites,
   hidden/trash state, pinned items, album order, manual metadata, People names,
-  covers, groups, group order, hidden flags, and manual faces must survive
-  rescans and rebuilds.
+  covers, groups, group order, hidden flags, manual faces, Pets names, Pets
+  covers, rejected pet detections, and identity redirects must survive rescans
+  and rebuilds.
 - **Cross-platform desktop first.** macOS, Windows, and Linux remain supported.
   Platform-specific rendering, maps, ExifTool, FFmpeg, and AI behavior must be
   isolated behind adapters or runtime discovery.
@@ -64,7 +66,7 @@ Forbidden directions:
 ```text
 domain -> application/gui/infrastructure
 application -> gui/concrete cache/concrete infrastructure
-infrastructure/cache/core/io/library/people -> gui
+infrastructure/cache/core/io/library/people/pets -> gui
 production runtime -> iPhoto.legacy
 production runtime -> iPhoto.models.*
 ```
@@ -74,8 +76,8 @@ Key runtime objects:
 - `RuntimeContext`: process composition root, current settings/theme/recent
   libraries, active `LibrarySession` lifecycle.
 - `LibrarySession`: library-scoped adapters and surfaces for assets, state,
-  scanning, album metadata, People, Maps, thumbnails, edit sidecars, location,
-  asset lifecycle, and file operations.
+  scanning, album metadata, People, Pets, Maps, thumbnails, edit sidecars,
+  location, asset lifecycle, and file operations.
 - `LibraryRuntimeController`: GUI/runtime controller bound to the active
   session; it should not re-create standalone compatibility services.
 
@@ -104,6 +106,10 @@ Library workspace:
     face_index.db       # Rebuildable People runtime snapshot
     face_state.db       # Durable People user decisions
     thumbnails/         # Rebuildable cropped face thumbnails
+  pets/
+    pet_index.db        # Rebuildable Pets runtime snapshot
+    pet_state.db        # Durable Pets user decisions
+    thumbnails/         # Rebuildable cropped pet thumbnails
   manifest.bak/         # Manifest/links backup area
   locks/                # File-level locks for JSON sidecars
 ```
@@ -112,7 +118,7 @@ State rules:
 
 - `global_index.db` is the current source of truth for asset scan rows,
   pagination, Live Photo roles, trash/favorite/hidden flags, face scan status,
-  and the repository-backed user-state boundary.
+  pet scan status, and the repository-backed user-state boundary.
 - Large-library gallery reads are SQL-first and windowed through collection
   query APIs. Normal visible rows must be thumbnail-ready and carry a
   `thumb_cache_key`.
@@ -121,8 +127,11 @@ State rules:
   guard, and far-speculative thumbnail lanes keep separate capacity.
 - `links.json` is derived compatibility materialization for Live Photo payloads;
   target runtime behavior should read roles through repository/session surfaces.
-- `cache/thumbs/` and People thumbnails are disposable.
+- `cache/thumbs/` and People/Pets thumbnails are disposable.
 - `faces/face_index.db` is rebuildable; `faces/face_state.db` is durable.
+- `pets/pet_index.db` is rebuildable; `pets/pet_state.db` is durable. Pet names,
+  covers, hidden flags, rejected detections, and redirects must survive rescans
+  and runtime snapshot rebuilds.
 - `.ipo` sidecars are the durable source of non-destructive edit parameters.
 - Scan merge must be idempotent and must not implicitly clear durable user
   state.
@@ -133,7 +142,8 @@ State rules:
   that wire application behavior to the current library root.
 - `application/ports/`: public application boundary protocols, including
   `AssetRepositoryPort`, `LibraryStateRepositoryPort`, `MediaScannerPort`,
-  `PeopleIndexPort`, `MapRuntimePort`, `EditSidecarPort`,
+  `PeopleIndexPort`, `PetAssetRepositoryPort`, `PetIndexPort`, `MapRuntimePort`,
+  `EditSidecarPort`,
   `LocationAssetServicePort`, and `MapInteractionServicePort`.
 - `application/use_cases/`: owning use cases for workflows such as scanning.
 - `application/services/`: application-level services for album manifests,
@@ -155,6 +165,8 @@ State rules:
   filesystem shell code bound to session services.
 - `people/`: optional People runtime, scan coordination, repositories, manual
   faces, stable People state, groups, covers, hidden flags, and service API.
+- `pets/`: optional Pets runtime, scan coordination, repositories, stable Pets
+  state, rejected detections, identity redirects, and service API.
 - `maps/`: optional offline Maps runtime, tile parsing, OBF/native widget/helper
   integration, search, and map rendering internals.
 - `core/`: pure or rendering-oriented algorithms for Live Photo pairing,
@@ -193,6 +205,23 @@ State rules:
 - Do not merge people with incompatible hidden state.
 - UI mutations must route through the session-bound People service or explicit
   test doubles.
+
+### Pets
+
+- YOLOX/DINOv2 and their Python dependencies are optional. Missing models or
+  runtime packages must not break the library, People, editing, Live Photo, or
+  Maps workflows.
+- Scan commits may rebuild `pet_index.db` and cropped thumbnails, but must
+  preserve and repair `pet_state.db`.
+- Names, covers, hidden flags, rejected detections, stable identity redirects,
+  and group composition are durable user decisions.
+- Production loads hash-and-size-verified TorchScript artifacts and never
+  executes Torch Hub; Torch Hub is restricted to release conversion tooling.
+- GUI and headless callers must use `LibrarySession.pets` or explicit test
+  doubles. The dashboard composes People and Pets without merging their runtime
+  repositories.
+- See [`docs/misc/PETS_RECOGNITION_RUNTIME.md`](docs/misc/PETS_RECOGNITION_RUNTIME.md)
+  for the production contract.
 
 ### Maps
 
@@ -290,12 +319,17 @@ Required guardrail expectations:
 
 - Keep `README.md` product-facing and concise.
 - Keep `docs/architecture.md` as the current architecture entry point.
-- Keep completed refactor records under `docs/finished/refactor/`.
-- Do not treat archived refactor documents under `docs/finished/` as current
-  implementation instructions.
+- Keep only future work and current validation protocols under
+  `docs/requirements/`; move completed or superseded designs under
+  `docs/finished/` and confirmed unresolved debt under `docs/technical-debt/`.
+- Do not treat archived refactor, requirement, handoff, or closure documents
+  under `docs/finished/` as current implementation instructions.
 - Keep `docs/requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md` aligned with the
   production Detail profiler/harness whenever transaction stages, cache tiers,
   decoder names, or SLO validation fields change.
+- Keep `docs/requirements/STARTUP_BENCHMARK_RUNBOOK.md` and
+  `docs/requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md` aligned with the
+  production startup milestones and cross-platform native-surface lifecycle.
 - Release validation may include manual Qt GUI smoke testing and opening an
   existing library, but these are product acceptance checks rather than
   architecture guardrail replacements.

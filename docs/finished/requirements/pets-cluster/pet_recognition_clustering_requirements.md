@@ -3,7 +3,7 @@
 > 版本：1.0
 > 日期：2026-06-07
 > 状态：历史需求输入；P0 已在 `codex/pets-cluster-p0` 实现
-> 当前生产契约：[`../../misc/PETS_RECOGNITION_RUNTIME.md`](../../misc/PETS_RECOGNITION_RUNTIME.md)
+> 当前生产契约：[`../../../misc/PETS_RECOGNITION_RUNTIME.md`](../../../misc/PETS_RECOGNITION_RUNTIME.md)
 
 本文保留最初需求与优先级，不能再作为当前实现清单使用。生产实现相对初稿的主要变化是：
 

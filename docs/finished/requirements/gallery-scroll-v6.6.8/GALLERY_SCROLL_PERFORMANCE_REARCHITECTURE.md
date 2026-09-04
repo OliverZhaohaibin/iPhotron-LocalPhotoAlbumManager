@@ -1,6 +1,9 @@
 # Windows/Linux 大型图库 Gallery 滚动性能重构
 
-> 状态：核心架构已在 v6.6.8 分支实现；Windows/Linux 发布性能验收仍需按平台执行
+> 状态：核心架构已在 v6.6.8 实现并归档；归档时 Windows/Linux 发布性能验收
+> 尚未完全闭环。当前 Gallery 回归与目标平台验证要求以
+> [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](../../../misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md)
+> 为准。
 > 文档版本：1.2
 > 创建日期：2026-06-11
 > 适用架构：vNext / Qt Widgets Gallery
@@ -9,8 +12,8 @@
 
 > 本文档保留重构前的根因分析、分阶段计划和验收 SLO，因此其中的
 > “当前链路”和“必须新增”是历史实施语境，不代表现行生产架构。
-> 当前架构以 [architecture.md](../architecture.md) 为准，长期回归约束见
-> [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](../misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md)。
+> 当前架构以 [architecture.md](../../../architecture.md) 为准，长期回归约束见
+> [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](../../../misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md)。
 
 ## 1. 执行摘要
 
@@ -27,7 +30,8 @@
 
 本方案不以最小改动为目标，而以清晰的线程边界、可验证的性能契约和较低的长期技术债为目标。只有在完成 Python/Qt 架构重构后，性能剖析仍证明 Python/PySide 调度或 Qt Widgets 光栅绘制是主要瓶颈时，才进入 Qt Quick 或 C++ renderer 的 Native 门禁评估。
 
-本次实施以该文档为持续架构契约，并同步修改生产代码、测试与性能门禁。
+本文档是实施期架构记录；当前长期契约以 `docs/architecture.md` 与
+`docs/misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md` 为准。
 
 ## 2. 决策结论
 

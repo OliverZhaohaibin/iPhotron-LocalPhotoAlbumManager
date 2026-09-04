@@ -1,5 +1,10 @@
 # 🛠️ 人脸识别 / OCR 文字识别 — 开发文档（方案 B）
 
+> **状态：历史实施设计，已被取代。** `src/iPhoto/ai/`、统一 AI subsystem
+> 和本文的模型/仓储/worker 布局均不是现行 People 架构。维护 People 请使用
+> [`docs/architecture.md`](../../../architecture.md)；未来 OCR 仅以
+> [`OCR_REQUIREMENTS.md`](../../../requirements/ocr/OCR_REQUIREMENTS.md) 为产品需求输入。
+
 > 版本 2.0 · 2026-03-09
 >
 > 本文档面向开发者，详细描述基于 **InsightFace + RapidOCR + ONNX Runtime** 的人脸识别（Face Recognition & Clustering）和 OCR 文字提取子系统的**实现方案、文件结构、信号流、数据流**，以及关键操作的开发指南。

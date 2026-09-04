@@ -16,7 +16,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPainter, QPixmap, QWindow
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QWidget
 
 from iPhoto.application.ports import MapRuntimeCapabilities
 from iPhoto.gui.i18n import formatters
@@ -1751,7 +1751,8 @@ def test_info_panel_shell_is_capped_once_for_small_screen(
     monkeypatch.setattr(panel, "_panel_screen", lambda: _SmallScreen())
 
     assert panel._apply_shell_size(force=True) is True
-    assert panel.size() == QSize(320, 520)
+    expected_size = QSize(InfoPanel._PANEL_WIDTH, 520)
+    assert panel.size() == expected_size
 
     panel.set_asset_metadata(
         {
@@ -1760,7 +1761,7 @@ def test_info_panel_shell_is_capped_once_for_small_screen(
             "lens": "Long translated metadata " * 100,
         }
     )
-    assert panel.size() == QSize(320, 520)
+    assert panel.size() == expected_size
 
 
 def test_info_panel_faces_wrap_without_horizontal_overflow(qapp: QApplication) -> None:
@@ -1871,17 +1872,83 @@ def test_info_panel_title_label_drag_moves_panel(
     panel.close()
 
 
-def test_info_panel_has_shadow_margin(qapp: QApplication) -> None:
-    """The root layout should reserve right/bottom margins for the shadow."""
+def test_info_panel_card_preserves_visible_size_inside_symmetric_shadow_margin(
+    qapp: QApplication,
+) -> None:
+    """The transparent shell should reserve enough space on every shadow edge."""
 
     panel = InfoPanel()
+    panel.show()
+    qapp.processEvents()
+
     layout = panel.layout()
     margins = layout.contentsMargins()
-    shadow = InfoPanel._SHADOW_SIZE
-    assert margins.left() == 0
-    assert margins.top() == 0
-    assert margins.right() == shadow
-    assert margins.bottom() == shadow
+    padding = InfoPanel._SHADOW_PADDING
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+        padding,
+        padding,
+        padding,
+        padding,
+    )
+    assert panel.size() == QSize(InfoPanel._PANEL_WIDTH, InfoPanel._PANEL_HEIGHT)
+    assert panel._card.geometry() == QRect(
+        padding,
+        padding,
+        InfoPanel._CARD_WIDTH,
+        InfoPanel._CARD_HEIGHT,
+    )
+    assert panel._title_bar.width() == InfoPanel._CARD_WIDTH
+    assert panel._body_scroll.width() == InfoPanel._CARD_WIDTH
+    panel.close()
+
+
+def test_info_panel_uses_qt_shadow_effect_and_disables_native_shadow(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    panel = InfoPanel()
+
+    effect = panel._card.graphicsEffect()
+    assert isinstance(effect, QGraphicsDropShadowEffect)
+    assert effect.blurRadius() == InfoPanel._SHADOW_BLUR_RADIUS
+    assert effect.offset() == QPointF(0.0, InfoPanel._SHADOW_OFFSET_Y)
+    assert effect.color().getRgb() == (0, 0, 0, InfoPanel._SHADOW_ALPHA)
+    assert panel.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
+    assert panel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert panel.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not panel.autoFillBackground()
+    panel.close()
+
+
+def test_info_panel_render_contains_unclipped_shadow_on_all_four_sides(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.show()
+    qapp.processEvents()
+
+    rendered = QPixmap(panel.size())
+    rendered.fill(Qt.GlobalColor.transparent)
+    panel.render(rendered)
+    image = rendered.toImage()
+    card = panel._card.geometry()
+    sample_gap = 5
+    samples = (
+        (card.center().x(), card.top() - sample_gap),
+        (card.left() - sample_gap, card.center().y()),
+        (card.right() + sample_gap, card.center().y()),
+        (card.center().x(), card.bottom() + sample_gap),
+    )
+
+    assert all(image.pixelColor(x, y).alpha() > 0 for x, y in samples)
+    assert image.pixelColor(card.center()).alpha() == 255
+    outer_edge_samples = (
+        (image.width() // 2, 0),
+        (0, image.height() // 2),
+        (image.width() - 1, image.height() // 2),
+        (image.width() // 2, image.height() - 1),
+    )
+    assert all(image.pixelColor(x, y).alpha() == 0 for x, y in outer_edge_samples)
     panel.close()
 
 

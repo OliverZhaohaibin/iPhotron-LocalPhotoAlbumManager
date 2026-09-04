@@ -15,6 +15,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPain
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -405,6 +406,43 @@ class _FormattedMetadata:
     is_video: bool = False
 
 
+class _InfoPanelCard(QWidget):
+    """Paint the rounded Info Panel surface inside its transparent window."""
+
+    def __init__(self, corner_radius: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._corner_radius = max(0.0, float(corner_radius))
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802
+        """Draw the card background and border; the window owns only chrome."""
+
+        del event
+        if self.width() <= 0 or self.height() <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(
+            self._corner_radius,
+            min(rect.width(), rect.height()) / 2.0,
+        )
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(path, self.palette().color(QPalette.ColorRole.Window))
+
+        border_color = self.palette().color(QPalette.ColorRole.Mid)
+        border_color.setAlpha(80)
+        painter.setPen(border_color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+
 class InfoPanel(QWidget):
     """Small helper window that mirrors macOS Photos' info popover.
 
@@ -414,11 +452,14 @@ class InfoPanel(QWidget):
     """
 
     _CORNER_RADIUS = 12.0
-    _SHADOW_SIZE = 16
-    _SHADOW_MAX_ALPHA = 18
-    _SHADOW_RADIUS_GROWTH = 0.5
-    _PANEL_WIDTH = 320
-    _PANEL_HEIGHT = 550
+    _SHADOW_BLUR_RADIUS = 24.0
+    _SHADOW_OFFSET_Y = 4.0
+    _SHADOW_ALPHA = 72
+    _SHADOW_PADDING = 28
+    _CARD_WIDTH = 304
+    _CARD_HEIGHT = 534
+    _PANEL_WIDTH = _CARD_WIDTH + 2 * _SHADOW_PADDING
+    _PANEL_HEIGHT = _CARD_HEIGHT + 2 * _SHADOW_PADDING
     _SCREEN_HORIZONTAL_MARGIN = 40
     _SCREEN_VERTICAL_MARGIN = 80
     _DEFAULT_LOCATION_FALLBACK_TEXT = "Install the map extension to use Assign a Location."
@@ -444,10 +485,13 @@ class InfoPanel(QWidget):
             Qt.WindowType.Window
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setAutoFillBackground(False)
 
         self._metadata: Optional[dict[str, Any]] = None
         self._current_rel: Optional[str] = None
@@ -474,8 +518,30 @@ class InfoPanel(QWidget):
         self._last_location_map_target: tuple[float, float] | None = None
         self._shell_screen_key: tuple[object, ...] | None = None
 
+        # -- transparent window chrome -----------------------------------
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            self._SHADOW_PADDING,
+            self._SHADOW_PADDING,
+            self._SHADOW_PADDING,
+            self._SHADOW_PADDING,
+        )
+        layout.setSpacing(0)
+
+        self._card = _InfoPanelCard(self._CORNER_RADIUS, self)
+        card_layout = QVBoxLayout(self._card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        layout.addWidget(self._card)
+
+        shadow = QGraphicsDropShadowEffect(self._card)
+        shadow.setBlurRadius(self._SHADOW_BLUR_RADIUS)
+        shadow.setOffset(0, self._SHADOW_OFFSET_Y)
+        shadow.setColor(QColor(0, 0, 0, self._SHADOW_ALPHA))
+        self._card.setGraphicsEffect(shadow)
+
         # -- title bar -----------------------------------------------------
-        self._title_bar = QWidget(self)
+        self._title_bar = QWidget(self._card)
         self._title_bar.setFixedHeight(TITLE_BAR_HEIGHT)
         title_layout = QHBoxLayout(self._title_bar)
         title_layout.setContentsMargins(16, 10, 12, 6)
@@ -517,14 +583,9 @@ class InfoPanel(QWidget):
         self._summary_label = self._make_content_label()
         self._exposure_label = self._make_content_label()
 
-        # -- root layout ---------------------------------------------------
-        s = self._SHADOW_SIZE
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, s, s)
-        layout.setSpacing(0)
-        layout.addWidget(self._title_bar)
+        card_layout.addWidget(self._title_bar)
 
-        self._body_scroll = QScrollArea(self)
+        self._body_scroll = QScrollArea(self._card)
         self._body_scroll.setObjectName("infoPanelBodyScroll")
         self._body_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._body_scroll.setWidgetResizable(True)
@@ -679,7 +740,7 @@ class InfoPanel(QWidget):
         body_scrollbar = self._body_scroll.verticalScrollBar()
         body_scrollbar.rangeChanged.connect(self._sync_body_scrollbar_state)
         body_scrollbar.valueChanged.connect(self._handle_body_scroll_value_changed)
-        layout.addWidget(self._body_scroll, 1)
+        card_layout.addWidget(self._body_scroll, 1)
         self._apply_shell_size(force=True)
         self._sync_body_scrollbar_state(
             body_scrollbar.minimum(),
@@ -1402,7 +1463,7 @@ class InfoPanel(QWidget):
         self._content_layout.activate()
         viewport_width = self._body_scroll.viewport().width()
         if viewport_width <= 1:
-            viewport_width = max(1, self.width() - self._SHADOW_SIZE)
+            viewport_width = max(1, self._card.width())
         margins = self._content_layout.contentsMargins()
         content_width = max(1, viewport_width - margins.left() - margins.right())
         content_height = (
@@ -1653,59 +1714,13 @@ class InfoPanel(QWidget):
         event.ignore()
         self.dismiss()
 
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        """Draw drop shadow and an anti-aliased rounded rectangle."""
-
-        del event
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        s = self._SHADOW_SIZE
-        content_rect = QRectF(self.rect()).adjusted(0, 0, -s, -s)
-        radius = min(
-            self._CORNER_RADIUS,
-            min(content_rect.width(), content_rect.height()) / 2.0,
-        )
-
-        # -- drop shadow (right + bottom only) -----------------------------
-        shadow_steps = s
-        for i in range(shadow_steps):
-            alpha = int(self._SHADOW_MAX_ALPHA * (1 - i / shadow_steps) ** 2)
-            if alpha <= 0:
-                continue
-            shadow_color = QColor(0, 0, 0, alpha)
-            spread = float(i)
-            shadow_rect = content_rect.adjusted(spread, spread, spread, spread)
-            shadow_path = QPainterPath()
-            shadow_path.addRoundedRect(
-                shadow_rect,
-                radius + spread * self._SHADOW_RADIUS_GROWTH,
-                radius + spread * self._SHADOW_RADIUS_GROWTH,
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.fillPath(shadow_path, shadow_color)
-
-        # -- background ----------------------------------------------------
-        path = QPainterPath()
-        path.addRoundedRect(content_rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-
-        bg_color = self.palette().color(QPalette.ColorRole.Window)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillPath(path, bg_color)
-
-        border_color = self.palette().color(QPalette.ColorRole.Mid)
-        border_color.setAlpha(80)
-        painter.setPen(border_color)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
-        painter.end()
-
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         """Begin a drag when clicking on the title bar area."""
 
         if event.button() == Qt.MouseButton.LeftButton:
             local_pos = event.position().toPoint()
-            if self._title_bar.geometry().contains(local_pos):
+            title_pos = self._title_bar.mapFrom(self, local_pos)
+            if self._title_bar.rect().contains(title_pos):
                 if self._begin_drag(event):
                     event.accept()
                     return

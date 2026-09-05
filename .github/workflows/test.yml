@@ -255,7 +255,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           NUMBA_DISABLE_JIT: "1"
         run: >-
-          python -m pytest -q
+          python -m pytest -q -m "not windows_compositor"
           tests/gui/test_detail_pipeline.py
           tests/gui/test_detail_render_coordinator.py
           tests/gui/test_detail_decode_backend.py
@@ -264,7 +264,10 @@ jobs:
           tests/gui/test_detail_surface_residency.py
           tests/gui/test_detail_render_session.py
           tests/ui/controllers/test_player_view_controller_adjustments.py
+          tests/ui/controllers/test_player_view_init_cover.py
+          tests/ui/widgets/test_gl_image_viewer_post_load_signal.py
           tests/ui/widgets/test_still_texture_residency.py
+          tests/ui/widgets/test_video_area.py
           tests/test_detail_benchmark.py
           tests/test_detail_surface_cache_benchmark.py
 

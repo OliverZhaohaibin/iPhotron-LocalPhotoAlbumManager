@@ -5,13 +5,15 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GL image viewer tests")
 
 import os
+import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QPointF, QSize
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGridLayout, QWidget
 
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_image_viewer.widget import _crop_preview_adjustments
@@ -72,6 +74,150 @@ def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None
     )
     assert image_point.x() == pytest.approx(210.0)
     assert image_point.y() == pytest.approx(160.0)
+
+
+def test_presentation_transition_is_generation_bound_and_preserves_texture(qapp) -> None:
+    viewer = GLImageViewer()
+    image = QImage(32, 24, QImage.Format.Format_RGBA8888)
+    image.fill(0xFFFF0000)
+    viewer.set_image(image, {}, image_source="old-still")
+
+    viewer.begin_presentation_transition(8)
+
+    assert viewer.current_image_source() == "old-still"
+    assert viewer.has_image_content() is True
+    assert viewer.presentation_transition_active(7) is False
+    assert viewer.presentation_transition_active(8) is True
+    assert viewer.complete_presentation_transition(7) is False
+    assert viewer._presentation_suppressed_generation == 8
+    assert viewer.complete_presentation_transition(8) is True
+    assert viewer.current_image_source() == "old-still"
+
+
+def test_raw_gl_suppression_clears_without_drawing_or_mutating_residency() -> None:
+    viewer = Mock()
+    viewer._uses_raw_gl = True
+    viewer._gl_initialized = True
+    viewer._gl_funcs = Mock()
+    viewer._presentation_suppressed_generation = 9
+    viewer._renderer.has_texture.return_value = True
+    viewer._pending_resident_activation = "new-still"
+    viewer._pending_warm_surfaces = ["neighbor"]
+    target = Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    viewer.renderTarget.return_value = target
+    command_buffer = Mock()
+
+    GLImageViewer.render(viewer, command_buffer)
+
+    command_buffer.beginPass.assert_called_once()
+    command_buffer.beginExternal.assert_not_called()
+    viewer._renderer.render.assert_not_called()
+    viewer._texture_manager.activate_resident_texture.assert_not_called()
+    viewer._texture_manager.needs_texture_upload.assert_not_called()
+    assert viewer._pending_resident_activation == "new-still"
+    assert viewer._pending_warm_surfaces == ["neighbor"]
+    assert viewer._rendered_content_identity is None
+
+
+def test_rhi_suppression_clears_without_drawing_or_consuming_new_surface() -> None:
+    viewer = Mock()
+    viewer._gl_initialized = True
+    viewer._presentation_suppressed_generation = 10
+    viewer._pending_resident_activation = "new-still"
+    viewer._pending_warm_surfaces = ["neighbor"]
+    target = Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    viewer.renderTarget.return_value = target
+    command_buffer = Mock()
+
+    GLImageViewer._render_rhi(viewer, command_buffer)
+
+    command_buffer.beginPass.assert_called_once()
+    viewer._renderer.render.assert_not_called()
+    viewer._texture_manager.activate_resident_texture.assert_not_called()
+    viewer._texture_manager.needs_texture_upload.assert_not_called()
+    assert viewer._pending_resident_activation == "new-still"
+    assert viewer._pending_warm_surfaces == ["neighbor"]
+    assert viewer._rendered_content_identity is None
+
+
+@pytest.mark.gpu
+@pytest.mark.windows_compositor
+def test_visible_windows_transition_never_exposes_previous_still(qapp) -> None:
+    """Validate transition pixels on a real visible Windows QRhi compositor."""
+
+    if sys.platform != "win32":
+        pytest.skip("requires a visible Windows compositor integration runner")
+    if QApplication.platformName().lower() in {"offscreen", "minimal"}:
+        pytest.skip("requires a visible platform QRhi compositor")
+
+    host = QWidget()
+    layout = QGridLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    viewer = GLImageViewer(host)
+    layout.addWidget(viewer, 0, 0)
+    host.resize(320, 180)
+    host.show()
+    qapp.processEvents()
+
+    def wait_for(spy: QSignalSpy, count: int) -> None:
+        deadline = time.monotonic() + 5.0
+        while spy.count() < count and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert spy.count() >= count
+
+    def center_pixel():
+        screen = qapp.primaryScreen()
+        assert screen is not None
+        image = screen.grabWindow(int(host.winId())).toImage()
+        assert not image.isNull()
+        return image.pixelColor(image.width() // 2, image.height() // 2)
+
+    submitted = QSignalSpy(viewer.stillFrameSubmitted)
+    composed = QSignalSpy(viewer.frameSubmitted)
+    red = QImage(320, 180, QImage.Format.Format_RGBA8888)
+    red.fill(0xFFFF0000)
+    viewer._still_generation_by_key["red"] = 1
+    viewer.set_image(red, {}, image_source="red")
+    viewer.update()
+    wait_for(submitted, 1)
+    red_pixel = center_pixel()
+    assert red_pixel.red() > red_pixel.blue()
+    cycles = max(
+        1,
+        min(100, int(os.environ.get("IPHOTO_WINDOWS_COMPOSITOR_CYCLES", "1"))),
+    )
+    for index in range(cycles):
+        generation = index + 2
+        viewer.begin_presentation_transition(generation)
+        composed_before = composed.count()
+        viewer.update()
+        wait_for(composed, composed_before + 1)
+        transition_pixel = center_pixel()
+        expected_background = viewer._transition_clear_color()
+        assert transition_pixel.alpha() == 255
+        assert abs(transition_pixel.red() - expected_background.red()) <= 20
+        assert abs(transition_pixel.green() - expected_background.green()) <= 20
+        assert abs(transition_pixel.blue() - expected_background.blue()) <= 20
+
+        next_is_blue = index % 2 == 0
+        color = 0xFF0000FF if next_is_blue else 0xFFFF0000
+        source = f"transition-{generation}"
+        image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+        image.fill(color)
+        viewer._still_generation_by_key[source] = generation
+        viewer.set_image(image, {}, image_source=source)
+        assert viewer.complete_presentation_transition(generation)
+        viewer.update()
+        wait_for(submitted, index + 2)
+        presented_pixel = center_pixel()
+        if next_is_blue:
+            assert presented_pixel.blue() > presented_pixel.red()
+        else:
+            assert presented_pixel.red() > presented_pixel.blue()
+    host.close()
 
 
 def test_still_surface_retains_transaction_generation_until_gpu_upload(qapp) -> None:
@@ -135,6 +281,7 @@ def test_rhi_render_without_pending_upload_has_defined_presentation_flags() -> N
     """Regression: an idle Metal render must not read an unbound local."""
 
     viewer = Mock()
+    viewer._presentation_suppressed_generation = None
     viewer._gl_initialized = True
     viewer._renderer.has_texture.return_value = True
     viewer._using_video_frame_source = False
@@ -186,6 +333,7 @@ def test_rhi_render_presents_video_uploaded_before_render() -> None:
     """A video draw is acknowledged only after window-frame submission."""
 
     viewer = Mock()
+    viewer._presentation_suppressed_generation = None
     viewer._gl_initialized = True
     viewer._renderer.has_texture.return_value = True
     viewer._using_video_frame_source = True
@@ -287,6 +435,7 @@ def test_rhi_first_texture_failure_is_reported_before_no_texture_return() -> Non
     """A failed first allocation must trigger LOD fallback without an old texture."""
 
     viewer = Mock()
+    viewer._presentation_suppressed_generation = None
     viewer._gl_initialized = True
     viewer._using_video_frame_source = False
     viewer._video_frame_dirty = False
@@ -328,6 +477,7 @@ def test_windows_gl_first_texture_failure_is_reported_before_no_texture_return(
     """The Windows raw-GL path must also report a failed first allocation."""
 
     viewer = Mock()
+    viewer._presentation_suppressed_generation = None
     viewer._uses_raw_gl = True
     viewer._gl_initialized = True
     viewer._using_video_frame_source = False

@@ -50,7 +50,7 @@ from ....gui.detail_request_scheduler import DetailStillRequestScheduler
 from ....gui.detail_surface_cache import CachedStillDecodeBackend
 from ....gui.detail_surface_residency import SurfaceResidencyTracker
 from ....gui.i18n import tr
-from ..widgets.gl_image_viewer import GLImageViewer
+from ..widgets.gl_image_viewer import GLImageViewer, preload_opengl_python_runtime
 from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
 
@@ -201,6 +201,27 @@ class _ScheduledStillSurfaceDecodeWorker(_StillSurfaceDecodeWorker):
             self._signals.finished.emit(self)
 
 
+class _RenderRuntimeWarmupSignals(QObject):
+    finished = Signal(object, bool, str)
+
+
+class _RenderRuntimeWarmupWorker(QRunnable):
+    """Import the Windows OpenGL Python runtime after user interaction."""
+
+    def __init__(self, signals: _RenderRuntimeWarmupSignals) -> None:
+        super().__init__()
+        self.setAutoDelete(False)
+        self.signals = signals
+
+    def run(self) -> None:  # pragma: no cover - executed on a worker thread
+        try:
+            preload_opengl_python_runtime()
+        except Exception as exc:  # noqa: BLE001 - best-effort import warm-up
+            self.signals.finished.emit(self, False, type(exc).__name__)
+        else:
+            self.signals.finished.emit(self, True, "")
+
+
 class _AdjustmentPreparationSignals(QObject):
     started = Signal(object)
     ready = Signal(object, object)
@@ -348,6 +369,8 @@ class PlayerViewController(QObject):
     stillFramePresented = Signal(object, int)
     """Emitted after the requested viewport surface is presented."""
 
+    _POST_SUBMIT_REVEAL_DEADLINE_MS = 250
+
     def __init__(
         self,
         player_stack: QStackedWidget,
@@ -413,6 +436,14 @@ class PlayerViewController(QObject):
         self._preparation_entry_by_worker: dict[int, _PreparationEntry] = {}
         self._preparation_prefetch_queue: list[_PreparedRequestIntent] = []
         self._preparation_shutting_down = False
+        self._interaction_warmup_enabled = False
+        self._render_runtime_warmup_state: Literal[
+            "idle", "running", "completed"
+        ] = "idle"
+        self._render_runtime_warmup_attempts = 0
+        self._render_runtime_warmup_pool: QThreadPool | None = None
+        self._render_runtime_warmup_worker: _RenderRuntimeWarmupWorker | None = None
+        self._render_runtime_warmup_signals: _RenderRuntimeWarmupSignals | None = None
         self._raw_source_probe_cache: OrderedDict[
             tuple,
             AssetSourceIdentity,
@@ -475,12 +506,14 @@ class PlayerViewController(QObject):
         self._pending_video_generation: int | None = None
         self._pending_video_content_serial: int | None = None
         self._video_interactive_when_ready = False
+        self._pending_live_badge_generation: int | None = None
         self._requires_post_submit_frame = sys.platform == "win32"
         self._surface_transition_epoch = 0
         self._post_submit_epoch: int | None = None
         self._post_submit_kind: Literal["image", "video"] | None = None
         self._post_submit_payload: tuple[object, ...] = ()
         self._post_submit_armed = False
+        self._post_submit_deadline_timer: QTimer | None = None
 
         self._image_viewer.firstFrameReady.connect(self._on_image_first_render)
         self._video_area.firstFrameReady.connect(self._on_video_first_render)
@@ -522,15 +555,43 @@ class PlayerViewController(QObject):
             return tr("DetailPage", "Select a photo or video to preview.")
         return self._placeholder_default_text
 
-    def _advance_surface_transition_epoch(self) -> int:
+    def _advance_surface_transition_epoch(self, reason: str) -> int:
         """Invalidate delayed cover releases owned by an older transition."""
 
+        kind = self._post_submit_kind
+        payload = self._post_submit_payload
+        if kind is not None and payload:
+            self._discard_post_submit_payload(
+                kind,
+                payload,
+                self._post_submit_generation(kind, payload),
+                reason=reason,
+                epoch=self._post_submit_epoch,
+                state="armed" if self._post_submit_armed else "scheduled",
+            )
+        else:
+            self._cancel_post_submit_deadline()
         self._surface_transition_epoch += 1
         self._post_submit_epoch = None
         self._post_submit_kind = None
         self._post_submit_payload = ()
         self._post_submit_armed = False
         return self._surface_transition_epoch
+
+    def _cancel_post_submit_deadline(self) -> None:
+        timer = self._post_submit_deadline_timer
+        if timer is not None:
+            timer.stop()
+
+    def _start_post_submit_deadline(self) -> None:
+        timer = self._post_submit_deadline_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(self._POST_SUBMIT_REVEAL_DEADLINE_MS)
+            timer.timeout.connect(self._on_post_submit_deadline)
+            self._post_submit_deadline_timer = timer
+        timer.start()
 
     def _schedule_post_submit_release(
         self,
@@ -553,6 +614,12 @@ class PlayerViewController(QObject):
         self._post_submit_kind = kind
         self._post_submit_payload = candidate_payload
         self._post_submit_armed = False
+        emit_detail_event(
+            "post_submit_scheduled",
+            generation=self._post_submit_generation(kind, candidate_payload),
+            kind=kind,
+            epoch=epoch,
+        )
         QTimer.singleShot(0, lambda: self._arm_post_submit_release(epoch, kind))
 
     def _arm_post_submit_release(
@@ -572,6 +639,13 @@ class PlayerViewController(QObject):
             if self._player_stack.currentWidget() is not self._image_viewer:
                 return
             self._post_submit_armed = True
+            self._start_post_submit_deadline()
+            emit_detail_event(
+                "post_submit_armed",
+                generation=self._post_submit_generation(kind, self._post_submit_payload),
+                kind=kind,
+                epoch=epoch,
+            )
             self._image_viewer.update()
             return
         if self._player_stack.currentWidget() is not self._video_area:
@@ -579,7 +653,27 @@ class PlayerViewController(QObject):
         request_update = getattr(self._video_area, "request_active_surface_update", None)
         if callable(request_update):
             self._post_submit_armed = True
+            self._start_post_submit_deadline()
+            emit_detail_event(
+                "post_submit_armed",
+                generation=self._post_submit_generation(kind, self._post_submit_payload),
+                kind=kind,
+                epoch=epoch,
+            )
             request_update()
+
+    @staticmethod
+    def _post_submit_generation(
+        kind: Literal["image", "video"],
+        payload: tuple[object, ...],
+    ) -> int:
+        if len(payload) != 2:
+            return 0
+        value = payload[1] if kind == "image" else payload[0]
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
 
     def _peek_post_submit_payload(
         self,
@@ -608,7 +702,99 @@ class PlayerViewController(QObject):
         self._post_submit_kind = None
         self._post_submit_payload = ()
         self._post_submit_armed = False
+        self._cancel_post_submit_deadline()
         return True
+
+    def _on_post_submit_deadline(self) -> None:
+        """Fail open only for content already submitted by the current surface."""
+
+        kind = self._post_submit_kind
+        if kind not in {"image", "video"}:
+            return
+        payload = self._peek_post_submit_payload(kind)
+        if payload is None or len(payload) != 2:
+            return
+        generation = self._post_submit_generation(kind, payload)
+        emit_detail_event(
+            "post_submit_deadline",
+            generation=generation,
+            kind=kind,
+            epoch=self._surface_transition_epoch,
+        )
+        if kind == "image":
+            source = payload[0]
+            invalid = (
+                generation != self._pending_image_generation
+                or source != self._pending_image_key
+                or self._player_stack.currentWidget() is not self._image_viewer
+            )
+            if invalid:
+                self._discard_post_submit_payload(
+                    "image",
+                    payload,
+                    generation,
+                    reason="deadline_stale",
+                )
+                return
+            if not self._consume_post_submit_payload("image", payload):
+                return
+            self._finalize_image_surface_submission(
+                source,
+                generation,
+                reveal_reason="deadline",
+            )
+            return
+
+        content_serial = int(payload[1])
+        required_serial = self._pending_video_content_serial
+        invalid = (
+            generation != self._pending_video_generation
+            or (required_serial is not None and content_serial < required_serial)
+            or self._player_stack.currentWidget() is not self._video_area
+        )
+        if invalid:
+            self._discard_post_submit_payload(
+                "video",
+                payload,
+                generation,
+                reason="deadline_stale",
+            )
+            return
+        if not self._consume_post_submit_payload("video", payload):
+            return
+        self._finalize_video_surface_submission(reveal_reason="deadline")
+
+    def _discard_post_submit_payload(
+        self,
+        kind: Literal["image", "video"],
+        payload: tuple[object, ...],
+        generation: int,
+        *,
+        reason: str,
+        epoch: int | None = None,
+        state: str | None = None,
+    ) -> None:
+        """Terminate an expired stale barrier without revealing its content."""
+
+        if (
+            self._post_submit_kind != kind
+            or self._post_submit_payload != payload
+            or self._post_submit_epoch is None
+        ):
+            return
+        self._post_submit_epoch = None
+        self._post_submit_kind = None
+        self._post_submit_payload = ()
+        self._post_submit_armed = False
+        self._cancel_post_submit_deadline()
+        emit_detail_event(
+            "post_submit_discarded",
+            generation=generation,
+            kind=kind,
+            epoch=self._surface_transition_epoch if epoch is None else int(epoch),
+            state=state or "armed",
+            reason=reason,
+        )
 
     def _on_image_first_render(self) -> None:
         """Mark image viewer as initialised; hide cover if it is visible."""
@@ -625,7 +811,7 @@ class PlayerViewController(QObject):
 
         self._image_viewer_rendered = False
         if self._player_stack.currentWidget() is self._image_viewer:
-            self._advance_surface_transition_epoch()
+            self._advance_surface_transition_epoch("image_resources_invalidated")
         if (
             self._player_stack.currentWidget() is self._image_viewer
             and self._pending_image_generation is None
@@ -636,17 +822,30 @@ class PlayerViewController(QObject):
                 self._pending_image_key = current_source
         self._sync_detail_surface_cover()
 
-    def _arm_image_transition(self, generation: int, content_key: object) -> None:
-        """Cover the still surface until the identified content is submitted."""
+    def _bind_image_transition_key(
+        self,
+        generation: int,
+        content_key: object,
+    ) -> bool:
+        """Bind decoded content identity without starting a second transition."""
 
-        self._advance_surface_transition_epoch()
-        self._pending_image_generation = int(generation)
+        generation = int(generation)
+        if generation != self._pending_image_generation:
+            return False
         self._pending_image_key = content_key
         self._show_detail_init_cover()
+        return True
 
     def _cancel_image_transition(self) -> None:
         self._pending_image_generation = None
         self._pending_image_key = None
+        cancel_suppression = getattr(
+            self._image_viewer,
+            "cancel_presentation_transition",
+            None,
+        )
+        if callable(cancel_suppression):
+            cancel_suppression()
 
     def _on_video_surface_invalidated(
         self,
@@ -657,7 +856,7 @@ class PlayerViewController(QObject):
 
         self._video_renderer_rendered = False
         if self._player_stack.currentWidget() is self._video_area and generation > 0:
-            self._advance_surface_transition_epoch()
+            self._advance_surface_transition_epoch("video_resources_invalidated")
             self._pending_video_generation = int(generation)
             self._pending_video_content_serial = (
                 int(content_serial) if content_serial > 0 else None
@@ -687,14 +886,26 @@ class PlayerViewController(QObject):
             return
         self._finalize_video_surface_submission()
 
-    def _finalize_video_surface_submission(self) -> None:
+    def _finalize_video_surface_submission(
+        self,
+        *,
+        reveal_reason: str = "content_submission",
+    ) -> None:
         """Reveal video after all platform presentation barriers are satisfied."""
 
+        generation = self._pending_video_generation or 0
         self._pending_video_generation = None
         self._pending_video_content_serial = None
         self._video_renderer_rendered = True
         self._configure_video_controls(self._video_interactive_when_ready)
         self._sync_detail_surface_cover()
+        self._restore_transition_ui(generation)
+        emit_detail_event(
+            "surface_revealed",
+            generation=generation,
+            kind="video",
+            reason=reveal_reason,
+        )
 
     def _on_video_composition_submitted(self) -> None:
         payload = self._peek_post_submit_payload("video")
@@ -710,7 +921,7 @@ class PlayerViewController(QObject):
             return
         if not self._consume_post_submit_payload("video", payload):
             return
-        self._finalize_video_surface_submission()
+        self._finalize_video_surface_submission(reveal_reason="composition")
 
     def _sync_detail_surface_cover(self) -> None:
         """Show the cover while the current surface has an unsatisfied barrier."""
@@ -758,7 +969,7 @@ class PlayerViewController(QObject):
 
     def show_placeholder(self, message: str | None = None) -> None:
         """Display the placeholder widget and clear any previous image."""
-        self._advance_surface_transition_epoch()
+        self._advance_surface_transition_epoch("placeholder")
         if isinstance(self._placeholder, QLabel):
             self._placeholder.setText(
                 self._default_placeholder_text() if message is None else message
@@ -802,6 +1013,61 @@ class PlayerViewController(QObject):
         if self._image_viewer_rendered:
             self._sync_detail_surface_cover()
 
+    def _begin_image_transition(self, generation: int) -> None:
+        """Expose the still QRhi surface under the cover while decode runs."""
+
+        self._advance_surface_transition_epoch("image_transition_started")
+        generation = int(generation)
+        suppress_presentation = getattr(
+            self._image_viewer,
+            "begin_presentation_transition",
+            None,
+        )
+        if callable(suppress_presentation):
+            suppress_presentation(generation)
+        self._pending_image_generation = generation
+        self._pending_image_key = None
+        self._pending_video_generation = None
+        self._pending_video_content_serial = None
+        self._suppress_transition_ui(generation)
+        self._show_detail_init_cover()
+        if self._player_stack.currentWidget() is not self._image_viewer:
+            self._player_stack.setCurrentWidget(self._image_viewer)
+        if not self._player_stack.isVisible():
+            self._player_stack.show()
+        self._image_viewer.update()
+        emit_detail_event(
+            "image_surface_init_requested",
+            generation=generation,
+        )
+
+    def _suppress_transition_ui(self, generation: int) -> None:
+        """Hide media-specific overlays before exposing a transition surface."""
+
+        if self._pending_live_badge_generation != int(generation):
+            self._pending_live_badge_generation = None
+        self._set_detail_media_overlays_suppressed(True)
+        self._live_badge.hide()
+        self._video_area.hide_controls(animate=False)
+
+    def _restore_transition_ui(self, generation: int) -> None:
+        self._set_detail_media_overlays_suppressed(False)
+        if self._pending_live_badge_generation != int(generation):
+            return
+        self._pending_live_badge_generation = None
+        self._live_badge.show()
+        self._live_badge.raise_()
+
+    def _set_detail_media_overlays_suppressed(self, suppressed: bool) -> None:
+        from ..widgets.detail_page import DetailPageWidget
+
+        widget = self._player_stack.parent()
+        while widget is not None:
+            if isinstance(widget, DetailPageWidget):
+                widget.set_media_overlays_suppressed(suppressed)
+                return
+            widget = widget.parent()
+
     def _configure_video_controls(self, interactive: bool) -> None:
         self._video_area.set_controls_enabled(interactive)
         if interactive:
@@ -817,17 +1083,29 @@ class PlayerViewController(QObject):
     ) -> None:
         """Expose the loading surface behind a generation-bound opaque cover."""
 
-        self._advance_surface_transition_epoch()
+        self._advance_surface_transition_epoch("video_transition_started")
         self._pending_video_generation = int(request_generation)
         self._pending_video_content_serial = None
         self._cancel_image_transition()
         self._video_interactive_when_ready = bool(interactive_when_ready)
+        self._suppress_transition_ui(request_generation)
         self._configure_video_controls(False)
         self._show_detail_init_cover()
         if self._player_stack.currentWidget() is not self._video_area:
             self._player_stack.setCurrentWidget(self._video_area)
         if not self._player_stack.isVisible():
             self._player_stack.show()
+        request_surface_update = getattr(
+            self._video_area,
+            "request_active_surface_update",
+            None,
+        )
+        if callable(request_surface_update):
+            request_surface_update()
+            emit_detail_event(
+                "video_surface_blank_requested",
+                generation=int(request_generation),
+            )
         self._video_area.video_view().setFocus()
 
     # ------------------------------------------------------------------
@@ -870,7 +1148,14 @@ class PlayerViewController(QObject):
         self._loading_source = source
         self._loading_started_at = time.perf_counter()
 
-        self.show_placeholder("")
+        schedule_runtime_warmup = getattr(
+            self,
+            "_schedule_render_runtime_warmup",
+            None,
+        )
+        if callable(schedule_runtime_warmup):
+            schedule_runtime_warmup()
+        self._begin_image_transition(request_generation)
         emit_detail_event(
             "decode_started",
             generation=request_generation,
@@ -888,6 +1173,7 @@ class PlayerViewController(QObject):
         if not scheduled:
             self._loading_source = None
             self._loading_started_at = None
+            self.show_placeholder("")
         return scheduled
 
     def _cancel_stale_image_workers(self) -> None:
@@ -912,6 +1198,14 @@ class PlayerViewController(QObject):
         descriptor: DetailPrefetchDescriptor | Path,
     ) -> bool:
         """Warm exactly one viewport-surface candidate at low priority."""
+
+        schedule_runtime_warmup = getattr(
+            self,
+            "_schedule_render_runtime_warmup",
+            None,
+        )
+        if callable(schedule_runtime_warmup):
+            schedule_runtime_warmup()
 
         if isinstance(descriptor, DetailPrefetchDescriptor):
             asset_id = descriptor.asset_id
@@ -938,6 +1232,13 @@ class PlayerViewController(QObject):
     ) -> bool:
         """Warm the previous/next window without occupying both decode lanes."""
 
+        schedule_runtime_warmup = getattr(
+            self,
+            "_schedule_render_runtime_warmup",
+            None,
+        )
+        if callable(schedule_runtime_warmup):
+            schedule_runtime_warmup()
         if self._preparation_shutting_down:
             return False
         self._residency_window_generation += 1
@@ -962,6 +1263,71 @@ class PlayerViewController(QObject):
                 )
             ) or accepted
         return accepted
+
+    def _schedule_render_runtime_warmup(self) -> None:
+        """Best-effort preload after hover/click, never during app startup."""
+
+        if (
+            not self._interaction_warmup_enabled
+            or self._render_runtime_warmup_state != "idle"
+            or self._render_runtime_warmup_attempts >= 2
+            or self._preparation_shutting_down
+            or sys.platform != "win32"
+        ):
+            return
+        backend_name = getattr(self._image_viewer, "render_backend_name", None)
+        if (
+            not callable(backend_name)
+            or str(backend_name()).strip().lower() != "opengl"
+        ):
+            return
+        pool = self._render_runtime_warmup_pool
+        if pool is None:
+            pool = QThreadPool(self)
+            pool.setMaxThreadCount(1)
+            pool.setThreadPriority(QThread.Priority.LowPriority)
+            self._render_runtime_warmup_pool = pool
+        signals = _RenderRuntimeWarmupSignals(self)
+        worker = _RenderRuntimeWarmupWorker(signals)
+        signals.finished.connect(self._on_render_runtime_warmup_finished)
+        self._render_runtime_warmup_state = "running"
+        self._render_runtime_warmup_attempts += 1
+        self._render_runtime_warmup_worker = worker
+        self._render_runtime_warmup_signals = signals
+        try:
+            pool.start(worker)
+        except RuntimeError:
+            self._render_runtime_warmup_state = "idle"
+            self._render_runtime_warmup_worker = None
+            self._render_runtime_warmup_signals = None
+            signals.deleteLater()
+
+    def _on_render_runtime_warmup_finished(
+        self,
+        worker: object,
+        succeeded: bool,
+        error_type: str,
+    ) -> None:
+        if worker is not self._render_runtime_warmup_worker:
+            return
+        signals = self._render_runtime_warmup_signals
+        self._render_runtime_warmup_worker = None
+        self._render_runtime_warmup_signals = None
+        self._render_runtime_warmup_state = "completed" if succeeded else "idle"
+        if signals is not None:
+            signals.deleteLater()
+        if not succeeded:
+            emit_detail_event(
+                "gl_runtime_preload_failed",
+                generation=0,
+                error_type=error_type,
+                attempt=self._render_runtime_warmup_attempts,
+            )
+
+    def enable_interaction_warmup(self) -> None:
+        """Allow later hover/click work after startup reached its terminal state."""
+
+        self._interaction_warmup_enabled = True
 
     def _schedule_adjustment_preparation(self, intent: _PreparedRequestIntent) -> bool:
         if self._preparation_shutting_down:
@@ -1193,7 +1559,7 @@ class PlayerViewController(QObject):
         resident_activated = False
         if not defer_presentation and callable(activate_resident):
             if request.reason == "initial":
-                self._arm_image_transition(request.generation, decode_key)
+                self._bind_image_transition_key(request.generation, decode_key)
             resident_activated = activate_resident(
                 decode_key,
                 render_adjustments,
@@ -1204,13 +1570,17 @@ class PlayerViewController(QObject):
                 reset_view=request.reason == "initial",
                 generation=request.generation,
             )
-            if not resident_activated and request.reason == "initial":
-                self._cancel_image_transition()
-                self._sync_detail_surface_cover()
         if resident_activated:
             self._present_generation = request.generation
             self._present_started_at = self._loading_started_at
             self._present_source = request.source_identity.path
+            complete_suppression = getattr(
+                self._image_viewer,
+                "complete_presentation_transition",
+                None,
+            )
+            if callable(complete_suppression):
+                complete_suppression(request.generation)
             self.show_image_surface()
             self._loading_source = None
             self._loading_started_at = None
@@ -1539,13 +1909,22 @@ class PlayerViewController(QObject):
         self,
         source: object,
         generation: int,
+        *,
+        reveal_reason: str = "content_submission",
     ) -> None:
         """Reveal still content after all platform barriers are satisfied."""
 
         self._cancel_image_transition()
         self._image_viewer_rendered = True
         self._sync_detail_surface_cover()
+        self._restore_transition_ui(generation)
         self._accept_still_frame_presented(source, generation)
+        emit_detail_event(
+            "surface_revealed",
+            generation=int(generation),
+            kind="image",
+            reason=reveal_reason,
+        )
 
     def _on_image_composition_submitted(self) -> None:
         payload = self._peek_post_submit_payload("image")
@@ -1560,7 +1939,11 @@ class PlayerViewController(QObject):
             return
         if not self._consume_post_submit_payload("image", payload):
             return
-        self._finalize_image_surface_submission(source, generation)
+        self._finalize_image_surface_submission(
+            source,
+            generation,
+            reveal_reason="composition",
+        )
 
     def _accept_still_frame_presented(self, source: object, generation: int) -> None:
         generation = int(generation)
@@ -1721,6 +2104,10 @@ class PlayerViewController(QObject):
 
         self._preparation_shutting_down = True
         self.cancel_pending_image_requests()
+        warmup_pool = self._render_runtime_warmup_pool
+        if warmup_pool is not None:
+            warmup_pool.clear()
+            warmup_pool.waitForDone(min(max(0, int(timeout_ms)), 500))
         self._preparation_pool.clear()
         preparation_done = self._preparation_pool.waitForDone(max(0, int(timeout_ms)))
         if preparation_done:
@@ -2114,7 +2501,7 @@ class PlayerViewController(QObject):
     def cancel_pending_image_requests(self) -> None:
         """Invalidate still work when Detail or the current library is left."""
 
-        self._advance_surface_transition_epoch()
+        self._advance_surface_transition_epoch("requests_cancelled")
         self._request_generation += 1
         self._residency_window_generation += 1
         self._preparation_prefetch_queue.clear()
@@ -2161,7 +2548,7 @@ class PlayerViewController(QObject):
     def clear_image(self) -> None:
         """Remove any pixmap currently shown in the image viewer."""
         # 清空而非传空图像，避免一帧“空绘制/空上传”
-        self._advance_surface_transition_epoch()
+        self._advance_surface_transition_epoch("image_cleared")
         self._current_full_image = None
         self._cancel_image_transition()
         self._image_viewer.set_image(None, {})
@@ -2172,12 +2559,20 @@ class PlayerViewController(QObject):
     def show_live_badge(self) -> None:
         """Ensure the Live Photo badge is visible and raised above overlays."""
 
+        self._pending_live_badge_generation = None
         self._live_badge.show()
         self._live_badge.raise_()
+
+    def defer_live_badge_until_ready(self, generation: int) -> None:
+        """Restore the Live badge only after the owning media is revealed."""
+
+        self._pending_live_badge_generation = int(generation)
+        self._live_badge.hide()
 
     def hide_live_badge(self) -> None:
         """Hide the Live Photo badge."""
 
+        self._pending_live_badge_generation = None
         self._live_badge.hide()
 
     def is_live_badge_visible(self) -> bool:
@@ -2251,7 +2646,9 @@ class PlayerViewController(QObject):
                 self._loading_source = None
                 self._loading_started_at = None
             self._image_viewer.set_image(None, {})
-            self.imageLoadingFailed.emit(source, "Image decoder returned an empty frame")
+            message = "Image decoder returned an empty frame"
+            self.show_placeholder(message)
+            self.imageLoadingFailed.emit(source, message)
             return
 
         if self._defer_still_updates and self._player_stack.currentWidget() is self._video_area:
@@ -2277,6 +2674,7 @@ class PlayerViewController(QObject):
             self._loading_source = None
             self._loading_started_at = None
         self._image_viewer.set_image(None)
+        self.show_placeholder(message)
         self.imageLoadingFailed.emit(source, message)
 
     def _apply_still_frame(
@@ -2292,11 +2690,10 @@ class PlayerViewController(QObject):
         image = surface.image
         reason = self._request_reason_by_generation.get(self._present_generation)
         if reason not in {"zoom", "resize"}:
-            self._arm_image_transition(
+            self._bind_image_transition_key(
                 self._present_generation,
                 surface.decode_key,
             )
-        self.show_image_surface()
         self._current_full_image = QImage(image)
         session_key = self._render_session_key_for_surface(surface)
         session = self._render_sessions.get(session_key)
@@ -2322,6 +2719,14 @@ class PlayerViewController(QObject):
                 source_size=surface.source_size,
                 reset_view=reset_view,
             )
+        complete_suppression = getattr(
+            self._image_viewer,
+            "complete_presentation_transition",
+            None,
+        )
+        if callable(complete_suppression):
+            complete_suppression(self._present_generation)
+        self.show_image_surface()
         self._image_viewer.update()
         log_detail_profile(
             "player_view",

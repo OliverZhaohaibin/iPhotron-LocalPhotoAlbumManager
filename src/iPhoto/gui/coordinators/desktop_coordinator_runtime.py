@@ -421,6 +421,11 @@ class DesktopCoordinatorRuntime(QObject):
         self._theme_controller.apply_current_theme()
         self._view_router.show_gallery()
 
+    def enable_detail_interaction_warmup(self) -> None:
+        """Enable demand-driven Detail imports after startup is complete."""
+
+        self._player_view_controller.enable_interaction_warmup()
+
     # ------------------------------------------------------------------
     # Lazy Edit lifecycle used by the Detail immersive port
     # ------------------------------------------------------------------

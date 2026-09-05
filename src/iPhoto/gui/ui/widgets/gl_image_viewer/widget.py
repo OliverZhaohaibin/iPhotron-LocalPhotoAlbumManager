@@ -171,6 +171,24 @@ def _load_gl_renderer_class():
         GLRenderer = _GLRenderer
     return GLRenderer
 
+
+def preload_opengl_python_runtime() -> None:
+    """Import raw-OpenGL helpers without creating Qt or GPU resources.
+
+    The interaction-triggered Detail warm-up runs this on a worker thread.  It
+    must stay limited to Python imports: QRhi/context access and renderer
+    resource allocation remain in ``initialize()`` on the GUI/render path.
+    """
+
+    started = time.perf_counter()
+    _load_gl_module()
+    _load_gl_renderer_class()
+    emit_detail_event(
+        "gl_runtime_preloaded",
+        generation=0,
+        duration_ms=(time.perf_counter() - started) * 1000.0,
+    )
+
 # 如果你的工程没有这个函数，可以改成固定背景色
 try:
     from ...palette import viewer_surface_color  # type: ignore
@@ -264,6 +282,7 @@ class GLImageViewer(QRhiWidget):
         self._content_revision = 0
         self._rendered_content_identity: tuple[str, object, int, int] | None = None
         self._last_composed_content_identity: tuple[str, object, int, int] | None = None
+        self._presentation_suppressed_generation: int | None = None
         self._source_image_dimensions: tuple[int, int] | None = None
         self._video_frame = None
         self._pending_video_image: QImage | None = None
@@ -399,6 +418,58 @@ class GLImageViewer(QRhiWidget):
         """Return the active QRhi backend name for diagnostics/tests."""
 
         return qrhi_api_name(self._rhi_api)
+
+    def begin_presentation_transition(self, generation: int) -> None:
+        """Suppress media draws while preserving all resident GPU resources."""
+
+        generation = int(generation)
+        if generation <= 0:
+            raise ValueError("presentation transition generation must be positive")
+        self._presentation_suppressed_generation = generation
+        self._still_presentation_pending = False
+        self._video_frame_presentation_pending = False
+        self._rendered_content_identity = None
+        emit_detail_event(
+            "presentation_suppressed",
+            generation=generation,
+            renderer="gl_image_viewer",
+        )
+
+    def complete_presentation_transition(self, generation: int) -> bool:
+        """Resume media draws only for the transition that owns suppression."""
+
+        if int(generation) != self._presentation_suppressed_generation:
+            return False
+        self._presentation_suppressed_generation = None
+        emit_detail_event(
+            "presentation_resumed",
+            generation=int(generation),
+            renderer="gl_image_viewer",
+        )
+        return True
+
+    def presentation_transition_active(self, generation: int) -> bool:
+        """Return whether this generation still owns presentation suppression."""
+
+        return int(generation) == self._presentation_suppressed_generation
+
+    def cancel_presentation_transition(self) -> None:
+        """Drop presentation suppression without changing texture residency."""
+
+        generation = self._presentation_suppressed_generation
+        self._presentation_suppressed_generation = None
+        self._still_presentation_pending = False
+        self._video_frame_presentation_pending = False
+        self._rendered_content_identity = None
+        if generation is not None:
+            emit_detail_event(
+                "presentation_suppression_cancelled",
+                generation=generation,
+                renderer="gl_image_viewer",
+            )
+
+    def _presentation_is_suppressed(self) -> bool:
+        return getattr(self, "_presentation_suppressed_generation", None) is not None
 
     def render_device_name(self) -> str:
         """Return the QRhi adapter name used to reject software benchmark runs."""
@@ -1295,6 +1366,13 @@ class GLImageViewer(QRhiWidget):
         bg = self._fullscreen_handler.backdrop_color
         return QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
 
+    def _transition_clear_color(self) -> QColor:
+        """Return an opaque clear colour for generation transitions."""
+
+        color = QColor(self._pass_clear_color())
+        color.setAlpha(255)
+        return color
+
     def _gl_clear_rgba(self) -> tuple[float, float, float, float]:
         """Return the OpenGL clear colour matching the QRhi pass clear."""
 
@@ -1450,9 +1528,23 @@ class GLImageViewer(QRhiWidget):
         self.complete_runtime()
         if self._gl_initialized:
             return
+        initialize_started = time.perf_counter()
+        backend = self.render_backend_name()
+        emit_detail_event(
+            "qrhi_initialize_started",
+            generation=0,
+            backend=backend,
+        )
         rhi = self.rhi()
         if rhi is None:
             _LOGGER.warning("QRhi not available - image rendering disabled")
+            emit_detail_event(
+                "qrhi_initialize_finished",
+                generation=0,
+                backend=backend,
+                success=False,
+                duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+            )
             return
         if not self._uses_raw_gl:
             renderer = RhiImageRenderer()
@@ -1460,12 +1552,26 @@ class GLImageViewer(QRhiWidget):
                 renderer.initialize_resources(rhi, self.renderTarget().renderPassDescriptor(), cb)
             except Exception:
                 _LOGGER.exception("Failed to initialise QRhi image renderer")
+                emit_detail_event(
+                    "qrhi_initialize_finished",
+                    generation=0,
+                    backend=backend,
+                    success=False,
+                    duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+                )
                 return
             self._renderer = renderer
             self._adjustment_applicator.invalidate_cache()
             self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
             self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
             self._gl_initialized = True
+            emit_detail_event(
+                "qrhi_initialize_finished",
+                generation=0,
+                backend=backend,
+                success=True,
+                duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+            )
             return
 
         # Make the underlying OpenGL context current so we can issue raw GL
@@ -1474,6 +1580,13 @@ class GLImageViewer(QRhiWidget):
         current_context = QOpenGLContext.currentContext()
         if current_context is None:
             _LOGGER.warning("Current OpenGL context unavailable - image rendering disabled")
+            emit_detail_event(
+                "qrhi_initialize_finished",
+                generation=0,
+                backend=backend,
+                success=False,
+                duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+            )
             return
         gf = current_context.extraFunctions()
         self._gl_funcs = gf
@@ -1491,6 +1604,13 @@ class GLImageViewer(QRhiWidget):
         dpr = self.devicePixelRatioF()
         gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
         self._gl_initialized = True
+        emit_detail_event(
+            "qrhi_initialize_finished",
+            generation=0,
+            backend=backend,
+            success=True,
+            duration_ms=(time.perf_counter() - initialize_started) * 1000.0,
+        )
 
     def releaseResources(self) -> None:  # type: ignore[override]
         """QRhiWidget override: release renderer resources."""
@@ -1537,7 +1657,11 @@ class GLImageViewer(QRhiWidget):
             # window's WA_TranslucentBackground.
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(),
+                (
+                    self._transition_clear_color()
+                    if GLImageViewer._presentation_is_suppressed(self)
+                    else self._pass_clear_color()
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -1548,7 +1672,11 @@ class GLImageViewer(QRhiWidget):
         if gf is None or self._renderer is None:
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(),
+                (
+                    self._transition_clear_color()
+                    if GLImageViewer._presentation_is_suppressed(self)
+                    else self._pass_clear_color()
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -1568,6 +1696,17 @@ class GLImageViewer(QRhiWidget):
                 )
             return
         self._last_render_target_size = QSize(output_size)
+
+        if GLImageViewer._presentation_is_suppressed(self):
+            cb.beginPass(
+                self.renderTarget(),
+                self._transition_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
+            return
 
         # Start a QRhi render pass (required by QRhiWidget) then immediately
         # switch to raw OpenGL via beginExternal()/endExternal().  This lets
@@ -1776,7 +1915,11 @@ class GLImageViewer(QRhiWidget):
         if not self._gl_initialized or self._renderer is None:
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(),
+                (
+                    self._transition_clear_color()
+                    if GLImageViewer._presentation_is_suppressed(self)
+                    else self._pass_clear_color()
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -1788,6 +1931,17 @@ class GLImageViewer(QRhiWidget):
         if output_size.isEmpty():
             return
         self._last_render_target_size = QSize(output_size)
+
+        if GLImageViewer._presentation_is_suppressed(self):
+            cb.beginPass(
+                self.renderTarget(),
+                self._transition_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
+            return
 
         vw = max(1, output_size.width())
         vh = max(1, output_size.height())

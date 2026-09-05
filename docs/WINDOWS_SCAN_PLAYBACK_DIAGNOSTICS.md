@@ -75,8 +75,47 @@ failed graphics contract, not a successful reproduction run.
 
 The extra active-surface `frameSubmitted` is a QRhi submission heuristic, not a
 DXGI/DWM presentation fence. It verifies the application state machine and an
-additional Qt composition submission; only the real Windows repetition matrix
-can determine whether it fixes the user-visible first-frame leak.
+additional Qt composition submission. The reveal wait is bounded: after the
+matching current-generation media submission, a missing extra composition may
+end with `post_submit_deadline` followed by `surface_revealed` with
+`reason=deadline`. A stale transition must instead record
+`post_submit_discarded` and must not reveal its media. Only the real Windows
+repetition matrix can determine whether this preserves the user-visible
+first-frame leak fix.
+
+Transition traces must show `presentation_suppressed` before the exposed
+surface's `video_surface_blank_requested`/blank submission and
+`presentation_resumed` only after matching new content is installed. A rapid
+A→B switch must record `post_submit_discarded`
+for any scheduled or armed A barrier, including `reason`, `state`, and the old
+epoch. During the suppressed interval a real compositor screenshot must contain
+the opaque Detail background, never A's pixels or media-specific overlays.
+When async preparation changes the active video renderer, the trace must add a
+second `video_surface_blank_requested` with `reason=surface_switch`, the current
+Detail generation, the current media generation, and `surface=adjusted|native`.
+Its matching `presentation_resumed` must follow successful frame installation.
+
+Run the real-pixel contracts manually from a normal interactive Windows
+desktop. Setting the platform explicitly is required because the unit-test
+fixtures otherwise default to `offscreen`:
+
+```powershell
+$env:QT_QPA_PLATFORM = "windows"
+$env:IPHOTO_RHI_BACKEND = "opengl"
+$env:IPHOTO_WINDOWS_COMPOSITOR_CYCLES = "100"
+$tests = @(
+  "tests/ui/widgets/test_gl_image_viewer_post_load_signal.py",
+  "tests/ui/widgets/test_video_area.py"
+)
+1..30 | ForEach-Object {
+  python -m pytest -q -m windows_compositor $tests
+  if ($LASTEXITCODE -ne 0) { throw "Compositor run $_ failed" }
+}
+```
+
+The video pixel contract drives `VideoArea.begin_load()` followed by
+`PlayerViewController.begin_video_transition()`; it must not request the blank
+frame directly from the tested QRhi child.
 
 The default timeout is 30 minutes. Override it with `-MaxMinutes 60` if the scan takes longer.
 The expanded directory is retained beside the ZIP so its contents can be reviewed before

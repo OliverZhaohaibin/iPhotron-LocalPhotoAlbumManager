@@ -466,6 +466,20 @@ class VideoArea(QWidget):
                 self._edit_viewer.update()
         else:
             self._edit_mode_active = False
+        transition_active = getattr(
+            target_surface,
+            "presentation_transition_active",
+            None,
+        )
+        if callable(transition_active) and transition_active(self._media_generation):
+            target_surface.update()
+            emit_detail_event(
+                "video_surface_blank_requested",
+                generation=self._detail_request_generation,
+                media_generation=self._media_generation,
+                reason="surface_switch",
+                surface="adjusted" if target_surface is self._edit_viewer else "native",
+            )
         if required_serial > 0 and self._last_presented_video_frame is not None:
             self._queue_retained_frame_for_surface(
                 target_surface,
@@ -838,6 +852,11 @@ class VideoArea(QWidget):
         load_started = time.perf_counter()
         prev_source = self._current_source
         previous_duration_ms = self._current_duration_ms
+        next_media_generation = self._media_generation + 1
+        for surface in (self._renderer, self._edit_viewer):
+            suppress = getattr(surface, "begin_presentation_transition", None)
+            if callable(suppress):
+                suppress(next_media_generation)
         media_generation = self._begin_media_generation()
         self._detach_video_output()
         if sys.platform == "darwin" and prev_source is not None:
@@ -1354,7 +1373,6 @@ class VideoArea(QWidget):
                 )
             self._edit_viewer.set_pending_video_source_rotation(resolved_rotation_cw)
             reset_view = self._adjusted_first_frame_pending
-            self._adjusted_first_frame_pending = False
             self._edit_viewer.set_video_frame(
                 frame,
                 self._current_adjustments,
@@ -1362,6 +1380,14 @@ class VideoArea(QWidget):
                 content_generation=self._media_generation,
                 content_serial=content_serial,
             )
+            self._adjusted_first_frame_pending = False
+            complete_transition = getattr(
+                surface,
+                "complete_presentation_transition",
+                None,
+            )
+            if callable(complete_transition):
+                complete_transition(self._media_generation)
             self._surface_stack.update()
             self.update()
         else:
@@ -1370,6 +1396,13 @@ class VideoArea(QWidget):
                 content_generation=self._media_generation,
                 content_serial=content_serial,
             )
+            complete_transition = getattr(
+                surface,
+                "complete_presentation_transition",
+                None,
+            )
+            if callable(complete_transition):
+                complete_transition(self._media_generation)
 
     def _queue_retained_frame_for_surface(
         self,

@@ -58,7 +58,25 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
 - `decode_fallback`：统计 `imageio_to_qt`、`wic_to_qt`、`pillow`、`qt_full_scale`、`half`、`full`、`full_level`；没有 fallback
   的样本也要计入分母。
 - `surface_ready`：核对最终 detached surface 的宽高与 decode level。
+- Windows/OpenGL 冷首开同时保留 `gl_runtime_preloaded`、
+  `image_surface_init_requested`、`qrhi_initialize_started/finished` 与
+  `presentation_suppressed/resumed`、`post_submit_scheduled/armed`。模块预热
+  只能由 startup terminal 之后的 hover/click 触发；不得出现在无用户交互的
+  startup profile 中。suppressed 区间不得产生旧 generation 的
+  `gpu_upload`、`presented` 或 media submission。
+- video transition 必须在 active surface 确定后记录
+  `video_surface_blank_requested`；对应的 `presentation_resumed` 只能出现在
+  current-generation frame 已成功安装之后。frame rotation/staging/install
+  失败时 suppression 必须保持有效。异步 preparation 切换 native/adjusted
+  renderer 时必须再记录 `reason=surface_switch`、当前 media generation 和最终
+  surface；正常非 transition 切换不得产生该事件。
 - `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。
+- 正常 Windows reveal 记录 `surface_revealed(reason=composition)`；缺少额外
+  composition 时允许在匹配内容已提交后记录
+  `post_submit_deadline`、`surface_revealed(reason=deadline)`。过期 epoch、
+  generation、source 或 surface 只能产生 `post_submit_discarded`，不得 reveal。
+  快速切换主动取消 scheduled/armed barrier 时也必须记录 discard 的旧 epoch、
+  `state=scheduled|armed` 与取消 reason，不能只依赖 deadline 路径记录。
 - RAW 冷解码同时保留 `raw_probe`、`raw_candidate_selected`、`raw_thumb_decode`、
   `raw_postprocess`、`raw_surface_convert` 和 `color_stats`。未知几何必须先由 `raw_probe` 修复后再产生
   `level_selected`；每个 cache miss 只能选择 embedded、half、full 之一，不得在同一请求中连续执行

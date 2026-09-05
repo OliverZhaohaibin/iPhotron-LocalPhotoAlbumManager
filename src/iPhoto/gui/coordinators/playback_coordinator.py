@@ -1272,7 +1272,9 @@ class PlaybackCoordinator(QObject):
 
             if presentation.is_live:
                 self._hide_face_name_overlay(clear_annotations=False)
-                self._player_view.show_live_badge()
+                self._player_view.defer_live_badge_until_ready(
+                    presentation.request_generation
+                )
                 self._player_view.set_live_replay_enabled(True)
                 self._autoplay_live_motion(presentation)
             else:
@@ -1573,7 +1575,12 @@ class PlaybackCoordinator(QObject):
             else:
                 self._player_view.display_image(still, asset_id=asset_id)
         self._player_bar.setEnabled(False)
-        self._player_view.show_live_badge()
+        badge_generation = (
+            transaction.generation
+            if transaction is not None
+            else getattr(self, "_detail_request_generation", 0)
+        )
+        self._player_view.defer_live_badge_until_ready(badge_generation)
         self._player_view.set_live_replay_enabled(True)
         self._is_playing = False
         return True

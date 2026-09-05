@@ -183,25 +183,39 @@ def test_visible_windows_transition_never_exposes_previous_still(qapp) -> None:
     wait_for(submitted, 1)
     red_pixel = center_pixel()
     assert red_pixel.red() > red_pixel.blue()
+    cycles = max(
+        1,
+        min(100, int(os.environ.get("IPHOTO_WINDOWS_COMPOSITOR_CYCLES", "1"))),
+    )
+    for index in range(cycles):
+        generation = index + 2
+        viewer.begin_presentation_transition(generation)
+        composed_before = composed.count()
+        viewer.update()
+        wait_for(composed, composed_before + 1)
+        transition_pixel = center_pixel()
+        expected_background = viewer._transition_clear_color()
+        assert transition_pixel.alpha() == 255
+        assert abs(transition_pixel.red() - expected_background.red()) <= 20
+        assert abs(transition_pixel.green() - expected_background.green()) <= 20
+        assert abs(transition_pixel.blue() - expected_background.blue()) <= 20
 
-    viewer.begin_presentation_transition(2)
-    composed_before = composed.count()
-    viewer.update()
-    wait_for(composed, composed_before + 1)
-    transition_pixel = center_pixel()
-    assert transition_pixel.red() < 200
-
-    blue = QImage(320, 180, QImage.Format.Format_RGBA8888)
-    blue.fill(0xFF0000FF)
-    viewer._still_generation_by_key["blue"] = 2
-    viewer.set_image(blue, {}, image_source="blue")
-    assert viewer.complete_presentation_transition(2)
-    viewer.update()
-    wait_for(submitted, 2)
-    blue_pixel = center_pixel()
+        next_is_blue = index % 2 == 0
+        color = 0xFF0000FF if next_is_blue else 0xFFFF0000
+        source = f"transition-{generation}"
+        image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+        image.fill(color)
+        viewer._still_generation_by_key[source] = generation
+        viewer.set_image(image, {}, image_source=source)
+        assert viewer.complete_presentation_transition(generation)
+        viewer.update()
+        wait_for(submitted, index + 2)
+        presented_pixel = center_pixel()
+        if next_is_blue:
+            assert presented_pixel.blue() > presented_pixel.red()
+        else:
+            assert presented_pixel.red() > presented_pixel.blue()
     host.close()
-
-    assert blue_pixel.blue() > blue_pixel.red()
 
 
 def test_still_surface_retains_transaction_generation_until_gpu_upload(qapp) -> None:

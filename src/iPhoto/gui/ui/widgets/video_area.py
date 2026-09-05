@@ -1340,14 +1340,6 @@ class VideoArea(QWidget):
     ) -> None:
         """Queue one identified frame on exactly one QRhi child surface."""
 
-        complete_transition = getattr(
-            surface,
-            "complete_presentation_transition",
-            None,
-        )
-        if callable(complete_transition):
-            complete_transition(self._media_generation)
-
         if surface is self._edit_viewer:
             resolved_rotation_cw = _resolve_frame_rotation_cw(
                 frame.surfaceFormat(),
@@ -1367,7 +1359,6 @@ class VideoArea(QWidget):
                 )
             self._edit_viewer.set_pending_video_source_rotation(resolved_rotation_cw)
             reset_view = self._adjusted_first_frame_pending
-            self._adjusted_first_frame_pending = False
             self._edit_viewer.set_video_frame(
                 frame,
                 self._current_adjustments,
@@ -1375,6 +1366,14 @@ class VideoArea(QWidget):
                 content_generation=self._media_generation,
                 content_serial=content_serial,
             )
+            self._adjusted_first_frame_pending = False
+            complete_transition = getattr(
+                surface,
+                "complete_presentation_transition",
+                None,
+            )
+            if callable(complete_transition):
+                complete_transition(self._media_generation)
             self._surface_stack.update()
             self.update()
         else:
@@ -1383,6 +1382,13 @@ class VideoArea(QWidget):
                 content_generation=self._media_generation,
                 content_serial=content_serial,
             )
+            complete_transition = getattr(
+                surface,
+                "complete_presentation_transition",
+                None,
+            )
+            if callable(complete_transition):
+                complete_transition(self._media_generation)
 
     def _queue_retained_frame_for_surface(
         self,

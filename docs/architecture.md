@@ -238,6 +238,10 @@ by generation before exposing its QRhi surface. Suppressed renders submit an
 opaque clear frame while preserving still residency; only installation of
 matching-generation content may resume media drawing. Media-specific overlays
 remain suppressed until that generation reaches its reveal terminal.
+After `VideoArea.begin_load()` suppresses both video renderers, the active
+surface is explicitly updated under the Detail cover so its retained backing
+texture is replaced by the opaque clear frame before decode completes. Video
+suppression is released only after the new frame is installed successfully.
 The pre-show hierarchy is part of shell construction: failure is terminal and
 non-recoverable for that process. Startup-generation retry applies only after a
 valid visible shell exists; it must not claim to reconstruct the native

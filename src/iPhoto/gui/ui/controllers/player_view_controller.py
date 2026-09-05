@@ -1095,6 +1095,17 @@ class PlayerViewController(QObject):
             self._player_stack.setCurrentWidget(self._video_area)
         if not self._player_stack.isVisible():
             self._player_stack.show()
+        request_surface_update = getattr(
+            self._video_area,
+            "request_active_surface_update",
+            None,
+        )
+        if callable(request_surface_update):
+            request_surface_update()
+            emit_detail_event(
+                "video_surface_blank_requested",
+                generation=int(request_generation),
+            )
         self._video_area.video_view().setFocus()
 
     # ------------------------------------------------------------------

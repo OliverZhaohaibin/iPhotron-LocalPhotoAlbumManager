@@ -1307,6 +1307,38 @@ class TestInitCoverTracking:
         mock_show_cover.assert_called()
         mock_hide_cover.assert_called_once()
 
+    def test_video_transition_requests_blank_after_surface_is_active(
+        self,
+        controller,
+        mocker,
+    ):
+        events: list[str] = []
+        mocker.patch.object(
+            controller,
+            "_show_detail_init_cover",
+            side_effect=lambda: events.append("cover"),
+        )
+
+        def request_blank() -> None:
+            assert controller._player_stack.currentWidget() is controller._video_area
+            assert not controller._player_stack.isHidden()
+            events.append("blank")
+
+        request = mocker.patch.object(
+            controller._video_area,
+            "request_active_surface_update",
+            side_effect=request_blank,
+        )
+        emit = mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.emit_detail_event"
+        )
+
+        controller.begin_video_transition(18, interactive_when_ready=True)
+
+        request.assert_called_once_with()
+        assert events == ["cover", "blank"]
+        emit.assert_any_call("video_surface_blank_requested", generation=18)
+
     def test_placeholder_cancels_pending_video_transition(self, controller, mocker):
         mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
         controller.begin_video_transition(23, interactive_when_ready=True)
@@ -1639,6 +1671,8 @@ class TestInitCoverTracking:
             "set_controls_enabled",
         )
         controller.begin_video_transition(41, interactive_when_ready=True)
+        request_update.assert_called_once_with()
+        request_update.reset_mock()
 
         controller._video_area.surfaceFrameSubmitted.emit(41, 7)
         controller._video_area.surfaceCompositionSubmitted.emit()
@@ -1816,6 +1850,8 @@ class TestInitCoverTracking:
         )
         hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
         controller.begin_video_transition(43, interactive_when_ready=False)
+        request_update.assert_called_once_with()
+        request_update.reset_mock()
         controller._video_area.surfaceFrameSubmitted.emit(43, 8)
 
         controller._video_area.surfaceInvalidated.emit(43, 8)

@@ -64,6 +64,10 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
   只能由 startup terminal 之后的 hover/click 触发；不得出现在无用户交互的
   startup profile 中。suppressed 区间不得产生旧 generation 的
   `gpu_upload`、`presented` 或 media submission。
+- video transition 必须在 active surface 确定后记录
+  `video_surface_blank_requested`；对应的 `presentation_resumed` 只能出现在
+  current-generation frame 已成功安装之后。frame rotation/staging/install
+  失败时 suppression 必须保持有效。
 - `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。
 - 正常 Windows reveal 记录 `surface_revealed(reason=composition)`；缺少额外
   composition 时允许在匹配内容已提交后记录

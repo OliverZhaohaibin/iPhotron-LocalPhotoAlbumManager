@@ -282,6 +282,7 @@ class GLImageViewer(QRhiWidget):
         self._content_revision = 0
         self._rendered_content_identity: tuple[str, object, int, int] | None = None
         self._last_composed_content_identity: tuple[str, object, int, int] | None = None
+        self._presentation_suppressed_generation: int | None = None
         self._source_image_dimensions: tuple[int, int] | None = None
         self._video_frame = None
         self._pending_video_image: QImage | None = None
@@ -417,6 +418,53 @@ class GLImageViewer(QRhiWidget):
         """Return the active QRhi backend name for diagnostics/tests."""
 
         return qrhi_api_name(self._rhi_api)
+
+    def begin_presentation_transition(self, generation: int) -> None:
+        """Suppress media draws while preserving all resident GPU resources."""
+
+        generation = int(generation)
+        if generation <= 0:
+            raise ValueError("presentation transition generation must be positive")
+        self._presentation_suppressed_generation = generation
+        self._still_presentation_pending = False
+        self._video_frame_presentation_pending = False
+        self._rendered_content_identity = None
+        emit_detail_event(
+            "presentation_suppressed",
+            generation=generation,
+            renderer="gl_image_viewer",
+        )
+
+    def complete_presentation_transition(self, generation: int) -> bool:
+        """Resume media draws only for the transition that owns suppression."""
+
+        if int(generation) != self._presentation_suppressed_generation:
+            return False
+        self._presentation_suppressed_generation = None
+        emit_detail_event(
+            "presentation_resumed",
+            generation=int(generation),
+            renderer="gl_image_viewer",
+        )
+        return True
+
+    def cancel_presentation_transition(self) -> None:
+        """Drop presentation suppression without changing texture residency."""
+
+        generation = self._presentation_suppressed_generation
+        self._presentation_suppressed_generation = None
+        self._still_presentation_pending = False
+        self._video_frame_presentation_pending = False
+        self._rendered_content_identity = None
+        if generation is not None:
+            emit_detail_event(
+                "presentation_suppression_cancelled",
+                generation=generation,
+                renderer="gl_image_viewer",
+            )
+
+    def _presentation_is_suppressed(self) -> bool:
+        return getattr(self, "_presentation_suppressed_generation", None) is not None
 
     def render_device_name(self) -> str:
         """Return the QRhi adapter name used to reject software benchmark runs."""
@@ -1313,6 +1361,13 @@ class GLImageViewer(QRhiWidget):
         bg = self._fullscreen_handler.backdrop_color
         return QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
 
+    def _transition_clear_color(self) -> QColor:
+        """Return an opaque clear colour for generation transitions."""
+
+        color = QColor(self._pass_clear_color())
+        color.setAlpha(255)
+        return color
+
     def _gl_clear_rgba(self) -> tuple[float, float, float, float]:
         """Return the OpenGL clear colour matching the QRhi pass clear."""
 
@@ -1597,7 +1652,11 @@ class GLImageViewer(QRhiWidget):
             # window's WA_TranslucentBackground.
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(),
+                (
+                    self._transition_clear_color()
+                    if GLImageViewer._presentation_is_suppressed(self)
+                    else self._pass_clear_color()
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -1608,7 +1667,11 @@ class GLImageViewer(QRhiWidget):
         if gf is None or self._renderer is None:
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(),
+                (
+                    self._transition_clear_color()
+                    if GLImageViewer._presentation_is_suppressed(self)
+                    else self._pass_clear_color()
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -1628,6 +1691,17 @@ class GLImageViewer(QRhiWidget):
                 )
             return
         self._last_render_target_size = QSize(output_size)
+
+        if GLImageViewer._presentation_is_suppressed(self):
+            cb.beginPass(
+                self.renderTarget(),
+                self._transition_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
+            return
 
         # Start a QRhi render pass (required by QRhiWidget) then immediately
         # switch to raw OpenGL via beginExternal()/endExternal().  This lets
@@ -1836,7 +1910,11 @@ class GLImageViewer(QRhiWidget):
         if not self._gl_initialized or self._renderer is None:
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(),
+                (
+                    self._transition_clear_color()
+                    if GLImageViewer._presentation_is_suppressed(self)
+                    else self._pass_clear_color()
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -1848,6 +1926,17 @@ class GLImageViewer(QRhiWidget):
         if output_size.isEmpty():
             return
         self._last_render_target_size = QSize(output_size)
+
+        if GLImageViewer._presentation_is_suppressed(self):
+            cb.beginPass(
+                self.renderTarget(),
+                self._transition_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
+            return
 
         vw = max(1, output_size.width())
         vh = max(1, output_size.height())

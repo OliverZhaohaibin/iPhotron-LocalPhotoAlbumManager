@@ -19,6 +19,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import (
     QApplication,
     QGridLayout,
@@ -739,6 +740,83 @@ class TestVideoRendererWidget:
         assert cover_visible_at_submission == expected_visibility
         assert cover_released
 
+    @pytest.mark.gpu
+    @pytest.mark.windows_compositor
+    @pytest.mark.parametrize("surface_kind", ("native", "adjusted"))
+    def test_visible_windows_video_transition_never_exposes_previous_frame(
+        self,
+        qapp,
+        surface_kind,
+    ):
+        if sys.platform != "win32":
+            pytest.skip("requires a visible Windows compositor integration runner")
+        if QApplication.platformName().lower() in {"offscreen", "minimal"}:
+            pytest.skip("requires a visible platform QRhi compositor")
+
+        host = QWidget()
+        layout = QGridLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        surface = VideoRendererWidget(host) if surface_kind == "native" else GLImageViewer(host)
+        layout.addWidget(surface, 0, 0)
+        host.resize(320, 180)
+        host.show()
+        qapp.processEvents()
+
+        presented = QSignalSpy(surface.videoFramePresented)
+        composed = QSignalSpy(surface.frameSubmitted)
+
+        def wait_for(spy: QSignalSpy, count: int) -> None:
+            deadline = time.monotonic() + 5.0
+            while spy.count() < count and time.monotonic() < deadline:
+                qapp.processEvents()
+                time.sleep(0.005)
+            assert spy.count() >= count
+
+        def center_pixel():
+            screen = qapp.primaryScreen()
+            assert screen is not None
+            image = screen.grabWindow(int(host.winId())).toImage()
+            assert not image.isNull()
+            return image.pixelColor(image.width() // 2, image.height() // 2)
+
+        def submit_color(color: int, generation: int) -> None:
+            image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+            image.fill(color)
+            frame = QVideoFrame(image)
+            if surface_kind == "native":
+                surface.update_frame(
+                    frame,
+                    content_generation=generation,
+                    content_serial=1,
+                )
+            else:
+                surface.set_video_frame(
+                    frame,
+                    {},
+                    content_generation=generation,
+                    content_serial=1,
+                )
+
+        submit_color(0xFFFF0000, 1)
+        wait_for(presented, 1)
+        red_pixel = center_pixel()
+        assert red_pixel.red() > red_pixel.blue()
+
+        surface.begin_presentation_transition(2)
+        composed_before = composed.count()
+        surface.update()
+        wait_for(composed, composed_before + 1)
+        transition_pixel = center_pixel()
+        assert transition_pixel.red() < 200
+
+        assert surface.complete_presentation_transition(2)
+        submit_color(0xFF0000FF, 2)
+        wait_for(presented, 2)
+        blue_pixel = center_pixel()
+        host.close()
+
+        assert blue_pixel.blue() > blue_pixel.red()
+
     def test_transparent_rounded_clip_toggles_widget_attributes(self, qapp):
         """Preview clipping should switch the renderer into transparent output mode."""
         w = VideoRendererWidget()
@@ -857,6 +935,55 @@ class TestVideoArea:
         """VideoRendererWidget must use the same selected QRhi backend as GLImageViewer."""
         va = VideoArea()
         assert va._renderer.render_backend_name() == selected_rhi_backend_name()
+
+    def test_native_renderer_transition_is_generation_bound(self, qapp):
+        renderer = VideoRendererWidget()
+
+        renderer.begin_presentation_transition(4)
+
+        assert renderer.complete_presentation_transition(3) is False
+        assert renderer._presentation_suppressed_generation == 4
+        assert renderer.complete_presentation_transition(4) is True
+
+    def test_native_renderer_suppression_clears_without_drawing(self):
+        renderer = Mock()
+        renderer._initialized = True
+        renderer._presentation_suppressed_generation = 5
+        renderer._has_frame = True
+        retained_frame = object()
+        renderer._current_frame = retained_frame
+        renderer.rhi.return_value = Mock()
+        target = Mock()
+        target.pixelSize.return_value = QSize(320, 240)
+        renderer.renderTarget.return_value = target
+        command_buffer = Mock()
+
+        VideoRendererWidget.render(renderer, command_buffer)
+
+        command_buffer.beginPass.assert_called_once()
+        command_buffer.setGraphicsPipeline.assert_not_called()
+        command_buffer.draw.assert_not_called()
+        assert renderer._current_frame is retained_frame
+        assert renderer._has_frame is True
+        assert renderer._rendered_content_identity is None
+
+    def test_begin_load_suppresses_both_video_surfaces(self, qapp, mocker):
+        va = VideoArea()
+        native_suppress = mocker.patch.object(
+            va._renderer,
+            "begin_presentation_transition",
+        )
+        adjusted_suppress = mocker.patch.object(
+            va._edit_viewer,
+            "begin_presentation_transition",
+        )
+        expected_generation = va._media_generation + 1
+
+        actual_generation = va.begin_load(Path("/fake/transition.mov"), 20)
+
+        assert actual_generation == expected_generation
+        native_suppress.assert_called_once_with(expected_generation)
+        adjusted_suppress.assert_called_once_with(expected_generation)
 
     def test_opaque_widget_attributes(self, qapp):
         """VideoArea and renderer must block WA_TranslucentBackground cascade."""

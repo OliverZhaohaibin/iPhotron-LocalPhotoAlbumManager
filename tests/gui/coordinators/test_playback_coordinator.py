@@ -1200,6 +1200,7 @@ def test_live_photo_motion_preparation_failure_restores_pending_still() -> None:
         apply_pending_still=Mock(return_value=True),
         display_image=Mock(),
         show_live_badge=Mock(),
+        defer_live_badge_until_ready=Mock(),
         set_live_replay_enabled=Mock(),
         show_placeholder=Mock(),
     )
@@ -1225,7 +1226,7 @@ def test_live_photo_motion_preparation_failure_restores_pending_still() -> None:
     coordinator._player_view.apply_pending_still.assert_called_once_with()
     coordinator._player_view.display_image.assert_not_called()
     coordinator._player_view.show_placeholder.assert_not_called()
-    coordinator._player_view.show_live_badge.assert_called_once_with()
+    coordinator._player_view.defer_live_badge_until_ready.assert_called_once_with(7)
     coordinator._player_view.set_live_replay_enabled.assert_called_once_with(True)
 
     PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)

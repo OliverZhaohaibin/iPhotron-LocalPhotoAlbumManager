@@ -83,6 +83,13 @@ end with `post_submit_deadline` followed by `surface_revealed` with
 repetition matrix can determine whether this preserves the user-visible
 first-frame leak fix.
 
+Transition traces must show `presentation_suppressed` before the exposed
+surface's blank submission and `presentation_resumed` only after matching new
+content is installed. A rapid A→B switch must record `post_submit_discarded`
+for any scheduled or armed A barrier, including `reason`, `state`, and the old
+epoch. During the suppressed interval a real compositor screenshot must contain
+the opaque Detail background, never A's pixels or media-specific overlays.
+
 The default timeout is 30 minutes. Override it with `-MaxMinutes 60` if the scan takes longer.
 The expanded directory is retained beside the ZIP so its contents can be reviewed before
 sharing.

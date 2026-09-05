@@ -132,6 +132,7 @@ class _FakeImageViewer(QWidget):
         self._has_image_content = True
         self._current_source = None
         self._adjustments = {}
+        self._presentation_suppressed_generation = None
         self.setMouseTracking(True)
 
     def set_image(self, *args, **kwargs):
@@ -142,6 +143,18 @@ class _FakeImageViewer(QWidget):
 
     def render_backend_name(self) -> str:
         return "opengl"
+
+    def begin_presentation_transition(self, generation: int) -> None:
+        self._presentation_suppressed_generation = int(generation)
+
+    def complete_presentation_transition(self, generation: int) -> bool:
+        if self._presentation_suppressed_generation != int(generation):
+            return False
+        self._presentation_suppressed_generation = None
+        return True
+
+    def cancel_presentation_transition(self) -> None:
+        self._presentation_suppressed_generation = None
 
     def set_adjustments(self, adjustments):
         self._adjustments = dict(adjustments)
@@ -291,7 +304,71 @@ class TestInitCoverTracking:
         assert controller._player_stack.currentWidget() is controller._image_viewer
         assert controller._pending_image_generation == 12
         assert controller._pending_image_key is None
+        assert controller._image_viewer._presentation_suppressed_generation == 12
         update.assert_called_once()
+
+    def test_resident_miss_keeps_transition_suppressed_until_decode(
+        self,
+        controller,
+        tmp_path,
+        mocker,
+        monkeypatch,
+    ):
+        source = tmp_path / "resident-miss.jpg"
+        normalized_source = source.absolute()
+        identity = AssetSourceIdentity.create(
+            source,
+            width=1600,
+            height=1200,
+            source_mtime_ns=1,
+        )
+        controller._begin_image_transition(14)
+        controller._loading_source = normalized_source
+        controller._loading_started_at = time.perf_counter()
+        mocker.patch.object(
+            controller,
+            "_viewport_metrics",
+            return_value=((800, 600), 1.0),
+        )
+        activate = mocker.Mock(return_value=False)
+        monkeypatch.setattr(
+            controller._image_viewer,
+            "activate_resident_surface",
+            activate,
+            raising=False,
+        )
+        request = mocker.patch.object(
+            controller._still_scheduler,
+            "request",
+            return_value=True,
+        )
+
+        assert controller._dispatch_prepared_intent(
+            _PreparedRequestIntent("asset-14", identity, 14, "initial"),
+            {},
+        )
+
+        assert controller._pending_image_generation == 14
+        assert controller._pending_image_key is not None
+        assert controller._image_viewer._presentation_suppressed_generation == 14
+        assert controller._player_stack.currentWidget() is controller._image_viewer
+        activate.assert_called_once()
+        request.assert_called_once()
+
+    def test_transition_badge_restores_only_for_matching_generation(
+        self,
+        controller,
+    ):
+        controller.show_live_badge()
+        controller._begin_image_transition(15)
+        controller.defer_live_badge_until_ready(15)
+
+        assert controller.is_live_badge_visible() is False
+        controller._restore_transition_ui(14)
+        assert controller.is_live_badge_visible() is False
+
+        controller._restore_transition_ui(15)
+        assert controller._live_badge.isHidden() is False
 
     def test_primed_image_decode_failure_returns_to_placeholder(
         self,
@@ -325,6 +402,9 @@ class TestInitCoverTracking:
         controller._schedule_render_runtime_warmup()
 
         start.assert_not_called()
+        assert controller._render_runtime_warmup_pool is None
+        assert controller._render_runtime_warmup_state == "idle"
+        assert controller._render_runtime_warmup_attempts == 0
 
     def test_latest_preparation_bypasses_one_blocked_raw_worker(
         self,
@@ -1084,7 +1164,8 @@ class TestInitCoverTracking:
         mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
         mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
         controller._image_viewer_rendered = True
-        controller._arm_image_transition(22, "image-b")
+        controller._begin_image_transition(22)
+        controller._bind_image_transition_key(22, "image-b")
         controller.show_image_surface()
 
         controller._image_viewer.firstFrameReady.emit()
@@ -1111,19 +1192,19 @@ class TestInitCoverTracking:
         )
         controller._present_generation = 24
         controller._request_reason_by_generation[24] = "initial"
-        arm = mocker.patch.object(controller, "_arm_image_transition")
+        controller._begin_image_transition(24)
+        bind = mocker.patch.object(controller, "_bind_image_transition_key")
         show = mocker.patch.object(controller, "show_image_surface")
         upload = mocker.patch.object(controller._image_viewer, "set_image")
         calls = mocker.Mock()
-        calls.attach_mock(arm, "arm")
+        calls.attach_mock(bind, "bind")
         calls.attach_mock(show, "show")
         calls.attach_mock(upload, "upload")
 
         controller._apply_still_frame(surface, {})
 
         assert calls.mock_calls[:3] == [
-            call.arm(24, surface.decode_key),
-            call.show(),
+            call.bind(24, surface.decode_key),
             call.upload(
                 surface.image,
                 {},
@@ -1131,6 +1212,7 @@ class TestInitCoverTracking:
                 source_size=surface.source_size,
                 reset_view=True,
             ),
+            call.show(),
         ]
 
     def test_stale_still_generation_cannot_consume_current_presentation(
@@ -1271,7 +1353,8 @@ class TestInitCoverTracking:
         controller._requires_post_submit_frame = True
         update = mocker.patch.object(controller._image_viewer, "update")
         hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
-        controller._arm_image_transition(40, "image-40")
+        controller._begin_image_transition(40)
+        controller._bind_image_transition_key(40, "image-40")
         controller.show_image_surface()
         update.reset_mock()
 
@@ -1303,7 +1386,8 @@ class TestInitCoverTracking:
         controller._present_generation = 45
         controller._present_started_at = time.perf_counter()
         controller._present_source = Path("image-45.jpg")
-        controller._arm_image_transition(45, "image-45")
+        controller._begin_image_transition(45)
+        controller._bind_image_transition_key(45, "image-45")
 
         controller._image_viewer.stillFrameSubmitted.emit("image-45", 45)
         qapp.processEvents()
@@ -1325,7 +1409,8 @@ class TestInitCoverTracking:
         controller._requires_post_submit_frame = True
         mocker.patch.object(controller._image_viewer, "update")
         controller._player_stack.setCurrentWidget(controller._image_viewer)
-        controller._arm_image_transition(46, "image-46")
+        controller._begin_image_transition(46)
+        controller._bind_image_transition_key(46, "image-46")
         controller._image_viewer.stillFrameSubmitted.emit("image-46", 46)
         qapp.processEvents()
 
@@ -1344,16 +1429,73 @@ class TestInitCoverTracking:
         controller._requires_post_submit_frame = True
         mocker.patch.object(controller._image_viewer, "update")
         controller._player_stack.setCurrentWidget(controller._image_viewer)
-        controller._arm_image_transition(47, "image-47")
+        controller._begin_image_transition(47)
+        controller._bind_image_transition_key(47, "image-47")
         controller._image_viewer.stillFrameSubmitted.emit("image-47", 47)
         qapp.processEvents()
         assert controller._post_submit_deadline_timer.isActive()
 
-        controller._arm_image_transition(48, "image-48")
+        controller._begin_image_transition(48)
+        controller._bind_image_transition_key(48, "image-48")
 
         assert not controller._post_submit_deadline_timer.isActive()
         assert controller._pending_image_generation == 48
         assert controller._pending_image_key == "image-48"
+
+    def test_new_generation_records_discarded_armed_barrier(
+        self,
+        controller,
+        qapp,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        emit = mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.emit_detail_event"
+        )
+        controller._begin_image_transition(60)
+        controller._bind_image_transition_key(60, "image-60")
+        controller._image_viewer.stillFrameSubmitted.emit("image-60", 60)
+        qapp.processEvents()
+
+        controller._begin_image_transition(61)
+
+        discard_calls = [
+            item
+            for item in emit.call_args_list
+            if item.args and item.args[0] == "post_submit_discarded"
+        ]
+        assert len(discard_calls) == 1
+        assert discard_calls[0].kwargs["generation"] == 60
+        assert discard_calls[0].kwargs["kind"] == "image"
+        assert discard_calls[0].kwargs["state"] == "armed"
+        assert discard_calls[0].kwargs["reason"] == "image_transition_started"
+
+    def test_same_turn_navigation_records_discarded_scheduled_barrier(
+        self,
+        controller,
+        mocker,
+    ):
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller._image_viewer, "update")
+        emit = mocker.patch(
+            "iPhoto.gui.ui.controllers.player_view_controller.emit_detail_event"
+        )
+        controller._begin_image_transition(62)
+        controller._bind_image_transition_key(62, "image-62")
+        controller._image_viewer.stillFrameSubmitted.emit("image-62", 62)
+
+        controller._begin_image_transition(63)
+
+        discard_calls = [
+            item
+            for item in emit.call_args_list
+            if item.args and item.args[0] == "post_submit_discarded"
+        ]
+        assert len(discard_calls) == 1
+        assert discard_calls[0].kwargs["generation"] == 62
+        assert discard_calls[0].kwargs["state"] == "scheduled"
+        assert discard_calls[0].kwargs["reason"] == "image_transition_started"
 
     def test_stale_windows_deadline_discards_barrier_without_reveal(
         self,
@@ -1365,7 +1507,8 @@ class TestInitCoverTracking:
         mocker.patch.object(controller._image_viewer, "update")
         hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
         controller._player_stack.setCurrentWidget(controller._image_viewer)
-        controller._arm_image_transition(50, "image-50")
+        controller._begin_image_transition(50)
+        controller._bind_image_transition_key(50, "image-50")
         controller._image_viewer.stillFrameSubmitted.emit("image-50", 50)
         qapp.processEvents()
         controller._pending_image_generation = 51
@@ -1404,7 +1547,8 @@ class TestInitCoverTracking:
         controller._present_generation = 40
         controller._present_source = path
         controller._present_started_at = time.perf_counter()
-        controller._arm_image_transition(40, old_key)
+        controller._begin_image_transition(40)
+        controller._bind_image_transition_key(40, old_key)
         controller._image_viewer.stillFrameSubmitted.emit(old_key, 40)
         qapp.processEvents()
 
@@ -1454,7 +1598,8 @@ class TestInitCoverTracking:
         controller._present_generation = 40
         controller._present_source = path
         controller._present_started_at = time.perf_counter()
-        controller._arm_image_transition(40, old_key)
+        controller._begin_image_transition(40)
+        controller._bind_image_transition_key(40, old_key)
         controller._image_viewer.stillFrameSubmitted.emit(old_key, 40)
         qapp.processEvents()
 
@@ -1544,6 +1689,7 @@ class TestInitCoverTracking:
         self,
         controller,
         monkeypatch,
+        qapp,
     ):
         warmed = Event()
         monkeypatch.setattr(
@@ -1560,7 +1706,51 @@ class TestInitCoverTracking:
         controller._schedule_render_runtime_warmup()
 
         assert warmed.wait(5)
-        assert controller._render_runtime_warmup_requested is True
+        assert _spin_until(
+            qapp,
+            lambda: controller._render_runtime_warmup_state == "completed",
+        )
+        assert controller._render_runtime_warmup_attempts == 1
+        assert controller._render_runtime_warmup_pool is not controller._preparation_pool
+
+    def test_failed_windows_opengl_warmup_can_retry_once(
+        self,
+        controller,
+        monkeypatch,
+        qapp,
+    ):
+        attempts = 0
+
+        def preload() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transient")
+
+        monkeypatch.setattr(
+            "iPhoto.gui.ui.controllers.player_view_controller.sys.platform",
+            "win32",
+        )
+        monkeypatch.setattr(
+            "iPhoto.gui.ui.controllers.player_view_controller.preload_opengl_python_runtime",
+            preload,
+        )
+        controller.enable_interaction_warmup()
+
+        controller._schedule_render_runtime_warmup()
+        assert _spin_until(
+            qapp,
+            lambda: controller._render_runtime_warmup_state == "idle"
+            and controller._render_runtime_warmup_attempts == 1,
+        )
+        controller._schedule_render_runtime_warmup()
+
+        assert _spin_until(
+            qapp,
+            lambda: controller._render_runtime_warmup_state == "completed",
+        )
+        assert attempts == 2
+        assert controller._render_runtime_warmup_attempts == 2
 
     def test_invalid_composition_does_not_consume_post_submit_payload(
         self,
@@ -1600,7 +1790,8 @@ class TestInitCoverTracking:
     ):
         controller._requires_post_submit_frame = True
         update = mocker.patch.object(controller._image_viewer, "update")
-        controller._arm_image_transition(42, "image-42")
+        controller._begin_image_transition(42)
+        controller._bind_image_transition_key(42, "image-42")
         controller.show_image_surface()
         update.reset_mock()
         controller._image_viewer.stillFrameSubmitted.emit("image-42", 42)
@@ -1749,6 +1940,34 @@ def test_init_cover_stays_below_face_name_overlay_and_does_not_take_mouse(
 
     while QApplication.overrideCursor() is not None:
         QApplication.restoreOverrideCursor()
+
+
+def test_detail_transition_suppresses_old_media_overlays(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.widgets.detail_page.VideoArea",
+        _FakeVideoArea,
+    )
+    main_window = QWidget()
+    detail = DetailPageWidget(main_window, image_viewer=_FakeImageViewer())
+    detail.resize(640, 480)
+    detail.show()
+    detail.face_name_overlay.set_overlay_active(True)
+    detail.live_badge.show()
+    qapp.processEvents()
+
+    detail.set_media_overlays_suppressed(True)
+    detail.show_rhi_init_cover()
+    qapp.processEvents()
+
+    assert detail.face_name_overlay.isHidden()
+    assert detail.live_badge.isHidden()
+
+    detail.set_media_overlays_suppressed(False)
+    detail.show_rhi_init_cover()
+    qapp.processEvents()
+
+    assert detail.face_name_overlay.isHidden()
+    assert detail.live_badge.isHidden()
 
 
 class TestPlaceholderMessage:

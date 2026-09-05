@@ -838,6 +838,11 @@ class VideoArea(QWidget):
         load_started = time.perf_counter()
         prev_source = self._current_source
         previous_duration_ms = self._current_duration_ms
+        next_media_generation = self._media_generation + 1
+        for surface in (self._renderer, self._edit_viewer):
+            suppress = getattr(surface, "begin_presentation_transition", None)
+            if callable(suppress):
+                suppress(next_media_generation)
         media_generation = self._begin_media_generation()
         self._detach_video_output()
         if sys.platform == "darwin" and prev_source is not None:
@@ -1334,6 +1339,14 @@ class VideoArea(QWidget):
         content_serial: int,
     ) -> None:
         """Queue one identified frame on exactly one QRhi child surface."""
+
+        complete_transition = getattr(
+            surface,
+            "complete_presentation_transition",
+            None,
+        )
+        if callable(complete_transition):
+            complete_transition(self._media_generation)
 
         if surface is self._edit_viewer:
             resolved_rotation_cw = _resolve_frame_rotation_cw(

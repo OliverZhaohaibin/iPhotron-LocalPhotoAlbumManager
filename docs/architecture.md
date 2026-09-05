@@ -227,10 +227,17 @@ and QtMultimedia runtime post-paint. Platform allowlists, post-show surface
 creation, parentless surface warm-up, and hide/show workarounds are forbidden.
 Windows OpenGL Python-module warm-up is enabled only after startup reaches its
 terminal state and is triggered by a later Detail hover/click; it is never a
-startup prerequisite. QRhi/context creation and GPU resource allocation remain
-on the active Detail surface. Windows reveal waits for the additional QRhi
+startup prerequisite. It uses a lazily created, isolated one-thread pool and
+may retry one failed import on a later interaction without occupying still
+preparation lanes. QRhi/context creation and GPU resource allocation remain on
+the active Detail surface. Windows reveal waits for the additional QRhi
 submission heuristic, but that wait is bounded and may fail open only after the
 matching current-generation media content was already submitted.
+Every still, native-video, and adjusted-video transition suppresses media draws
+by generation before exposing its QRhi surface. Suppressed renders submit an
+opaque clear frame while preserving still residency; only installation of
+matching-generation content may resume media drawing. Media-specific overlays
+remain suppressed until that generation reaches its reveal terminal.
 The pre-show hierarchy is part of shell construction: failure is terminal and
 non-recoverable for that process. Startup-generation retry applies only after a
 valid visible shell exists; it must not claim to reconstruct the native

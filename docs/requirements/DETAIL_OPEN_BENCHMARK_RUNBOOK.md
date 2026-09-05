@@ -67,7 +67,9 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
 - video transition 必须在 active surface 确定后记录
   `video_surface_blank_requested`；对应的 `presentation_resumed` 只能出现在
   current-generation frame 已成功安装之后。frame rotation/staging/install
-  失败时 suppression 必须保持有效。
+  失败时 suppression 必须保持有效。异步 preparation 切换 native/adjusted
+  renderer 时必须再记录 `reason=surface_switch`、当前 media generation 和最终
+  surface；正常非 transition 切换不得产生该事件。
 - `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。
 - 正常 Windows reveal 记录 `surface_revealed(reason=composition)`；缺少额外
   composition 时允许在匹配内容已提交后记录

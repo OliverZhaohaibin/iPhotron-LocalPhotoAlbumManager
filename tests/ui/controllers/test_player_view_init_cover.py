@@ -1161,6 +1161,7 @@ class TestInitCoverTracking:
         controller,
         mocker,
     ):
+        controller._requires_post_submit_frame = False
         mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
         mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
         controller._image_viewer_rendered = True
@@ -1284,6 +1285,7 @@ class TestInitCoverTracking:
         controller,
         mocker,
     ):
+        controller._requires_post_submit_frame = False
         mock_show_cover = mocker.patch.object(controller, "_show_detail_init_cover")
         mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
         controls_enabled = mocker.patch.object(
@@ -1365,6 +1367,7 @@ class TestInitCoverTracking:
         controller,
         mocker,
     ):
+        controller._requires_post_submit_frame = False
         mock_hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
         controller._player_stack.setCurrentWidget(controller._video_area)
 

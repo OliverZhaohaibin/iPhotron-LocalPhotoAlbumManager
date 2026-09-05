@@ -414,6 +414,11 @@ class VideoRendererWidget(QRhiWidget):
         )
         return True
 
+    def presentation_transition_active(self, generation: int) -> bool:
+        """Return whether this generation still owns presentation suppression."""
+
+        return int(generation) == self._presentation_suppressed_generation
+
     def cancel_presentation_transition(self) -> None:
         """Cancel suppression without destroying QRhi resources."""
 

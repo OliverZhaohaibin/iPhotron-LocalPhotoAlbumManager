@@ -466,6 +466,20 @@ class VideoArea(QWidget):
                 self._edit_viewer.update()
         else:
             self._edit_mode_active = False
+        transition_active = getattr(
+            target_surface,
+            "presentation_transition_active",
+            None,
+        )
+        if callable(transition_active) and transition_active(self._media_generation):
+            target_surface.update()
+            emit_detail_event(
+                "video_surface_blank_requested",
+                generation=self._detail_request_generation,
+                media_generation=self._media_generation,
+                reason="surface_switch",
+                surface="adjusted" if target_surface is self._edit_viewer else "native",
+            )
         if required_serial > 0 and self._last_presented_video_frame is not None:
             self._queue_retained_frame_for_surface(
                 target_surface,

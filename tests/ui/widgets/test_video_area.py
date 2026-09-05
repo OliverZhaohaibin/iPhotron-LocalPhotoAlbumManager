@@ -806,8 +806,22 @@ class TestVideoRendererWidget:
                 content_serial=content_serial,
             )
 
+        def commit_state(generation: int, adjusted: bool) -> None:
+            assert video_area.commit_presentation(
+                VideoPresentationState(
+                    generation,
+                    {},
+                    None,
+                    adjusted,
+                    0,
+                    0,
+                    0,
+                    False,
+                )
+            )
+
         video_area.begin_load(Path("/fake/video-a.mov"), 1)
-        video_area.set_adjusted_preview_enabled(surface_kind == "adjusted")
+        commit_state(1, surface_kind == "adjusted")
         surface = video_area.video_view()
         presented = QSignalSpy(surface.videoFramePresented)
         composed = QSignalSpy(surface.frameSubmitted)
@@ -825,13 +839,13 @@ class TestVideoRendererWidget:
                 Path(f"/fake/video-{request_generation}.mov"),
                 request_generation,
             )
-            video_area.set_adjusted_preview_enabled(surface_kind == "adjusted")
-            assert video_area.video_view() is surface
             composed_before = composed.count()
             controller.begin_video_transition(
                 request_generation,
                 interactive_when_ready=True,
             )
+            commit_state(request_generation, surface_kind == "adjusted")
+            assert video_area.video_view() is surface
             wait_for(composed, composed_before + 1)
             transition_pixel = center_pixel()
             expected_background = surface._transition_clear_color()
@@ -975,6 +989,8 @@ class TestVideoArea:
 
         renderer.begin_presentation_transition(4)
 
+        assert renderer.presentation_transition_active(3) is False
+        assert renderer.presentation_transition_active(4) is True
         assert renderer.complete_presentation_transition(3) is False
         assert renderer._presentation_suppressed_generation == 4
         assert renderer.complete_presentation_transition(4) is True
@@ -1018,6 +1034,56 @@ class TestVideoArea:
         assert actual_generation == expected_generation
         native_suppress.assert_called_once_with(expected_generation)
         adjusted_suppress.assert_called_once_with(expected_generation)
+
+    @pytest.mark.parametrize("target_kind", ("native", "adjusted"))
+    def test_suppressed_surface_switch_requests_target_blank(
+        self,
+        qapp,
+        mocker,
+        target_kind,
+    ):
+        va = VideoArea()
+        va._media_generation = 12
+        va._detail_request_generation = 22
+        va._current_duration_ms = 0
+        mocker.patch.object(va._edit_viewer, "set_adjustments")
+        if target_kind == "native":
+            va._adjusted_preview_enabled = True
+            va._surface_stack.setCurrentWidget(va._edit_viewer)
+            target_surface = va._renderer
+        else:
+            va._adjusted_preview_enabled = False
+            va._surface_stack.setCurrentWidget(va._renderer)
+            target_surface = va._edit_viewer
+        target_surface.begin_presentation_transition(12)
+        update = mocker.patch.object(target_surface, "update")
+        emit = mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.emit_detail_event"
+        )
+
+        va.set_adjusted_preview_enabled(target_kind == "adjusted")
+
+        assert va.video_view() is target_surface
+        update.assert_called_once_with()
+        emit.assert_any_call(
+            "video_surface_blank_requested",
+            generation=22,
+            media_generation=12,
+            reason="surface_switch",
+            surface=target_kind,
+        )
+
+    def test_completed_surface_switch_does_not_request_blank(self, qapp, mocker):
+        va = VideoArea()
+        va._media_generation = 13
+        va._current_duration_ms = 0
+        mocker.patch.object(va._edit_viewer, "set_adjustments")
+        update = mocker.patch.object(va._edit_viewer, "update")
+
+        va.set_adjusted_preview_enabled(True)
+
+        assert va.video_view() is va._edit_viewer
+        update.assert_not_called()
 
     def test_opaque_widget_attributes(self, qapp):
         """VideoArea and renderer must block WA_TranslucentBackground cascade."""

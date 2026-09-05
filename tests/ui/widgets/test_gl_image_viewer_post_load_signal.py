@@ -86,6 +86,8 @@ def test_presentation_transition_is_generation_bound_and_preserves_texture(qapp)
 
     assert viewer.current_image_source() == "old-still"
     assert viewer.has_image_content() is True
+    assert viewer.presentation_transition_active(7) is False
+    assert viewer.presentation_transition_active(8) is True
     assert viewer.complete_presentation_transition(7) is False
     assert viewer._presentation_suppressed_generation == 8
     assert viewer.complete_presentation_transition(8) is True

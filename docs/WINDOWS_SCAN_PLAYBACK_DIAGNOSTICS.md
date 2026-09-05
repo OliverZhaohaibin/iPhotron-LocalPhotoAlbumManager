@@ -90,6 +90,10 @@ A→B switch must record `post_submit_discarded`
 for any scheduled or armed A barrier, including `reason`, `state`, and the old
 epoch. During the suppressed interval a real compositor screenshot must contain
 the opaque Detail background, never A's pixels or media-specific overlays.
+When async preparation changes the active video renderer, the trace must add a
+second `video_surface_blank_requested` with `reason=surface_switch`, the current
+Detail generation, the current media generation, and `surface=adjusted|native`.
+Its matching `presentation_resumed` must follow successful frame installation.
 
 Run the real-pixel contracts manually from a normal interactive Windows
 desktop. Setting the platform explicitly is required because the unit-test

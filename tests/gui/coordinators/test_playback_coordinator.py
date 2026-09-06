@@ -1228,6 +1228,10 @@ def test_live_photo_motion_preparation_failure_restores_pending_still() -> None:
     coordinator._player_view.show_placeholder.assert_not_called()
     coordinator._player_view.defer_live_badge_until_ready.assert_called_once_with(7)
     coordinator._player_view.set_live_replay_enabled.assert_called_once_with(True)
+    player_calls = [item[0] for item in coordinator._player_view.method_calls]
+    assert player_calls.index("defer_live_badge_until_ready") < player_calls.index(
+        "apply_pending_still"
+    )
 
     PlaybackCoordinator._on_still_frame_presented(coordinator, still, 7)
 

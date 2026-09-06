@@ -142,6 +142,145 @@ def test_rhi_suppression_clears_without_drawing_or_consuming_new_surface() -> No
     assert viewer._rendered_content_identity is None
 
 
+@pytest.mark.parametrize("uses_raw_gl", (True, False))
+def test_adjusted_video_resumes_only_after_gpu_draw(
+    qapp,
+    mocker,
+    uses_raw_gl,
+) -> None:
+    viewer = GLImageViewer()
+    viewer._uses_raw_gl = uses_raw_gl
+    viewer._gl_initialized = True
+    viewer._gl_funcs = mocker.Mock()
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.has_texture.return_value = True
+    viewer._renderer.texture_size.return_value = (64, 48)
+    viewer._renderer.last_video_upload_pre_rotated.return_value = False
+    viewer._renderer.take_still_upload_result.return_value = None
+    retained_frame = mocker.Mock()
+    viewer._using_video_frame_source = True
+    viewer._video_frame = retained_frame
+    viewer._pending_video_image = None
+    viewer._video_frame_dirty = True
+    viewer._video_frame_content_generation = 9
+    viewer._video_frame_content_serial = 4
+    viewer._video_frame_presentation_pending = False
+    viewer._pending_source_rotate90_steps = 0
+    viewer._pending_video_reset_view = False
+    viewer._pending_resident_activation = None
+    viewer._pending_warm_surfaces = []
+    viewer._image = None
+    viewer.begin_presentation_transition(9)
+    target = mocker.Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    mocker.patch.object(viewer, "renderTarget", return_value=target)
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget._load_gl_module",
+        return_value=SimpleNamespace(GL_COLOR_BUFFER_BIT=0x4000),
+    )
+    command_buffer = mocker.Mock()
+
+    viewer.render(command_buffer)
+
+    viewer._renderer.upload_video_frame.assert_called_once_with(retained_frame)
+    viewer._renderer.render.assert_called_once()
+    assert viewer._presentation_suppressed_generation is None
+    assert viewer._video_frame_dirty is False
+    assert viewer._video_frame is None
+    assert viewer._rendered_content_identity is not None
+    assert viewer._rendered_content_identity[:3] == ("video", 9, 4)
+
+
+@pytest.mark.parametrize("uses_raw_gl", (True, False))
+def test_adjusted_video_upload_failure_keeps_suppression_and_retry_input(
+    qapp,
+    mocker,
+    uses_raw_gl,
+) -> None:
+    viewer = GLImageViewer()
+    viewer._uses_raw_gl = uses_raw_gl
+    viewer._gl_initialized = True
+    viewer._gl_funcs = mocker.Mock()
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.has_texture.return_value = True
+    viewer._renderer.upload_video_frame.side_effect = RuntimeError("upload failed")
+    viewer._renderer.take_still_upload_result.return_value = None
+    retained_frame = mocker.Mock()
+    viewer._using_video_frame_source = True
+    viewer._video_frame = retained_frame
+    viewer._pending_video_image = None
+    viewer._video_frame_dirty = True
+    viewer._video_frame_content_generation = 10
+    viewer._video_frame_content_serial = 5
+    viewer._pending_source_rotate90_steps = 0
+    viewer._pending_video_reset_view = False
+    viewer._pending_resident_activation = None
+    viewer._pending_warm_surfaces = []
+    viewer._image = None
+    viewer.begin_presentation_transition(10)
+    target = mocker.Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    mocker.patch.object(viewer, "renderTarget", return_value=target)
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget._load_gl_module",
+        return_value=SimpleNamespace(GL_COLOR_BUFFER_BIT=0x4000),
+    )
+
+    viewer.render(mocker.Mock())
+
+    viewer._renderer.render.assert_not_called()
+    assert viewer._presentation_suppressed_generation == 10
+    assert viewer._video_frame_dirty is True
+    assert viewer._video_frame is retained_frame
+    assert viewer._rendered_content_identity is None
+
+
+@pytest.mark.parametrize("uses_raw_gl", (True, False))
+def test_adjusted_video_draw_failure_keeps_suppression_and_retry_input(
+    qapp,
+    mocker,
+    uses_raw_gl,
+) -> None:
+    viewer = GLImageViewer()
+    viewer._uses_raw_gl = uses_raw_gl
+    viewer._gl_initialized = True
+    viewer._gl_funcs = mocker.Mock()
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.has_texture.return_value = True
+    viewer._renderer.texture_size.return_value = (64, 48)
+    viewer._renderer.last_video_upload_pre_rotated.return_value = False
+    viewer._renderer.take_still_upload_result.return_value = None
+    viewer._renderer.render.side_effect = RuntimeError("draw failed")
+    retained_frame = mocker.Mock()
+    viewer._using_video_frame_source = True
+    viewer._video_frame = retained_frame
+    viewer._pending_video_image = None
+    viewer._video_frame_dirty = True
+    viewer._video_frame_content_generation = 11
+    viewer._video_frame_content_serial = 6
+    viewer._pending_source_rotate90_steps = 0
+    viewer._pending_video_reset_view = False
+    viewer._pending_resident_activation = None
+    viewer._pending_warm_surfaces = []
+    viewer._image = None
+    viewer.begin_presentation_transition(11)
+    target = mocker.Mock()
+    target.pixelSize.return_value = QSize(320, 240)
+    mocker.patch.object(viewer, "renderTarget", return_value=target)
+    mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget._load_gl_module",
+        return_value=SimpleNamespace(GL_COLOR_BUFFER_BIT=0x4000),
+    )
+
+    with pytest.raises(RuntimeError, match="draw failed"):
+        viewer.render(mocker.Mock())
+
+    assert viewer._presentation_suppressed_generation == 11
+    assert viewer._video_frame_dirty is True
+    assert viewer._video_frame is retained_frame
+    assert viewer._rendered_content_identity is None
+
+
 @pytest.mark.gpu
 @pytest.mark.windows_compositor
 def test_visible_windows_transition_never_exposes_previous_still(qapp) -> None:

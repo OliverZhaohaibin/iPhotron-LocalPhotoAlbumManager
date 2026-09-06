@@ -238,10 +238,15 @@ by generation before exposing its QRhi surface. Suppressed renders submit an
 opaque clear frame while preserving still residency; only installation of
 matching-generation content may resume media drawing. Media-specific overlays
 remain suppressed until that generation reaches its reveal terminal.
+Live Photo stills decoded while motion is active retain their request
+generation and re-enter the same image transition/reveal terminal when motion
+ends, so generation-bound overlays cannot remain deferred indefinitely.
 After `VideoArea.begin_load()` suppresses both video renderers, the active
 surface is explicitly updated under the Detail cover so its retained backing
 texture is replaced by the opaque clear frame before decode completes. Video
-suppression is released only after the new frame is installed successfully.
+suppression is released only after the new frame's GPU upload and draw are
+recorded successfully. Upload failure keeps the retryable CPU frame and submits
+only the opaque clear surface.
 If asynchronous presentation preparation switches native/adjusted renderers,
 the newly active renderer submits its own suppressed clear frame before any new
 content is installed.

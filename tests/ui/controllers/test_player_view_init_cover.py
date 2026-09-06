@@ -370,6 +370,48 @@ class TestInitCoverTracking:
         controller._restore_transition_ui(15)
         assert controller._live_badge.isHidden() is False
 
+    def test_pending_live_still_uses_image_transition_and_restores_badge(
+        self,
+        controller,
+        tmp_path,
+    ):
+        source = tmp_path / "live-still.jpg"
+        surface = _surface(
+            source,
+            QImage(64, 48, QImage.Format.Format_RGBA8888),
+        )
+        controller._requires_post_submit_frame = False
+        controller._request_generation = 16
+        controller._present_generation = 16
+        controller._present_source = source.absolute()
+        controller._present_started_at = time.perf_counter()
+        controller._request_reason_by_generation[16] = "initial"
+        controller._pending_still = (16, surface, {})
+        controller._player_stack.setCurrentWidget(controller._video_area)
+        controller.defer_live_badge_until_ready(16)
+
+        assert controller.apply_pending_still()
+
+        assert controller._pending_image_generation == 16
+        assert controller._pending_image_key == surface.decode_key
+        assert controller._player_stack.currentWidget() is controller._image_viewer
+        controller._image_viewer.stillFrameSubmitted.emit(surface.decode_key, 16)
+
+        assert controller._pending_image_generation is None
+        assert controller._live_badge.isHidden() is False
+
+    def test_stale_pending_live_still_is_rejected(self, controller, tmp_path):
+        surface = _surface(
+            tmp_path / "stale-live-still.jpg",
+            QImage(64, 48, QImage.Format.Format_RGBA8888),
+        )
+        controller._request_generation = 18
+        controller._pending_still = (17, surface, {})
+
+        assert controller.apply_pending_still() is False
+        assert controller._pending_still is None
+        assert controller._pending_image_generation is None
+
     def test_primed_image_decode_failure_returns_to_placeholder(
         self,
         controller,

@@ -103,6 +103,7 @@ fixtures otherwise default to `offscreen`:
 $env:QT_QPA_PLATFORM = "windows"
 $env:IPHOTO_RHI_BACKEND = "opengl"
 $env:IPHOTO_WINDOWS_COMPOSITOR_CYCLES = "100"
+$env:IPHOTO_WINDOWS_COMPOSITOR_FORCE_UPLOAD_FAILURE = "1"
 $tests = @(
   "tests/ui/widgets/test_gl_image_viewer_post_load_signal.py",
   "tests/ui/widgets/test_video_area.py"
@@ -116,6 +117,9 @@ $tests = @(
 The video pixel contract drives `VideoArea.begin_load()` followed by
 `PlayerViewController.begin_video_transition()`; it must not request the blank
 frame directly from the tested QRhi child.
+Forced first-upload failures must record `video_gpu_upload_retry`, remain on the
+opaque background, and emit `presentation_resumed` only after the retained
+current-generation frame uploads and draws successfully on retry.
 
 The default timeout is 30 minutes. Override it with `-MaxMinutes 60` if the scan takes longer.
 The expanded directory is retained beside the ZIP so its contents can be reviewed before

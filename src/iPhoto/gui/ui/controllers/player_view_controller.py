@@ -475,7 +475,7 @@ class PlayerViewController(QObject):
         self._loading_source: Path | None = None
         self._loading_started_at: float | None = None
         self._defer_still_updates = False
-        self._pending_still: tuple[DecodedSurface, dict] | None = None
+        self._pending_still: tuple[int, DecodedSurface, dict] | None = None
         self._current_full_image: QImage | None = None
         self._render_sessions: OrderedDict[tuple, PhotoRenderSessionHandle] = OrderedDict()
         self._current_render_session: PhotoRenderSessionHandle | None = None
@@ -1550,7 +1550,11 @@ class PlayerViewController(QObject):
             self._present_generation = request.generation
             self._present_started_at = self._loading_started_at
             self._present_source = request.source_identity.path
-            self._pending_still = (deferred_surface, render_adjustments)
+            self._pending_still = (
+                request.generation,
+                deferred_surface,
+                render_adjustments,
+            )
             self._loading_source = None
             self._loading_started_at = None
             return True
@@ -2540,8 +2544,12 @@ class PlayerViewController(QObject):
         """Apply any deferred still frame if available."""
         if self._pending_still is None:
             return False
-        surface, adjustments = self._pending_still
+        generation, surface, adjustments = self._pending_still
         self._pending_still = None
+        if generation != self._request_generation:
+            return False
+        self._present_generation = generation
+        self._begin_image_transition(generation)
         self._apply_still_frame(surface, adjustments)
         return True
 
@@ -2652,7 +2660,11 @@ class PlayerViewController(QObject):
             return
 
         if self._defer_still_updates and self._player_stack.currentWidget() is self._video_area:
-            self._pending_still = (surface, adjustments)
+            self._pending_still = (
+                self._present_generation,
+                surface,
+                adjustments,
+            )
         else:
             self._apply_still_frame(
                 surface,

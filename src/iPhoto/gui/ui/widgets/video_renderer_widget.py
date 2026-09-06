@@ -833,7 +833,15 @@ class VideoRendererWidget(QRhiWidget):
         if output_size.isEmpty():
             return
 
-        if VideoRendererWidget._presentation_is_suppressed(self):
+        suppressed_generation = self._presentation_suppressed_generation
+        suppressed_frame_ready = bool(
+            suppressed_generation is not None
+            and self._has_frame
+            and self._frame_dirty
+            and self._frame_content_generation == suppressed_generation
+            and self._current_frame is not None
+        )
+        if suppressed_generation is not None and not suppressed_frame_ready:
             cb.beginPass(
                 self.renderTarget(),
                 self._transition_clear_color(),
@@ -860,18 +868,44 @@ class VideoRendererWidget(QRhiWidget):
             return
 
         ru = rhi.nextResourceUpdateBatch()
+        staged_suppressed_frame = False
 
         # Upload frame data if dirty.
         # Only clear the dirty flag *after* the upload succeeds so that a
         # failed map/upload attempt is retried on the next render cycle
         # instead of leaving uninitialized textures on screen.
         if self._frame_dirty:
-            if self._upload_frame(rhi, ru):
-                self._frame_dirty = False
-                # Release the decoded frame reference immediately so the
-                # hardware decoder can recycle its buffer.  All pixel data
-                # has already been copied into GPU textures.
-                self._current_frame = None
+            try:
+                upload_succeeded = self._upload_frame(rhi, ru)
+            except Exception:
+                if suppressed_generation is None:
+                    raise
+                upload_succeeded = False
+            if upload_succeeded:
+                staged_suppressed_frame = suppressed_generation is not None
+                if not staged_suppressed_frame:
+                    self._frame_dirty = False
+                    # Release the decoded frame reference immediately so the
+                    # hardware decoder can recycle its buffer. All pixel data
+                    # has already been copied into GPU textures.
+                    self._current_frame = None
+            elif suppressed_generation is not None:
+                emit_detail_event(
+                    "video_gpu_upload_retry",
+                    generation=int(suppressed_generation),
+                    renderer="video_renderer",
+                    backend=self.render_backend_name(),
+                    failure_stage="upload",
+                )
+                cb.beginPass(
+                    self.renderTarget(),
+                    self._transition_clear_color(),
+                    QRhiDepthStencilClearValue(),
+                )
+                cb.endPass()
+                self._queue_first_frame_ready()
+                self._rendered_content_identity = None
+                return
 
         # Update uniform buffer
         self._update_uniforms(ru, output_size)
@@ -891,6 +925,10 @@ class VideoRendererWidget(QRhiWidget):
         cb.setVertexInput(0, vbuf_binding)
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
+        if staged_suppressed_frame and suppressed_generation is not None:
+            self._frame_dirty = False
+            self._current_frame = None
+            self.complete_presentation_transition(suppressed_generation)
         self._queue_first_frame_ready()
         if self._frame_presentation_pending and not self._frame_dirty:
             self._frame_presentation_pending = False

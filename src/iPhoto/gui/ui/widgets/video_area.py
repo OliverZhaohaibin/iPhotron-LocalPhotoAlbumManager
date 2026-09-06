@@ -1381,13 +1381,6 @@ class VideoArea(QWidget):
                 content_serial=content_serial,
             )
             self._adjusted_first_frame_pending = False
-            complete_transition = getattr(
-                surface,
-                "complete_presentation_transition",
-                None,
-            )
-            if callable(complete_transition):
-                complete_transition(self._media_generation)
             self._surface_stack.update()
             self.update()
         else:
@@ -1396,13 +1389,6 @@ class VideoArea(QWidget):
                 content_generation=self._media_generation,
                 content_serial=content_serial,
             )
-            complete_transition = getattr(
-                surface,
-                "complete_presentation_transition",
-                None,
-            )
-            if callable(complete_transition):
-                complete_transition(self._media_generation)
 
     def _queue_retained_frame_for_surface(
         self,

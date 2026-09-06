@@ -14,6 +14,7 @@ import time
 import weakref
 from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
@@ -137,6 +138,12 @@ def _load_video_frame_types() -> None:
 _CROP_PREVIEW_MASK_SIZE = 1_000_000.0
 gl: Any | None = None
 GLRenderer: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingVideoUploadState:
+    pre_rotated: bool
+    final_rotation: int
 
 
 def _crop_preview_adjustments(adjustments: Mapping[str, float]) -> dict[str, float]:
@@ -470,6 +477,27 @@ class GLImageViewer(QRhiWidget):
 
     def _presentation_is_suppressed(self) -> bool:
         return getattr(self, "_presentation_suppressed_generation", None) is not None
+
+    def _suppressed_video_upload_generation(self) -> int | None:
+        generation = getattr(self, "_presentation_suppressed_generation", None)
+        if (
+            generation is None
+            or not self._using_video_frame_source
+            or not self._video_frame_dirty
+            or self._video_frame_content_generation != generation
+            or (self._video_frame is None and self._pending_video_image is None)
+        ):
+            return None
+        return int(generation)
+
+    def _emit_video_gpu_upload_retry(self, generation: int, stage: str) -> None:
+        emit_detail_event(
+            "video_gpu_upload_retry",
+            generation=int(generation),
+            renderer="gl_image_viewer",
+            backend=self.render_backend_name(),
+            failure_stage=stage,
+        )
 
     def render_device_name(self) -> str:
         """Return the QRhi adapter name used to reject software benchmark runs."""
@@ -929,11 +957,11 @@ class GLImageViewer(QRhiWidget):
         height = int(fmt.frameHeight())
         return width > 0 and height > 0 and image.width() == height and image.height() == width
 
-    def _upload_pending_video_source(self) -> bool:
-        """Upload pending video source and return whether snapshot path was pre-rotated."""
+    def _stage_pending_video_source(self) -> _PendingVideoUploadState | None:
+        """Upload/stage a video source while retaining retryable input state."""
 
         if self._renderer is None:
-            return False
+            return None
 
         pending_rotation = self._pending_source_rotate90_steps
         if pending_rotation is None:
@@ -943,30 +971,49 @@ class GLImageViewer(QRhiWidget):
         if self._pending_video_image is not None:
             self._renderer.upload_texture(self._pending_video_image)
             pre_rotated = self._pending_video_image_pre_rotated
-            self._pending_video_image = None
-            self._pending_video_image_pre_rotated = False
-            self._video_frame = None
         elif self._video_frame is not None:
             self._renderer.upload_video_frame(self._video_frame)
             pre_rotated = self._renderer.last_video_upload_pre_rotated()
         else:
-            return False
+            return None
 
         final_rotation = 0 if pre_rotated else pending_rotation
         self._apply_video_source_rotation_steps(
             final_rotation,
             request_update=False,
         )
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        if self._pending_video_reset_view:
+            self.reset_zoom()
+        return _PendingVideoUploadState(
+            pre_rotated=pre_rotated,
+            final_rotation=final_rotation,
+        )
+
+    def _commit_pending_video_source(
+        self,
+        state: _PendingVideoUploadState,
+    ) -> None:
+        """Consume staged input only after its new texture was drawn successfully."""
+
+        del state
+        self._pending_video_image = None
+        self._pending_video_image_pre_rotated = False
         self._pending_source_rotate90_steps = None
         self._video_frame = None
         self._video_frame_dirty = False
         self._video_frame_presentation_pending = True
-        straighten, rotate_steps, _ = self._rotation_parameters()
-        self._update_cover_scale(straighten, rotate_steps)
-        if self._pending_video_reset_view:
-            self._pending_video_reset_view = False
-            self.reset_zoom()
-        return pre_rotated
+        self._pending_video_reset_view = False
+
+    def _upload_pending_video_source(self) -> bool:
+        """Upload and consume a video source outside a suppressed transition."""
+
+        state = self._stage_pending_video_source()
+        if state is None:
+            return False
+        self._commit_pending_video_source(state)
+        return state.pre_rotated
 
     def _upload_video_frame_immediately_if_possible(self) -> None:
         """Best-effort immediate Linux upload for edit-preview video frames.
@@ -979,6 +1026,8 @@ class GLImageViewer(QRhiWidget):
         """
 
         if not sys.platform.startswith("linux"):
+            return
+        if GLImageViewer._presentation_is_suppressed(self):
             return
         if not self._using_video_frame_source or not self._video_frame_dirty:
             return
@@ -1697,7 +1746,11 @@ class GLImageViewer(QRhiWidget):
             return
         self._last_render_target_size = QSize(output_size)
 
-        if GLImageViewer._presentation_is_suppressed(self):
+        suppressed = GLImageViewer._presentation_is_suppressed(self)
+        suppressed_video_generation = (
+            GLImageViewer._suppressed_video_upload_generation(self)
+        )
+        if suppressed and suppressed_video_generation is None:
             cb.beginPass(
                 self.renderTarget(),
                 self._transition_clear_color(),
@@ -1730,6 +1783,7 @@ class GLImageViewer(QRhiWidget):
         gf.glClear(gl_module.GL_COLOR_BUFFER_BIT)
 
         uploaded_new_still_texture = False
+        staged_video_upload: _PendingVideoUploadState | None = None
         if self._pending_resident_activation is not None:
             key = self._pending_resident_activation
             self._pending_resident_activation = None
@@ -1755,7 +1809,13 @@ class GLImageViewer(QRhiWidget):
                     self._diag_video_frame_summary(self._video_frame),
                 )
             try:
-                pre_rotated = self._upload_pending_video_source()
+                if suppressed_video_generation is not None:
+                    staged_video_upload = self._stage_pending_video_source()
+                    if staged_video_upload is None:
+                        raise RuntimeError("No matching video source available for upload")
+                    pre_rotated = staged_video_upload.pre_rotated
+                else:
+                    pre_rotated = self._upload_pending_video_source()
                 if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
                     logical_tex_w, logical_tex_h = self._display_texture_dimensions()
                     _LOGGER.warning(
@@ -1772,6 +1832,16 @@ class GLImageViewer(QRhiWidget):
                     )
             except Exception:
                 _LOGGER.exception("Failed to upload video frame into GLImageViewer")
+                if suppressed_video_generation is not None:
+                    self._emit_video_gpu_upload_retry(
+                        suppressed_video_generation,
+                        "upload",
+                    )
+                    cb.endExternal()
+                    cb.endPass()
+                    self._queue_first_frame_ready()
+                    self._rendered_content_identity = None
+                    return
         elif (
             self._image is not None
             and not self._image.isNull()
@@ -1825,6 +1895,11 @@ class GLImageViewer(QRhiWidget):
             cb.endPass()
             self._queue_first_frame_ready()
             self._rendered_content_identity = None
+            if suppressed_video_generation is not None:
+                self._emit_video_gpu_upload_retry(
+                    suppressed_video_generation,
+                    "no_texture",
+                )
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -1902,6 +1977,9 @@ class GLImageViewer(QRhiWidget):
         # --- End raw OpenGL block ---
         cb.endExternal()
         cb.endPass()
+        if staged_video_upload is not None and suppressed_video_generation is not None:
+            self._commit_pending_video_source(staged_video_upload)
+            self.complete_presentation_transition(suppressed_video_generation)
         self._queue_first_frame_ready()
         rendered_identity = self._take_pending_content_submission()
         if rendered_identity is not None:
@@ -1932,7 +2010,11 @@ class GLImageViewer(QRhiWidget):
             return
         self._last_render_target_size = QSize(output_size)
 
-        if GLImageViewer._presentation_is_suppressed(self):
+        suppressed = GLImageViewer._presentation_is_suppressed(self)
+        suppressed_video_generation = (
+            GLImageViewer._suppressed_video_upload_generation(self)
+        )
+        if suppressed and suppressed_video_generation is None:
             cb.beginPass(
                 self.renderTarget(),
                 self._transition_clear_color(),
@@ -1947,6 +2029,7 @@ class GLImageViewer(QRhiWidget):
         vh = max(1, output_size.height())
 
         uploaded_new_still_texture = False
+        staged_video_upload: _PendingVideoUploadState | None = None
         if self._pending_resident_activation is not None:
             key = self._pending_resident_activation
             self._pending_resident_activation = None
@@ -1959,9 +2042,28 @@ class GLImageViewer(QRhiWidget):
         ):
             self._diag_video_render_count += 1
             try:
-                self._upload_pending_video_source()
+                if suppressed_video_generation is not None:
+                    staged_video_upload = self._stage_pending_video_source()
+                    if staged_video_upload is None:
+                        raise RuntimeError("No matching video source available for upload")
+                else:
+                    self._upload_pending_video_source()
             except Exception:
                 _LOGGER.exception("Failed to upload video frame into QRhi image viewer")
+                if suppressed_video_generation is not None:
+                    self._emit_video_gpu_upload_retry(
+                        suppressed_video_generation,
+                        "upload",
+                    )
+                    cb.beginPass(
+                        self.renderTarget(),
+                        self._transition_clear_color(),
+                        QRhiDepthStencilClearValue(),
+                    )
+                    cb.endPass()
+                    self._queue_first_frame_ready()
+                    self._rendered_content_identity = None
+                    return
         elif (
             self._image is not None
             and not self._image.isNull()
@@ -2007,6 +2109,11 @@ class GLImageViewer(QRhiWidget):
             cb.endPass()
             self._queue_first_frame_ready()
             self._rendered_content_identity = None
+            if suppressed_video_generation is not None:
+                self._emit_video_gpu_upload_retry(
+                    suppressed_video_generation,
+                    "no_texture",
+                )
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
@@ -2050,6 +2157,10 @@ class GLImageViewer(QRhiWidget):
             crop_rect=crop_rect,
             crop_faded=crop_faded,
         )
+
+        if staged_video_upload is not None and suppressed_video_generation is not None:
+            self._commit_pending_video_source(staged_video_upload)
+            self.complete_presentation_transition(suppressed_video_generation)
 
         self._queue_first_frame_ready()
         rendered_identity = self._take_pending_content_submission()

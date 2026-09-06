@@ -66,8 +66,9 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
   `gpu_upload`、`presented` 或 media submission。
 - video transition 必须在 active surface 确定后记录
   `video_surface_blank_requested`；对应的 `presentation_resumed` 只能出现在
-  current-generation frame 已成功安装之后。frame rotation/staging/install
-  失败时 suppression 必须保持有效。异步 preparation 切换 native/adjusted
+  current-generation frame 的 GPU upload 和 draw 均成功之后。GPU upload
+  失败必须记录 `video_gpu_upload_retry`、保留 retryable frame 并只提交 opaque
+  clear。frame rotation/staging/install 失败时 suppression 必须保持有效。异步 preparation 切换 native/adjusted
   renderer 时必须再记录 `reason=surface_switch`、当前 media generation 和最终
   surface；正常非 transition 切换不得产生该事件。
 - `presented`：仍是 click-to-present 的终点；stale generation 不得产生该事件。

@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Iterable, Iterator, cast
+from typing import TYPE_CHECKING, cast
 
-from PySide6.QtCore import Property, QCoreApplication, QEvent, QObject, QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QMouseEvent,
-    QPainter,
-    QPainterPath,
-    QPaintEvent,
     QPalette,
 )
 from PySide6.QtWidgets import (
@@ -24,7 +22,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..detail_profile import detail_profile_enabled, emit_detail_event
 from ..i18n.font_policy import sync_widget_language_font
+from ..render_backend import selected_rhi_backend_name
 from .icon import load_icon
 from .styles import modern_scrollbar_style
 from .widgets.custom_tooltip import FloatingToolTip, ToolTipEventFilter
@@ -34,8 +34,8 @@ from .window_snap import EdgeSnapHelper
 if TYPE_CHECKING:  # pragma: no cover - used only for type checking
     from PySide6.QtGui import QResizeEvent
 
-    from ..coordinators.edit_coordinator import EditCoordinator
     from ..coordinators.contracts import ImmersiveDetailPort
+    from ..coordinators.edit_coordinator import EditCoordinator
     from .ui_main_window import Ui_MainWindow
 
 
@@ -46,6 +46,7 @@ if TYPE_CHECKING:  # pragma: no cover - used only for type checking
 # visibly on macOS and Windows when the compositor is still applying the size
 # changes.
 PLAYBACK_RESUME_DELAY_MS = 120
+FULLSCREEN_ENTER_TIMEOUT_MS = 1000
 _MIN_WINDOW_WIDTH = 900
 _MIN_WINDOW_HEIGHT = 640
 _SCREEN_CLAMP_MARGIN = 40
@@ -108,6 +109,12 @@ class FramelessWindowManager(QObject):
         self._immersive_background_applied = False
         self._immersive_visibility_targets = self._build_immersive_targets()
         self._shadow_restore_generation = 0
+        self._fullscreen_transition_generation = 0
+        self._fullscreen_enter_pending: int | None = None
+        self._fullscreen_enter_updates_enabled_before: bool | None = None
+        self._fullscreen_enter_resume = False
+        self._fullscreen_enter_timeout_timer: QTimer | None = None
+        self._fullscreen_transition_backend = "unknown"
 
         self._qmenu_stylesheet: str = ""
         self._global_menu_stylesheet: str | None = None
@@ -116,6 +123,7 @@ class FramelessWindowManager(QObject):
         self._install_tooltip_filter()
         self._configure_window_controls()
         self._configure_drag_sources()
+        self._window.installEventFilter(self)
         self._apply_menu_styles()
         self.position_live_badge()
         self.position_resize_widgets()
@@ -154,6 +162,7 @@ class FramelessWindowManager(QObject):
                 if app.property("floatingToolTipFilter") == self._tooltip_filter:
                     app.setProperty("floatingToolTipFilter", None)
         self._tooltip_filter = None
+        self._cancel_fullscreen_enter_timeout()
         self._window_tooltip.hide_tooltip()
         self._snap_helper.cleanup()
 
@@ -185,6 +194,7 @@ class FramelessWindowManager(QObject):
         """Reposition overlays whenever the window geometry changes."""
 
         _ = event  # ``QResizeEvent`` is unused but kept for signature clarity.
+        self._emit_fullscreen_transition_event("fullscreen_resize")
         self.position_live_badge()
         self.position_resize_widgets()
         self._clamp_window_to_current_screen()
@@ -293,10 +303,15 @@ class FramelessWindowManager(QObject):
         if not ready:
             self._detail_coordinator.show_placeholder_in_viewer()
 
-        self._suppress_playback_header_shadow()
         self._previous_geometry = self._window.saveGeometry()
         self._previous_window_state = self._window.windowState()
         self._splitter_sizes = self._ui.splitter.sizes()
+
+        if sys.platform == "win32":
+            self._begin_windows_fullscreen_enter(resume_after_transition)
+            return
+
+        self._suppress_playback_header_shadow()
         with self._suspend_layout_updates():
             self._hidden_widget_states = self._override_visibility(
                 self._immersive_visibility_targets, visible=False
@@ -312,6 +327,42 @@ class FramelessWindowManager(QObject):
         self._window.showFullScreen()
         self._update_fullscreen_button_icon()
         self._schedule_playback_resume(expect_immersive=True, resume=resume_after_transition)
+
+    def _begin_windows_fullscreen_enter(self, resume_after_transition: bool) -> None:
+        """Request one atomic Windows fullscreen presentation transaction."""
+
+        self._fullscreen_transition_generation += 1
+        transition_id = self._fullscreen_transition_generation
+        self._fullscreen_enter_pending = transition_id
+        self._fullscreen_enter_updates_enabled_before = self._window.updatesEnabled()
+        self._fullscreen_enter_resume = bool(resume_after_transition)
+        self._fullscreen_transition_backend = selected_rhi_backend_name()
+        self._emit_fullscreen_transition_event("fullscreen_enter_requested", transition_id)
+
+        self._window.setUpdatesEnabled(False)
+        self._emit_fullscreen_transition_event("fullscreen_updates_suspended", transition_id)
+
+        splitter_signals_blocked = self._ui.splitter.signalsBlocked()
+        self._ui.splitter.blockSignals(True)
+        try:
+            self._suppress_playback_header_shadow()
+            self._hidden_widget_states = self._override_visibility(
+                self._immersive_visibility_targets, visible=False
+            )
+            self._video_controls_enabled_before = self._ui.video_area.controls_enabled()
+            self._ui.video_area.hide_controls(animate=False)
+            self._ui.splitter.setSizes([0, sum(self._splitter_sizes or [self._window.width()])])
+            self._apply_immersive_backdrop()
+            self._emit_fullscreen_transition_event("fullscreen_backdrop_applied", transition_id)
+            self._immersive_active = True
+            self._window.showFullScreen()
+            self._emit_fullscreen_transition_event(
+                "fullscreen_native_state_requested", transition_id
+            )
+        finally:
+            self._ui.splitter.blockSignals(splitter_signals_blocked)
+
+        self._start_fullscreen_enter_timeout(transition_id)
 
     def exit_fullscreen(self) -> None:
         """Restore the normal window chrome and previously visible widgets."""
@@ -340,7 +391,14 @@ class FramelessWindowManager(QObject):
         if self._detail_coordinator is None:
             return
 
-        resume_after_transition = self._detail_coordinator.suspend_playback_for_transition()
+        pending_transition = getattr(self, "_fullscreen_enter_pending", None)
+        pending_windows_enter = pending_transition is not None
+        if pending_windows_enter:
+            resume_after_transition = bool(self._fullscreen_enter_resume)
+            self._cancel_fullscreen_enter_timeout()
+            self._fullscreen_enter_pending = None
+        else:
+            resume_after_transition = self._detail_coordinator.suspend_playback_for_transition()
         self._immersive_active = False
         self._restore_default_backdrop()
         if request_window_change:
@@ -376,14 +434,88 @@ class FramelessWindowManager(QObject):
 
         self._update_fullscreen_button_icon()
         self._request_media_viewport_relayout(reset_view=True)
+        if pending_windows_enter:
+            self._emit_fullscreen_transition_event("fullscreen_enter_rollback", pending_transition)
+            self._restore_fullscreen_enter_updates(pending_transition)
         self._schedule_playback_header_shadow_restore()
-        self._schedule_playback_resume(expect_immersive=False, resume=resume_after_transition)
+        self._schedule_playback_resume(
+            expect_immersive=False,
+            resume=resume_after_transition,
+            transition_id=pending_transition if pending_windows_enter else None,
+        )
 
     def _reconcile_playback_fullscreen_state(self) -> None:
         """Restore stale Playback immersive state after a native fullscreen exit."""
 
+        pending_transition = getattr(self, "_fullscreen_enter_pending", None)
+        if pending_transition is not None:
+            if self._window.isFullScreen():
+                self._complete_windows_fullscreen_enter(pending_transition)
+            return
         if self._immersive_active and not self._window.isFullScreen():
             self._finish_immersive_exit(request_window_change=False)
+
+    def _complete_windows_fullscreen_enter(self, transition_id: int) -> None:
+        """Publish the first stable frame after Windows confirms fullscreen."""
+
+        if transition_id != getattr(self, "_fullscreen_enter_pending", None):
+            return
+        if not self._window.isFullScreen():
+            return
+
+        self._cancel_fullscreen_enter_timeout()
+        self._emit_fullscreen_transition_event("fullscreen_native_state_confirmed", transition_id)
+        self._request_media_viewport_relayout()
+        self._emit_fullscreen_transition_event(
+            "fullscreen_viewport_relayout_requested", transition_id
+        )
+        resume_after_transition = bool(self._fullscreen_enter_resume)
+        self._fullscreen_enter_pending = None
+        self._update_fullscreen_button_icon()
+        self._restore_fullscreen_enter_updates(transition_id)
+        self._schedule_playback_resume(
+            expect_immersive=True,
+            resume=resume_after_transition,
+            transition_id=transition_id,
+        )
+
+    def _start_fullscreen_enter_timeout(self, transition_id: int) -> None:
+        self._cancel_fullscreen_enter_timeout()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(
+            lambda transaction=transition_id: self._handle_fullscreen_enter_timeout(transaction)
+        )
+        self._fullscreen_enter_timeout_timer = timer
+        timer.start(FULLSCREEN_ENTER_TIMEOUT_MS)
+
+    def _cancel_fullscreen_enter_timeout(self) -> None:
+        timer = getattr(self, "_fullscreen_enter_timeout_timer", None)
+        self._fullscreen_enter_timeout_timer = None
+        if timer is None:
+            return
+        timer.stop()
+        timer.deleteLater()
+
+    def _handle_fullscreen_enter_timeout(self, transition_id: int) -> None:
+        if transition_id != getattr(self, "_fullscreen_enter_pending", None):
+            return
+        self._emit_fullscreen_transition_event("fullscreen_enter_timeout", transition_id)
+        if self._window.isFullScreen():
+            self._complete_windows_fullscreen_enter(transition_id)
+            return
+        self._finish_immersive_exit(request_window_change=True)
+
+    def _restore_fullscreen_enter_updates(self, transition_id: int) -> None:
+        updates_enabled = getattr(self, "_fullscreen_enter_updates_enabled_before", None)
+        self._fullscreen_enter_updates_enabled_before = None
+        self._fullscreen_enter_resume = False
+        if updates_enabled is None:
+            return
+        self._window.setUpdatesEnabled(updates_enabled)
+        if updates_enabled:
+            self._window.update()
+        self._emit_fullscreen_transition_event("fullscreen_updates_resumed", transition_id)
 
     def _request_media_viewport_relayout(self, *, reset_view: bool = False) -> None:
         """Let the active media surface consume the restored QRhi target size."""
@@ -401,7 +533,7 @@ class FramelessWindowManager(QObject):
 
         return self._immersive_active
 
-    def _edit_controller(self) -> "EditCoordinator | None":
+    def _edit_controller(self) -> EditCoordinator | None:
         """Return the edit coordinator exposed by the Detail domain."""
 
         if self._detail_coordinator is None:
@@ -415,6 +547,13 @@ class FramelessWindowManager(QObject):
     # QObject overrides
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
         """Handle title-bar dragging and badge positioning."""
+
+        if (
+            watched is self._window
+            and event.type() == QEvent.Type.UpdateRequest
+            and getattr(self, "_fullscreen_enter_pending", None) is not None
+        ):
+            self._emit_fullscreen_transition_event("fullscreen_update_requested")
 
         if watched in self._drag_sources:
             if self._handle_title_bar_drag(event):
@@ -752,7 +891,13 @@ class FramelessWindowManager(QObject):
 
         QTimer.singleShot(PLAYBACK_RESUME_DELAY_MS, _restore)
 
-    def _schedule_playback_resume(self, *, expect_immersive: bool, resume: bool) -> None:
+    def _schedule_playback_resume(
+        self,
+        *,
+        expect_immersive: bool,
+        resume: bool,
+        transition_id: int | None = None,
+    ) -> None:
         if not resume:
             return
         if self._detail_coordinator is None:
@@ -762,8 +907,55 @@ class FramelessWindowManager(QObject):
             if self._immersive_active != expect_immersive:
                 return
             self._detail_coordinator.resume_playback_after_transition()
+            if transition_id is not None:
+                self._emit_fullscreen_transition_event("fullscreen_playback_resumed", transition_id)
 
         QTimer.singleShot(PLAYBACK_RESUME_DELAY_MS, _resume)
+
+    def _emit_fullscreen_transition_event(
+        self, stage: str, transition_id: int | None = None
+    ) -> None:
+        """Emit privacy-safe fullscreen compositor diagnostics when enabled."""
+
+        if not detail_profile_enabled():
+            return
+        active_transition = (
+            transition_id
+            if transition_id is not None
+            else getattr(self, "_fullscreen_enter_pending", None)
+        )
+        if active_transition is None:
+            return
+
+        geometry = self._window.geometry()
+        window_state = self._window.windowState()
+        state_name = getattr(window_state, "name", None) or str(window_state)
+        emit_detail_event(
+            stage,
+            generation=0,
+            transition_id=int(active_transition),
+            geometry=(geometry.x(), geometry.y(), geometry.width(), geometry.height()),
+            window_state=state_name,
+            is_fullscreen=bool(self._window.isFullScreen()),
+            updates_enabled=bool(self._window.updatesEnabled()),
+            backend=getattr(self, "_fullscreen_transition_backend", "unknown"),
+            image_render_target=self._render_target_size(self._ui.image_viewer),
+            video_render_target=self._render_target_size(self._active_video_surface()),
+        )
+
+    def _active_video_surface(self) -> object | None:
+        accessor = getattr(self._ui.video_area, "video_viewport", None)
+        return accessor() if callable(accessor) else self._ui.video_area
+
+    @staticmethod
+    def _render_target_size(viewport: object | None) -> tuple[int, int] | None:
+        accessor = getattr(viewport, "_render_target_device_size", None)
+        if not callable(accessor):
+            return None
+        size = accessor()
+        if size is None:
+            return None
+        return (int(size[0]), int(size[1]))
 
     @contextmanager
     def _suspend_layout_updates(self) -> Iterator[None]:

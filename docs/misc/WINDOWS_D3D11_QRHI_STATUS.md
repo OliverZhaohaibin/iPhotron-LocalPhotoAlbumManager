@@ -55,6 +55,24 @@ The following pieces exist and are covered by code-level contracts:
 This is sufficient for focused Detail compositor A/B experiments. It is not a
 complete application graphics contract.
 
+### Playback fullscreen compositor hotfix
+
+The production OpenGL path keeps top-level updates disabled while Windows
+applies the native fullscreen state. Chrome visibility, splitter geometry, and
+the immersive backdrop are changed within that transaction; updates resume
+only after a confirmed `WindowStateChange`, followed by one viewport relayout
+and one final top-level update. A one-second deadline either completes an
+already-landed fullscreen state or rolls the UI back to its saved windowed
+state, so a missing native event cannot leave painting disabled.
+
+When Detail profiling is enabled, the `fullscreen_*` timeline records the
+transaction id, window state and geometry, update state, selected backend, and
+known render-target sizes. A packaged Windows run must compare `opengl` and
+`d3d11` on the same host and retain both the timeline and a screen recording.
+The A/B result is diagnostic only: D3D11 remains experimental and cannot become
+the production default until the application-wide graphics and Maps contract
+below is complete.
+
 ### Guarantee boundary of the extra submission
 
 The Windows reveal workaround proves that Qt/QRhi submitted an additional

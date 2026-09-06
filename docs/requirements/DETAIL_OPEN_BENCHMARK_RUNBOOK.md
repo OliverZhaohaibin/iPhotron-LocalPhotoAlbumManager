@@ -38,6 +38,17 @@ surface 与 GPU residency；sidecar/edit-done 也只修改临时副本。
 baseline 必须在只加入同一 benchmark instrumentation、尚未实施 Phase 5 render/backend 清理的提交构建；candidate
 使用最终代码。两者必须使用相同机器、packaged 配置、manifest、重复次数和缓存场景。
 
+Windows Playback fullscreen 样本还必须保留同一 `transition_id` 下的
+`fullscreen_enter_requested`、`fullscreen_updates_suspended`、
+`fullscreen_backdrop_applied`、`fullscreen_native_state_requested`、
+`fullscreen_native_state_confirmed`、`fullscreen_viewport_relayout_requested` 和
+`fullscreen_updates_resumed`。播放中的视频随后应出现
+`fullscreen_playback_resumed`；若 native state event 丢失，必须出现有界的
+`fullscreen_enter_timeout`，并收敛为完成或 `fullscreen_enter_rollback`。确认前不得
+恢复顶层 updates，确认后每个 transaction 只允许一次 viewport relayout 和一次顶层
+update。`fullscreen_resize` 与 `fullscreen_update_requested` 用于关联 DWM/Qt 事件数量，
+不得当作 terminal event。
+
 启动应用前指定结构化输出文件：
 
 ```bash
@@ -154,6 +165,12 @@ JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总�
 - JPEG/PNG/HEIC/RAW，MP4/MOV/MKV，H.264/H.265，4K/HDR、旋转、trim、adjusted video 与 Live Photo。
 
 source/offscreen 数据只作回归趋势，不作为正式性能证据。门槛采用实施计划中的普通/重型媒体绝对 P95，并要求 P50 至少改善 40%、P95 至少改善 25%。
+
+Windows fullscreen compositor 回归必须使用 packaged `auto/opengl` 连续完成至少
+30 次 normal→fullscreen→normal，并覆盖静态图、播放/暂停视频、Live Photo、
+maximized、125%/150% DPI 与双显示器。屏幕录像中不得出现桌面暴露、透明帧、
+黑屏与媒体画面交替或播放恢复造成的整窗闪烁；最多允许一次正常系统级状态过渡。
+同机 `opengl`/`d3d11` 只作为根因 A/B，不能替代生产 OpenGL 通过记录。
 
 任何失败组必须保留原 events/summary/validation，按 queue、surface cache、decode、GPU upload、draw 定位；修正后
 先重跑失败组，再完整重跑该平台矩阵。不得用删除失败样本、合并取消事务或降低重复次数的方式通过门槛。

@@ -49,6 +49,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QRhiWidget, QWidget
 
+from iPhoto.gui.detail_profile import emit_detail_event
+
 QVideoFrame = None  # type: ignore[assignment, misc]
 QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
@@ -326,6 +328,7 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_content_revision = 0
         self._rendered_content_identity: tuple[int, int, int] | None = None
         self._last_composed_content_identity: tuple[int, int, int] | None = None
+        self._presentation_suppressed_generation: int | None = None
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
         self._transparent_rounded_clip_enabled = False
@@ -382,6 +385,56 @@ class VideoRendererWidget(QRhiWidget):
         """Return the active QRhi backend name for diagnostics/tests."""
 
         return qrhi_api_name(self._rhi_api)
+
+    def begin_presentation_transition(self, generation: int) -> None:
+        """Suppress video draws while retaining allocated QRhi textures."""
+
+        generation = int(generation)
+        if generation <= 0:
+            raise ValueError("presentation transition generation must be positive")
+        self._presentation_suppressed_generation = generation
+        self._frame_presentation_pending = False
+        self._rendered_content_identity = None
+        emit_detail_event(
+            "presentation_suppressed",
+            generation=generation,
+            renderer="video_renderer",
+        )
+
+    def complete_presentation_transition(self, generation: int) -> bool:
+        """Resume video draws only for the owning media generation."""
+
+        if int(generation) != self._presentation_suppressed_generation:
+            return False
+        self._presentation_suppressed_generation = None
+        emit_detail_event(
+            "presentation_resumed",
+            generation=int(generation),
+            renderer="video_renderer",
+        )
+        return True
+
+    def presentation_transition_active(self, generation: int) -> bool:
+        """Return whether this generation still owns presentation suppression."""
+
+        return int(generation) == self._presentation_suppressed_generation
+
+    def cancel_presentation_transition(self) -> None:
+        """Cancel suppression without destroying QRhi resources."""
+
+        generation = self._presentation_suppressed_generation
+        self._presentation_suppressed_generation = None
+        self._frame_presentation_pending = False
+        self._rendered_content_identity = None
+        if generation is not None:
+            emit_detail_event(
+                "presentation_suppression_cancelled",
+                generation=generation,
+                renderer="video_renderer",
+            )
+
+    def _presentation_is_suppressed(self) -> bool:
+        return getattr(self, "_presentation_suppressed_generation", None) is not None
 
     # ------------------------------------------------------------------
     # Public API
@@ -760,7 +813,11 @@ class VideoRendererWidget(QRhiWidget):
             # target. Normal playback stays opaque; preview popups stay clear.
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(self._letterbox_color),
+                (
+                    self._transition_clear_color()
+                    if VideoRendererWidget._presentation_is_suppressed(self)
+                    else self._pass_clear_color(self._letterbox_color)
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
@@ -774,6 +831,25 @@ class VideoRendererWidget(QRhiWidget):
 
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
+            return
+
+        suppressed_generation = self._presentation_suppressed_generation
+        suppressed_frame_ready = bool(
+            suppressed_generation is not None
+            and self._has_frame
+            and self._frame_dirty
+            and self._frame_content_generation == suppressed_generation
+            and self._current_frame is not None
+        )
+        if suppressed_generation is not None and not suppressed_frame_ready:
+            cb.beginPass(
+                self.renderTarget(),
+                self._transition_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         # When no video frame has been loaded (or after clear_frame()), fill
@@ -792,18 +868,44 @@ class VideoRendererWidget(QRhiWidget):
             return
 
         ru = rhi.nextResourceUpdateBatch()
+        staged_suppressed_frame = False
 
         # Upload frame data if dirty.
         # Only clear the dirty flag *after* the upload succeeds so that a
         # failed map/upload attempt is retried on the next render cycle
         # instead of leaving uninitialized textures on screen.
         if self._frame_dirty:
-            if self._upload_frame(rhi, ru):
-                self._frame_dirty = False
-                # Release the decoded frame reference immediately so the
-                # hardware decoder can recycle its buffer.  All pixel data
-                # has already been copied into GPU textures.
-                self._current_frame = None
+            try:
+                upload_succeeded = self._upload_frame(rhi, ru)
+            except Exception:
+                if suppressed_generation is None:
+                    raise
+                upload_succeeded = False
+            if upload_succeeded:
+                staged_suppressed_frame = suppressed_generation is not None
+                if not staged_suppressed_frame:
+                    self._frame_dirty = False
+                    # Release the decoded frame reference immediately so the
+                    # hardware decoder can recycle its buffer. All pixel data
+                    # has already been copied into GPU textures.
+                    self._current_frame = None
+            elif suppressed_generation is not None:
+                emit_detail_event(
+                    "video_gpu_upload_retry",
+                    generation=int(suppressed_generation),
+                    renderer="video_renderer",
+                    backend=self.render_backend_name(),
+                    failure_stage="upload",
+                )
+                cb.beginPass(
+                    self.renderTarget(),
+                    self._transition_clear_color(),
+                    QRhiDepthStencilClearValue(),
+                )
+                cb.endPass()
+                self._queue_first_frame_ready()
+                self._rendered_content_identity = None
+                return
 
         # Update uniform buffer
         self._update_uniforms(ru, output_size)
@@ -823,6 +925,10 @@ class VideoRendererWidget(QRhiWidget):
         cb.setVertexInput(0, vbuf_binding)
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
+        if staged_suppressed_frame and suppressed_generation is not None:
+            self._frame_dirty = False
+            self._current_frame = None
+            self.complete_presentation_transition(suppressed_generation)
         self._queue_first_frame_ready()
         if self._frame_presentation_pending and not self._frame_dirty:
             self._frame_presentation_pending = False
@@ -856,6 +962,11 @@ class VideoRendererWidget(QRhiWidget):
         if self._transparent_rounded_clip_enabled:
             return QColor(0, 0, 0, 0)
         color = QColor(fallback)
+        color.setAlpha(255)
+        return color
+
+    def _transition_clear_color(self) -> QColor:
+        color = QColor(self._letterbox_color)
         color.setAlpha(255)
         return color
 

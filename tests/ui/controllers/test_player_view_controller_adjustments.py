@@ -297,7 +297,7 @@ def test_resident_live_photo_still_is_deferred_while_motion_is_visible() -> None
 
     assert PlayerViewController._dispatch_prepared_intent(controller, intent, {})
 
-    assert controller._pending_still == (surface, {"Exposure": 0.25})
+    assert controller._pending_still == (2, surface, {"Exposure": 0.25})
     image_viewer.activate_resident_surface.assert_not_called()
     controller.show_image_surface.assert_not_called()
     scheduler.request.assert_not_called()

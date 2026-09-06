@@ -981,6 +981,13 @@ def main(argv: list[str] | None = None) -> int:
                 _logger.info("Starting deferred startup scan")
                 starter()
             startup.complete()
+            enable_detail_warmup = getattr(
+                coordinator_runtime,
+                "enable_detail_interaction_warmup",
+                None,
+            )
+            if callable(enable_detail_warmup):
+                enable_detail_warmup()
 
         def _enqueue_idle_startup_jobs() -> None:
             nonlocal startup_scan_enqueued

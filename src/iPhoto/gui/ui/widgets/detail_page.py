@@ -172,6 +172,7 @@ class DetailPageWidget(QWidget):
         # Initialised in ``_build_player_area()``; set here so that
         # ``hide_rhi_init_cover()`` and ``resizeEvent`` always find the attr.
         self._rhi_init_cover: QWidget | None = None
+        self._media_overlays_suppressed = False
         self._edit_bundle_created = False
         self._feature_completed = False
         self._main_window = main_window
@@ -819,6 +820,17 @@ class DetailPageWidget(QWidget):
         self._rhi_init_cover.raise_()
         self._raise_player_overlays()
 
+    def set_media_overlays_suppressed(self, suppressed: bool) -> None:
+        """Prevent old media overlays from crossing a surface transition."""
+
+        self._media_overlays_suppressed = bool(suppressed)
+        if not self._media_overlays_suppressed:
+            return
+        if self.face_name_overlay is not None:
+            self.face_name_overlay.set_overlay_active(False)
+        if self.live_badge is not None:
+            self.live_badge.hide()
+
     def _configure_rhi_init_cover(self, cover: QWidget) -> None:
         cover.setAutoFillBackground(True)
         cover.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
@@ -826,6 +838,8 @@ class DetailPageWidget(QWidget):
         cover.setStyleSheet("background-color: palette(window);")
 
     def _raise_player_overlays(self) -> None:
+        if self._media_overlays_suppressed:
+            return
         face_name_overlay = self.face_name_overlay
         live_badge = self.live_badge
         if face_name_overlay is None or live_badge is None:

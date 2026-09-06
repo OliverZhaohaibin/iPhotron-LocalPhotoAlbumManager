@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import struct
 import sys
 import time
@@ -19,6 +20,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QRhiCommandBuffer, QShowEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import (
     QApplication,
     QGridLayout,
@@ -31,6 +33,8 @@ from iPhoto.config import VIDEO_COMPLETE_HOLD_BACKSTEP_MS
 import iPhoto.gui.ui.widgets.video_area as video_area_module
 import iPhoto.gui.ui.widgets.gl_texture_manager as gl_texture_manager_module
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
+from iPhoto.gui.ui.controllers.player_view_controller import PlayerViewController
+from iPhoto.gui.ui.widgets.live_badge import LiveBadge
 from iPhoto.gui.ui.widgets.gl_texture_manager import TextureManager
 from iPhoto.gui.render_backend import selected_rhi_backend_name
 from iPhoto.gui.detail_pipeline import VideoPresentationState
@@ -739,6 +743,169 @@ class TestVideoRendererWidget:
         assert cover_visible_at_submission == expected_visibility
         assert cover_released
 
+    @pytest.mark.gpu
+    @pytest.mark.windows_compositor
+    @pytest.mark.parametrize("surface_kind", ("native", "adjusted"))
+    def test_visible_windows_video_transition_never_exposes_previous_frame(
+        self,
+        qapp,
+        surface_kind,
+        mocker,
+    ):
+        if sys.platform != "win32":
+            pytest.skip("requires a visible Windows compositor integration runner")
+        if QApplication.platformName().lower() in {"offscreen", "minimal"}:
+            pytest.skip("requires a visible platform QRhi compositor")
+
+        host = QWidget()
+        layout = QGridLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        player_stack = QStackedWidget(host)
+        placeholder = QWidget(player_stack)
+        image_viewer = GLImageViewer(player_stack)
+        video_area = VideoArea(player_stack)
+        player_stack.addWidget(placeholder)
+        player_stack.addWidget(image_viewer)
+        player_stack.addWidget(video_area)
+        player_stack.setCurrentWidget(video_area)
+        live_badge = LiveBadge(host)
+        controller = PlayerViewController(
+            player_stack,
+            image_viewer,
+            video_area,
+            placeholder,
+            live_badge,
+        )
+        mocker.patch.object(video_area._player, "setSource")
+        layout.addWidget(player_stack, 0, 0)
+        host.resize(320, 180)
+        host.show()
+        qapp.processEvents()
+
+        def wait_for(spy: QSignalSpy, count: int) -> None:
+            deadline = time.monotonic() + 5.0
+            while spy.count() < count and time.monotonic() < deadline:
+                qapp.processEvents()
+                time.sleep(0.005)
+            assert spy.count() >= count
+
+        def center_pixel():
+            screen = qapp.primaryScreen()
+            assert screen is not None
+            image = screen.grabWindow(int(host.winId())).toImage()
+            assert not image.isNull()
+            return image.pixelColor(image.width() // 2, image.height() // 2)
+
+        def submit_color(color: int, content_serial: int) -> None:
+            image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+            image.fill(color)
+            frame = QVideoFrame(image)
+            video_area._submit_video_frame_to_surface(
+                frame,
+                video_area.video_view(),
+                content_serial=content_serial,
+            )
+
+        def commit_state(generation: int, adjusted: bool) -> None:
+            assert video_area.commit_presentation(
+                VideoPresentationState(
+                    generation,
+                    {},
+                    None,
+                    adjusted,
+                    0,
+                    0,
+                    0,
+                    False,
+                )
+            )
+
+        video_area.begin_load(Path("/fake/video-a.mov"), 1)
+        commit_state(1, surface_kind == "adjusted")
+        surface = video_area.video_view()
+        presented = QSignalSpy(surface.videoFramePresented)
+        composed = QSignalSpy(surface.frameSubmitted)
+        force_upload_failure = os.environ.get(
+            "IPHOTO_WINDOWS_COMPOSITOR_FORCE_UPLOAD_FAILURE",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        failure_budget = {"remaining": 0}
+        if force_upload_failure and surface_kind == "native":
+            real_upload = surface._upload_frame
+
+            def fail_native_upload_once(*args, **kwargs):
+                if failure_budget["remaining"] > 0:
+                    failure_budget["remaining"] -= 1
+                    return False
+                return real_upload(*args, **kwargs)
+
+            mocker.patch.object(surface, "_upload_frame", side_effect=fail_native_upload_once)
+        elif force_upload_failure:
+            real_upload = surface._renderer.upload_video_frame
+
+            def fail_adjusted_upload_once(*args, **kwargs):
+                if failure_budget["remaining"] > 0:
+                    failure_budget["remaining"] -= 1
+                    raise RuntimeError("forced compositor upload failure")
+                return real_upload(*args, **kwargs)
+
+            mocker.patch.object(
+                surface._renderer,
+                "upload_video_frame",
+                side_effect=fail_adjusted_upload_once,
+            )
+        submit_color(0xFFFF0000, 1)
+        wait_for(presented, 1)
+        red_pixel = center_pixel()
+        assert red_pixel.red() > red_pixel.blue()
+        cycles = max(
+            1,
+            min(100, int(os.environ.get("IPHOTO_WINDOWS_COMPOSITOR_CYCLES", "1"))),
+        )
+        for index in range(cycles):
+            request_generation = index + 2
+            video_area.begin_load(
+                Path(f"/fake/video-{request_generation}.mov"),
+                request_generation,
+            )
+            composed_before = composed.count()
+            controller.begin_video_transition(
+                request_generation,
+                interactive_when_ready=True,
+            )
+            commit_state(request_generation, surface_kind == "adjusted")
+            assert video_area.video_view() is surface
+            wait_for(composed, composed_before + 1)
+            transition_pixel = center_pixel()
+            expected_background = surface._transition_clear_color()
+            assert transition_pixel.alpha() == 255
+            assert abs(transition_pixel.red() - expected_background.red()) <= 20
+            assert abs(transition_pixel.green() - expected_background.green()) <= 20
+            assert abs(transition_pixel.blue() - expected_background.blue()) <= 20
+
+            next_is_blue = index % 2 == 0
+            failed_upload_composed_before = composed.count()
+            if force_upload_failure:
+                failure_budget["remaining"] = 1
+            submit_color(0xFF0000FF if next_is_blue else 0xFFFF0000, 1)
+            if force_upload_failure:
+                wait_for(composed, failed_upload_composed_before + 1)
+                failed_upload_pixel = center_pixel()
+                expected_background = surface._transition_clear_color()
+                assert failed_upload_pixel.alpha() == 255
+                assert abs(failed_upload_pixel.red() - expected_background.red()) <= 20
+                assert abs(failed_upload_pixel.green() - expected_background.green()) <= 20
+                assert abs(failed_upload_pixel.blue() - expected_background.blue()) <= 20
+                surface.update()
+            wait_for(presented, index + 2)
+            presented_pixel = center_pixel()
+            if next_is_blue:
+                assert presented_pixel.blue() > presented_pixel.red()
+            else:
+                assert presented_pixel.red() > presented_pixel.blue()
+        controller.shutdown(timeout_ms=500)
+        host.close()
+
     def test_transparent_rounded_clip_toggles_widget_attributes(self, qapp):
         """Preview clipping should switch the renderer into transparent output mode."""
         w = VideoRendererWidget()
@@ -857,6 +1024,187 @@ class TestVideoArea:
         """VideoRendererWidget must use the same selected QRhi backend as GLImageViewer."""
         va = VideoArea()
         assert va._renderer.render_backend_name() == selected_rhi_backend_name()
+
+    def test_native_renderer_transition_is_generation_bound(self, qapp):
+        renderer = VideoRendererWidget()
+
+        renderer.begin_presentation_transition(4)
+
+        assert renderer.presentation_transition_active(3) is False
+        assert renderer.presentation_transition_active(4) is True
+        assert renderer.complete_presentation_transition(3) is False
+        assert renderer._presentation_suppressed_generation == 4
+        assert renderer.complete_presentation_transition(4) is True
+
+    def test_native_renderer_suppression_clears_without_drawing(self):
+        renderer = Mock()
+        renderer._initialized = True
+        renderer._presentation_suppressed_generation = 5
+        renderer._has_frame = True
+        retained_frame = object()
+        renderer._current_frame = retained_frame
+        renderer.rhi.return_value = Mock()
+        target = Mock()
+        target.pixelSize.return_value = QSize(320, 240)
+        renderer.renderTarget.return_value = target
+        command_buffer = Mock()
+
+        VideoRendererWidget.render(renderer, command_buffer)
+
+        command_buffer.beginPass.assert_called_once()
+        command_buffer.setGraphicsPipeline.assert_not_called()
+        command_buffer.draw.assert_not_called()
+        assert renderer._current_frame is retained_frame
+        assert renderer._has_frame is True
+        assert renderer._rendered_content_identity is None
+
+    def test_native_suppressed_upload_failure_keeps_frame_and_does_not_draw(self):
+        renderer = Mock()
+        renderer._initialized = True
+        renderer._presentation_suppressed_generation = 6
+        renderer._has_frame = True
+        renderer._frame_dirty = True
+        renderer._frame_content_generation = 6
+        renderer._frame_content_serial = 2
+        renderer._frame_content_revision = 1
+        renderer._frame_presentation_pending = True
+        retained_frame = object()
+        renderer._current_frame = retained_frame
+        renderer.rhi.return_value = Mock()
+        renderer._upload_frame.return_value = False
+        target = Mock()
+        target.pixelSize.return_value = QSize(320, 240)
+        renderer.renderTarget.return_value = target
+        command_buffer = Mock()
+
+        VideoRendererWidget.render(renderer, command_buffer)
+
+        command_buffer.draw.assert_not_called()
+        renderer.complete_presentation_transition.assert_not_called()
+        assert renderer._frame_dirty is True
+        assert renderer._current_frame is retained_frame
+        assert renderer._presentation_suppressed_generation == 6
+        assert renderer._rendered_content_identity is None
+
+    def test_native_suppressed_upload_success_draws_before_resuming(self):
+        renderer = Mock()
+        renderer._initialized = True
+        renderer._presentation_suppressed_generation = 7
+        renderer._has_frame = True
+        renderer._frame_dirty = True
+        renderer._frame_content_generation = 7
+        renderer._frame_content_serial = 3
+        renderer._frame_content_revision = 2
+        renderer._frame_presentation_pending = True
+        renderer._current_frame = object()
+        renderer.rhi.return_value = Mock()
+        renderer._upload_frame.return_value = True
+        target = Mock()
+        target.pixelSize.return_value = QSize(320, 240)
+        renderer.renderTarget.return_value = target
+        command_buffer = Mock()
+
+        VideoRendererWidget.render(renderer, command_buffer)
+
+        renderer._upload_frame.assert_called_once()
+        command_buffer.resourceUpdate.assert_called_once()
+        command_buffer.draw.assert_called_once_with(6)
+        renderer.complete_presentation_transition.assert_called_once_with(7)
+        assert renderer._frame_dirty is False
+        assert renderer._current_frame is None
+        assert renderer._rendered_content_identity == (7, 3, 2)
+
+    def test_native_suppressed_draw_failure_keeps_retryable_frame(self):
+        renderer = Mock()
+        renderer._initialized = True
+        renderer._presentation_suppressed_generation = 8
+        renderer._has_frame = True
+        renderer._frame_dirty = True
+        renderer._frame_content_generation = 8
+        renderer._current_frame = object()
+        renderer.rhi.return_value = Mock()
+        renderer._upload_frame.return_value = True
+        target = Mock()
+        target.pixelSize.return_value = QSize(320, 240)
+        renderer.renderTarget.return_value = target
+        command_buffer = Mock()
+        command_buffer.draw.side_effect = RuntimeError("draw failed")
+
+        with pytest.raises(RuntimeError, match="draw failed"):
+            VideoRendererWidget.render(renderer, command_buffer)
+
+        renderer.complete_presentation_transition.assert_not_called()
+        assert renderer._frame_dirty is True
+        assert renderer._current_frame is not None
+        assert renderer._presentation_suppressed_generation == 8
+
+    def test_begin_load_suppresses_both_video_surfaces(self, qapp, mocker):
+        va = VideoArea()
+        native_suppress = mocker.patch.object(
+            va._renderer,
+            "begin_presentation_transition",
+        )
+        adjusted_suppress = mocker.patch.object(
+            va._edit_viewer,
+            "begin_presentation_transition",
+        )
+        expected_generation = va._media_generation + 1
+
+        actual_generation = va.begin_load(Path("/fake/transition.mov"), 20)
+
+        assert actual_generation == expected_generation
+        native_suppress.assert_called_once_with(expected_generation)
+        adjusted_suppress.assert_called_once_with(expected_generation)
+
+    @pytest.mark.parametrize("target_kind", ("native", "adjusted"))
+    def test_suppressed_surface_switch_requests_target_blank(
+        self,
+        qapp,
+        mocker,
+        target_kind,
+    ):
+        va = VideoArea()
+        va._media_generation = 12
+        va._detail_request_generation = 22
+        va._current_duration_ms = 0
+        mocker.patch.object(va._edit_viewer, "set_adjustments")
+        if target_kind == "native":
+            va._adjusted_preview_enabled = True
+            va._surface_stack.setCurrentWidget(va._edit_viewer)
+            target_surface = va._renderer
+        else:
+            va._adjusted_preview_enabled = False
+            va._surface_stack.setCurrentWidget(va._renderer)
+            target_surface = va._edit_viewer
+        target_surface.begin_presentation_transition(12)
+        update = mocker.patch.object(target_surface, "update")
+        emit = mocker.patch(
+            "iPhoto.gui.ui.widgets.video_area.emit_detail_event"
+        )
+
+        va.set_adjusted_preview_enabled(target_kind == "adjusted")
+
+        assert va.video_view() is target_surface
+        update.assert_called_once_with()
+        emit.assert_any_call(
+            "video_surface_blank_requested",
+            generation=22,
+            media_generation=12,
+            reason="surface_switch",
+            surface=target_kind,
+        )
+
+    def test_completed_surface_switch_does_not_request_blank(self, qapp, mocker):
+        va = VideoArea()
+        va._media_generation = 13
+        va._current_duration_ms = 0
+        mocker.patch.object(va._edit_viewer, "set_adjustments")
+        update = mocker.patch.object(va._edit_viewer, "update")
+
+        va.set_adjusted_preview_enabled(True)
+
+        assert va.video_view() is va._edit_viewer
+        update.assert_not_called()
 
     def test_opaque_widget_attributes(self, qapp):
         """VideoArea and renderer must block WA_TranslucentBackground cascade."""
@@ -1533,6 +1881,105 @@ class TestVideoArea:
         assert media_generation == va._media_generation
         assert va._end_detection_armed_media_generation is None
         assert mock_set_rot.call_args_list[-1] == call(90, 1920, 1440)
+
+    @pytest.mark.parametrize("surface_kind", ("native", "adjusted"))
+    def test_video_area_stages_frame_without_completing_suppression(
+        self,
+        qapp,
+        mocker,
+        surface_kind,
+    ):
+        va = VideoArea()
+        va._media_generation = 9
+        image = QImage(64, 48, QImage.Format.Format_RGBA8888)
+        image.fill(0xFF123456)
+        frame = QVideoFrame(image)
+        surface = va._renderer if surface_kind == "native" else va._edit_viewer
+        complete = mocker.patch.object(surface, "complete_presentation_transition")
+
+        if surface_kind == "native":
+            install = mocker.patch.object(surface, "update_frame")
+        else:
+            mocker.patch(
+                "iPhoto.gui.ui.widgets.video_area._resolve_frame_rotation_cw",
+                return_value=0,
+            )
+            mocker.patch.object(surface, "set_pending_video_source_rotation")
+            install = mocker.patch.object(surface, "set_video_frame")
+
+        va._submit_video_frame_to_surface(frame, surface, content_serial=3)
+
+        install.assert_called_once()
+        complete.assert_not_called()
+
+    def test_native_frame_install_failure_keeps_suppression(self, qapp, mocker):
+        va = VideoArea()
+        va._media_generation = 10
+        surface = va._renderer
+        surface.begin_presentation_transition(10)
+        complete = mocker.patch.object(
+            surface,
+            "complete_presentation_transition",
+            wraps=surface.complete_presentation_transition,
+        )
+        mocker.patch.object(
+            surface,
+            "update_frame",
+            side_effect=RuntimeError("native install failed"),
+        )
+        frame = QVideoFrame(QImage(64, 48, QImage.Format.Format_RGBA8888))
+
+        with pytest.raises(RuntimeError, match="native install failed"):
+            va._submit_video_frame_to_surface(frame, surface, content_serial=4)
+
+        complete.assert_not_called()
+        assert surface._presentation_suppressed_generation == 10
+        assert surface._rendered_content_identity is None
+
+    @pytest.mark.parametrize("failure_stage", ("rotation", "install"))
+    def test_adjusted_frame_failure_keeps_suppression(
+        self,
+        qapp,
+        mocker,
+        failure_stage,
+    ):
+        va = VideoArea()
+        va._media_generation = 11
+        va._adjusted_first_frame_pending = True
+        surface = va._edit_viewer
+        surface.begin_presentation_transition(11)
+        complete = mocker.patch.object(
+            surface,
+            "complete_presentation_transition",
+            wraps=surface.complete_presentation_transition,
+        )
+        if failure_stage == "rotation":
+            mocker.patch(
+                "iPhoto.gui.ui.widgets.video_area._resolve_frame_rotation_cw",
+                side_effect=RuntimeError("rotation failed"),
+            )
+        else:
+            mocker.patch(
+                "iPhoto.gui.ui.widgets.video_area._resolve_frame_rotation_cw",
+                return_value=0,
+            )
+            mocker.patch.object(surface, "set_pending_video_source_rotation")
+            mocker.patch.object(
+                surface,
+                "set_video_frame",
+                side_effect=RuntimeError("install failed"),
+            )
+        image = QImage(64, 48, QImage.Format.Format_RGBA8888)
+        image.fill(0xFF654321)
+        frame = QVideoFrame(image)
+
+        with pytest.raises(RuntimeError):
+            va._submit_video_frame_to_surface(frame, surface, content_serial=5)
+
+        complete.assert_not_called()
+        assert surface._presentation_suppressed_generation == 11
+        assert surface._rendered_content_identity is None
+        assert va._adjusted_first_frame_pending is True
 
     def test_load_video_handles_probe_failure(self, qapp, mocker):
         """load_video should still work when ffprobe returns no rotation."""

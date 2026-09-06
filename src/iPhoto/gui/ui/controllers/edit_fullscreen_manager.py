@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Optional
 
 from PySide6.QtCore import QObject
@@ -20,10 +21,13 @@ class EditFullscreenManager(QObject):
         ui: Ui_MainWindow,
         window: Optional[QObject],
         parent: Optional[QObject] = None,
+        *,
+        active_viewport_provider: Callable[[], object] | None = None,
     ) -> None:
         super().__init__(parent)
         self._ui = ui
         self._window: Optional[QObject] = window
+        self._active_viewport_provider = active_viewport_provider
 
         # Track whether the immersive layout is currently active so callers can
         # avoid re-entering the workflow while a session is already running.
@@ -126,7 +130,11 @@ class EditFullscreenManager(QObject):
 
         self._fullscreen_active = True
 
-        self._ui.edit_image_viewer.reset_zoom()
+        viewport = self._active_viewport()
+        reset_zoom = getattr(viewport, "reset_zoom", None)
+        if callable(reset_zoom):
+            reset_zoom()
+        self._request_viewport_relayout(viewport)
 
         return True
 
@@ -166,12 +174,26 @@ class EditFullscreenManager(QObject):
         self._fullscreen_splitter_sizes = None
 
         self._fullscreen_active = False
+        self._request_viewport_relayout(self._active_viewport())
 
         return True
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _active_viewport(self) -> object:
+        """Return the still or adjusted-video viewport owned by Edit."""
+
+        if self._active_viewport_provider is not None:
+            return self._active_viewport_provider()
+        return self._ui.edit_image_viewer
+
+    @staticmethod
+    def _request_viewport_relayout(viewport: object) -> None:
+        request_relayout = getattr(viewport, "request_viewport_relayout", None)
+        if callable(request_relayout):
+            request_relayout()
+
     def _sanitise_splitter_sizes(
         self,
         sizes,

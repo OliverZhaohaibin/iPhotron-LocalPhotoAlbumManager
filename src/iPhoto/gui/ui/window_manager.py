@@ -375,6 +375,7 @@ class FramelessWindowManager(QObject):
                 self._ui.filmstrip_view.setVisible(self._ui.toggle_filmstrip_action.isChecked())
 
         self._update_fullscreen_button_icon()
+        self._request_media_viewport_relayout()
         self._schedule_playback_header_shadow_restore()
         self._schedule_playback_resume(expect_immersive=False, resume=resume_after_transition)
 
@@ -383,6 +384,14 @@ class FramelessWindowManager(QObject):
 
         if self._immersive_active and not self._window.isFullScreen():
             self._finish_immersive_exit(request_window_change=False)
+
+    def _request_media_viewport_relayout(self) -> None:
+        """Let the active media surface consume the restored QRhi target size."""
+
+        for viewport in (self._ui.image_viewer, self._ui.video_area):
+            request_relayout = getattr(viewport, "request_viewport_relayout", None)
+            if callable(request_relayout):
+                request_relayout()
 
     def is_immersive_active(self) -> bool:
         """Return ``True`` when the window is in immersive full screen mode."""

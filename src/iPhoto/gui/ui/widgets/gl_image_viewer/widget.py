@@ -308,6 +308,12 @@ class GLImageViewer(QRhiWidget):
         self._source_rotate90_steps = 0
         self._pending_source_rotate90_steps: int | None = None
         self._last_render_target_size = QSize()
+        # Crop framing must be derived from the QRhi render target that will
+        # consume it. QWidget resize events can arrive before QRhi replaces
+        # its target, so keep a separate dirty bit and synchronised target
+        # size instead of calculating pan against the previous frame here.
+        self._viewport_relayout_pending = False
+        self._last_layout_target_size = QSize()
         self._diag_video_frame_set_count = 0
         self._diag_video_render_count = 0
         self._adjustments: dict[str, Any] = {}
@@ -564,6 +570,44 @@ class GLImageViewer(QRhiWidget):
             float(self._last_render_target_size.width()),
             float(self._last_render_target_size.height()),
         )
+
+    def request_viewport_relayout(self) -> None:
+        """Rebuild automatic media framing against the next real render target."""
+
+        self._viewport_relayout_pending = True
+        self.update()
+
+    def _sync_view_transform_for_render_target(self, output_size: QSize) -> None:
+        """Synchronise crop-aware zoom and pan with *output_size* once.
+
+        ``resizeEvent`` cannot safely do this work because
+        :meth:`_render_target_device_size` may still describe the previous
+        fullscreen/windowed frame. Both render backends call this helper only
+        after publishing their current target size, keeping fit scale and crop
+        pan in one coordinate space.
+        """
+
+        target_size = QSize(output_size)
+        if target_size.isEmpty():
+            return
+        if (
+            not self._viewport_relayout_pending
+            and target_size == self._last_layout_target_size
+        ):
+            return
+
+        self._viewport_relayout_pending = False
+        self._last_layout_target_size = target_size
+
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+
+        if self._crop_controller.is_active():
+            return
+        if self._auto_crop_view_locked:
+            self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked:
+            self._reapply_locked_crop_center()
 
     @staticmethod
     def _should_log_diag_frame(index: int) -> bool:
@@ -1745,6 +1789,7 @@ class GLImageViewer(QRhiWidget):
                 )
             return
         self._last_render_target_size = QSize(output_size)
+        self._sync_view_transform_for_render_target(output_size)
 
         suppressed = GLImageViewer._presentation_is_suppressed(self)
         suppressed_video_generation = (
@@ -2009,6 +2054,7 @@ class GLImageViewer(QRhiWidget):
         if output_size.isEmpty():
             return
         self._last_render_target_size = QSize(output_size)
+        self._sync_view_transform_for_render_target(output_size)
 
         suppressed = GLImageViewer._presentation_is_suppressed(self)
         suppressed_video_generation = (
@@ -2430,12 +2476,7 @@ class GLImageViewer(QRhiWidget):
         if not self._runtime_ready:
             return
         self._loading_overlay.update_geometry(self.size())
-        if self._auto_crop_view_locked and not self._crop_controller.is_active():
-            self._reapply_locked_crop_view()
-        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
-            self._reapply_locked_crop_center()
-        straighten, rotate_steps, _ = self._rotation_parameters()
-        self._update_cover_scale(straighten, rotate_steps)
+        self.request_viewport_relayout()
         self.viewTransformChanged.emit()
         self.viewportMetricsChanged.emit()
         if sys.platform.startswith("linux"):

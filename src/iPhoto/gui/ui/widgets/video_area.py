@@ -659,6 +659,16 @@ class VideoArea(QWidget):
         else:
             self._renderer.reset_zoom()
 
+    def request_viewport_relayout(self) -> None:
+        """Refresh the active video surface after its real viewport settles."""
+
+        if self._adjusted_preview_enabled:
+            self._edit_viewer.request_viewport_relayout()
+        else:
+            # The direct video renderer derives its fit from every render
+            # target and therefore only needs another frame requested.
+            self._renderer.update()
+
     def zoom_in(self) -> None:
         if self._adjusted_preview_enabled:
             self._edit_viewer.zoom_in()

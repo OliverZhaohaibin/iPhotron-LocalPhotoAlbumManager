@@ -70,6 +70,8 @@ def test_native_exit_restores_playback_without_calling_show_normal() -> None:
     manager._window.restoreGeometry.assert_not_called()
     manager._window.setWindowState.assert_not_called()
     manager._ui.splitter.setSizes.assert_called_once_with([200, 800])
+    manager._ui.image_viewer.request_viewport_relayout.assert_called_once_with()
+    manager._ui.video_area.request_viewport_relayout.assert_called_once_with()
     manager._schedule_playback_header_shadow_restore.assert_called_once_with()
 
 

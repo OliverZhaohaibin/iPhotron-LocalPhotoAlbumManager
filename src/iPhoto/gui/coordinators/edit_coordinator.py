@@ -162,6 +162,7 @@ class EditCoordinator(QObject):
             self._ui,
             window,
             parent=self,
+            active_viewport_provider=self._active_edit_viewport,
         )
 
         self._update_throttler = QTimer(self)

@@ -81,17 +81,10 @@ def load_icon(
             modified = _STROKE_WIDTH_RE.sub(f'stroke-width="{stroke_width}"', content)
             svg_data = QByteArray(modified.encode("utf-8"))
 
-    if (
-        svg_data is None
-        and stroke_width is None
-        and normalized_color is None
-        and size is None
-        and not mirror_horizontal
-    ):
-        icon = QIcon(str(path))
-        _ICON_CACHE[cache_key] = icon
-        return icon
-
+    # Always render SVG data explicitly.  ``QIcon(path)`` delegates to Qt's
+    # process-global icon plugin and can segfault in headless Linux after other
+    # GUI plugins have been exercised; QSvgRenderer keeps the native boundary
+    # deterministic and is already required for transformed icons below.
     renderer = QSvgRenderer()
     if svg_data is not None:
         renderer.load(svg_data)
@@ -152,4 +145,3 @@ def _normalize_color_key(
 
 
 __all__ = ["load_icon"]
-

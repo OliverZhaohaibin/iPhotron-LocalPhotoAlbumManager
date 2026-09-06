@@ -6,6 +6,7 @@ without losing user data when possible.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -68,7 +69,7 @@ class RecoveryService:
         self._force_reset()
 
         try:
-            with sqlite3.connect(self.db_path, timeout=10.0) as conn:
+            with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
                 self._init_schema(conn)
                 if salvaged_rows:
                     self._insert_rows(conn, salvaged_rows)
@@ -85,7 +86,7 @@ class RecoveryService:
         """
         try:
             logger.info("Attempting REINDEX for %s", self.db_path)
-            with sqlite3.connect(self.db_path, timeout=10.0) as conn:
+            with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
                 conn.execute("REINDEX;")
                 self._init_schema(conn)
             logger.info("REINDEX succeeded for %s", self.db_path)
@@ -102,7 +103,7 @@ class RecoveryService:
         """
         salvaged_rows: List[Dict[str, Any]] = []
         try:
-            with sqlite3.connect(self.db_path, timeout=10.0) as conn:
+            with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("SELECT * FROM assets")
                 try:

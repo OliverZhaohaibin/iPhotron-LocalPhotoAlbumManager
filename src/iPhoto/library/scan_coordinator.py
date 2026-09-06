@@ -5,12 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
-from PySide6.QtCore import QMutexLocker, QRunnable
+from PySide6.QtCore import QMutexLocker, QRunnable, QThread
 
+from ..bootstrap.startup_profile import mark
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
     from ..bootstrap.library_scan_service import LibraryScanService
+    from .workers.face_scan_worker import FaceScanWorker
+    from .workers.pet_scan_worker import PetScanWorker
+    from .workers.scanner_worker import ScannerWorker
 
 LOGGER = get_logger()
 
@@ -55,12 +59,20 @@ class ScanCoordinatorMixin:
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        startup: bool = False,
     ) -> None:
         """Start a scan through the session-facing runtime controller surface."""
 
-        self.start_scanning(root, include, exclude)
+        self.start_scanning(root, include, exclude, startup=startup)
 
-    def start_scanning(self, root: Path, include: Iterable[str], exclude: Iterable[str]) -> None:
+    def start_scanning(
+        self,
+        root: Path,
+        include: Iterable[str],
+        exclude: Iterable[str],
+        *,
+        startup: bool = False,
+    ) -> None:
         """Start a background scan for the given root directory.
         
         All scanned assets are written to the global database at the library root.
@@ -68,24 +80,29 @@ class ScanCoordinatorMixin:
         # Scanner and face-recognition workers bring Pillow/NumPy and optional
         # AI runtimes into the process. Import them only when a scan actually
         # starts, never while constructing the first window frame.
-        from .workers.face_scan_worker import FaceScanWorker
         from .workers.scanner_worker import ScannerSignals, ScannerWorker
 
         signals = ScannerSignals()
 
         # Check if already scanning the same root (thread-safe)
-        locker = QMutexLocker(self._scan_buffer_lock)
+        _locker = QMutexLocker(self._scan_buffer_lock)
         if self._current_scanner_worker is not None:
             if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
                 return
-            self._queue_deferred_scan(root, include, exclude)
+            self._queue_deferred_scan(root, include, exclude, startup=startup)
             return
         if self._current_face_scanner is not None:
             is_running = getattr(self._current_face_scanner, "isRunning", None)
             if callable(is_running) and is_running():
-                self._queue_deferred_scan(root, include, exclude)
+                self._queue_deferred_scan(root, include, exclude, startup=startup)
                 return
             self._current_face_scanner = None
+        if self._current_pet_scanner is not None:
+            is_running = getattr(self._current_pet_scanner, "isRunning", None)
+            if callable(is_running) and is_running():
+                self._queue_deferred_scan(root, include, exclude, startup=startup)
+                return
+            self._current_pet_scanner = None
 
         self._live_scan_root = root
         self._live_scan_buffer.clear()
@@ -99,6 +116,7 @@ class ScanCoordinatorMixin:
             library_root=self._root,
             scan_service=getattr(self, "_scan_service", None),
         )
+        setattr(worker, "_defer_ai_workers_until_scan_finished", bool(startup))
         self._current_scanner_worker = worker
         signals.progressUpdated.connect(self.scanProgress)
         signals.batchCommitted.connect(self._on_scan_batch_committed)
@@ -119,28 +137,139 @@ class ScanCoordinatorMixin:
         signals.batchFailed.connect(self._on_scan_batch_failed)
         self._face_scan_status_message = None
         self.faceScanStatusChanged.emit("")
-        face_library_root = self._root if self._root is not None else root
-        face_worker = FaceScanWorker(
-            face_library_root,
-            self,
-            people_service=getattr(self, "_people_service", None),
-        )
-        face_worker.statusChanged.connect(self._on_face_scan_status_changed)
-        face_worker.finished.connect(
-            lambda face_worker=face_worker: self._on_face_scan_finished(face_worker)
-        )
-        self._current_face_scanner = face_worker
+        self._pet_scan_status_message = None
+        self.petScanStatusChanged.emit("")
+        ai_scan_root = self._root if self._root is not None else root
+        start_ai_scan_root = None if startup else ai_scan_root
         # Release lock before starting the worker
-        del locker
+        del _locker
 
-        face_worker.start()
+        if start_ai_scan_root is not None:
+            self._start_ai_scan_workers(start_ai_scan_root)
+        if startup:
+            mark("startup_metadata_scan.started", root=root)
         self._scan_thread_pool.start(worker)
+
+    def _start_ai_scan_workers(self, library_root: Path, *, startup: bool = False) -> bool:
+        """Start face and pet workers for an already-bound scan root."""
+
+        ai_root = Path(library_root)
+        generation = int(getattr(self, "_recognition_generation", 0))
+        started: list[object] = []
+
+        if self._current_face_scanner is None:
+            from .workers.face_scan_worker import FaceScanWorker
+
+            face_worker = FaceScanWorker(
+                ai_root,
+                self,
+                people_service=getattr(self, "_people_service", None),
+            )
+            setattr(face_worker, "_recognition_generation_token", generation)
+            set_face_name = getattr(face_worker, "setObjectName", None)
+            if callable(set_face_name):
+                set_face_name("FaceScanWorker")
+            face_worker.statusChanged.connect(
+                lambda message, worker=face_worker: self._on_recognition_worker_status(
+                    worker, "face", message
+                )
+            )
+            face_worker.finished.connect(
+                lambda face_worker=face_worker: self._on_face_scan_finished(face_worker)
+            )
+            self._current_face_scanner = face_worker
+            started.append(face_worker)
+
+        if self._current_pet_scanner is None:
+            from .workers.pet_scan_worker import PetScanWorker
+
+            pet_worker = PetScanWorker(
+                ai_root,
+                self,
+                pet_service=getattr(self, "_pet_service", None),
+            )
+            setattr(pet_worker, "_recognition_generation_token", generation)
+            set_pet_name = getattr(pet_worker, "setObjectName", None)
+            if callable(set_pet_name):
+                set_pet_name("PetScanWorker")
+            pet_worker.statusChanged.connect(
+                lambda message, worker=pet_worker: self._on_recognition_worker_status(
+                    worker, "pet", message
+                )
+            )
+            pet_worker.finished.connect(
+                lambda pet_worker=pet_worker: self._on_pet_scan_finished(pet_worker)
+            )
+            self._current_pet_scanner = pet_worker
+            started.append(pet_worker)
+
+        if startup:
+            mark("startup_ai_scan.started", root=ai_root)
+        all_started = True
+        for worker in started:
+            try:
+                if startup:
+                    worker.finish_input()
+                worker.start()
+            except Exception:  # noqa: BLE001
+                all_started = False
+                if self._current_face_scanner is worker:
+                    self._current_face_scanner = None
+                if self._current_pet_scanner is worker:
+                    self._current_pet_scanner = None
+                LOGGER.exception(
+                    "Failed to start recognition worker %s for %s",
+                    type(worker).__name__,
+                    ai_root,
+                )
+        return (
+            all_started
+            and self._current_face_scanner is not None
+            and self._current_pet_scanner is not None
+        )
+
+    def _start_pet_backfill_worker(self, library_root: Path) -> None:
+        """Drain an upgraded library's Pet backlog after the UI is interactive."""
+
+        if self._current_pet_scanner is not None:
+            return
+        from .workers.pet_scan_worker import PetScanWorker
+
+        root = Path(library_root)
+        if root != getattr(self, "_root", None):
+            return
+        worker = PetScanWorker(
+            root,
+            self,
+            pet_service=getattr(self, "_pet_service", None),
+        )
+        setattr(
+            worker,
+            "_recognition_generation_token",
+            int(getattr(self, "_recognition_generation", 0)),
+        )
+        worker.setObjectName("PetBackfillWorker")
+        worker.statusChanged.connect(
+            lambda message, worker=worker: self._on_recognition_worker_status(
+                worker, "pet", message
+            )
+        )
+        worker.finished.connect(
+            lambda worker=worker: self._on_pet_scan_finished(worker)
+        )
+        self._current_pet_scanner = worker
+        worker.finish_input()
+        worker.start(QThread.Priority.LowestPriority)
 
     def stop_scanning(self, *, wait: bool = False, timeout_ms: int = 2000) -> None:
         """Cancel the currently running scan, if any."""
-        locker = QMutexLocker(self._scan_buffer_lock)
+        _locker = QMutexLocker(self._scan_buffer_lock)
         scanner_worker = self._current_scanner_worker
         face_scanner = self._current_face_scanner
+        pet_scanner = self._current_pet_scanner
+        self._recognition_generation = int(
+            getattr(self, "_recognition_generation", 0)
+        ) + 1
         if self._current_scanner_worker:
             worker = self._current_scanner_worker
             worker.cancel()
@@ -156,21 +285,35 @@ class ScanCoordinatorMixin:
             deferred_queue.clear()
         if self._current_face_scanner is not None:
             self._current_face_scanner.cancel()
+            self._retiring_recognition_workers.add(self._current_face_scanner)
             self._current_face_scanner = None
-        del locker
+        if self._current_pet_scanner is not None:
+            self._current_pet_scanner.cancel()
+            self._retiring_recognition_workers.add(self._current_pet_scanner)
+            self._current_pet_scanner = None
+        del _locker
 
         if wait:
             self._wait_for_scan_workers(
                 scanner_worker=scanner_worker,
                 face_scanner=face_scanner,
+                pet_scanner=pet_scanner,
                 timeout_ms=timeout_ms,
             )
+            self._retiring_recognition_workers.discard(face_scanner)
+            self._retiring_recognition_workers.discard(pet_scanner)
+            for worker in tuple(self._retiring_recognition_workers):
+                try:
+                    worker.wait(timeout_ms)
+                except RuntimeError:
+                    LOGGER.debug("Retiring recognition worker wait failed", exc_info=True)
 
     def _wait_for_scan_workers(
         self,
         *,
         scanner_worker: ScannerWorker | None,
         face_scanner: FaceScanWorker | None,
+        pet_scanner: PetScanWorker | None,
         timeout_ms: int,
     ) -> None:
         """Best-effort bounded wait for cancelled scan workers during teardown."""
@@ -197,6 +340,28 @@ class ScanCoordinatorMixin:
                         exc_info=True,
                     )
 
+        if pet_scanner is not None:
+            wait = getattr(pet_scanner, "wait", None)
+            if callable(wait):
+                try:
+                    wait(timeout_ms)
+                except RuntimeError:
+                    LOGGER.debug("Pet scanner wait failed during teardown", exc_info=True)
+            is_running = getattr(pet_scanner, "isRunning", None)
+            if callable(is_running):
+                try:
+                    if is_running():
+                        LOGGER.warning(
+                            "Pet scan worker did not exit within %d ms after cancel(); "
+                            "detaching without terminate() to avoid DB corruption.",
+                            timeout_ms,
+                        )
+                except RuntimeError:
+                    LOGGER.debug(
+                        "Pet scanner state check failed during teardown",
+                        exc_info=True,
+                    )
+
         if scanner_worker is None:
             return
         wait_for_done = getattr(self._scan_thread_pool, "waitForDone", None)
@@ -216,7 +381,7 @@ class ScanCoordinatorMixin:
 
     def is_scanning_path(self, path: Path) -> bool:
         """Return True if the given path is covered by the active scan."""
-        locker = QMutexLocker(self._scan_buffer_lock)
+        _locker = QMutexLocker(self._scan_buffer_lock)
         if not self._live_scan_root:
             return False
 
@@ -388,6 +553,8 @@ class ScanCoordinatorMixin:
             self.invalidate_geotagged_assets_cache()
             if self._current_face_scanner is not None:
                 self._current_face_scanner.enqueue_rows(rows)
+            if self._current_pet_scanner is not None:
+                self._current_pet_scanner.enqueue_rows(rows)
         self.scanBatchCommitted.emit(batch)
 
     def _on_scan_chunk(self, _root: Path, rows: List[dict]) -> None:
@@ -398,6 +565,8 @@ class ScanCoordinatorMixin:
         self.invalidate_geotagged_assets_cache()
         if self._current_face_scanner is not None:
             self._current_face_scanner.enqueue_rows(rows)
+        if self._current_pet_scanner is not None:
+            self._current_pet_scanner.enqueue_rows(rows)
 
     def _on_scan_finished(
         self,
@@ -418,13 +587,19 @@ class ScanCoordinatorMixin:
                 return
             return
         self._current_scanner_worker = None
+        defer_ai_workers = (
+            getattr(worker, "_defer_ai_workers_until_scan_finished", False) is True
+        )
         face_scanner = self._current_face_scanner
+        pet_scanner = self._current_pet_scanner
         self._live_scan_root = None
         del locker
         self.invalidate_geotagged_assets_cache()
 
-        if face_scanner is not None:
+        if face_scanner is not None and not defer_ai_workers:
             face_scanner.finish_input()
+        if pet_scanner is not None and not defer_ai_workers:
+            pet_scanner.finish_input()
 
         if worker.cancelled:
             self.scanFinished.emit(root, False)
@@ -452,6 +627,12 @@ class ScanCoordinatorMixin:
             self._start_next_deferred_scan()
             return
 
+        # A startup metadata scan only prepares the Gallery index.  People and
+        # Pets are feature-scoped services and their model workers are started
+        # by ``activate_recognition_services`` on first use.  Starting them here
+        # used to add model pressure immediately after startup completion and
+        # made a quick window close race QThread destruction.
+
         # Emit immediately so the UI (status bar, map refresh) can react without
         # waiting for the potentially slow live-photo pairing step.
         self.scanFinished.emit(root, True)
@@ -467,10 +648,13 @@ class ScanCoordinatorMixin:
             return
         self._current_scanner_worker = None
         face_scanner = self._current_face_scanner
+        pet_scanner = self._current_pet_scanner
         self._live_scan_root = None
         del locker
         if face_scanner is not None:
             face_scanner.finish_input()
+        if pet_scanner is not None:
+            pet_scanner.finish_input()
         self.errorRaised.emit(message)
         self.scanFinished.emit(root, False)
         self._start_next_deferred_scan()
@@ -490,15 +674,17 @@ class ScanCoordinatorMixin:
         root: Path,
         include: Iterable[str],
         exclude: Iterable[str],
+        *,
+        startup: bool = False,
     ) -> None:
         queue = getattr(self, "_deferred_scan_queue", None)
         if queue is None:
             queue = []
             setattr(self, "_deferred_scan_queue", queue)
-        for queued_root, _queued_include, _queued_exclude in queue:
+        for queued_root, _queued_include, _queued_exclude, _queued_startup in queue:
             if self._paths_equal(queued_root, root):
                 return
-        queue.append((Path(root), list(include), list(exclude)))
+        queue.append((Path(root), list(include), list(exclude), bool(startup)))
 
     def _start_next_deferred_scan(self) -> None:
         queue = getattr(self, "_deferred_scan_queue", None)
@@ -512,14 +698,48 @@ class ScanCoordinatorMixin:
             if not callable(is_running) or is_running():
                 return
             self._current_face_scanner = None
-        root, include, exclude = queue.pop(0)
-        self.start_scanning(root, include, exclude)
+        pet_scanner = getattr(self, "_current_pet_scanner", None)
+        if pet_scanner is not None:
+            is_running = getattr(pet_scanner, "isRunning", None)
+            if not callable(is_running) or is_running():
+                return
+            self._current_pet_scanner = None
+        root, include, exclude, startup = queue.pop(0)
+        self.start_scanning(root, include, exclude, startup=startup)
 
     def _on_face_scan_status_changed(self, message: str) -> None:
         self._face_scan_status_message = message or None
         self.faceScanStatusChanged.emit(message)
 
     def _on_face_scan_finished(self, worker: FaceScanWorker | None = None) -> None:
+        if worker is not None:
+            self._retiring_recognition_workers.discard(worker)
         if worker is None or self._current_face_scanner is worker:
             self._current_face_scanner = None
             self._start_next_deferred_scan()
+
+    def _on_pet_scan_status_changed(self, message: str) -> None:
+        self._pet_scan_status_message = message or None
+        self.petScanStatusChanged.emit(message)
+
+    def _on_pet_scan_finished(self, worker: PetScanWorker | None = None) -> None:
+        if worker is not None:
+            self._retiring_recognition_workers.discard(worker)
+        if worker is None or self._current_pet_scanner is worker:
+            self._current_pet_scanner = None
+            self._start_next_deferred_scan()
+
+    def _on_recognition_worker_status(
+        self,
+        worker: QThread,
+        kind: str,
+        message: str,
+    ) -> None:
+        if int(getattr(worker, "_recognition_generation_token", -1)) != int(
+            getattr(self, "_recognition_generation", 0)
+        ):
+            return
+        if kind == "face":
+            self._on_face_scan_status_changed(message)
+        else:
+            self._on_pet_scan_status_changed(message)

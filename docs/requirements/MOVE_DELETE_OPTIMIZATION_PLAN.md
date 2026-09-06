@@ -4,11 +4,19 @@
 > **状态:** 🔮 未来需求  
 > **已完成部分:** 见 `docs/finished/requirements/MOVE_DELETE_OPTIMIZATION_PYTHON.md`
 
+> **实施门禁：性能判断基于 2026-02 的历史 profiling。** 实施前必须重新测量
+> 当前 `LibraryAssetOperationService -> MoveWorker -> LibraryAssetLifecycleService`
+> 完整路径。只有目标平台数据仍证明 Python 调度、ExifTool 启动、文件操作或缩略图
+> 解码是主要瓶颈时，才能采用本文对应的 native rewrite 建议。本文的收益排序、耗时
+> 和倍数均不是当前性能合同。
+
 ---
 
 ## 概述
 
-纯 Python 架构优化（方案一至四）已实施完成，预计解决 80%+ 的性能问题。本文档保留方案五（pybind11 / C++ 加速层）作为未来极限优化的参考方案。
+纯 Python 架构优化（方案一至四）已实施完成。2026-02 的原始方案曾预计它们可
+解决 80% 以上的性能问题，但该估算尚未针对当前 lifecycle 和 move service 路径重新
+验证。本文档仅保留方案五（pybind11 / C++ 加速层）作为未来极限优化输入。
 
 > **建议：** 优先验证方案一至四的效果，仅在纯 Python 优化无法满足需求时再考虑 C++ 加速层。
 
@@ -28,7 +36,7 @@
 
 ## 1. 适用场景分析
 
-| Python 瓶颈 | C++ 能否加速 | 收益评估 |
+| 历史候选瓶颈 | C++ 能否加速 | 历史收益假设（需重新 profiling） |
 |-------------|-------------|---------|
 | ExifTool 子进程启动 | ✅ 使用 libexiv2 内嵌替代 | 🔴 高（消除进程启动开销） |
 | shutil.move 文件操作 | ✅ 批量 rename() 无 GIL | 🟡 中等（减少 GIL 竞争） |
@@ -48,6 +56,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <filesystem>
+#include <stdexcept>
+#include <system_error>
 
 namespace py = pybind11;
 namespace fs = std::filesystem;
@@ -98,7 +108,14 @@ std::vector<MoveResult> batch_move(
             r.target = target.string();
             r.success = true;
         } catch (const fs::filesystem_error& e) {
-            // rename 失败（通常是跨分区），回退到拷贝+删除
+            // 只有 cross-device rename 才能按 move 语义回退。权限、只读文件系统等
+            // 其他错误必须原样失败，不能用 copy+delete 掩盖。
+            if (e.code() != std::errc::cross_device_link) {
+                r.success = false;
+                r.error = e.what();
+                results.push_back(std::move(r));
+                continue;
+            }
             try {
                 fs::path src(src_str);
                 fs::path target = dest / src.filename();
@@ -113,8 +130,12 @@ std::vector<MoveResult> batch_move(
                     }
                 }
 
-                fs::copy(src, target, fs::copy_options::none);  // none = 不覆盖
-                fs::remove(src);
+                // copy 成功后才能删除源文件。生产实现还必须接入现有 operation
+                // journal/lifecycle，处理 copy 成功但 remove 失败后的恢复。
+                fs::copy_file(src, target, fs::copy_options::none);
+                if (!fs::remove(src)) {
+                    throw std::runtime_error("source was copied but could not be removed");
+                }
                 r.target = target.string();
                 r.success = true;
             } catch (const std::exception& e2) {
@@ -266,6 +287,9 @@ iphoto_native_metadata = {
 
 ## 5. 预期收益
 
+下表是 2026-02 的历史估算，只能用于确定重新 profiling 的候选场景，不能作为当前
+实现的验收目标或 native rewrite 的立项依据。
+
 | 模块 | Python 耗时 | C++ 耗时 | 加速比 |
 |------|------------|---------|--------|
 | 批量移动 20 文件 | 100ms | 20ms | 5× |
@@ -293,7 +317,7 @@ iphoto_native_metadata = {
 ### 阶段三：极限优化（可选，3-4 周）
 
 ```
-优先级  方案                              预计耗时    收益
+优先级  方案                              历史预计耗时  历史收益假设
 ──────────────────────────────────────────────────────────
 P3     模块一: C++ 批量文件操作            2 周     5× 加速
 P3     模块二: C++ 元数据提取              2 周     5-7× 加速
@@ -304,4 +328,6 @@ P3     C++ 缩略图解码                      1 周     4-6× 加速
 
 ---
 
-> **注意：** 本文档中的 C++ 代码仅为设计参考，尚未实施。实施前需评估纯 Python 优化（方案一至四）的实际效果。
+> **注意：** 本文档中的 C++ 代码仅为设计参考，尚未实施，也不得绕过当前
+> `LibraryAssetOperationService`、`MoveWorker`、`LibraryAssetLifecycleService`
+> 及其 durable-state/recovery 边界。实施前必须先完成当前路径的目标平台 profiling。

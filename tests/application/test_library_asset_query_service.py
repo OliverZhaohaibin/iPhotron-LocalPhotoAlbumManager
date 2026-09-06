@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
 from iPhoto.cache.index_store import IndexStore
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
@@ -67,6 +69,7 @@ class _BackfillRepository(_Repository):
     def __init__(self) -> None:
         super().__init__()
         self.ready_updates: list[tuple[str, dict[str, Any]]] = []
+        self.accept_ready_updates = True
         self.candidate_calls: list[tuple[Any, int, int]] = []
         self.backfill_candidates = [
             {"rel": "Trip/stale.jpg", "id": "stale", "thumbnail_state": "stale"}
@@ -76,8 +79,9 @@ class _BackfillRepository(_Repository):
         self.candidate_calls.append((query, first, limit))
         return list(self.backfill_candidates)
 
-    def update_thumbnail_ready(self, rel: str, **kwargs: Any) -> None:
+    def update_thumbnail_ready(self, rel: str, **kwargs: Any) -> bool:
         self.ready_updates.append((rel, kwargs))
+        return self.accept_ready_updates
 
 
 class _DeferredExecutor:
@@ -386,7 +390,14 @@ def test_thumbnail_hint_window_returns_only_existing_l2_identity(tmp_path: Path)
     window = service.read_thumbnail_hint_window(library_root, AssetQuery(), 0, 10)
 
     assert window.total_count == -1
-    assert window.rows == [{"rel": "ready.jpg", "thumb_cache_key": "thumb-ready"}]
+    assert window.rows == [
+        {
+            "rel": "ready.jpg",
+            "thumb_cache_key": "thumb-ready",
+            "thumbnail_state": "ready",
+            "thumb_revision": None,
+        }
+    ]
 
 
 def test_recently_deleted_query_includes_non_ready_thumbnail_rows(tmp_path: Path) -> None:
@@ -529,6 +540,71 @@ def test_thumbnail_backfill_failed_rows_publish_empty_completion_batch(tmp_path:
     assert batches[0].ready_count == 0
     assert batches[0].rows == []
     assert service.thumbnail_backfill_pending() is False
+
+
+def test_thumbnail_backfill_exception_emits_failed_terminal_event(tmp_path: Path) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Trip"
+    album_root.mkdir(parents=True)
+    repo = _BackfillRepository()
+    service = LibraryAssetQueryService(library_root, repository_factory=lambda _root: repo)
+    executor = _DeferredExecutor()
+    service._thumbnail_backfill_executor = executor  # type: ignore[assignment]
+    failures: list[tuple[Path, str]] = []
+    batches = []
+    service.thumbnail_backfill_failed.connect(
+        lambda root, error: failures.append((root, error))
+    )
+    service.thumbnail_backfill_completed.connect(batches.append)
+
+    with patch(
+        "iPhoto.bootstrap.library_asset_query_service.ensure_scan_thumbnail",
+        side_effect=RuntimeError("thumbnail decode crashed"),
+    ):
+        assert service.request_thumbnail_backfill(album_root, AssetQuery(), 0, 100) == 1
+        fn, args = executor.submitted[0]
+        with pytest.raises(RuntimeError, match="thumbnail decode crashed"):
+            fn(*args)
+
+    assert failures == [(album_root, "thumbnail decode crashed")]
+    assert batches == []
+    assert service.thumbnail_backfill_pending() is False
+
+
+def test_thumbnail_backfill_does_not_emit_ready_row_when_revision_cas_rejects(
+    tmp_path: Path,
+) -> None:
+    library_root = tmp_path / "Library"
+    album_root = library_root / "Trip"
+    album_root.mkdir(parents=True)
+    repo = _BackfillRepository()
+    repo.accept_ready_updates = False
+    service = LibraryAssetQueryService(
+        library_root,
+        repository_factory=lambda _root: repo,
+    )
+    batches = []
+    service.thumbnail_backfill_completed.connect(batches.append)
+
+    with patch(
+        "iPhoto.bootstrap.library_asset_query_service.ensure_scan_thumbnail",
+        return_value=SimpleNamespace(
+            micro_thumbnail=b"old-result",
+            thumb_cache_key="stable-key",
+            thumb_revision="revision-1",
+            thumb_error=None,
+        ),
+    ):
+        service._run_thumbnail_backfill(
+            (album_root.as_posix(), 0, 100, "query"),
+            album_root,
+            "Trip",
+            repo.backfill_candidates,
+        )
+
+    assert len(batches) == 1
+    assert batches[0].ready_count == 0
+    assert batches[0].rows == []
 
 
 def test_thumbnail_backfill_shutdown_suppresses_completion_event(tmp_path: Path) -> None:

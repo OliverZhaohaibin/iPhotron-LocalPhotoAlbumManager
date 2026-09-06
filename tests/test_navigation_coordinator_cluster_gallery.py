@@ -302,10 +302,10 @@ def test_route_requested_updates_router() -> None:
     coord._router.show_detail.assert_called_once_with()
 
 
-def test_detail_requested_uses_playback_coordinator() -> None:
+def test_detail_requested_uses_detail_navigation_port() -> None:
     coord = _make_coordinator()
     playback = MagicMock()
-    coord.set_playback_coordinator(playback)
+    coord.set_detail_navigation_port(playback)
 
     coord._handle_detail_requested(3)
 

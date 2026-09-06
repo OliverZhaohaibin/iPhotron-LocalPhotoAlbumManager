@@ -56,6 +56,7 @@ class PersonRecord:
     updated_at: str
     sample_count: int = 0
     profile_state: str = "unstable"
+    evidence_asset_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,20 @@ class PersonSummary:
     thumbnail_path: Path | None
     created_at: str
     is_hidden: bool = False
+    asset_count: int = 0
+    profile_state: str = "unstable"
+    evidence_asset_count: int = 0
+    promotion_state: str = "legacy_visible"
+
+
+@dataclass(frozen=True)
+class IdentityGroupMember:
+    kind: str
+    entity_id: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.kind}:{self.entity_id}"
 
 
 @dataclass(frozen=True)
@@ -76,6 +91,7 @@ class PeopleGroupRecord:
     member_key: str
     created_at: str
     updated_at: str
+    member_entities: tuple[IdentityGroupMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +103,8 @@ class PeopleGroupSummary:
     asset_count: int
     cover_asset_path: Path | None
     created_at: str
+    member_entities: tuple[IdentityGroupMember, ...] = ()
+    pet_members: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -102,6 +120,12 @@ class AssetFaceAnnotation:
     image_height: int
     thumbnail_path: Path | None = None
     is_manual: bool = False
+    source_identity_kind: str = "person"
+    source_identity_id: str | None = None
+    canonical_identity_kind: str = "person"
+    canonical_identity_id: str | None = None
+    canonical_display_name: str | None = None
+    promotion_state: str = "legacy_visible"
 
 
 @dataclass(frozen=True)
@@ -114,3 +138,5 @@ class PersonProfile:
     updated_at: str
     sample_count: int = 0
     profile_state: str = "unstable"
+    evidence_asset_count: int = 0
+    promotion_state: str = "legacy_visible"

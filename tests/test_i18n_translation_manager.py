@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +10,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", exc_type=ImportError)
 
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMenuBar, QStackedWidget, QWidget
 
@@ -24,15 +23,6 @@ from iPhoto.gui.ui.widgets.main_header import MainHeaderWidget
 from iPhoto.gui.ui.widgets.player_bar import PlayerBar
 from iPhoto.settings.manager import SettingsManager
 from iPhoto.settings.schema import merge_with_defaults, validate_settings
-
-
-@pytest.fixture(scope="module")
-def qapp() -> QApplication:
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    yield app
 
 
 def _settings(tmp_path: Path) -> SettingsManager:
@@ -88,6 +78,8 @@ def test_settings_language_default_and_schema() -> None:
 def test_translation_manager_reads_languages_and_switches_to_chinese(
     tmp_path: Path,
     qapp: QApplication,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = _settings(tmp_path)
     translations = TranslationManager(manager)
@@ -121,9 +113,39 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
     assert QCoreApplication.translate("ShareController", "Copied to Clipboard", None) == "已复制到剪贴板"
     assert QCoreApplication.translate("MainCoordinator", "Moved", None) == "已移动"
     assert QCoreApplication.translate("InformationPopup", "Information", None) == "信息"
+    assert QCoreApplication.translate("PeopleDashboard", "Merge Failed", None) == "合并失败"
+    assert (
+        QCoreApplication.translate(
+            "PeopleDashboard",
+            "The identities could not be merged. "
+            "They may have changed since this view was loaded.",
+            None,
+        )
+        == "无法合并这些身份。它们可能在当前视图加载后发生了变化。"
+    )
     assert QCoreApplication.translate("GalleryPage", "Return to Map", None) == "返回地图"
+    assert QCoreApplication.translate("MainWindow", "Dismiss", None) == "关闭"
+    assert (
+        QCoreApplication.translate(
+            "MainWindow",
+            "The photo library database is in use by another process. "
+            "Close other iPhotron versions and retry.",
+            None,
+        )
+        == "照片图库数据库正被其他进程使用。请关闭其他 iPhotron 版本后重试。"
+    )
+
+    # This test verifies translated widget text, not SVG rendering.  Loading
+    # real icons would make these assertions depend on QtSvg's native plugin
+    # in the Linux offscreen test environment.
+    def empty_icon(*_args, **_kwargs) -> QIcon:
+        return QIcon()
+
+    monkeypatch.setattr("iPhoto.gui.ui.widgets.info_panel.load_icon", empty_icon)
+    monkeypatch.setattr("iPhoto.gui.ui.widgets.player_bar.load_icon", empty_icon)
 
     panel = InfoPanel()
+    qtbot.addWidget(panel)
     try:
         panel.set_location_capability(enabled=False)
         panel.set_asset_metadata({"rel": "photo.jpg", "name": "photo.jpg"})
@@ -136,6 +158,7 @@ def test_translation_manager_reads_languages_and_switches_to_chinese(
         panel.close()
 
     player_bar = PlayerBar()
+    qtbot.addWidget(player_bar)
     try:
         player_bar.retranslate_ui()
 

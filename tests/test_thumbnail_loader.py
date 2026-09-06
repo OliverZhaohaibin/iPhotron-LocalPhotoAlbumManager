@@ -1,6 +1,8 @@
 import hashlib
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,12 +14,20 @@ pytest.importorskip(
 )
 pytest.importorskip("PySide6.QtTest", reason="Qt test utilities unavailable", exc_type=ImportError)
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.config import WORK_DIR_NAME
-from iPhoto.gui.ui.tasks.thumbnail_loader import ThumbnailLoader, generate_cache_path, safe_unlink
+from iPhoto.gui.ui.tasks.thumbnail_cache import write_cache
+from iPhoto.gui.ui.tasks.thumbnail_loader import (
+    CacheCleanupTarget,
+    ThumbnailLoader,
+    generate_cache_path,
+    remove_cache_versions_many,
+    safe_unlink,
+)
 from iPhoto.io.sidecar import save_adjustments
 
 try:
@@ -32,6 +42,16 @@ except Exception as exc:  # pragma: no cover - pillow missing or broken
 def _create_image(path: Path) -> None:
     image = Image.new("RGB", (16, 16), color="red")
     image.save(path)
+
+
+class _ManualPool:
+    def __init__(self) -> None:
+        self.jobs = []
+        self.priorities: list[int] = []
+
+    def start(self, job, priority: int = 0) -> None:
+        self.jobs.append(job)
+        self.priorities.append(priority)
 
 
 def test_generate_cache_path_basic(tmp_path: Path) -> None:
@@ -170,6 +190,571 @@ def test_thumbnail_loader_lru_eviction(tmp_path: Path, qapp: QApplication) -> No
     assert "IMG_3.JPG" not in rels
     assert "IMG_2.JPG" in rels
     assert "IMG_4.JPG" in rels
+
+
+def test_thumbnail_loader_rejects_stale_generation_results(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "race.jpg"
+    key = loader._base_key(rel, QSize(512, 512))
+    stale_generation = loader._generation_token(rel)
+    loader.invalidate(rel)
+    current_generation = loader._generation_token(rel)
+    ready_spy = QSignalSpy(loader.ready)
+
+    current_image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    current_image.fill(Qt.GlobalColor.green)
+    stale_image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    stale_image.fill(Qt.GlobalColor.red)
+    stale_cache_path = generate_cache_path(
+        tmp_path,
+        tmp_path / rel,
+        QSize(512, 512),
+        1,
+    )
+    stale_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_cache_path.write_bytes(b"stale")
+    loader._active_jobs_count = 2
+
+    loader._handle_result((*key, 2), current_image, rel, current_generation)
+    loader._handle_result(
+        (*key, 1),
+        stale_image,
+        rel,
+        stale_generation,
+        stale_cache_path,
+    )
+
+    stamp, pixmap = loader._memory[key]
+    assert stamp == 2
+    assert pixmap.toImage().pixelColor(0, 0) == current_image.pixelColor(0, 0)
+    assert ready_spy.count() == 1
+    assert not stale_cache_path.exists()
+
+
+def test_thumbnail_loader_invalidation_preserves_stale_pixmap_and_stamp(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "changed.jpg"
+    path = tmp_path / rel
+    key = loader._base_key(rel, QSize(512, 512))
+    stale_pixmap = QPixmap(2, 2)
+    stale_pixmap.fill(Qt.GlobalColor.red)
+    loader._memory[key] = (123, stale_pixmap)
+    loader._max_active_jobs = 0
+
+    loader.invalidate(rel)
+    returned = loader.request(rel, path, QSize(192, 192), is_image=True)
+
+    assert loader._memory[key][0] == 123
+    assert returned is not None
+    assert returned.cacheKey() == stale_pixmap.cacheKey()
+    assert loader._job_specs[key][3] == 123
+    assert loader._job_specs[key][-1] == loader._generation_token(rel)
+
+
+def test_thumbnail_loader_accepted_result_removes_superseded_disk_versions(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "changed.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    key = loader._base_key(rel, size)
+    old_path = generate_cache_path(tmp_path, path, size, 1)
+    current_path = generate_cache_path(tmp_path, path, size, 2)
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_bytes(b"old")
+    current_path.write_bytes(b"current")
+    loader.invalidate(rel)
+    generation = loader._generation_token(rel)
+    loader._store_job_spec(
+        key,
+        rel,
+        path,
+        size,
+        1,
+        tmp_path,
+        tmp_path,
+        True,
+        False,
+        None,
+        None,
+        generation,
+    )
+    loader._pending_keys.add(key)
+    loader._active_jobs_count = 1
+    image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.green)
+
+    loader._handle_result((*key, 2), image, rel, generation)
+    loader._flush_cache_cleanup()
+    assert loader._pool.waitForDone(4_000)
+
+    assert not old_path.exists()
+    assert current_path.exists()
+
+
+def test_thumbnail_loader_evict_removes_all_known_disk_versions(
+    tmp_path: Path,
+) -> None:
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "removed.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    key = loader._base_key(rel, size)
+    pixmap = QPixmap(2, 2)
+    loader._memory[key] = (1, pixmap)
+    cache_paths = [
+        generate_cache_path(tmp_path, path, size, stamp)
+        for stamp in (1, 2)
+    ]
+    cache_paths[0].parent.mkdir(parents=True, exist_ok=True)
+    for cache_path in cache_paths:
+        cache_path.write_bytes(b"cached")
+
+    loader.evict(rel, path)
+    loader._flush_cache_cleanup()
+    assert loader._pool.waitForDone(4_000)
+
+    assert key not in loader._memory
+    assert all(not cache_path.exists() for cache_path in cache_paths)
+
+
+def test_thumbnail_loader_evict_many_clears_memory_before_background_cleanup(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    size = QSize(512, 512)
+    removed = [
+        (f"removed-{index}.jpg", tmp_path / f"removed-{index}.jpg")
+        for index in range(3)
+    ]
+    for index, (rel, _path) in enumerate(removed):
+        loader._memory[loader._base_key(rel, size)] = (index, QPixmap(2, 2))
+
+    loader.evict_many(removed)
+
+    assert loader._memory == {}
+    assert manual_pool.jobs == []
+    loader._flush_cache_cleanup()
+    assert len(manual_pool.jobs) == 1
+    assert manual_pool.priorities == [int(ThumbnailLoader.Priority.LOW)]
+
+
+def test_cleanup_accumulator_flushes_once_after_quiet_window(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+
+    loader.evict_many(
+        [
+            ("first.jpg", tmp_path / "first.jpg"),
+            ("second.jpg", tmp_path / "second.jpg"),
+        ]
+    )
+    assert manual_pool.jobs == []
+
+    deadline = time.monotonic() + 1.0
+    while not manual_pool.jobs and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert len(manual_pool.jobs) == 1
+    assert len(manual_pool.jobs[0]._targets) == 2
+
+
+def test_deferred_eviction_does_not_delete_reactivated_rel_cache(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    rel = "recreated.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    cache_path = generate_cache_path(tmp_path, path, size, 1)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"new-current-cache")
+
+    loader.evict(rel, path)
+    loader._flush_cache_cleanup()
+    assert len(manual_pool.jobs) == 1
+
+    loader._max_active_jobs = 0
+    loader.request(rel, path, size, is_image=True)
+    manual_pool.jobs[0].run()
+
+    assert cache_path.exists()
+
+
+def test_remove_cache_versions_many_scans_thumbnail_directory_once(
+    tmp_path: Path,
+) -> None:
+    size = QSize(512, 512)
+    first_path = tmp_path / "first.jpg"
+    second_path = tmp_path / "second.jpg"
+    survivor_path = tmp_path / "survivor.jpg"
+    removed_paths = [
+        generate_cache_path(tmp_path, asset_path, size, stamp)
+        for asset_path in (first_path, second_path)
+        for stamp in (1, 2)
+    ]
+    survivor_cache_path = generate_cache_path(tmp_path, survivor_path, size, 1)
+    removed_paths[0].parent.mkdir(parents=True, exist_ok=True)
+    for cache_path in [*removed_paths, survivor_cache_path]:
+        cache_path.write_bytes(b"cached")
+
+    with patch(
+        "iPhoto.gui.ui.tasks.thumbnail_cache.os.scandir",
+        wraps=os.scandir,
+    ) as scandir:
+        remove_cache_versions_many(
+            tmp_path,
+            [
+                CacheCleanupTarget(first_path, size),
+                CacheCleanupTarget(second_path, size),
+            ],
+        )
+
+    assert scandir.call_count == 1
+    assert all(not cache_path.exists() for cache_path in removed_paths)
+    assert survivor_cache_path.exists()
+
+
+def test_write_cache_uses_unique_temp_files_for_concurrent_writers(
+    tmp_path: Path,
+) -> None:
+    barrier = threading.Barrier(2)
+    destination = tmp_path / "shared.png"
+
+    class _ConcurrentCanvas:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def save(self, path: str, image_format: str) -> bool:
+            assert image_format == "PNG"
+            Path(path).write_bytes(self._payload)
+            barrier.wait(timeout=2.0)
+            return True
+
+    payloads = (b"first-writer", b"second-writer")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda payload: write_cache(_ConcurrentCanvas(payload), destination),
+                payloads,
+            )
+        )
+
+    assert results == [True, True]
+    assert destination.read_bytes() in payloads
+    assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
+
+
+def test_stale_result_defers_shared_disk_cleanup_to_current_generation(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    rel = "race.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    key = loader._base_key(rel, size)
+    stale_generation = loader._generation_token(rel)
+    loader.invalidate(rel)
+    current_generation = loader._generation_token(rel)
+    loader._store_job_spec(
+        key,
+        rel,
+        path,
+        size,
+        None,
+        tmp_path,
+        tmp_path,
+        True,
+        False,
+        None,
+        None,
+        current_generation,
+    )
+    loader._pending_keys.add(key)
+    loader._active_jobs_count = 2
+    stale_cache_path = generate_cache_path(tmp_path, path, size, 1)
+    current_cache_path = generate_cache_path(tmp_path, path, size, 2)
+    stale_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_cache_path.write_bytes(b"stale")
+    current_cache_path.write_bytes(b"current")
+    stale_image = QImage(2, 2, QImage.Format.Format_ARGB32)
+    current_image = QImage(2, 2, QImage.Format.Format_ARGB32)
+
+    loader._handle_result(
+        (*key, 1),
+        stale_image,
+        rel,
+        stale_generation,
+        stale_cache_path,
+    )
+
+    assert stale_cache_path.exists()
+    assert manual_pool.jobs == []
+
+    loader._handle_result(
+        (*key, 2),
+        current_image,
+        rel,
+        current_generation,
+        current_cache_path,
+    )
+
+    loader._flush_cache_cleanup()
+    assert len(manual_pool.jobs) == 1
+    manual_pool.jobs[0].run()
+    assert not stale_cache_path.exists()
+    assert current_cache_path.exists()
+
+
+def test_deferred_reconciliation_cannot_prune_a_newer_generation(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    rel = "changed-again.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    key = loader._base_key(rel, size)
+    loader.invalidate(rel)
+    first_generation = loader._generation_token(rel)
+    loader._store_job_spec(
+        key,
+        rel,
+        path,
+        size,
+        None,
+        tmp_path,
+        tmp_path,
+        True,
+        False,
+        None,
+        None,
+        first_generation,
+    )
+    loader._pending_keys.add(key)
+    loader._active_jobs_count = 1
+    first_cache_path = generate_cache_path(tmp_path, path, size, 1)
+    next_cache_path = generate_cache_path(tmp_path, path, size, 2)
+    first_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    first_cache_path.write_bytes(b"first")
+    next_cache_path.write_bytes(b"next")
+    image = QImage(2, 2, QImage.Format.Format_ARGB32)
+
+    loader._handle_result((*key, 1), image, rel, first_generation, first_cache_path)
+    loader._flush_cache_cleanup()
+    assert len(manual_pool.jobs) == 1
+
+    loader.invalidate(rel)
+    manual_pool.jobs[0].run()
+
+    assert first_cache_path.exists()
+    assert next_cache_path.exists()
+
+
+def test_changed_asset_reconciliation_coalesces_into_one_directory_scan(
+    tmp_path: Path,
+) -> None:
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    size = QSize(512, 512)
+    changed_count = 100
+
+    for index in range(changed_count):
+        rel = f"changed-{index}.jpg"
+        path = tmp_path / rel
+        key = loader._base_key(rel, size)
+        loader.invalidate(rel)
+        generation = loader._generation_token(rel)
+        loader._store_job_spec(
+            key,
+            rel,
+            path,
+            size,
+            None,
+            tmp_path,
+            tmp_path,
+            True,
+            False,
+            None,
+            None,
+            generation,
+        )
+        loader._pending_keys.add(key)
+        loader._active_jobs_count += 1
+        loader._handle_validation_success((*key, index + 1), generation)
+
+    assert manual_pool.jobs == []
+    assert sum(
+        len(targets)
+        for _root, targets in loader._pending_cache_cleanup_targets.values()
+    ) == changed_count
+
+    with patch(
+        "iPhoto.gui.ui.tasks.thumbnail_cache.os.scandir",
+        wraps=os.scandir,
+    ) as scandir:
+        loader._flush_cache_cleanup()
+        assert len(manual_pool.jobs) == 1
+        assert len(manual_pool.jobs[0]._targets) == changed_count
+        manual_pool.jobs[0].run()
+
+    assert scandir.call_count == 1
+
+
+def test_invalidation_with_known_stamp_skips_directory_reconciliation(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    del qapp
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    rel = "metadata-only.jpg"
+    path = tmp_path / rel
+    size = QSize(512, 512)
+    key = loader._base_key(rel, size)
+    loader._memory[key] = (123, QPixmap(2, 2))
+
+    loader.invalidate(rel)
+    generation = loader._generation_token(rel)
+    loader._store_job_spec(
+        key,
+        rel,
+        path,
+        size,
+        123,
+        tmp_path,
+        tmp_path,
+        True,
+        False,
+        None,
+        None,
+        generation,
+    )
+    loader._pending_keys.add(key)
+    loader._active_jobs_count = 1
+    loader._handle_validation_success((*key, 123), generation)
+    loader._flush_cache_cleanup()
+
+    assert manual_pool.jobs == []
+
+
+def test_deferred_cleanup_rejects_cross_library_aba_generation(
+    tmp_path: Path,
+) -> None:
+    library_a = tmp_path / "library-a"
+    library_b = tmp_path / "library-b"
+    loader = ThumbnailLoader()
+    loader.reset_for_album(library_a)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    rel = "DCIM/001.jpg"
+    path = library_a / rel
+    size = QSize(512, 512)
+    current_cache_path = generate_cache_path(library_a, path, size, 1)
+    current_cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    loader.evict(rel, path)
+    loader._flush_cache_cleanup()
+    assert len(manual_pool.jobs) == 1
+
+    loader.reset_for_album(library_b)
+    loader.reset_for_album(library_a)
+    loader.invalidate(rel)
+    assert loader._generation_token(rel)[1] == 1
+    current_cache_path.write_bytes(b"current-a-epoch")
+
+    manual_pool.jobs[0].run()
+
+    assert current_cache_path.exists()
+
+
+def test_deferred_cleanup_can_finish_while_its_library_is_inactive(
+    tmp_path: Path,
+) -> None:
+    library_a = tmp_path / "library-a"
+    library_b = tmp_path / "library-b"
+    loader = ThumbnailLoader()
+    loader.reset_for_album(library_a)
+    manual_pool = _ManualPool()
+    loader._pool = manual_pool
+    rel = "DCIM/removed.jpg"
+    path = library_a / rel
+    size = QSize(512, 512)
+    old_cache_path = generate_cache_path(library_a, path, size, 1)
+    old_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    old_cache_path.write_bytes(b"removed")
+
+    loader.evict(rel, path)
+    loader._flush_cache_cleanup()
+    assert len(manual_pool.jobs) == 1
+
+    loader.reset_for_album(library_b)
+    manual_pool.jobs[0].run()
+
+    assert not old_cache_path.exists()
+
+
+def test_stale_validation_does_not_clear_current_pending_job(tmp_path: Path) -> None:
+    loader = ThumbnailLoader()
+    loader.reset_for_album(tmp_path)
+    rel = "race.jpg"
+    key = loader._base_key(rel, QSize(512, 512))
+    stale_generation = loader._generation_token(rel)
+    loader.invalidate(rel)
+    loader._pending_keys.add(key)
+    loader._active_jobs_count = 1
+
+    loader._handle_validation_success((*key, 1), stale_generation)
+
+    assert key in loader._pending_keys
 
 
 def test_generate_cache_path_different_stamps(tmp_path: Path) -> None:

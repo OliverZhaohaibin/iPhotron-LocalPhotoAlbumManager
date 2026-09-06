@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,10 +29,12 @@ class DialogController:
         parent: QWidget,
         context: RuntimeEntryContract,
         status_bar: ChromeStatusBar,
+        library_rebind_preflight: Callable[[], bool] | None = None,
     ) -> None:
         self._parent = parent
         self._context = context
         self._status = status_bar
+        self._library_rebind_preflight = library_rebind_preflight
 
     # ------------------------------------------------------------------
     # Public API
@@ -43,6 +46,19 @@ class DialogController:
         )
 
     def bind_library_dialog(self) -> Path | None:
+        if (
+            self._library_rebind_preflight is not None
+            and not self._library_rebind_preflight()
+        ):
+            dialogs.show_error(
+                self._parent,
+                QCoreApplication.translate(
+                    "DialogController",
+                    "Finish the current edit with Done, or press Escape to cancel it, before switching libraries.",
+                    None,
+                ),
+            )
+            return None
         root = dialogs.select_directory(
             self._parent,
             QCoreApplication.translate("DialogController", "Select Basic Library", None),

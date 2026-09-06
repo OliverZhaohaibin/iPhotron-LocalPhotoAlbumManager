@@ -4,19 +4,28 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import MutableMapping
 
 from ..config import WORK_DIR_NAME
-from ..settings.manager import default_settings_path
 from ..utils.pathutils import ensure_work_dir
+
+
+def _default_settings_path() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("APPDATA")
+        return Path(base) / "iPhoto" / "settings.json" if base else Path.home() / "AppData" / "Roaming" / "iPhoto" / "settings.json"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "iPhoto" / "settings.json"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "iPhoto" / "settings.json"
 
 
 def load_saved_basic_library_path(settings_path: Path | None = None) -> Path | None:
     """Return the saved Basic Library root from ``settings.json`` when available."""
 
     try:
-        resolved_settings_path = settings_path or default_settings_path()
+        resolved_settings_path = settings_path or _default_settings_path()
         if not resolved_settings_path.exists():
             return None
         payload = json.loads(resolved_settings_path.read_text(encoding="utf-8"))
@@ -34,10 +43,11 @@ def resolve_managed_work_root(
     *,
     home_root: Path | None = None,
     library_root: Path | None = None,
+    use_saved_library: bool = True,
 ) -> Path:
     """Return the managed ``.iPhoto`` directory used for startup caches."""
 
-    if library_root is None:
+    if library_root is None and use_saved_library:
         library_root = load_saved_basic_library_path(settings_path)
     if library_root is not None:
         candidate = Path(library_root).expanduser()
@@ -55,6 +65,7 @@ def resolve_shader_cache_root(
     *,
     home_root: Path | None = None,
     library_root: Path | None = None,
+    use_saved_library: bool = True,
 ) -> Path:
     """Return the managed shader cache directory."""
 
@@ -62,6 +73,7 @@ def resolve_shader_cache_root(
         settings_path,
         home_root=home_root,
         library_root=library_root,
+        use_saved_library=use_saved_library,
     ) / "cache" / "shaders"
     cache_root.mkdir(parents=True, exist_ok=True)
     return cache_root
@@ -73,6 +85,7 @@ def configure_shader_cache_environment(
     home_root: Path | None = None,
     environ: MutableMapping[str, str] | None = None,
     library_root: Path | None = None,
+    use_saved_library: bool = True,
 ) -> Path:
     """Configure process env vars so shader caches stay under ``.iPhoto``."""
 
@@ -81,6 +94,7 @@ def configure_shader_cache_environment(
         settings_path,
         home_root=home_root,
         library_root=library_root,
+        use_saved_library=use_saved_library,
     )
     driver_cache_root = cache_root / "driver"
     qt3d_cache_root = cache_root / "qt3d"

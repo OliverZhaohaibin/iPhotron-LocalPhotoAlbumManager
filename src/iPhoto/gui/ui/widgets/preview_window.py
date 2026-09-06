@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-import importlib.util
 from pathlib import Path
 import sys
 from typing import Callable, Mapping, Optional
@@ -30,9 +29,9 @@ from ....utils.ffmpeg import probe_video_rotation
 from ..media import MediaController, require_multimedia
 from .video_area import VideoArea
 
-if importlib.util.find_spec("PySide6.QtMultimediaWidgets") is not None:
+try:
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
-else:  # pragma: no cover - requires optional Qt module
+except (ImportError, AttributeError):  # pragma: no cover - optional Qt module
     QGraphicsVideoItem = None  # type: ignore[assignment]
 
 
@@ -346,7 +345,7 @@ class _RhiPreviewPopup(QWidget):
         # on the GL/adjusted surface; unedited videos still pass empty
         # adjustments and no trim.
         internal_adjusted_preview = bool(adjusted_preview or sys.platform == "darwin")
-        self._video_area.load_video(
+        self._video_area.present_video(
             source,
             adjustments=adjustments,
             trim_range_ms=trim_range_ms,

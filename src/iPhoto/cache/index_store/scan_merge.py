@@ -12,6 +12,12 @@ from ...people import (
     initial_face_status,
     normalize_face_status,
 )
+from ...pets import (
+    PET_STATUS_DONE,
+    PET_STATUS_SKIPPED,
+    initial_pet_status,
+    normalize_pet_status,
+)
 
 _PRESERVED_SCAN_STATE_FIELDS = (
     "is_favorite",
@@ -21,6 +27,14 @@ _PRESERVED_SCAN_STATE_FIELDS = (
     "live_role",
     "live_partner_rel",
     "is_deleted",
+)
+_THUMBNAIL_STATE_FIELDS = (
+    "thumbnail_state",
+    "micro_thumbnail",
+    "thumb_cache_key",
+    "thumb_updated_at",
+    "thumb_error",
+    "thumb_revision",
 )
 
 
@@ -49,13 +63,16 @@ def merge_scan_row(
             if field in existing_row and (field not in merged or merged.get(field) in (None, "")):
                 merged[field] = existing_row.get(field)
         _preserve_location_state(merged, existing_row)
+        _preserve_newer_thumbnail_revision(merged, existing_row)
 
     identity_unchanged = (
         existing_row is not None and _asset_identity_unchanged(existing_row, merged)
     )
     existing_face_status = None
+    existing_pet_status = None
     if existing_row is not None:
         existing_face_status = normalize_face_status(existing_row.get("face_status"))
+        existing_pet_status = normalize_pet_status(existing_row.get("pet_status"))
 
     if (
         existing_face_status is not None
@@ -71,7 +88,42 @@ def merge_scan_row(
             )
         )
 
+    if (
+        existing_pet_status is not None
+        and existing_pet_status in {PET_STATUS_DONE, PET_STATUS_SKIPPED}
+        and identity_unchanged
+    ):
+        merged["pet_status"] = existing_pet_status
+    else:
+        merged["pet_status"] = initial_pet_status(
+            _row_for_face_status(
+                merged,
+                preserve_live_state=identity_unchanged,
+            )
+        )
+
     return merged
+
+
+def _preserve_newer_thumbnail_revision(
+    merged: dict[str, Any],
+    existing_row: dict[str, Any],
+) -> None:
+    """Reject scan thumbnail state superseded by a newer edit revision."""
+
+    existing_revision = str(existing_row.get("thumb_revision") or "").strip()
+    incoming_revision = str(merged.get("thumb_revision") or "").strip()
+    if (
+        existing_row.get("thumbnail_state") != "stale"
+        or not existing_revision
+        or existing_revision == incoming_revision
+    ):
+        return
+    for field in _THUMBNAIL_STATE_FIELDS:
+        if field in existing_row:
+            merged[field] = existing_row[field]
+        else:
+            merged.pop(field, None)
 
 
 def _preserve_location_state(

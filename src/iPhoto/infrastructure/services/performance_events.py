@@ -2,17 +2,35 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
 import sys
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_SENSITIVE_FIELDS = {
+    "absolute_path",
+    "caller",
+    "key",
+    "old_key",
+    "path",
+    "paths",
+    "source",
+    "source_path",
+}
 
 
 def perf_logging_enabled() -> bool:
-    return os.environ.get("IPHOTO_PERF_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("IPHOTO_PERF_LOG", "").strip().lower() in _TRUE_VALUES
+
+
+def privacy_safe_perf_logging_enabled() -> bool:
+    return os.environ.get("IPHOTO_PERF_PRIVACY_SAFE", "").strip().lower() in _TRUE_VALUES
 
 
 def explain_enabled() -> bool:
@@ -87,23 +105,52 @@ def _caller_is_gallery_collection(caller: str | None) -> bool:
 
 
 def _json_safe_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    safe: dict[str, Any] = {}
-    for key, value in payload.items():
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            safe[key] = value
-        elif isinstance(value, (list, tuple)):
-            safe[key] = [
-                item if isinstance(item, (str, int, float, bool)) or item is None else str(item)
-                for item in value
-            ]
-        elif isinstance(value, dict):
-            safe[key] = {
-                str(k): v if isinstance(v, (str, int, float, bool)) or v is None else str(v)
-                for k, v in value.items()
-            }
-        else:
-            safe[key] = str(value)
-    return safe
+    privacy_safe = privacy_safe_perf_logging_enabled()
+    return {
+        str(key): _json_safe_value(
+            value,
+            privacy_safe=privacy_safe,
+            sensitive=str(key).lower() in _SENSITIVE_FIELDS,
+        )
+        for key, value in payload.items()
+    }
+
+
+def _json_safe_value(
+    value: Any,
+    *,
+    privacy_safe: bool,
+    sensitive: bool,
+) -> Any:
+    if isinstance(value, (list, tuple)):
+        return [
+            _json_safe_value(
+                item,
+                privacy_safe=privacy_safe,
+                sensitive=sensitive,
+            )
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe_value(
+                item,
+                privacy_safe=privacy_safe,
+                sensitive=sensitive or str(key).lower() in _SENSITIVE_FIELDS,
+            )
+            for key, item in value.items()
+        }
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    text = os.fspath(value) if isinstance(value, Path) else str(value)
+    if privacy_safe and (sensitive or isinstance(value, Path) or os.path.isabs(text)):
+        salt = os.environ.get("IPHOTO_PERF_PRIVACY_SALT", "iPhoto-perf")
+        digest = hashlib.sha256(
+            f"{salt}|{text}".encode("utf-8", errors="replace")
+        ).hexdigest()
+        return f"redacted:{digest[:16]}"
+    return text
 
 
 __all__ = [
@@ -112,5 +159,6 @@ __all__ = [
     "explain_enabled",
     "fail_on_full_scan_query_enabled",
     "monotonic_ms",
+    "privacy_safe_perf_logging_enabled",
     "perf_logging_enabled",
 ]

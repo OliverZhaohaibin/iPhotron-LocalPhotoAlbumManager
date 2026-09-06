@@ -38,6 +38,8 @@ def _empty_media_info() -> Dict[str, Any]:
         "codec": None,
         "frame_rate": None,
         "still_image_time": None,
+        "video_rotation_cw": None,
+        "video_linux_180_hint": None,
     }
 
 

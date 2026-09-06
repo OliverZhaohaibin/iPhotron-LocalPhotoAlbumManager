@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT=/app/lib/iphotron
+export PATH="$APP_ROOT:/app/bin:/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$APP_ROOT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+for candidate in entrypoint.bin entrypoint main.bin main; do
+    if [ -x "$APP_ROOT/$candidate" ]; then
+        exec "$APP_ROOT/$candidate" "$@"
+    fi
+done
+
+echo "iPhotron executable not found in Flatpak payload" >&2
+exit 127

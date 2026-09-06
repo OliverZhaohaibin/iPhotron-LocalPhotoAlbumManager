@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..application.ports import PeopleAssetRepositoryPort
 from ..cache.index_store import get_global_repository
-from ..people.index_coordinator import (
-    PeopleIndexCoordinator,
-    get_people_index_coordinator,
-)
 from ..people.service import PeopleService
+
+if TYPE_CHECKING:
+    from ..people.index_coordinator import PeopleIndexCoordinator
+    from ..recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
 class IndexStorePeopleAssetRepository:
@@ -49,6 +49,9 @@ class IndexStorePeopleAssetRepository:
     def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
         self._repository().update_face_statuses(asset_ids, status)
 
+    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
+        return int(self._repository().reset_face_statuses_for_pipeline_upgrade())
+
     def count_by_face_status(self) -> dict[str, int]:
         return dict(self._repository().count_by_face_status())
 
@@ -74,6 +77,7 @@ def create_people_service(
     *,
     asset_repository: PeopleAssetRepositoryPort | None = None,
     coordinator: PeopleIndexCoordinator | None = None,
+    mutation_coordinator: RecognitionMutationCoordinator | None = None,
     repository_factory: Callable[[Path], Any] | None = None,
 ) -> PeopleService:
     """Create a session-bound People service for one library."""
@@ -83,18 +87,13 @@ def create_people_service(
         root,
         repository_factory=repository_factory,
     )
-    if coordinator is None:
-        resolved_coordinator = get_people_index_coordinator(
-            root,
-            asset_repository=repository,
-        )
-    else:
+    if coordinator is not None:
         coordinator.set_asset_repository(repository)
-        resolved_coordinator = coordinator
     return PeopleService(
         root,
         asset_repository=repository,
-        coordinator=resolved_coordinator,
+        coordinator=coordinator,
+        mutation_coordinator=mutation_coordinator,
     )
 
 

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from PySide6.QtCore import QObject, QThreadPool, Signal
 from PySide6.QtGui import QImage
 
-from ..tasks.image_load_worker import ImageLoadWorker
+from ....core.color_resolver import ColorStats
 from ..tasks.edit_sidebar_preview_worker import (
     EditSidebarPreviewResult,
     EditSidebarPreviewWorker,
@@ -22,34 +21,16 @@ _LOGGER = logging.getLogger(__name__)
 class EditPipelineLoader(QObject):
     """Orchestrates background image loading and preview generation."""
 
-    imageLoaded = Signal(Path, QImage)
-    """Emitted when the full-resolution image is ready for editing."""
-
-    imageLoadFailed = Signal(Path, str)
-    """Emitted when the source image cannot be loaded."""
-
     sidebarPreviewReady = Signal(EditSidebarPreviewResult)
     """Emitted when a sidebar preview thumbnail is available."""
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self._active_image_worker: ImageLoadWorker | None = None
         self._sidebar_preview_worker: EditSidebarPreviewWorker | None = None
 
         # Generation tracking to prevent stale updates
         self._sidebar_preview_generation = 0
         self._sidebar_preview_worker_generation: int | None = None
-
-    def load_image(self, source: Path) -> None:
-        """Start loading the full resolution image in the background."""
-        # Reset any previous worker reference
-        self._active_image_worker = None
-
-        worker = ImageLoadWorker(source)
-        worker.signals.imageLoaded.connect(self._on_image_loaded)
-        worker.signals.loadFailed.connect(self._on_image_load_failed)
-        self._active_image_worker = worker
-        QThreadPool.globalInstance().start(worker)
 
     def prepare_sidebar_preview(
         self,
@@ -57,6 +38,7 @@ class EditPipelineLoader(QObject):
         target_height: int,
         *,
         full_res_image_for_fallback: QImage | None = None,
+        color_stats: ColorStats | None = None,
     ) -> None:
         """Queue generation of a sidebar preview thumbnail.
 
@@ -84,6 +66,7 @@ class EditPipelineLoader(QObject):
             worker_image,
             generation=generation,
             target_height=worker_target_height,
+            color_stats=color_stats,
         )
         worker.signals.ready.connect(self._handle_sidebar_preview_ready)
         worker.signals.error.connect(self._handle_sidebar_preview_error)
@@ -98,6 +81,7 @@ class EditPipelineLoader(QObject):
         target_height: int,
         *,
         full_res_image_for_fallback: QImage | None = None,
+        color_stats: ColorStats | None = None,
     ) -> None:
         """Prepare a sidebar preview immediately on the caller's thread."""
 
@@ -115,7 +99,11 @@ class EditPipelineLoader(QObject):
         )
 
         try:
-            result = build_edit_sidebar_preview(worker_image, worker_target_height)
+            result = build_edit_sidebar_preview(
+                worker_image,
+                worker_target_height,
+                color_stats=color_stats,
+            )
         except Exception as exc:  # noqa: BLE001 - keep edit mode resilient to preview failures
             _LOGGER.exception("Failed to prepare edit sidebar preview")
             self._handle_sidebar_preview_error(generation, str(exc))
@@ -127,23 +115,8 @@ class EditPipelineLoader(QObject):
         """Cancel any pending load or preview operations (where possible)."""
         # Note: QRunnable cannot be easily cancelled once started,
         # but we can detach listeners or ignore results via generation checks.
-        self._active_image_worker = None
         # Increment generation to invalidate in-flight preview workers
         self._sidebar_preview_generation += 1
-
-    def _on_image_loaded(self, path: Path, image: QImage) -> None:
-        # Don't check for self._active_image_worker is None here.
-        # This fixes a race condition where a new load request replaces _active_image_worker,
-        # but the previous worker finishes and clears it, leaving the new one active but the variable None.
-
-        # We also don't strictly clear _active_image_worker here because a newer one might have been started.
-        # If we really want to track which one is active, we need IDs.
-        # But for now, just emitting is safer, and let EditController filter by path.
-        self.imageLoaded.emit(path, image)
-
-    def _on_image_load_failed(self, path: Path, message: str) -> None:
-        # Same logic as above.
-        self.imageLoadFailed.emit(path, message)
 
     def _handle_sidebar_preview_ready(
         self,

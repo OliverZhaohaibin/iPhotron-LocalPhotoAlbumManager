@@ -15,32 +15,41 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, Qt, QTimer, Signal, QThreadPool, QMutex
+from PySide6.QtCore import (
+    QFileSystemWatcher,
+    QMutex,
+    QObject,
+    Qt,
+    QThread,
+    QThreadPool,
+    QTimer,
+    Signal,
+)
 
 from ..errors import LibraryUnavailableError
 from ..utils.logging import get_logger
-from .tree import AlbumNode
-
-# Re-export GeotaggedAsset for presentation widgets that need the map DTO.
-from .geo_aggregator import GeotaggedAsset  # noqa: F401
 
 # Mixin classes providing the extracted functionality
 from .album_operations import AlbumOperationsMixin
-from .scan_coordinator import ScanCoordinatorMixin
 from .filesystem_watcher import FileSystemWatcherMixin
-from .geo_aggregator import GeoAggregatorMixin
+
+# Re-export GeotaggedAsset for presentation widgets that need the map DTO.
+from .geo_aggregator import (
+    GeoAggregatorMixin,
+    GeotaggedAsset,  # noqa: F401
+)
+from .scan_coordinator import ScanCoordinatorMixin
 from .trash_manager import TrashManagerMixin
+from .tree import AlbumNode
+from .watch_service import LibraryWatchResult, LibraryWatchService
 
 LOGGER = get_logger()
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..people.index_coordinator import PeopleIndexCoordinator
-    from ..people.service import PeopleService
-    from .workers.face_scan_worker import FaceScanWorker
-    from .workers.scanner_worker import ScannerWorker
     from ..application.ports import (
         AssetStateServicePort,
         EditServicePort,
+        LibraryStateRepositoryPort,
         LocationAssetServicePort,
         MapInteractionServicePort,
         MapRuntimePort,
@@ -49,9 +58,16 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..bootstrap.library_asset_lifecycle_service import LibraryAssetLifecycleService
     from ..bootstrap.library_asset_operation_service import LibraryAssetOperationService
     from ..bootstrap.library_asset_query_service import LibraryAssetQueryService
-    from ..bootstrap.library_session import LibrarySession
+    from ..bootstrap.library_probe import PreparedLibrary
     from ..bootstrap.library_scan_service import LibraryScanService
-    from ..application.ports import LibraryStateRepositoryPort
+    from ..bootstrap.library_session import LibrarySession
+    from ..people.index_coordinator import PeopleIndexCoordinator
+    from ..people.service import PeopleService
+    from ..pets.index_coordinator import PetIndexCoordinator
+    from ..pets.service import PetService
+    from .workers.face_scan_worker import FaceScanWorker
+    from .workers.pet_scan_worker import PetScanWorker
+    from .workers.scanner_worker import ScannerWorker
 
 
 class LibraryRuntimeController(
@@ -76,6 +92,9 @@ class LibraryRuntimeController(
     peopleIndexUpdated = Signal()
     peopleSnapshotCommitted = Signal(object)
     faceScanStatusChanged = Signal(str)
+    petIndexUpdated = Signal()
+    petSnapshotCommitted = Signal(object)
+    petScanStatusChanged = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -98,20 +117,33 @@ class LibraryRuntimeController(
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._debounce.timeout.connect(self._on_watcher_debounce_timeout)
         self.scanFinished.connect(self._on_watcher_scan_finished)
+        self._watch_service = LibraryWatchService(self)
+        self._watch_service.resultReady.connect(self._on_background_watch_result)
+        self._background_watch_generation = 0
 
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
         self._current_face_scanner: Optional[FaceScanWorker] = None
+        self._current_pet_scanner: Optional[PetScanWorker] = None
         self._cancelled_scanner_workers: set[int] = set()
-        self._scan_thread_pool = QThreadPool.globalInstance()
+        self._scan_thread_pool = QThreadPool(self)
+        self._scan_thread_pool.setMaxThreadCount(1)
+        self._scan_thread_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
-        self._deferred_scan_queue: list[tuple[Path, list[str], list[str]]] = []
+        self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool]] = []
         self._scan_buffer_lock = QMutex()
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
         self._face_scan_status_message: Optional[str] = None
+        self._pet_scan_status_message: Optional[str] = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
+        self._pet_index_coordinator: PetIndexCoordinator | None = None
+        self._recognition_services_root: Path | None = None
+        self._recognition_scans_root: Path | None = None
+        self._recognition_generation = 0
+        self._delivered_recognition_event_ids: set[str] = set()
+        self._retiring_recognition_workers: set[QThread] = set()
         self._library_session: "LibrarySession | None" = None
         self._owns_library_session = False
         self._scan_service: "LibraryScanService | None" = None
@@ -122,6 +154,7 @@ class LibraryRuntimeController(
         self._asset_lifecycle_service: "LibraryAssetLifecycleService | None" = None
         self._asset_operation_service: "LibraryAssetOperationService | None" = None
         self._people_service: PeopleService | None = None
+        self._pet_service: PetService | None = None
         self._map_runtime: "MapRuntimePort | None" = None
         self._map_interaction_service: "MapInteractionServicePort | None" = None
         self._edit_service: "EditServicePort | None" = None
@@ -156,6 +189,56 @@ class LibraryRuntimeController(
 
         self._bind_path(root, bind_session_if_needed=False)
 
+    def bind_prepared_library(self, prepared: "PreparedLibrary") -> None:
+        """Publish a helper-produced tree without probing storage on the GUI thread."""
+
+        self._clear_watches_for_rebind()
+        self.stop_scanning()
+        self._recognition_services_root = None
+        self._recognition_scans_root = None
+        self._delivered_recognition_event_ids.clear()
+        self._pending_watch_paths.clear()
+        self._watch_scan_queue.clear()
+        self._root = Path(prepared.root)
+        self._deleted_dir = None
+        self._geotagged_assets_cache = None
+        self._geotagged_assets_cache_root = None
+
+        albums: list[AlbumNode] = []
+        children: Dict[Path, list[AlbumNode]] = {}
+        nodes: Dict[Path, AlbumNode] = {}
+        for item in prepared.albums:
+            path = Path(item.path)
+            node = AlbumNode(path, int(item.level), str(item.title), bool(item.has_manifest))
+            nodes[path] = node
+            if node.level == 1:
+                albums.append(node)
+                children.setdefault(path, [])
+            elif node.level == 2:
+                children.setdefault(path.parent, []).append(node)
+        self._albums = sorted(albums, key=lambda item: item.title.casefold())
+        self._children = {
+            parent: sorted(items, key=lambda item: item.title.casefold())
+            for parent, items in children.items()
+        }
+        self._nodes = nodes
+        storage_profile = getattr(prepared, "storage_profile", None)
+        storage_kind = getattr(storage_profile, "kind", prepared.storage_kind)
+        polling = storage_kind in {"network", "removable"} or prepared.storage_kind == "slow"
+        watch_paths = (self._root, *(node.path for node in self._nodes.values()))
+        self._background_watch_generation = self._watch_service.configure(
+            self._root,
+            watch_paths,
+            polling=polling,
+        )
+        LOGGER.info(
+            "bind_prepared_library: root=%s albums=%d storage=%s",
+            self._root,
+            len(self._albums),
+            prepared.storage_kind,
+        )
+        self.treeUpdated.emit()
+
     def _bind_path(self, root: Path, *, bind_session_if_needed: bool) -> None:
         LOGGER.info("bind_path: binding to %s", root)
         # Clear existing watches to ensure initialization operations (like creating
@@ -166,10 +249,14 @@ class LibraryRuntimeController(
         # Cancel any in-flight scan so we do not block UI interactions while
         # rebinding to a new library root.
         self.stop_scanning()
+        self._recognition_services_root = None
+        self._recognition_scans_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
         self._face_scan_status_message = None
+        self._pet_scan_status_message = None
         self._unbind_people_index_coordinator()
+        self._unbind_pet_index_coordinator()
 
         normalized = root.expanduser().resolve()
         if not normalized.exists() or not normalized.is_dir():
@@ -185,7 +272,7 @@ class LibraryRuntimeController(
                 except OSError:
                     session_root = Path(session.library_root)
                 if session_root == normalized:
-                    self.bind_people_service(session.people)
+                    self.bind_recognition_services(session.people, session.pets)
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         LOGGER.info("bind_path: normalized root=%s", normalized)
@@ -196,9 +283,7 @@ class LibraryRuntimeController(
         # cleared all watcher directories, ensure we restore them so filesystem
         # monitoring is active even when binding an (initially) empty library.
         if not self._watcher.directories():
-            LOGGER.info(
-                "bind_path: watcher has no directories after refresh; rebuilding watches"
-            )
+            LOGGER.info("bind_path: watcher has no directories after refresh; rebuilding watches")
             self._rebuild_watches()
         # ``_refresh_tree()`` skips the ``treeUpdated`` emission when the album
         # list is unchanged (an optimisation for filesystem-watcher refreshes).
@@ -213,6 +298,8 @@ class LibraryRuntimeController(
             self.treeUpdated.emit()
 
     def _clear_watches_for_rebind(self) -> None:
+        self._watch_service.cancel()
+        self._background_watch_generation = 0
         existing_dirs = self._watcher.directories()
         existing_files = self._watcher.files()
         if existing_dirs:
@@ -243,7 +330,10 @@ class LibraryRuntimeController(
     def shutdown(self) -> None:
         """Stop background workers and watchers during application shutdown."""
 
+        had_scanner_worker = self._current_scanner_worker is not None
         self.stop_scanning(wait=True)
+        self._recognition_services_root = None
+        self._recognition_scans_root = None
         self._debounce.stop()
         if self._watcher.directories():
             self._watcher.removePaths(self._watcher.directories())
@@ -256,9 +346,54 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         self._unbind_people_index_coordinator()
+        self._unbind_pet_index_coordinator()
+        self._watch_service.shutdown()
+        self._scan_thread_pool.clear()
+        if not had_scanner_worker:
+            self._scan_thread_pool.waitForDone(2000)
+
+    def _on_background_watch_result(self, result: object) -> None:
+        """Apply an immutable worker snapshot without traversing storage in GUI."""
+
+        if not isinstance(result, LibraryWatchResult):
+            return
+        if result.generation != self._background_watch_generation or self._root is None:
+            return
+        if result.warning:
+            LOGGER.warning("Library watcher refresh failed: %s", result.warning)
+            return
+        previous_paths = set(self._nodes)
+        previous_nodes = dict(self._nodes)
+        albums = [node for node in result.albums if node.level == 1]
+        children: Dict[Path, list[AlbumNode]] = {node.path: [] for node in albums}
+        nodes = {node.path: node for node in result.albums}
+        for node in result.albums:
+            if node.level == 2:
+                children.setdefault(node.path.parent, []).append(node)
+        self._albums = sorted(albums, key=lambda item: item.title.casefold())
+        self._children = {
+            parent: sorted(items, key=lambda item: item.title.casefold())
+            for parent, items in children.items()
+        }
+        self._nodes = nodes
+        tree_changed = nodes != previous_nodes
+        if tree_changed:
+            self._geotagged_assets_cache = None
+            self._geotagged_assets_cache_root = None
+            self.treeUpdated.emit()
+        # Root watcher events include internal links/index maintenance.  Never
+        # turn an unchanged root snapshot into a self-sustaining rescan loop;
+        # new albums are still scanned, while direct-root changes remain an
+        # explicit/manual refresh scope.
+        changed = {path for path in result.changed_paths if path != self._root and path in nodes}
+        changed.update(path for path in nodes if path not in previous_paths)
+        self._start_watcher_scans(changed)
 
     def face_scan_status_message(self) -> str | None:
         return self._face_scan_status_message
+
+    def pet_scan_status_message(self) -> str | None:
+        return self._pet_scan_status_message
 
     def bind_library_session(
         self,
@@ -283,6 +418,7 @@ class LibraryRuntimeController(
             self.bind_map_interaction_service(None)
             self.bind_map_runtime(None)
             self.bind_people_service(None)
+            self.bind_pet_service(None)
             self.bind_asset_operation_service(None)
             self.bind_asset_lifecycle_service(None)
             self.bind_album_metadata_service(None)
@@ -295,14 +431,9 @@ class LibraryRuntimeController(
             self.bind_state_repository(library_session.state)
             self.bind_asset_state_service(library_session.asset_state)
             self.bind_album_metadata_service(library_session.album_metadata)
-            self.bind_location_service(library_session.locations)
-            self.bind_edit_service(library_session.edit)
             self.bind_scan_service(library_session.scans)
             self.bind_asset_lifecycle_service(library_session.asset_lifecycle)
             self.bind_asset_operation_service(library_session.asset_operations)
-            self.bind_people_service(library_session.people)
-            self.bind_map_runtime(library_session.maps)
-            self.bind_map_interaction_service(library_session.map_interactions)
 
         if previous is not None and previous is not library_session and previous_owned:
             previous.shutdown()
@@ -330,13 +461,11 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         active_session = self._library_session
-        default_location_service = (
-            active_session.locations if active_session is not None else None
-        )
         if (
-            self._root is not None
+            active_session is None
+            and self._root is not None
             and asset_query_service is not None
-            and self._location_service is default_location_service
+            and self._location_service is None
         ):
             from ..bootstrap.library_location_service import LibraryLocationService
 
@@ -429,6 +558,140 @@ class LibraryRuntimeController(
     def people_service(self) -> PeopleService | None:
         return self._people_service
 
+    def bind_pet_service(self, pet_service: "PetService | None") -> None:
+        """Bind the current library session Pets surface."""
+
+        self._unbind_pet_index_coordinator()
+        self._pet_service = pet_service
+        if pet_service is None:
+            return
+        coordinator = pet_service.coordinator
+        if coordinator is None:
+            return
+        coordinator.resume()
+        coordinator.snapshotCommitted.connect(
+            self._on_pet_snapshot_committed, Qt.ConnectionType.QueuedConnection
+        )
+        self._pet_index_coordinator = coordinator
+
+    @property
+    def pet_service(self) -> "PetService | None":
+        return self._pet_service
+
+    def bind_recognition_services(
+        self,
+        people_service: PeopleService | None,
+        pet_service: "PetService | None",
+    ) -> None:
+        """Bind People/Pets without starting model workers."""
+
+        # Read-only dashboard/overlay use must not import or construct the AI
+        # coordinators. They are attached only when scanning is activated.
+        self._people_service = people_service
+        self._pet_service = pet_service
+        root = self._root
+        self._recognition_services_root = root
+        if root != self._recognition_scans_root:
+            self._recognition_scans_root = None
+        if root is not None and pet_service is not None:
+            from ..pets.pipeline import PET_DETECTOR_PIPELINE_VERSION
+
+            repository = pet_service.repository()
+            store = pet_service.asset_repository
+            if repository is not None and store is not None:
+                required_value = repository.get_scan_metadata("pet_backfill_required")
+                previous_version = repository.get_scan_metadata("detector_pipeline_version")
+                migration_target = repository.get_scan_metadata("detector_migration_target")
+                migration_state = repository.get_scan_metadata("detector_migration_state")
+                if not isinstance(required_value, (str, type(None))) or not isinstance(
+                    previous_version,
+                    (str, type(None)),
+                ):
+                    return
+                migration_incomplete = (
+                    migration_target == PET_DETECTOR_PIPELINE_VERSION
+                    and migration_state in {"pending", "running"}
+                )
+                counts = store.count_by_pet_status()
+                if not isinstance(counts, dict):
+                    return
+                ordinary_drain_required = (
+                    int(counts.get("pending", 0)) > 0 or int(counts.get("retry", 0)) > 0
+                )
+                backfill_required = (
+                    required_value == "1" or migration_incomplete or ordinary_drain_required
+                )
+                if required_value == "1" and migration_state not in {"pending", "running"}:
+                    set_many = getattr(repository, "set_scan_metadata_many", None)
+                    metadata = {
+                        "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                        "detector_migration_state": (
+                            "running"
+                            if previous_version == PET_DETECTOR_PIPELINE_VERSION
+                            else "pending"
+                        ),
+                    }
+                    if callable(set_many):
+                        set_many(metadata)
+                    else:
+                        for key, value in metadata.items():
+                            repository.set_scan_metadata(key, value)
+                if previous_version != PET_DETECTOR_PIPELINE_VERSION:
+                    backfill_required = backfill_required or int(counts.get("done", 0)) > 0
+                    if backfill_required:
+                        set_many = getattr(repository, "set_scan_metadata_many", None)
+                        metadata = {
+                            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+                            "detector_migration_state": "pending",
+                            "pet_backfill_required": "1",
+                        }
+                        if callable(set_many):
+                            set_many(metadata)
+                        else:
+                            for key, value in metadata.items():
+                                repository.set_scan_metadata(key, value)
+                if backfill_required:
+                    QTimer.singleShot(0, lambda: self._start_pet_backfill_worker(root))
+
+    def activate_recognition_scans(self) -> None:
+        """Start model workers after a recognition viewport is usable."""
+
+        root = self._root
+        if (
+            root is None
+            or root != self._recognition_services_root
+            or root == self._recognition_scans_root
+            or self._people_service is None
+            or self._pet_service is None
+        ):
+            return
+        self.bind_people_service(self._people_service)
+        self.bind_pet_service(self._pet_service)
+        if self._start_ai_scan_workers(root, startup=True):
+            self._recognition_scans_root = root
+
+    def activate_recognition_services(
+        self,
+        people_service: PeopleService | None,
+        pet_service: "PetService | None",
+    ) -> None:
+        """Compatibility wrapper for non-GUI callers requiring eager scans."""
+
+        self.bind_recognition_services(people_service, pet_service)
+        self.activate_recognition_scans()
+
+    def activate_map_services(
+        self,
+        location_service: "LocationAssetServicePort | None",
+        map_runtime: "MapRuntimePort | None",
+        map_interaction_service: "MapInteractionServicePort | None",
+    ) -> None:
+        """Bind Location and Maps services together on first map use."""
+
+        self.bind_location_service(location_service)
+        self.bind_map_runtime(map_runtime)
+        self.bind_map_interaction_service(map_interaction_service)
+
     def bind_map_runtime(self, map_runtime: "MapRuntimePort | None") -> None:
         """Bind the current library session Maps runtime surface."""
 
@@ -491,14 +754,25 @@ class LibraryRuntimeController(
             # bound for this root, restore the People surface so snapshot events
             # keep flowing after the tree refresh completes.
             self.bind_people_service(session.people)
+            self.bind_pet_service(session.pets)
+            self.bind_location_service(session.locations)
+            self.bind_edit_service(session.edit)
+            self.bind_map_runtime(session.maps)
+            self.bind_map_interaction_service(session.map_interactions)
             return
 
         from ..bootstrap.library_session import create_headless_library_session
 
-        self.bind_library_session(
-            create_headless_library_session(root),
-            owned=True,
-        )
+        session = create_headless_library_session(root)
+        self.bind_library_session(session, owned=True)
+        # Explicit synchronous/headless entry points keep the complete legacy
+        # service surface.  Prepared GUI startup stays Gallery-only until use.
+        self.bind_people_service(session.people)
+        self.bind_pet_service(session.pets)
+        self.bind_location_service(session.locations)
+        self.bind_edit_service(session.edit)
+        self.bind_map_runtime(session.maps)
+        self.bind_map_interaction_service(session.map_interactions)
 
     def _unbind_people_index_coordinator(self) -> None:
         if self._people_index_coordinator is None:
@@ -512,9 +786,54 @@ class LibraryRuntimeController(
             pass
         self._people_index_coordinator = None
 
+    def _unbind_pet_index_coordinator(self) -> None:
+        if self._pet_index_coordinator is None:
+            return
+        self._pet_index_coordinator.begin_shutdown()
+        try:
+            self._pet_index_coordinator.snapshotCommitted.disconnect(
+                self._on_pet_snapshot_committed
+            )
+        except (RuntimeError, TypeError):
+            pass
+        self._pet_index_coordinator = None
+
     def _on_people_snapshot_committed(self, event: object) -> None:
+        if self._recognition_event_was_delivered(event):
+            return
+        pet_service = self._pet_service
+        if pet_service is not None:
+            try:
+                pet_service.reconcile_people_overlaps(getattr(event, "changed_asset_ids", ()))
+            except Exception:  # noqa: BLE001 - do not break People snapshot delivery
+                LOGGER.warning(
+                    "Failed to reconcile People-priority pet detections for %s",
+                    self._root,
+                    exc_info=True,
+                )
         self.peopleIndexUpdated.emit()
         self.peopleSnapshotCommitted.emit(event)
+
+    def _on_pet_snapshot_committed(self, event: object) -> None:
+        if self._recognition_event_was_delivered(event):
+            return
+        self.petIndexUpdated.emit()
+        self.petSnapshotCommitted.emit(event)
+
+    def _recognition_event_was_delivered(self, event: object) -> bool:
+        event_id = str(getattr(event, "event_id", None) or "")
+        if not event_id:
+            return False
+        delivered = getattr(self, "_delivered_recognition_event_ids", None)
+        if delivered is None:
+            delivered = set()
+            self._delivered_recognition_event_ids = delivered
+        if event_id in delivered:
+            return True
+        delivered.add(event_id)
+        if len(delivered) > 4096:
+            delivered.pop()
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers (coordinator-level)
@@ -545,7 +864,9 @@ class LibraryRuntimeController(
             node = self._build_node(album_dir, level=1)
             albums.append(node)
             new_nodes[album_dir] = node
-            child_nodes = [self._build_node(child, level=2) for child in self._iter_album_dirs(album_dir)]
+            child_nodes = [
+                self._build_node(child, level=2) for child in self._iter_album_dirs(album_dir)
+            ]
             for child in child_nodes:
                 new_nodes[child.path] = child
             children[album_dir] = child_nodes

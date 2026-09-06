@@ -211,3 +211,37 @@ def test_revision_changes_only_for_scheduling_or_collection_changes() -> None:
     assert coordinator.revision == 5
     assert coordinator.viewport is not None
     assert coordinator.viewport.generation == 5
+
+
+def test_gallery_and_filmstrip_viewports_coexist() -> None:
+    coordinator = GalleryDemandCoordinator()
+    query = AssetQuery()
+    gallery = build_viewport_demand(
+        surface_id="gallery",
+        generation=1,
+        row_count=2_000,
+        visible_first=10,
+        visible_last=19,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    filmstrip = build_viewport_demand(
+        surface_id="filmstrip",
+        generation=1,
+        row_count=2_000,
+        visible_first=1_000,
+        visible_last=1_005,
+        direction=1,
+        screens_per_second=4.0,
+        actively_scrolling=True,
+    )
+
+    coordinator.update_viewport(gallery, root=Path("/library"), query=query, collection_revision=1)
+    coordinator.update_viewport(filmstrip, root=Path("/library"), query=query, collection_revision=1)
+
+    assert coordinator.viewport_for("gallery").visible_range == (10, 19)
+    assert coordinator.viewport_for("filmstrip").visible_range == (1_000, 1_005)
+    coordinator.release_viewport("filmstrip")
+    assert coordinator.viewport_for("gallery") is not None
+    assert coordinator.viewport_for("filmstrip") is None

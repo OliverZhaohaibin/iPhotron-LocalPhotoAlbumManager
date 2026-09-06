@@ -42,9 +42,10 @@ Our design philosophy is strict to ensure user trust and data safety:
 
 *   **Folder-Native Principle**: "Folder = Album". We do not import photos into a database. The filesystem is the source of truth.
 *   **Non-Destructive Editing**: We never bake crop/color/video edits into source files (HEIC, JPG, MOV, etc.). The explicit exception is Assign Location, which saves the chosen place to the local index and best-effort writes GPS metadata through ExifTool after the user confirms the action.
-*   **Manifest Files**: User decisions such as covers, starring, ordering, and edits are stored in sidecar or state files like `.iphoto.album.json`, `.ipo`, and People state databases.
-*   **Disposable Cache With Stable User State**: The system must be robust enough to rebuild `global_index.db` (SQLite database), `links.json`, thumbnails, and the runtime People face snapshot when needed. Do not treat cache as persistent storage. People names, selected covers, hidden flags, groups, group order, pinned state, and group covers are user decisions stored in stable People state and must not be discarded during cache repair or rescans.
+*   **Durable State and Sidecars**: User decisions are stored across repository-backed state and sidecar files such as `global_index.db`, `.iphoto.album.json`, `.ipo`, `face_state.db`, and `pet_state.db`. Back up the complete `.iPhoto/` workspace rather than assuming all library databases are disposable.
+*   **Rebuildable Facts vs. Durable Choices**: Scan-derived rows, `links.json`, thumbnails, and People/Pets runtime snapshots can be rebuilt. `global_index.db` also contains favorites, hidden/trash flags, pinned/order data, manual metadata, and other durable repository-backed user state, so deleting the whole database is not a normal cache-recovery operation. Rescans and repairs must preserve durable choices.
 *   **Optional People AI Runtime**: Face clustering uses the optional `ai-demo` dependencies (`insightface` and `onnxruntime`). Core photo management must remain usable when those dependencies are not installed.
+*   **Optional Pets AI Runtime**: Pet detection and clustering use the optional `pets-ai` dependencies. Missing models or optional packages must not break the core library, People, editing, Live Photo, or Maps workflows.
 
 ## 4. Project Architecture
 
@@ -61,8 +62,8 @@ workers use application/session surfaces instead of legacy facades.
 *   **Maps Module** (`src/maps/`): Semi-independent offline map runtime with legacy vector tiles, helper-backed OBF rendering, and native OsmAnd widgets.
 
 Production source must not import `iPhoto.legacy` or `iPhoto.models.*`. The
-quarantined compatibility subtree is not an extension point. See
-`docs/architecture.md` and `AGENT.md` for the authoritative dependency rules.
+removed legacy application tree must not be restored. See
+`docs/architecture.md` and `AGENTS.md` for the authoritative dependency rules.
 
 ### Module Responsibilities
 *   `domain/`: Domain values, collection queries, and pure services.
@@ -73,11 +74,11 @@ quarantined compatibility subtree is not an extension point. See
 *   `core/`: Algorithms for pairing Live Photos, sorting, filtering, and image adjustment resolvers (light, color, B&W, curves, selective color, levels).
 *   `cache/`: Management of global SQLite database (`global_index.db`), migrations, recovery, and file-level locking.
 *   `people/`: Face detection/clustering pipeline, rebuildable People snapshot, stable People state, names, covers, hidden people, and groups.
+*   `pets/`: Pet detection/clustering pipeline, rebuildable Pets snapshot, durable Pets decisions, and the session-bound service API.
 *   `maps/`: Offline map sources, runtime discovery, map widgets, native OsmAnd bridge, and standalone map preview entry point.
 *   `utils/`: General utilities and wrappers for `ExifTool` and `FFmpeg`.
 *   `gui/coordinators/`: MVVM coordinators managing view navigation and business flow.
 *   `gui/viewmodels/`: View models for data binding and presentation logic.
-*   `legacy/`: Quarantined historical compatibility code; no production imports or new features.
 
 ## 5. Coding Standards
 
@@ -153,8 +154,9 @@ pytest
 
 ### Robustness
 *   Tests must simulate missing or corrupt files to ensure the application handles them gracefully without crashing.
-*   **Rebuildability**: Verify that deleting `global_index.db` or `links.json` results in them being correctly rebuilt by the system through re-scanning.
+*   **Rebuildability**: Verify that rescanning rebuilds derived scan facts and that deleting derived artifacts such as `links.json` or runtime thumbnails causes safe regeneration. Do not delete `global_index.db` as a cache-recovery test; verify instead that repository-backed favorites, hidden/trash flags, pinned/order data, and manual metadata survive rescans and repairs.
 *   **People State Safety**: When changing face clustering, merges, covers, hidden people, or groups, verify both repository behavior and GUI behavior. Stable People state must survive rescans and runtime snapshot rebuilds.
+*   **Pets State Safety**: When changing pet detection, clustering, names, covers, hidden state, rejected detections, or redirects, verify that `pet_state.db` decisions survive rescans and `pet_index.db` rebuilds.
 *   **Architecture**: Run `python3 tools/check_architecture.py` and `pytest tests/architecture -q` for boundary-sensitive work.
 
 ## 9. Submitting Issues
@@ -194,7 +196,7 @@ We follow a standard commit message format to ensure history is readable.
 
 All submissions will be reviewed by maintainers. We look for:
 
-*   **Architectural Consistency**: Adherence to the layered architecture (Core vs. GUI) and Facade pattern.
+*   **Architectural Consistency**: Adherence to the `RuntimeContext` / `LibrarySession` / application-port boundaries and the documented dependency direction.
 *   **Data Safety**: Strict compliance with non-destructive editing and file locking rules.
 *   **Test Coverage**: New features must include unit tests; bug fixes must include regression tests.
 *   **Readability**: Clean, typed, and well-documented code following our style guide.
@@ -204,7 +206,7 @@ All submissions will be reviewed by maintainers. We look for:
 We welcome contributions across the entire stack:
 
 *   **Core Backend**: Filesystem logic, pairing algorithms, and performance optimization (NumPy/Numba).
-*   **People & Groups**: Face clustering, People state persistence, group workflows, cover handling, hidden-person filtering, and merge safety.
+*   **People & Pets**: Recognition clustering, durable state, group workflows, cover handling, hidden filtering, rejected detections, and merge safety.
 *   **GUI (PySide6)**: New widgets, view controllers, and interaction improvements.
 *   **OpenGL/Maps**: Shader development, map rendering, and high-performance image viewers.
 *   **Documentation & Tooling**: Improving guides, adding docstrings, and enhancing CI/CD scripts.

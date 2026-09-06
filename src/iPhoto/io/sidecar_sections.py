@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Mapping, Tuple
 import xml.etree.ElementTree as ET
 
@@ -43,6 +44,13 @@ def _float_or_default(value: object | None, default: float) -> float:
         return float(default)
 
 
+def _finite_or_default(value: object | None, default: float) -> float:
+    """Return a finite float so malformed sidecars cannot leak NaN/Inf."""
+
+    numeric = _float_or_default(value, default)
+    return numeric if math.isfinite(numeric) else float(default)
+
+
 # ---------------------------------------------------------------------------
 # Crop constants
 # ---------------------------------------------------------------------------
@@ -71,27 +79,25 @@ _ATTR_HEIGHT = "h"
 def _normalised_crop_components(values: Mapping[str, float | bool]) -> tuple[float, float, float, float]:
     """Return ``(left, top, width, height)`` from centre-based crop adjustments."""
 
-    cx = _clamp01(_float_or_default(values.get("Crop_CX"), 0.5))
-    cy = _clamp01(_float_or_default(values.get("Crop_CY"), 0.5))
-    width = _clamp01(_float_or_default(values.get("Crop_W"), 1.0))
-    height = _clamp01(_float_or_default(values.get("Crop_H"), 1.0))
+    cx = _finite_or_default(values.get("Crop_CX"), 0.5)
+    cy = _finite_or_default(values.get("Crop_CY"), 0.5)
+    width = max(0.0, _finite_or_default(values.get("Crop_W"), 1.0))
+    height = max(0.0, _finite_or_default(values.get("Crop_H"), 1.0))
 
     half_w = width * 0.5
     half_h = height * 0.5
-    cx = max(half_w, min(1.0 - half_w, cx))
-    cy = max(half_h, min(1.0 - half_h, cy))
-    left = max(0.0, min(1.0 - width, cx - half_w))
-    top = max(0.0, min(1.0 - height, cy - half_h))
+    left = cx - half_w
+    top = cy - half_h
     return (left, top, width, height)
 
 
 def _centre_crop_from_top_left(left: float, top: float, width: float, height: float) -> dict[str, float]:
     """Convert top-left crop coordinates to the centre-based representation."""
 
-    width = _clamp01(width)
-    height = _clamp01(height)
-    left = max(0.0, min(1.0 - width, _clamp01(left)))
-    top = max(0.0, min(1.0 - height, _clamp01(top)))
+    width = max(0.0, _finite_or_default(width, 1.0))
+    height = max(0.0, _finite_or_default(height, 1.0))
+    left = _finite_or_default(left, 0.0)
+    top = _finite_or_default(top, 0.0)
     cx = left + width * 0.5
     cy = top + height * 0.5
     return {
@@ -142,10 +148,10 @@ def _read_crop_from_node(node: ET.Element) -> dict[str, float]:
 def _read_crop_from_legacy_attributes(node: ET.Element) -> dict[str, float]:
     """Return crop adjustments stored as legacy ``<Crop cx=...`` attributes."""
 
-    cx = _clamp01(_float_or_default(node.get(_ATTR_CX), 0.5))
-    cy = _clamp01(_float_or_default(node.get(_ATTR_CY), 0.5))
-    width = _clamp01(_float_or_default(node.get(_ATTR_WIDTH), 1.0))
-    height = _clamp01(_float_or_default(node.get(_ATTR_HEIGHT), 1.0))
+    cx = _finite_or_default(node.get(_ATTR_CX), 0.5)
+    cy = _finite_or_default(node.get(_ATTR_CY), 0.5)
+    width = max(0.0, _finite_or_default(node.get(_ATTR_WIDTH), 1.0))
+    height = max(0.0, _finite_or_default(node.get(_ATTR_HEIGHT), 1.0))
     return {
         "Crop_CX": cx,
         "Crop_CY": cy,

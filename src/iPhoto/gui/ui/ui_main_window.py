@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+import time
 from enum import StrEnum
 from pathlib import Path
 
@@ -88,6 +89,8 @@ class Ui_MainWindow(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._features: dict[FeatureKind, object] = {}
+        self._prepared_detail_page = None
+        self._detail_native_prepare_duration_ms = 0.0
         self._main_window: QMainWindow | None = None
         self._library = None
 
@@ -148,6 +151,41 @@ class Ui_MainWindow(QObject):
         self.title_separator.setFixedHeight(1)
         window_chrome_layout.addWidget(self.title_separator)
 
+        self.sidebar = AlbumSidebar(library, MainWindow)
+        self.gallery_page = GalleryPageWidget()
+        self.grid_view = self.gallery_page.grid_view
+
+        right_panel = QWidget()
+        right_panel.setObjectName("rightPanel")
+        _configure_opaque_widget_background(right_panel)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.view_stack = QStackedWidget()
+        self.view_stack.setObjectName("mainViewStack")
+        _configure_opaque_widget_background(self.view_stack)
+
+        self.view_stack.addWidget(self.gallery_page)
+        self.view_stack.setCurrentWidget(self.gallery_page)
+        right_layout.addWidget(self.view_stack)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(right_panel)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setCollapsible(0, True)
+        self.splitter.setCollapsible(1, False)
+
+        self.window_shell_layout.addWidget(self.splitter)
+
+        # QMenuBar forces macOS to create the top-level native QWindow.  The
+        # complete QRhi hierarchy must already be attached at that point so Qt
+        # creates the window with MetalSurface (or the selected desktop API)
+        # instead of permanently committing a RasterSurface first.
+        MainWindow.setCentralWidget(self.window_shell)
+        self.prepare_detail_native_hierarchy()
+
         self.main_header = MainHeaderWidget(self.window_shell, MainWindow)
         self.menu_bar_container = self.main_header
         self.menu_bar = self.main_header.menu_bar
@@ -186,42 +224,12 @@ class Ui_MainWindow(QObject):
         self.language_de = self.main_header.language_de
         self.language_zh_cn = self.main_header.language_zh_cn
 
-        self.window_shell_layout.addWidget(self.window_chrome)
-        self.window_shell_layout.addWidget(self.menu_bar_container)
-
-        self.sidebar = AlbumSidebar(library, MainWindow)
-        self.gallery_page = GalleryPageWidget()
-        self.grid_view = self.gallery_page.grid_view
-
-        right_panel = QWidget()
-        right_panel.setObjectName("rightPanel")
-        _configure_opaque_widget_background(right_panel)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-
-        self.view_stack = QStackedWidget()
-        self.view_stack.setObjectName("mainViewStack")
-        _configure_opaque_widget_background(self.view_stack)
-
-        self.view_stack.addWidget(self.gallery_page)
-        self.view_stack.setCurrentWidget(self.gallery_page)
-        right_layout.addWidget(self.view_stack)
-
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.addWidget(self.sidebar)
-        self.splitter.addWidget(right_panel)
-        self.splitter.setStretchFactor(0, 0)
-        self.splitter.setStretchFactor(1, 1)
-        self.splitter.setCollapsible(0, True)
-        self.splitter.setCollapsible(1, False)
-
-        self.window_shell_layout.addWidget(self.splitter)
+        self.window_shell_layout.insertWidget(0, self.window_chrome)
+        self.window_shell_layout.insertWidget(1, self.menu_bar_container)
 
         self.status_bar = ChromeStatusBar(self.window_shell)
         self.window_shell_layout.addWidget(self.status_bar)
         self.progress_bar = self.status_bar.progress_bar
-
-        MainWindow.setCentralWidget(self.window_shell)
 
         self.notification_toast = NotificationToast(MainWindow)
 
@@ -248,13 +256,9 @@ class Ui_MainWindow(QObject):
         return created
 
     def _create_detail_feature(self) -> object:
-        from .widgets.detail_page import DetailPageWidget
-        from .widgets.gl_image_viewer import GLImageViewer
-        from .widgets.info_panel import InfoPanel
-
         assert self._main_window is not None
-        shared_image_viewer = GLImageViewer()
-        self.detail_page = DetailPageWidget(self._main_window, image_viewer=shared_image_viewer)
+        self.detail_page = self.prepare_detail_native_hierarchy()
+        self.detail_page.complete_feature()
         for name in (
             "back_button", "info_button", "share_button", "favorite_button",
             "rotate_left_button", "edit_button", "zoom_widget", "zoom_slider",
@@ -264,21 +268,76 @@ class Ui_MainWindow(QObject):
             "detail_chrome_container", "detail_header_separator", "player_stack",
             "player_placeholder", "video_area", "player_bar", "video_trim_bar",
             "face_name_overlay", "filmstrip_view", "live_badge", "badge_host",
-            "player_container", "edit_mode_group", "edit_adjust_action", "edit_crop_action",
+            "player_container",
+        ):
+            setattr(self, name, getattr(self.detail_page, name))
+        self.image_viewer = self.detail_page.image_viewer
+        self.edit_image_viewer = self.detail_page.image_viewer
+        self.player_container.installEventFilter(self._main_window)
+        self.retranslateUi(self._main_window)
+        return self.detail_page
+
+    def prepare_detail_native_hierarchy(self):
+        """Attach every Detail QRhi widget to its final top-level pre-show."""
+
+        existing = self._prepared_detail_page
+        if existing is not None:
+            return existing
+        from .widgets.detail_page import DetailPageWidget
+
+        assert self._main_window is not None
+        current_page = self.view_stack.currentWidget()
+        detail_page = None
+        started_ns = time.perf_counter_ns()
+        try:
+            detail_page = DetailPageWidget(
+                self._main_window,
+                parent=self.view_stack,
+                staged=True,
+            )
+            self.view_stack.addWidget(detail_page)
+            if current_page is not None:
+                self.view_stack.setCurrentWidget(current_page)
+        except Exception:
+            if detail_page is not None:
+                self.view_stack.removeWidget(detail_page)
+                detail_page.deleteLater()
+            raise
+        finally:
+            self._detail_native_prepare_duration_ms = (
+                time.perf_counter_ns() - started_ns
+            ) / 1_000_000.0
+
+        self._prepared_detail_page = detail_page
+        return detail_page
+
+    def ensure_detail_edit_bundle(self) -> object:
+        """Publish the edit-only Detail controls on first edit use."""
+
+        detail_page = self.ensure_feature(FeatureKind.DETAIL)
+        detail_page.ensure_edit_bundle()
+        for name in (
+            "edit_mode_group", "edit_adjust_action", "edit_crop_action",
             "edit_compare_button", "edit_reset_button", "edit_done_button",
             "edit_rotate_left_button", "edit_sidebar", "edit_mode_control",
             "edit_header_container", "edit_zoom_host", "edit_zoom_host_layout",
             "edit_right_controls_layout",
         ):
-            setattr(self, name, getattr(self.detail_page, name))
-        self.image_viewer = shared_image_viewer
-        self.edit_image_viewer = shared_image_viewer
-        self.view_stack.addWidget(self.detail_page)
+            setattr(self, name, getattr(detail_page, name))
+        return detail_page
+
+    def ensure_info_panel(self):
+        """Create the metadata/location panel on first explicit use."""
+
+        existing = getattr(self, "info_panel", None)
+        if existing is not None:
+            return existing
+        from .widgets.info_panel import InfoPanel
+
+        assert self._main_window is not None
         self.info_panel = InfoPanel(self._main_window)
         self.info_panel.set_map_runtime(getattr(self._library, "map_runtime", None))
-        self.player_container.installEventFilter(self._main_window)
-        self.retranslateUi(self._main_window)
-        return self.detail_page
+        return self.info_panel
 
     def _create_preview_feature(self) -> object:
         from .widgets.preview_window import PreviewWindow

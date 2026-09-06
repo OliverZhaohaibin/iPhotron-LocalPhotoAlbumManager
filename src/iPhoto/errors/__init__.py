@@ -71,6 +71,10 @@ class ExternalToolError(IPhotoError):
     """Raised when an external tool such as exiftool or ffmpeg fails."""
 
 
+class ExternalToolTimeoutError(ExternalToolError):
+    """Raised when an external tool exceeds its bounded execution time."""
+
+
 class IndexCorruptedError(IPhotoError):
     """Raised when the cached index cannot be parsed."""
 

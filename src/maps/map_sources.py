@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT = Path("tiles") / "extension"
+DEFAULT_OSMAND_BUNDLED_ARCHIVE_FILENAME = "extension.tar"
 DEFAULT_OSMAND_OBF_FILENAME = "World_basemap_2.obf"
 DEFAULT_OSMAND_STYLE_FILENAME = "snowmobile.render.xml"
 DEFAULT_OSMAND_RESOURCES_ROOT = DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT
@@ -165,6 +166,12 @@ def prefer_osmand_native_widget() -> bool:
     ``IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0`` to force the Python OBF path.
     """
 
+    if sys.platform == "linux":
+        qpa = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
+        session = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+        if qpa.startswith("wayland") or (not qpa and session == "wayland"):
+            return False
+
     raw_value = os.environ.get(ENV_PREFER_OSMAND_NATIVE_WIDGET, "").strip().lower()
     if raw_value in _TRUE_ENV_VALUES:
         return True
@@ -217,7 +224,7 @@ class MapSourceSpec:
         root = package_root or _package_root()
         return cls(
             kind="legacy_pbf",
-            data_path=root / "tiles",
+            data_path=_bundled_maps_root(root) / "tiles",
             style_path=root / "style.json",
         )
 
@@ -332,6 +339,22 @@ def default_osmand_download_url(platform: str | None = None) -> str | None:
     if resolved_platform.startswith("linux"):
         return LINUX_MAP_EXTENSION_DOWNLOAD_URL
     return None
+
+
+def bundled_osmand_extension_archive(package_root: Path | None = None) -> Path | None:
+    """Return the packaged macOS extension archive when one is present."""
+
+    root = Path(package_root or _package_root()).resolve()
+    macos_root = root.parent
+    if macos_root.name != "MacOS" or macos_root.parent.name != "Contents":
+        return None
+    archive = (
+        macos_root.parent
+        / "Resources"
+        / "maps"
+        / DEFAULT_OSMAND_BUNDLED_ARCHIVE_FILENAME
+    )
+    return archive.resolve() if archive.is_file() else None
 
 
 def supports_map_extension_download(platform: str | None = None) -> bool:
@@ -539,7 +562,26 @@ def default_osmand_extension_root(package_root: Path | None = None) -> Path:
 
 
 def _bundled_osmand_extension_root(package_root: Path) -> Path:
-    return (Path(package_root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+    return (_bundled_maps_root(package_root) / DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT).resolve()
+
+
+def _bundled_maps_root(package_root: Path) -> Path:
+    """Return the read-only map root bundled with the current runtime.
+
+    Nuitka places Python modules and small resources in ``Contents/MacOS``.
+    Large map data belongs in ``Contents/Resources``: leaving it beside the
+    executable makes macOS codesign inspect dotted style directories as nested
+    bundles. Source and non-macOS packaged layouts continue to use the package
+    directory itself.
+    """
+
+    root = Path(package_root).resolve()
+    macos_root = root.parent
+    if macos_root.name == "MacOS" and macos_root.parent.name == "Contents":
+        resources_root = macos_root.parent / "Resources" / "maps"
+        if resources_root.exists():
+            return resources_root.resolve()
+    return root
 
 
 def _managed_osmand_extension_root(package_root: Path) -> Path:
@@ -636,6 +678,8 @@ def _should_use_external_osmand_extension_root(package_root: Path) -> bool:
         return True
     if os.environ.get("APPIMAGE"):
         return True
+    if bundled_osmand_extension_archive(package_root) is not None:
+        return True
 
     resolved_root = Path(package_root).resolve()
     writable_probe_root = resolved_root / "tiles"
@@ -647,7 +691,7 @@ def _should_use_external_osmand_extension_root(package_root: Path) -> bool:
 
 def _default_osmand_search_roots(package_root: Path) -> tuple[Path, ...]:
     normalized_root = Path(package_root).resolve()
-    bundled_root = normalized_root
+    bundled_root = _bundled_maps_root(normalized_root)
     override_root = os.environ.get(ENV_OSMAND_EXTENSION_ROOT, "").strip()
     if override_root:
         external_root = Path(override_root).expanduser().resolve().parents[1]
@@ -705,6 +749,7 @@ __all__ = [
     "DEFAULT_OSMAND_PENDING_EXTENSION_SUFFIX",
     "DEFAULT_OSMAND_SEARCH_RELATIVE_PATH",
     "DEFAULT_OSMAND_EXTENSION_RELATIVE_ROOT",
+    "DEFAULT_OSMAND_BUNDLED_ARCHIVE_FILENAME",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH",
     "DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS",
@@ -718,6 +763,7 @@ __all__ = [
     "ENV_PREFER_OSMAND_NATIVE_WIDGET",
     "MapBackendMetadata",
     "MapSourceSpec",
+    "bundled_osmand_extension_archive",
     "apply_pending_osmand_extension_install",
     "default_osmand_extension_root",
     "default_osmand_tiles_root",

@@ -66,10 +66,10 @@ def test_discard_queued_preserves_active_hint_request() -> None:
     queued = object()
     loader._active = True
     loader._signals = active
-    loader._queued = queued
+    loader._queued = {"gallery": queued}
 
     loader.discard_queued()
 
     assert loader._active is True
     assert loader._signals is active
-    assert loader._queued is None
+    assert loader._queued == {}

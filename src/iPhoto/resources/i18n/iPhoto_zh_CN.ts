@@ -237,6 +237,66 @@
             <source>Zoom</source>
             <translation>缩放</translation>
         </message>
+        <message>
+            <source>The photo library could not be opened during startup: %1</source>
+            <translation>启动时无法打开照片图库：%1</translation>
+        </message>
+        <message>
+            <source>The photo library database is in use by another process. Close other iPhotron versions and retry.</source>
+            <translation>照片图库数据库正被其他进程使用。请关闭其他 iPhotron 版本后重试。</translation>
+        </message>
+        <message>
+            <source>Windows or security software is temporarily using a migration file. Close other programs or retry shortly.</source>
+            <translation>Windows 或安全软件正在暂时占用迁移文件。请关闭其他程序或稍后重试。</translation>
+        </message>
+        <message>
+            <source>The photo library database is damaged. The original file has been preserved.</source>
+            <translation>照片图库数据库已损坏，原始文件已保留。</translation>
+        </message>
+        <message>
+            <source>The photo library database is read-only. Remove its read-only attribute or grant modify access.</source>
+            <translation>照片图库数据库为只读。请移除只读属性或授予修改权限。</translation>
+        </message>
+        <message>
+            <source>The .iPhoto work folder cannot be updated. Check that folder's permissions.</source>
+            <translation>无法更新 .iPhoto 工作文件夹。请检查该文件夹的权限。</translation>
+        </message>
+        <message>
+            <source>There is not enough free disk space to prepare the photo library.</source>
+            <translation>可用磁盘空间不足，无法准备照片图库。</translation>
+        </message>
+        <message>
+            <source>The photo library database could not be opened. Check the path, drive, and security software.</source>
+            <translation>无法打开照片图库数据库。请检查路径、磁盘连接和安全软件。</translation>
+        </message>
+        <message>
+            <source>A safety backup could not be created. Migration did not start and the original database was preserved.</source>
+            <translation>无法创建安全备份。迁移尚未开始，原数据库已保留。</translation>
+        </message>
+        <message>
+            <source>The photo library database update failed. The original database and backup were preserved.</source>
+            <translation>照片图库数据库更新失败。原数据库和备份均已保留。</translation>
+        </message>
+        <message>
+            <source>This photo library was created by a newer app version. Open it with the same or a newer version.</source>
+            <translation>此照片图库由更新的应用版本创建。请使用相同或更新版本打开。</translation>
+        </message>
+        <message>
+            <source>The photo library index was restored after an interrupted update.</source>
+            <translation>照片图库索引已从中断的更新中恢复。</translation>
+        </message>
+        <message>
+            <source>The photo library was recovered and opened, but temporary migration files could not be removed. They will be cleaned up later.</source>
+            <translation>照片图库已恢复并打开，但无法移除临时迁移文件。系统稍后会再次清理。</translation>
+        </message>
+        <message>
+            <source>The photo library opened, but temporary migration files could not be removed. They will be cleaned up on a later start.</source>
+            <translation>照片图库已打开，但无法移除临时迁移文件。系统将在后续启动时再次清理。</translation>
+        </message>
+        <message>
+            <source>Dismiss</source>
+            <translation>关闭</translation>
+        </message>
     </context>
     <context>
         <name>MapExtension</name>
@@ -364,6 +424,10 @@
             <translation>缩略图已更新。</translation>
         </message>
         <message>
+            <source>Thumbnail update failed.</source>
+            <translation>缩略图更新失败。</translation>
+        </message>
+        <message>
             <source>Loading items…</source>
             <translation>正在加载项目…</translation>
         </message>
@@ -444,7 +508,11 @@
         </message>
         <message>
             <source>Choose Someone Else…</source>
-            <translation>选择其他人…</translation>
+            <translation>选择其他名称…</translation>
+        </message>
+        <message>
+            <source>New Name…</source>
+            <translation>新建名称…</translation>
         </message>
         <message>
             <source>New Person…</source>
@@ -459,8 +527,16 @@
             <translation>不是此人物</translation>
         </message>
         <message>
+            <source>Not This Name</source>
+            <translation>不是此名称</translation>
+        </message>
+        <message>
             <source>Choose Someone Else</source>
-            <translation>选择其他人</translation>
+            <translation>选择其他名称</translation>
+        </message>
+        <message>
+            <source>Assign to</source>
+            <translation>分配给</translation>
         </message>
         <message>
             <source>Assign this face to</source>
@@ -475,8 +551,16 @@
             <translation>新建人物</translation>
         </message>
         <message>
+            <source>New Name</source>
+            <translation>新建名称</translation>
+        </message>
+        <message>
             <source>Person name:</source>
             <translation>人物姓名：</translation>
+        </message>
+        <message>
+            <source>Name:</source>
+            <translation>名称：</translation>
         </message>
         <message>
             <source>Unnamed</source>
@@ -641,6 +725,34 @@
         <message>
             <source>Cannot Merge People</source>
             <translation>无法合并人物</translation>
+        </message>
+        <message>
+            <source>Merge Failed</source>
+            <translation>合并失败</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. No photos were deleted.</source>
+            <translation>无法合并这些身份。没有删除任何照片。</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. They may have changed since this view was loaded.</source>
+            <translation>无法合并这些身份。它们可能在当前视图加载后发生了变化。</translation>
+        </message>
+        <message>
+            <source>Recognition Busy</source>
+            <translation>识别任务繁忙</translation>
+        </message>
+        <message>
+            <source>Recognition data is still recovering. Please try again shortly.</source>
+            <translation>识别数据仍在恢复中，请稍后重试。</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Pets</source>
+            <translation>无法合并宠物</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>同一个宠物身份不能包含同一张照片中的两个检测结果。请删除重复检测，不要通过合并绕过此限制。</translation>
         </message>
         <message>
             <source>Merge Person</source>
@@ -1071,6 +1183,22 @@
             <source>Writing data, please wait...</source>
             <translation>正在写入数据，请稍候…</translation>
         </message>
+        <message>
+            <source>The name could not be assigned. Please try again.</source>
+            <translation>无法分配该名称，请重试。</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. The identities may have changed.</source>
+            <translation>无法分配该名称，相关身份可能已经发生变化。</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>同一个宠物身份不能包含同一张照片中的两个检测结果。请删除重复检测，不要通过合并绕过此限制。</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>同一宠物身份不能包含同一张照片中的两个标记。请为当前标记选择其他身份。</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>
@@ -1349,6 +1477,10 @@
         <message>
             <source>unnamed</source>
             <translation>未命名</translation>
+        </message>
+        <message>
+            <source>Pending confirmation</source>
+            <translation>待确认</translation>
         </message>
         <message>
             <source>Please enter a name before saving the face.</source>
@@ -1793,6 +1925,25 @@ Select a tile directory to switch back to the legacy backend.</source>
         <message>
             <source>Return to Map</source>
             <translation>返回地图</translation>
+        </message>
+    </context>
+    <context>
+        <name>PetCard</name>
+        <message>
+            <source>Unconfirmed Cat</source>
+            <translation>未确认的猫</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Dog</source>
+            <translation>未确认的狗</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Pet</source>
+            <translation>未确认的宠物</translation>
+        </message>
+        <message>
+            <source>Unconfirmed</source>
+            <translation>未确认</translation>
         </message>
     </context>
 </TS>

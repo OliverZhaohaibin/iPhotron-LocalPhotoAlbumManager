@@ -27,6 +27,7 @@ class _MarkerCluster:
     latitude_sum: float = 0.0
     longitude_sum: float = 0.0
     screen_pos: QPointF = field(default_factory=QPointF)
+    representative_screen_pos_approx: Optional[QPointF] = None
     screen_x_sum: float = 0.0
     screen_y_sum: float = 0.0
     bounding_rect: QRectF = field(default_factory=QRectF)
@@ -36,6 +37,8 @@ class _MarkerCluster:
 
         if not self.assets:
             self.assets.append(self.representative)
+        if self.representative_screen_pos_approx is None:
+            self.representative_screen_pos_approx = QPointF(self.screen_pos)
         self.latitude_sum = sum(asset.latitude for asset in self.assets)
         self.longitude_sum = sum(asset.longitude for asset in self.assets)
         count = len(self.assets)
@@ -89,6 +92,19 @@ class _MarkerCluster:
         self.screen_y_sum = point.y() * count
 
 
+@dataclass(frozen=True)
+class _ClusterRequestContext:
+    """Immutable parameters associated with an in-flight worker request."""
+
+    request_id: int
+    width: int
+    height: int
+    threshold: float
+    cell_size: int
+    margin: int
+    refine_exact_projection: bool
+
+
 class _ClusterWorker(QObject):
     """Worker object that performs clustering on a dedicated thread."""
 
@@ -100,11 +116,17 @@ class _ClusterWorker(QObject):
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._interrupted = False
+        self._cancel_before_request_id = 0
 
-    def interrupt(self) -> None:
+    def interrupt(self, next_request_id: Optional[int] = None) -> None:
         """Request cancellation of the currently running clustering job."""
 
         self._interrupted = True
+        if next_request_id is not None:
+            self._cancel_before_request_id = max(
+                self._cancel_before_request_id,
+                int(next_request_id),
+            )
 
     def build_clusters(
         self,
@@ -120,6 +142,9 @@ class _ClusterWorker(QObject):
         margin: int,
     ) -> None:
         """Project *assets* and aggregate them into clusters in screen space."""
+
+        if request_id < self._cancel_before_request_id:
+            return
 
         self._interrupted = False
 
@@ -138,7 +163,10 @@ class _ClusterWorker(QObject):
         clusters: list[_MarkerCluster] = []
 
         for asset in assets:
-            if self._interrupted:
+            if (
+                self._interrupted
+                or request_id < self._cancel_before_request_id
+            ):
                 return
 
             point = self._project_to_screen(
@@ -199,7 +227,10 @@ class _ClusterWorker(QObject):
                 clusters.append(cluster)
                 grid.setdefault((cell_x, cell_y), []).append(cluster)
 
-        if not self._interrupted:
+        if (
+            not self._interrupted
+            and request_id >= self._cancel_before_request_id
+        ):
             self.finished.emit(request_id, clusters)
 
     def _project_to_screen(
@@ -258,6 +289,7 @@ class MarkerController(QObject):
     citiesUpdated = Signal(list)
     markerActivated = Signal(list)
     thumbnailUpdated = Signal(str, QPixmap)
+    thumbnailInvalidated = Signal(str)
     thumbnailsInvalidated = Signal()
     _clustering_requested = Signal(int, object, int, int, float, float, float, float, int, int)
 
@@ -267,6 +299,13 @@ class MarkerController(QObject):
     # annotations so the renderer can draw lightweight labels alongside the
     # always-on photo clusters.
     CITY_LABEL_FETCH_LEVEL = 5
+    EXACT_PROJECTION_ASSET_LIMIT = 1_000
+    DENSITY_ADAPTATION_START_ASSET_COUNT = 1_000
+    DENSITY_ADAPTATION_FULL_ASSET_COUNT = 2_000
+    TARGET_VISIBLE_CLUSTERS = 160.0
+    ZOOM_THRESHOLD_REFERENCE = 7.0
+    MAX_ZOOM_OUT_THRESHOLD_FACTOR = 6.0
+    DENSITY_FULL_EFFECT_ZOOM_DELTA = 3.0
 
     def __init__(
         self,
@@ -287,6 +326,7 @@ class MarkerController(QObject):
         self._assets: list[GeotaggedAsset] = []
         self._library_root: Optional[Path] = None
         self._clusters: list[_MarkerCluster] = []
+        self._current_representative_rels: set[str] = set()
         self._city_annotations: list[CityAnnotation] = []
         self._view_center_x = 0.5
         self._view_center_y = 0.5
@@ -313,42 +353,61 @@ class MarkerController(QObject):
         self._cluster_thread.finished.connect(self._cluster_worker.deleteLater)
         self._cluster_thread.start()
         self._cluster_request_id = 0
+        self._cluster_request_context: Optional[_ClusterRequestContext] = None
 
     def set_assets(self, assets: Iterable[GeotaggedAsset], library_root: Path) -> None:
         """Replace the asset catalogue shown on the map."""
 
         normalized_assets = [asset for asset in assets if isinstance(asset, GeotaggedAsset)]
         same_root = self._library_root == library_root
-        same_assets = (
-            same_root
-            and len(normalized_assets) == len(self._assets)
-            and all(
-                incoming_asset is existing_asset
-                for incoming_asset, existing_asset in zip(normalized_assets, self._assets)
-            )
-        )
+        same_assets = same_root and normalized_assets == self._assets
         if same_assets:
             self._schedule_cluster_update()
             return
 
         if not self._pending_click_survives_asset_update(normalized_assets, same_root):
             self._clear_pending_click()
+
+        if same_root:
+            existing_by_rel = {
+                asset.library_relative: asset
+                for asset in self._assets
+            }
+            incoming_rels = {
+                asset.library_relative
+                for asset in normalized_assets
+            }
+            for incoming_asset in normalized_assets:
+                existing_asset = existing_by_rel.get(incoming_asset.library_relative)
+                if existing_asset is not None and incoming_asset != existing_asset:
+                    self._thumbnail_loader.invalidate(incoming_asset.library_relative)
+            removed_entries = [
+                (removed_rel, existing_by_rel[removed_rel].absolute_path)
+                for removed_rel in sorted(existing_by_rel.keys() - incoming_rels)
+            ]
+            for removed_rel, _absolute_path in removed_entries:
+                self._current_representative_rels.discard(removed_rel)
+                self.thumbnailInvalidated.emit(removed_rel)
+            if removed_entries:
+                self._thumbnail_loader.evict_many(removed_entries)
+
         self._assets = normalized_assets
         self._library_root = library_root
-        self._city_annotations = []
         if not same_root:
+            self._current_representative_rels.clear()
+            self._city_annotations = []
             self._thumbnail_loader.reset_for_album(library_root)
-        self.thumbnailsInvalidated.emit()
-        self.citiesUpdated.emit([])
+            self.thumbnailsInvalidated.emit()
+            self.citiesUpdated.emit([])
         self._schedule_cluster_update()
 
     def clear(self) -> None:
         """Remove all markers and cancel outstanding work."""
 
-        self._cluster_worker.interrupt()
-        self._cluster_request_id += 1
+        self._invalidate_cluster_request()
         self._assets = []
         self._clusters = []
+        self._current_representative_rels.clear()
         self._city_annotations = []
         self._library_root = None
         self._is_panning = False
@@ -364,7 +423,7 @@ class MarkerController(QObject):
     def shutdown(self) -> None:
         """Stop worker threads so the application can exit cleanly."""
 
-        self._cluster_worker.interrupt()
+        self._invalidate_cluster_request()
         if self._cluster_thread.isRunning():
             self._cluster_thread.quit()
             self._cluster_thread.wait()
@@ -380,6 +439,7 @@ class MarkerController(QObject):
     def handle_pan(self, delta: QPointF) -> None:
         """Shift visible markers while the user drags the map."""
 
+        self._invalidate_cluster_request()
         self._is_panning = True
         if self._cluster_timer.isActive():
             self._cluster_timer.stop()
@@ -454,6 +514,8 @@ class MarkerController(QObject):
 
         if self._library_root is None or root != self._library_root:
             return
+        if rel not in self._current_representative_rels:
+            return
         if pixmap.isNull():
             return
         self.thumbnailUpdated.emit(rel, pixmap)
@@ -502,15 +564,23 @@ class MarkerController(QObject):
             return 3
 
     def _schedule_cluster_update(self) -> None:
+        self._invalidate_cluster_request()
         if self._is_panning:
             return
         self._cluster_timer.start()
 
+    def _invalidate_cluster_request(self) -> None:
+        """Cancel worker output that no longer matches the current map state."""
+
+        self._cluster_request_id += 1
+        self._cluster_request_context = None
+        self._cluster_worker.interrupt(self._cluster_request_id)
+
     def _rebuild_clusters(self) -> None:
         if not self._assets:
-            self._cluster_worker.interrupt()
-            self._cluster_request_id += 1
+            self._invalidate_cluster_request()
             self._clusters = []
+            self._current_representative_rels.clear()
             if self._city_annotations:
                 self._city_annotations = []
                 self.citiesUpdated.emit([])
@@ -605,18 +675,25 @@ class MarkerController(QObject):
         width = self._map_widget.width()
         height = self._map_widget.height()
         if width <= 0 or height <= 0:
+            self._current_representative_rels.clear()
             if self._clusters:
                 self._clusters = []
                 self.clustersUpdated.emit([])
             return
 
-        threshold = max(self._marker_size * 0.6, 48.0)
-        cell_size = max(int(threshold), 1)
+        density_factor = self._density_adaptation_factor(len(self._assets))
+        threshold = self._cluster_threshold(
+            width,
+            height,
+            density_factor=density_factor,
+        )
+        cell_size = max(math.ceil(threshold), 1)
         margin = self._marker_size
 
-        self._cluster_worker.interrupt()
-        self._cluster_request_id += 1
-        if self._prefer_exact_screen_projection:
+        if (
+            self._prefer_exact_screen_projection
+            and len(self._assets) <= self.EXACT_PROJECTION_ASSET_LIMIT
+        ):
             clusters = self._build_exact_projection_clusters(
                 width=width,
                 height=height,
@@ -628,6 +705,15 @@ class MarkerController(QObject):
             return
 
         request_id = self._cluster_request_id
+        self._cluster_request_context = _ClusterRequestContext(
+            request_id=request_id,
+            width=width,
+            height=height,
+            threshold=float(threshold),
+            cell_size=cell_size,
+            margin=margin,
+            refine_exact_projection=self._prefer_exact_screen_projection,
+        )
         self._clustering_requested.emit(
             request_id,
             self._assets,
@@ -646,21 +732,89 @@ class MarkerController(QObject):
     ) -> None:
         """Receive freshly computed clusters from the worker thread."""
 
-        if request_id != self._cluster_request_id:
+        context = self._cluster_request_context
+        if (
+            context is None
+            or request_id != self._cluster_request_id
+            or request_id != context.request_id
+            or self._is_panning
+        ):
             return
 
+        self._cluster_request_context = None
+        if context.refine_exact_projection:
+            clusters = self._refine_exact_projection_clusters(
+                clusters,
+                width=context.width,
+                height=context.height,
+                threshold=context.threshold,
+                cell_size=context.cell_size,
+                margin=context.margin,
+            )
         self._publish_clusters(clusters)
+
+    def _cluster_threshold(
+        self,
+        width: int,
+        height: int,
+        *,
+        density_factor: float = 0.0,
+    ) -> float:
+        """Return a zoom- and viewport-aware marker clustering radius."""
+
+        base_threshold = max(self._marker_size * 0.6, 48.0)
+        zoom_delta = max(0.0, self.ZOOM_THRESHOLD_REFERENCE - self._view_zoom)
+        zoom_factor = min(
+            self.MAX_ZOOM_OUT_THRESHOLD_FACTOR,
+            2.0 ** (zoom_delta / 2.0),
+        )
+        threshold = base_threshold * zoom_factor
+        density_factor = min(1.0, max(0.0, float(density_factor)))
+        if density_factor <= 0.0:
+            return threshold
+
+        viewport_area = float(max(1, width) * max(1, height))
+        density_floor = math.sqrt(
+            viewport_area / self.TARGET_VISIBLE_CLUSTERS
+        )
+        density_weight = density_factor * min(
+            1.0,
+            zoom_delta / self.DENSITY_FULL_EFFECT_ZOOM_DELTA,
+        )
+        density_threshold = base_threshold + (
+            max(base_threshold, density_floor) - base_threshold
+        ) * density_weight
+        return max(threshold, density_threshold)
+
+    @classmethod
+    def _density_adaptation_factor(cls, asset_count: int) -> float:
+        """Return a smooth density ramp independent of projection dispatch."""
+
+        start = cls.DENSITY_ADAPTATION_START_ASSET_COUNT
+        full = cls.DENSITY_ADAPTATION_FULL_ASSET_COUNT
+        if asset_count <= start:
+            return 0.0
+        if asset_count >= full:
+            return 1.0
+        return float(asset_count - start) / float(full - start)
 
     def _publish_clusters(self, clusters: list[_MarkerCluster]) -> None:
         """Publish a stable cluster snapshot to the overlay and label layers."""
 
+        self._current_representative_rels = {
+            cluster.representative.library_relative
+            for cluster in clusters
+        }
         for cluster in clusters:
             cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
-            self._ensure_thumbnail(cluster.representative)
 
         self._clusters = clusters
         self._update_city_annotations_for_clusters(self._clusters)
         self.clustersUpdated.emit(self._clusters)
+        # Publish the cluster set before synchronous cache hits so the overlay
+        # can pin the new viewport's representatives before inserting pixmaps.
+        for cluster in self._clusters:
+            self._ensure_thumbnail(cluster.representative)
 
     def _build_exact_projection_clusters(
         self,
@@ -726,6 +880,120 @@ class MarkerController(QObject):
                 grid.setdefault((cell_x, cell_y), []).append(cluster)
 
         return clusters
+
+    def _refine_exact_projection_clusters(
+        self,
+        coarse_clusters: Sequence[_MarkerCluster],
+        *,
+        width: int,
+        height: int,
+        threshold: float,
+        cell_size: int,
+        margin: int,
+    ) -> list[_MarkerCluster]:
+        """Refine coarse worker clusters with bounded native projections."""
+
+        grid: Dict[tuple[int, int], list[_MarkerCluster]] = {}
+        refined_clusters: list[_MarkerCluster] = []
+
+        for coarse_cluster in coarse_clusters:
+            representative = coarse_cluster.representative
+            exact_representative = self._map_widget.project_lonlat(
+                representative.longitude,
+                representative.latitude,
+            )
+            if exact_representative is None:
+                continue
+            approximate_representative = (
+                coarse_cluster.representative_screen_pos_approx
+            )
+            if approximate_representative is None:
+                approximate_representative = coarse_cluster.screen_pos
+            corrected_centroid = QPointF(
+                coarse_cluster.screen_pos.x()
+                + exact_representative.x()
+                - approximate_representative.x(),
+                coarse_cluster.screen_pos.y()
+                + exact_representative.y()
+                - approximate_representative.y(),
+            )
+            if corrected_centroid.x() < -margin or corrected_centroid.y() < -margin:
+                continue
+            if (
+                corrected_centroid.x() > width + margin
+                or corrected_centroid.y() > height + margin
+            ):
+                continue
+
+            cell_x = int(corrected_centroid.x() // cell_size)
+            cell_y = int(corrected_centroid.y() // cell_size)
+            candidates: list[_MarkerCluster] = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    candidates.extend(grid.get((cell_x + dx, cell_y + dy), []))
+
+            assigned = False
+            for target_cluster in candidates:
+                if (
+                    self.distance(target_cluster.screen_pos, corrected_centroid)
+                    > threshold
+                ):
+                    continue
+                self._merge_coarse_cluster(
+                    target_cluster,
+                    coarse_cluster,
+                    corrected_centroid,
+                )
+                new_cell = (
+                    int(target_cluster.screen_pos.x() // cell_size),
+                    int(target_cluster.screen_pos.y() // cell_size),
+                )
+                old_cell = getattr(target_cluster, "cell", None)
+                if old_cell != new_cell:
+                    if old_cell in grid:
+                        try:
+                            grid[old_cell].remove(target_cluster)
+                        except ValueError:
+                            pass
+                    grid.setdefault(new_cell, []).append(target_cluster)
+                    target_cluster.cell = new_cell  # type: ignore[attr-defined]
+                assigned = True
+                break
+
+            if assigned:
+                continue
+
+            asset_count = float(len(coarse_cluster.assets))
+            coarse_cluster.screen_pos = QPointF(corrected_centroid)
+            coarse_cluster.screen_x_sum = corrected_centroid.x() * asset_count
+            coarse_cluster.screen_y_sum = corrected_centroid.y() * asset_count
+            coarse_cluster.cell = (cell_x, cell_y)  # type: ignore[attr-defined]
+            refined_clusters.append(coarse_cluster)
+            grid.setdefault((cell_x, cell_y), []).append(coarse_cluster)
+
+        return refined_clusters
+
+    @staticmethod
+    def _merge_coarse_cluster(
+        target: _MarkerCluster,
+        source: _MarkerCluster,
+        source_centroid: QPointF,
+    ) -> None:
+        """Merge an aggregate cluster without revisiting its individual assets."""
+
+        source_count = len(source.assets)
+        if source_count <= 0:
+            return
+        target.assets.extend(source.assets)
+        target.latitude_sum += source.latitude_sum
+        target.longitude_sum += source.longitude_sum
+        target.screen_x_sum += source_centroid.x() * float(source_count)
+        target.screen_y_sum += source_centroid.y() * float(source_count)
+        total_count = float(len(target.assets))
+        target.screen_pos = QPointF(
+            target.screen_x_sum / total_count,
+            target.screen_y_sum / total_count,
+        )
 
     def _cluster_label(
         self, cluster: _MarkerCluster

@@ -20,6 +20,121 @@ function Assert-Exists {
     }
 }
 
+function Resolve-ExecutablePath {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+
+    if (Test-Path -LiteralPath $Executable -PathType Leaf) {
+        return (Get-Item -LiteralPath $Executable).FullName
+    }
+
+    $command = Get-Command $Executable -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($command) {
+        return $command.Source
+    }
+
+    return $null
+}
+
+function Test-IsWindowsStorePythonAlias {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+
+    return $Executable -match '(?i)[\\/]Microsoft[\\/]WindowsApps[\\/]python(?:3)?(?:\.exe)?$'
+}
+
+function Resolve-BuildPython {
+    param(
+        [string]$RequestedPython,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    if ($RequestedPython) {
+        $candidates.Add([pscustomobject]@{
+            Label = '-PythonExe'
+            Executable = $RequestedPython
+            PrefixArgs = @()
+        }) | Out-Null
+    }
+    else {
+        $repositoryParent = Split-Path -Parent $RepositoryRoot
+        $candidates.Add([pscustomobject]@{
+            Label = 'repository virtual environment'
+            Executable = (Join-Path $RepositoryRoot '.venv\Scripts\python.exe')
+            PrefixArgs = @()
+        }) | Out-Null
+        $candidates.Add([pscustomobject]@{
+            Label = 'parent virtual environment'
+            Executable = (Join-Path $repositoryParent '.venv\Scripts\python.exe')
+            PrefixArgs = @()
+        }) | Out-Null
+        $candidates.Add([pscustomobject]@{
+            Label = 'Python launcher (3.12)'
+            Executable = 'py.exe'
+            PrefixArgs = @('-3.12')
+        }) | Out-Null
+        $candidates.Add([pscustomobject]@{
+            Label = 'PATH python.exe'
+            Executable = 'python.exe'
+            PrefixArgs = @()
+        }) | Out-Null
+    }
+
+    # Windows PowerShell 5.1 rebuilds the native command line before invoking
+    # python.exe. Keep this probe on one line and use only Python single-quoted
+    # strings so embedded double quotes cannot be stripped during that step.
+    $probeScript = "import importlib.util, sys; v=sys.version.split()[0]; required=('nuitka','exiftool','pillow_heif','_pillow_heif'); missing=[name for name in required if importlib.util.find_spec(name) is None]; ok=sys.version_info >= (3, 12) and not missing; print(sys.executable); print(v); raise SystemExit(0 if ok else 'Python 3.12+ with Nuitka, PyExifTool, and pillow-heif installed is required; missing: '+','.join(missing))"
+    $attempts = New-Object System.Collections.Generic.List[string]
+
+    foreach ($candidate in $candidates) {
+        $resolvedExecutable = Resolve-ExecutablePath -Executable $candidate.Executable
+        if (-not $resolvedExecutable) {
+            $attempts.Add("$($candidate.Label): executable not found") | Out-Null
+            continue
+        }
+        if (Test-IsWindowsStorePythonAlias -Executable $resolvedExecutable) {
+            $attempts.Add("$($candidate.Label): rejected Microsoft Store App Execution Alias $resolvedExecutable") | Out-Null
+            continue
+        }
+
+        [string[]]$prefixArgs = $candidate.PrefixArgs
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # A rejected candidate is expected to write to stderr. Do not let
+            # Windows PowerShell convert that output into a terminating
+            # NativeCommandError; capture it and continue to the next candidate.
+            $ErrorActionPreference = 'Continue'
+            $probeOutput = @(& $resolvedExecutable @prefixArgs -c $probeScript 2>&1)
+            $probeExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($probeExitCode -eq 0 -and $probeOutput.Count -ge 2) {
+            return [pscustomobject]@{
+                Executable = $resolvedExecutable
+                PrefixArgs = $prefixArgs
+                PythonPath = [string]$probeOutput[$probeOutput.Count - 2]
+                Version = [string]$probeOutput[$probeOutput.Count - 1]
+            }
+        }
+
+        $reason = ($probeOutput | ForEach-Object { $_.ToString() }) -join ' '
+        if (-not $reason) {
+            $reason = "probe exited with code $probeExitCode"
+        }
+        $attempts.Add("$($candidate.Label): $reason") | Out-Null
+    }
+
+    $attemptSummary = $attempts -join [Environment]::NewLine
+    throw @"
+Unable to locate a usable Python 3.12+ interpreter with Nuitka, PyExifTool, and pillow-heif installed.
+$attemptSummary
+Create a virtual environment and install Nuitka, or pass an explicit interpreter, for example:
+  powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -PythonExe "D:\python_code\iPhoto\.venv\Scripts\python.exe"
+"@
+}
+
 function Sync-NativeRuntime {
     param(
         [Parameter(Mandatory = $true)][string]$SourceDir,
@@ -47,12 +162,14 @@ function Sync-NativeRuntime {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location -LiteralPath $repoRoot
 $srcRoot = Join-Path $repoRoot 'src'
-$mainScript = Join-Path $srcRoot 'iPhoto\gui\main.py'
+$mainScript = Join-Path $srcRoot 'entrypoint.py'
 $nativeBuildScript = Join-Path $repoRoot 'tools\osmand_render_helper_native\build_native_widget_msvc.ps1'
 $nativeDistDir = Join-Path $repoRoot 'tools\osmand_render_helper_native\dist-msvc'
 $extensionBinDir = Join-Path $srcRoot 'maps\tiles\extension\bin'
 $faceModelDir = Join-Path $srcRoot 'extension\models'
+$defaultIcon = Join-Path $repoRoot 'docs\picture\logo_new.ico'
 
 Assert-Exists $repoRoot
 Assert-Exists $srcRoot
@@ -62,22 +179,33 @@ if ($IncludeOptionalAssets) {
     Assert-Exists $faceModelDir
 }
 
-if (-not $PythonExe) {
-    $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
-    if (Test-Path $venvPython) {
-        $PythonExe = $venvPython
-    }
-    else {
-        $PythonExe = 'python'
-    }
+if (-not $IconPath) {
+    $IconPath = $defaultIcon
+}
+elseif (-not [IO.Path]::IsPathRooted($IconPath)) {
+    $IconPath = Join-Path $repoRoot $IconPath
+}
+Assert-Exists $IconPath
+$IconPath = (Get-Item -LiteralPath $IconPath).FullName
+if ([IO.Path]::GetExtension($IconPath) -ine '.ico') {
+    throw "Windows Nuitka icon must be an .ico file: $IconPath"
 }
 
-if (-not $IconPath) {
-    $defaultIcon = Join-Path $repoRoot 'logo_new.ico'
-    if (Test-Path $defaultIcon) {
-        $IconPath = $defaultIcon
-    }
+$pythonInvocation = Resolve-BuildPython -RequestedPython $PythonExe -RepositoryRoot $repoRoot
+$PythonExe = $pythonInvocation.Executable
+[string[]]$pythonPrefixArgs = $pythonInvocation.PrefixArgs
+
+if (-not [IO.Path]::IsPathRooted($OutputDir)) {
+    $OutputDir = Join-Path $repoRoot $OutputDir
 }
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+$OutputDir = (Get-Item -LiteralPath $OutputDir).FullName
+$compilationReport = Join-Path $OutputDir 'nuitka-compilation-report.xml'
+
+Write-Host "Python interpreter: $($pythonInvocation.PythonPath)"
+Write-Host "Python version: $($pythonInvocation.Version)"
+Write-Host "Nuitka output directory: $OutputDir"
+Write-Host "Application icon: $IconPath"
 
 if ($RebuildNativeRuntime) {
     & $nativeBuildScript -BuildType Release -Jobs $Jobs
@@ -104,7 +232,7 @@ $arguments = @(
     '--include-qt-plugins=qml,multimedia,platforms',
     "--windows-console-mode=$ConsoleMode",
     '--assume-yes-for-downloads',
-    "--report=$(Join-Path $OutputDir 'nuitka-compilation-report.xml')",
+    "--report=$compilationReport",
     '--nofollow-import-to=numba',
     '--nofollow-import-to=llvmlite',
     '--nofollow-import-to=albumentations',
@@ -112,6 +240,10 @@ $arguments = @(
     '--nofollow-import-to=pydantic',
     '--nofollow-import-to=pydantic_core',
     '--nofollow-import-to=typing_inspection',
+    # People only uses InsightFace detection, recognition, and face alignment.
+    # Exclude the unused Face3D tree, which can otherwise be discovered from
+    # both a shadow source directory and site-packages by Nuitka.
+    '--nofollow-import-to=insightface.thirdparty.face3d',
     '--nofollow-import-to=iPhoto.tests',
     '--nofollow-import-to=pytest',
     # Keep dynamically resolved compatibility exports available. Nuitka does
@@ -123,9 +255,16 @@ $arguments = @(
     '--include-package=cv2',
     '--include-package=reverse_geocoder',
     '--include-package=insightface',
-    '--include-package=onnxruntime',
+    # PyExifTool is imported indirectly; freeze its Python package explicitly.
+    '--include-package=exiftool',
+    # pillow-heif is registered through a lazy import, so include both its
+    # Python package and native extension explicitly.
+    '--include-package=pillow_heif',
+    '--include-module=_pillow_heif',
+    '--noinclude-data-files=torch/include',
     "--output-dir=$OutputDir",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\resources\i18n')=iPhoto/resources/i18n",
+    "--include-data-file=$(Join-Path $srcRoot 'iPhoto\pets\model_manifest.json')=iPhoto/pets/model_manifest.json",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\schemas')=iPhoto/schemas",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\icon')=iPhoto/gui/ui/icon",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\qml')=iPhoto/gui/ui/qml",
@@ -152,14 +291,36 @@ if ($IncludeOptionalAssets) {
     $arguments += "--include-data-dir=$(Join-Path $srcRoot 'maps\tiles')=maps/tiles"
 }
 
-if ($IconPath) {
-    Assert-Exists $IconPath
-    $arguments += "--windows-icon-from-ico=$IconPath"
-}
+$arguments += "--windows-icon-from-ico=$IconPath"
 
 $arguments += $mainScript
 
-& $PythonExe @arguments
+$pythonArguments = @($pythonPrefixArgs) + $arguments
+& $PythonExe @pythonArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Nuitka build failed with exit code $LASTEXITCODE"
 }
+
+$builtExecutable = Join-Path $OutputDir 'entrypoint.dist\entrypoint.exe'
+Assert-Exists $builtExecutable
+$manifestTool = Join-Path $repoRoot 'tools\build_manifest.py'
+$manifestOutput = Join-Path $OutputDir 'build-manifest.json'
+$manifestArguments = @(
+    $manifestTool,
+    '--root', $repoRoot,
+    '--artifact', $builtExecutable,
+    '--build-driver', $PSCommandPath,
+    '--build-flag', 'profile=windows',
+    '--build-flag', "jobs=$Jobs",
+    '--build-flag', "console=$ConsoleMode",
+    '--build-flag', "optional_assets=$([bool]$IncludeOptionalAssets)",
+    '--native-runtime', $extensionBinDir,
+    '--asset', (Join-Path $srcRoot 'maps\tiles'),
+    '--asset', (Join-Path $srcRoot 'iPhoto\resources\i18n'),
+    '--output', $manifestOutput
+)
+& $PythonExe @pythonPrefixArgs @manifestArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Build manifest generation failed with exit code $LASTEXITCODE"
+}
+Write-Host "Build manifest: $manifestOutput"

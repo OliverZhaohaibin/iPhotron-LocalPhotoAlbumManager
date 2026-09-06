@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
-from ..application.ports import EditRenderingState, EditServicePort, EditSidecarPort
+from ..application.ports import (
+    EditCommitResult,
+    EditRenderingState,
+    EditServicePort,
+    EditSidecarPort,
+)
 from ..core.adjustment_mapping import (
     default_adjustment_values,
     normalise_video_trim,
@@ -17,6 +23,12 @@ from ..core.adjustment_mapping import (
 from ..infrastructure.repositories.edit_sidecar_repository import (
     FileSystemEditSidecarRepository,
 )
+from ..infrastructure.services.thumbnail_artifact import (
+    thumbnail_artifact_lock,
+    thumbnail_revision,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class LibraryEditService(EditServicePort):
@@ -27,11 +39,13 @@ class LibraryEditService(EditServicePort):
         library_root: Path | None,
         *,
         sidecar_repository: EditSidecarPort | None = None,
+        thumbnail_state_service: Any | None = None,
     ) -> None:
         self.library_root = (
             self._normalize_path(Path(library_root)) if library_root is not None else None
         )
         self._sidecar_repository = sidecar_repository or FileSystemEditSidecarRepository()
+        self._thumbnail_state_service = thumbnail_state_service
 
     def sidecar_exists(self, path: Path) -> bool:
         return self._sidecar_repository.sidecar_exists(self._normalize_path(path))
@@ -39,11 +53,25 @@ class LibraryEditService(EditServicePort):
     def read_adjustments(self, path: Path) -> dict[str, Any]:
         return self._sidecar_repository.read_adjustments(self._normalize_path(path))
 
-    def write_adjustments(self, path: Path, adjustments: dict[str, Any]) -> None:
-        self._sidecar_repository.write_adjustments(
-            self._normalize_path(path),
-            adjustments,
-        )
+    def write_adjustments(
+        self,
+        path: Path,
+        adjustments: dict[str, Any],
+    ) -> EditCommitResult:
+        normalized = self._normalize_path(path)
+        with thumbnail_artifact_lock(normalized):
+            self._sidecar_repository.write_adjustments(normalized, adjustments)
+            revision = thumbnail_revision(normalized)
+            marker = getattr(self._thumbnail_state_service, "mark_thumbnail_stale", None)
+            if callable(marker):
+                try:
+                    marker(normalized, revision)
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to mark thumbnail revision stale for %s",
+                        normalized,
+                    )
+        return EditCommitResult(thumbnail_revision=revision)
 
     def default_adjustments(self) -> dict[str, Any]:
         return default_adjustment_values()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QMetaObject, QObject
 from PySide6.QtWidgets import QPushButton, QSlider
 
 if TYPE_CHECKING:
@@ -28,22 +28,31 @@ class EditZoomHandler(QObject):
         self._zoom_out_button = zoom_out_button
         self._zoom_slider = zoom_slider
         self._connected = False
-        self._zoom_in_slot = None
-        self._zoom_out_slot = None
+        self._zoom_in_connection: QMetaObject.Connection | None = None
+        self._zoom_out_connection: QMetaObject.Connection | None = None
+        self._slider_connection: QMetaObject.Connection | None = None
+        self._viewer_connection: QMetaObject.Connection | None = None
 
     def connect_controls(self) -> None:
         """Connect the shared zoom toolbar to the edit image viewer."""
         if self._connected:
             return
 
-        # Cache the bound methods we connect so disconnect uses the exact same
-        # callable object when the active viewer changes.
-        self._zoom_in_slot = self._viewer.zoom_in
-        self._zoom_out_slot = self._viewer.zoom_out
-        self._zoom_in_button.clicked.connect(self._zoom_in_slot)
-        self._zoom_out_button.clicked.connect(self._zoom_out_slot)
-        self._zoom_slider.valueChanged.connect(self._handle_slider_changed)
-        self._viewer.zoomChanged.connect(self._handle_viewer_zoom_changed)
+        # Keep Qt's connection handles instead of disconnecting by Python
+        # callable. PySide removes every duplicate connection matching a bound
+        # method, which can invalidate a second controller's connection.
+        self._zoom_in_connection = self._zoom_in_button.clicked.connect(
+            self._handle_zoom_in_clicked
+        )
+        self._zoom_out_connection = self._zoom_out_button.clicked.connect(
+            self._handle_zoom_out_clicked
+        )
+        self._slider_connection = self._zoom_slider.valueChanged.connect(
+            self._handle_slider_changed
+        )
+        self._viewer_connection = self._viewer.zoomChanged.connect(
+            self._handle_viewer_zoom_changed
+        )
         self._connected = True
 
     def disconnect_controls(self) -> None:
@@ -51,17 +60,29 @@ class EditZoomHandler(QObject):
         if not self._connected:
             return
 
-        try:
-            if self._zoom_in_slot is not None:
-                self._zoom_in_button.clicked.disconnect(self._zoom_in_slot)
-            if self._zoom_out_slot is not None:
-                self._zoom_out_button.clicked.disconnect(self._zoom_out_slot)
-            self._zoom_slider.valueChanged.disconnect(self._handle_slider_changed)
-            self._viewer.zoomChanged.disconnect(self._handle_viewer_zoom_changed)
-        finally:
-            self._connected = False
-            self._zoom_in_slot = None
-            self._zoom_out_slot = None
+        connections = (
+            self._zoom_in_connection,
+            self._zoom_out_connection,
+            self._slider_connection,
+            self._viewer_connection,
+        )
+        self._connected = False
+        self._zoom_in_connection = None
+        self._zoom_out_connection = None
+        self._slider_connection = None
+        self._viewer_connection = None
+
+        for connection in connections:
+            if connection is not None:
+                QObject.disconnect(connection)
+
+    def _handle_zoom_in_clicked(self, _checked: bool = False) -> None:
+        """Zoom the currently active viewer in."""
+        self._viewer.zoom_in()
+
+    def _handle_zoom_out_clicked(self, _checked: bool = False) -> None:
+        """Zoom the currently active viewer out."""
+        self._viewer.zoom_out()
 
     def _handle_slider_changed(self, value: int) -> None:
         """Translate slider *value* percentages into edit viewer zoom factors."""

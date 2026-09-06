@@ -29,6 +29,8 @@ class MapWidget(QWidget):
     panFinished = Signal()
     """Signal emitted once the current pan gesture completes."""
 
+    firstFramePresented = Signal()
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -69,6 +71,7 @@ class MapWidget(QWidget):
         # widget.
         self.setMouseTracking(True)
         self.setMinimumSize(640, 480)
+        self._first_frame_presented = False
 
     # ------------------------------------------------------------------
     @property
@@ -149,6 +152,12 @@ class MapWidget(QWidget):
 
         return self
 
+    def prepare_surface(self) -> None:
+        """The QWidget surface is fully constructed during initialisation."""
+
+    def start_deferred_content(self) -> None:
+        self.update()
+
     # ------------------------------------------------------------------
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """Render the current scene using CPU backed ``QPainter`` drawing."""
@@ -162,6 +171,9 @@ class MapWidget(QWidget):
             self._controller.render(painter)
         finally:
             painter.end()
+        if not self._first_frame_presented:
+            self._first_frame_presented = True
+            self.firstFramePresented.emit()
 
     # ------------------------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]

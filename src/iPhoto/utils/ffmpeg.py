@@ -5,17 +5,21 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING
 
-from ..errors import ExternalToolError
+from ..errors import ExternalToolError, ExternalToolTimeoutError
 from .media_access import media_access
 
 if TYPE_CHECKING:
     from PIL import Image
 
 _FFMPEG_LOG_LEVEL = "error"
+_FFPROBE_COMMAND_TIMEOUT_SECONDS = 15.0
+_FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS = 30.0
+_PYAV_FRAME_TIMEOUT_SECONDS = 30.0
 _LINUX_180_HINT_CACHE: dict[str, bool] = {}
 _OPTIONAL_MODULE_UNSET = object()
 av: Any = _OPTIONAL_MODULE_UNSET
@@ -56,7 +60,11 @@ def _load_cv2() -> Any | None:
     return imported_cv2
 
 
-def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+def _run_command(
+    command: Sequence[str],
+    *,
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[bytes]:
     """Execute *command* and return the completed process."""
 
     # Define startupinfo to hide the window on Windows
@@ -74,9 +82,16 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
             stderr=subprocess.PIPE,
             startupinfo=startupinfo,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        tool_name = Path(command[0]).name if command else "external media tool"
+        raise ExternalToolTimeoutError(
+            f"{tool_name} timed out after {timeout_seconds:g} seconds"
+        ) from exc
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
-        raise ExternalToolError("ffmpeg executable not found on PATH") from exc
+        tool_name = Path(command[0]).name if command else "External media tool"
+        raise ExternalToolError(f"{tool_name} executable not found on PATH") from exc
     return process
 
 
@@ -107,7 +122,11 @@ def extract_frame_with_pyav(
         return None
 
     try:
-        with av_module.open(str(source)) as container:
+        deadline = time.monotonic() + _PYAV_FRAME_TIMEOUT_SECONDS
+        with av_module.open(
+            str(source),
+            timeout=(_PYAV_FRAME_TIMEOUT_SECONDS, _PYAV_FRAME_TIMEOUT_SECONDS),
+        ) as container:
             if not container.streams.video:
                 return None
             stream = container.streams.video[0]
@@ -121,6 +140,11 @@ def extract_frame_with_pyav(
                 container.seek(target_pts, stream=stream)
 
             for frame in container.decode(stream):
+                if time.monotonic() >= deadline:
+                    raise ExternalToolTimeoutError(
+                        f"PyAV frame extraction timed out after "
+                        f"{_PYAV_FRAME_TIMEOUT_SECONDS:g} seconds"
+                    )
                 # We seeked to the nearest keyframe, so we may need to decode
                 # forward to reach the exact target time.
                 if frame.pts is None or frame.pts < target_pts:
@@ -152,8 +176,20 @@ def extract_frame_with_pyav(
 
                 return image
 
+            if time.monotonic() >= deadline:
+                raise ExternalToolTimeoutError(
+                    f"PyAV frame extraction timed out after "
+                    f"{_PYAV_FRAME_TIMEOUT_SECONDS:g} seconds"
+                )
             return None
 
+    except ExternalToolTimeoutError:
+        raise
+    except TimeoutError as exc:
+        raise ExternalToolTimeoutError(
+            f"PyAV frame extraction timed out after "
+            f"{_PYAV_FRAME_TIMEOUT_SECONDS:g} seconds"
+        ) from exc
     except Exception:
         # Fallback to other methods if PyAV fails for any reason
         return None
@@ -198,6 +234,8 @@ def extract_video_frame(
     with media_access.read(source):
         try:
             return _extract_with_ffmpeg(source, at=at, scale=scale, format=fmt)
+        except ExternalToolTimeoutError:
+            raise
         except ExternalToolError as exc:
             fallback = _extract_with_opencv(source, at=at, scale=scale, format=fmt)
             if fallback is not None:
@@ -265,7 +303,10 @@ def _extract_with_ffmpeg(
         command += ["-q:v", "2"]
 
     command.append("pipe:1")
-    process = _run_command(command)
+    process = _run_command(
+        command,
+        timeout_seconds=_FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS,
+    )
 
     if process.returncode != 0 or not process.stdout:
         stderr = process.stderr.decode("utf-8", "ignore").strip()
@@ -572,7 +613,10 @@ def probe_media(source: Path) -> Dict[str, Any]:
     ]
 
     with media_access.read(source):
-        process = _run_command(command)
+        process = _run_command(
+            command,
+            timeout_seconds=_FFPROBE_COMMAND_TIMEOUT_SECONDS,
+        )
     if process.returncode != 0 or not process.stdout:
         stderr = process.stderr.decode("utf-8", "ignore").strip()
         raise ExternalToolError(

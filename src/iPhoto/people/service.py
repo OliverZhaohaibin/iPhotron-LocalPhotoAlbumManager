@@ -2,25 +2,44 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import uuid
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from iPhoto.application.ports import PeopleAssetRepositoryPort
 from iPhoto.domain.models.query import AssetQuery
-from iPhoto.utils.pathutils import ensure_work_dir
+from iPhoto.pets.records import PetSummary
+from iPhoto.pets.repository import PetRepository
+from iPhoto.pets.state_repository import PetStateRepository
+from iPhoto.recognition.assignment_recovery import (
+    apply_detection_assignment_with_group_refresh,
+)
+from iPhoto.recognition.promotion import VISIBLE_PROMOTION_STATES
+from iPhoto.utils.pathutils import (
+    LibraryAssetPathError,
+    ensure_work_dir,
+    resolve_library_asset_path,
+)
 
-from .index_coordinator import PeopleIndexCoordinator, get_people_index_coordinator
 from .manual_faces import ManualFaceValidationError, build_manual_face_record
 from .repository import (
     AssetFaceAnnotation,
     FaceRepository,
+    IdentityGroupMember,
     PeopleGroupRecord,
     PeopleGroupSummary,
     PersonSummary,
 )
+from .state_repository import FaceStateRepository
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
+
+if TYPE_CHECKING:
+    from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
+
+    from .index_coordinator import PeopleIndexCoordinator
+
 
 def _default_shared_face_model_dir() -> Path:
     override = os.environ.get("IPHOTO_FACE_MODEL_DIR")
@@ -28,10 +47,7 @@ def _default_shared_face_model_dir() -> Path:
         return Path(override).expanduser()
 
     if os.name == "nt":
-        base = Path(
-            os.environ.get("LOCALAPPDATA")
-            or Path.home() / "AppData" / "Local"
-        )
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         # InsightFace expects ``root/models/<pack>``. Keeping the cache outside
         # Program Files makes on-demand model installation work for a standard
         # non-administrator account and keeps models out of the base bundle.
@@ -61,6 +77,16 @@ class ManualFaceAddResult:
     created_new_person: bool
 
 
+@dataclass(frozen=True)
+class IdentityMergeResult:
+    merged: bool
+    source_kind: str
+    source_id: str
+    target_kind: str
+    target_id: str
+    group_redirects: dict[str, str | None]
+
+
 def shared_face_model_dir() -> Path:
     """Return the shared cache directory for downloaded face models."""
     return _SHARED_FACE_MODEL_DIR
@@ -84,17 +110,66 @@ class PeopleService:
         *,
         asset_repository: PeopleAssetRepositoryPort | None = None,
         coordinator: PeopleIndexCoordinator | None = None,
+        mutation_coordinator: RecognitionMutationCoordinator | None = None,
     ) -> None:
         self._library_root = library_root
         self._asset_repository = asset_repository
         self._coordinator = coordinator
+        self._mutation_coordinator = mutation_coordinator
+        self._owns_mutation_coordinator = False
+        self._shutdown = False
+        self._repository: FaceRepository | None = None
+        if self._mutation_coordinator is not None:
+            self._mutation_coordinator.register_recovery_handler(
+                {"recognition_detection_assignment"},
+                self._recover_assignment_operation,
+            )
+
+    def _recover_assignment_operation(self, operation) -> bool:
+        if self._library_root is None or operation.kind != "recognition_detection_assignment":
+            return False
+        changed = apply_detection_assignment_with_group_refresh(
+            self._library_root,
+            operation.payload,
+        )
+        coordinator = self._mutation_coordinator
+        if coordinator is None:
+            return False
+        if changed:
+            coordinator.commit_and_dispatch(
+                operation.operation_id,
+                {"kind": operation.kind, **operation.payload},
+                lambda: None,
+            )
+        else:
+            coordinator.transition(
+                operation.operation_id,
+                "finalized",
+                error="assignment_recovery_rejected",
+            )
+        return True
 
     def set_library_root(self, library_root: Path | None) -> None:
-        if self._library_root == library_root:
+        if self._library_root == library_root and not self._shutdown:
             return
+        self.shutdown()
+        self._shutdown = False
         self._library_root = library_root
         self._asset_repository = None
         self._coordinator = None
+        self._mutation_coordinator = None
+        self._repository = None
+
+    def shutdown(self) -> None:
+        self._shutdown = True
+        coordinator = self._coordinator
+        if coordinator is not None:
+            coordinator.close()
+        if self._owns_mutation_coordinator and self._mutation_coordinator is not None:
+            self._mutation_coordinator.close()
+        self._coordinator = None
+        self._mutation_coordinator = None
+        self._owns_mutation_coordinator = False
 
     def library_root(self) -> Path | None:
         return self._library_root
@@ -108,15 +183,34 @@ class PeopleService:
 
     @property
     def coordinator(self) -> PeopleIndexCoordinator | None:
+        if self._shutdown:
+            return None
         if self._coordinator is not None:
             return self._coordinator
         if self._library_root is None:
             return None
-        self._coordinator = get_people_index_coordinator(
+        from .index_coordinator import PeopleIndexCoordinator
+
+        self._coordinator = PeopleIndexCoordinator(
             self._library_root,
             asset_repository=self._asset_repository,
+            mutation_coordinator=self._ensure_mutation_coordinator(),
         )
         return self._coordinator
+
+    def _ensure_mutation_coordinator(self) -> RecognitionMutationCoordinator:
+        if self._shutdown:
+            raise RuntimeError("People service is shut down.")
+        if self._mutation_coordinator is None:
+            from iPhoto.recognition.mutation_coordinator import (
+                RecognitionMutationCoordinator,
+            )
+
+            if self._library_root is None:
+                raise RuntimeError("People service is not bound to a library.")
+            self._mutation_coordinator = RecognitionMutationCoordinator(self._library_root)
+            self._owns_mutation_coordinator = True
+        return self._mutation_coordinator
 
     def paths(self) -> FaceLibraryPaths | None:
         if self._library_root is None:
@@ -124,31 +218,66 @@ class PeopleService:
         return face_library_paths(self._library_root)
 
     def repository(self) -> FaceRepository | None:
+        if self._repository is not None:
+            return self._repository
         paths = self.paths()
         if paths is None:
             return None
-        return FaceRepository(paths.index_db_path, paths.state_db_path)
+        self._repository = FaceRepository(paths.index_db_path, paths.state_db_path)
+        return self._repository
 
-    def list_clusters(self, *, include_hidden: bool = False) -> list[PersonSummary]:
+    def list_clusters(
+        self,
+        *,
+        include_hidden: bool = False,
+        include_candidates: bool = False,
+    ) -> list[PersonSummary]:
         repository = self.repository()
         if repository is None:
             return []
-        return repository.get_person_summaries(include_hidden=include_hidden)
+        redirected_people = self._redirected_source_ids("person")
+        summaries = [
+            summary
+            for summary in repository.get_person_summaries(include_hidden=include_hidden)
+            if summary.person_id not in redirected_people
+            and (
+                include_candidates
+                or summary.promotion_state in VISIBLE_PROMOTION_STATES
+            )
+        ]
+        return self._with_valid_person_asset_counts(
+            summaries,
+            repository,
+        )
 
     def list_groups(
         self,
         *,
         repository: FaceRepository | None = None,
         summaries: list[PersonSummary] | None = None,
+        pet_summaries: list[PetSummary] | None = None,
     ) -> list[PeopleGroupSummary]:
         if self._library_root is None:
             return []
         repository = repository or self.repository()
         if repository is None:
             return []
-        summary_list = summaries if summaries is not None else repository.get_person_summaries()
+        if summaries is None:
+            summary_list = self._with_valid_person_asset_counts(
+                repository.get_person_summaries(),
+                repository,
+            )
+        else:
+            summary_list = summaries
         summaries_by_id = {summary.person_id: summary for summary in summary_list}
-        return self._build_group_summaries(repository, repository.list_groups(), summaries_by_id)
+        pet_summary_list = self._list_pet_summaries() if pet_summaries is None else pet_summaries
+        pet_summaries_by_id = {summary.pet_id: summary for summary in pet_summary_list}
+        return self._build_group_summaries(
+            repository,
+            repository.list_groups(),
+            summaries_by_id,
+            pet_summaries_by_id,
+        )
 
     def get_group_summary(self, group_id: str) -> PeopleGroupSummary | None:
         if self._library_root is None or not group_id:
@@ -159,32 +288,62 @@ class PeopleService:
         group = repository.get_group(group_id)
         if group is None:
             return None
-        summaries = repository.get_person_summaries()
+        summaries = self._with_valid_person_asset_counts(
+            repository.get_person_summaries(),
+            repository,
+        )
         summaries_by_id = {summary.person_id: summary for summary in summaries}
-        return self._build_group_summary(repository, group, summaries_by_id)
+        pet_summaries_by_id = {summary.pet_id: summary for summary in self._list_pet_summaries()}
+        return self._build_group_summary(repository, group, summaries_by_id, pet_summaries_by_id)
 
     def load_dashboard(
         self,
         *,
         include_hidden: bool = False,
+        pet_summaries: list[PetSummary] | None = None,
     ) -> tuple[list[PersonSummary], list[PeopleGroupSummary], int]:
         repository = self.repository()
         if repository is None:
             return [], [], 0
-        summaries = repository.get_person_summaries(include_hidden=include_hidden)
-        groups = self.list_groups(repository=repository, summaries=summaries)
+        redirected_people = self._redirected_source_ids("person")
+        summaries = self._with_valid_person_asset_counts(
+            [
+                summary
+                for summary in repository.get_person_summaries(include_hidden=include_hidden)
+                if summary.person_id not in redirected_people
+                and summary.promotion_state in VISIBLE_PROMOTION_STATES
+            ],
+            repository,
+        )
+        groups = self.list_groups(
+            repository=repository,
+            summaries=summaries,
+            pet_summaries=pet_summaries,
+        )
         counts = self.face_status_counts()
         pending = counts.get("pending", 0) + counts.get("retry", 0)
         return summaries, groups, pending
 
     def create_group(
-        self, member_person_ids: list[str] | tuple[str, ...]
+        self,
+        member_person_ids: list[str] | tuple[str, ...],
     ) -> PeopleGroupSummary | None:
         repository = self.repository()
         if repository is None or self._library_root is None:
             return None
-        summaries_by_id = {summary.person_id: summary for summary in self.list_clusters()}
-        valid_member_ids = _ordered_valid_person_ids(member_person_ids, summaries_by_id)
+        summaries_by_id = {
+            summary.person_id: summary
+            for summary in self.list_clusters(include_candidates=True)
+        }
+        pet_summaries_by_id = {
+            summary.pet_id: summary
+            for summary in self._list_pet_summaries(include_candidates=True)
+        }
+        valid_member_ids = _ordered_valid_identity_members(
+            member_person_ids,
+            summaries_by_id,
+            pet_summaries_by_id,
+        )
         if len(valid_member_ids) < 2:
             return None
         coordinator = self.coordinator
@@ -193,14 +352,27 @@ class PeopleService:
         group = coordinator.create_group(valid_member_ids)
         if group is None:
             return None
-        return self._build_group_summary(repository, group, summaries_by_id)
+        for member in group.member_entities:
+            if member.kind == "person" and repository.state_repository is not None:
+                repository.state_repository.confirm_person(member.entity_id)
+            elif member.kind == "pet":
+                pet_root = ensure_work_dir(self._library_root) / "pets"
+                PetStateRepository(pet_root / "pet_state.db").confirm_pet(member.entity_id)
+        summaries_by_id = {
+            summary.person_id: summary
+            for summary in self.list_clusters(include_candidates=True)
+        }
+        pet_summaries_by_id = {
+            summary.pet_id: summary
+            for summary in self._list_pet_summaries(include_candidates=True)
+        }
+        return self._build_group_summary(repository, group, summaries_by_id, pet_summaries_by_id)
 
-    def rename_cluster(self, person_id: str, new_name: str | None) -> None:
+    def rename_cluster(self, person_id: str, new_name: str | None) -> bool:
         if self._library_root is None:
-            return
+            return False
         coordinator = self.coordinator
-        if coordinator is not None:
-            coordinator.rename_person(person_id, new_name)
+        return bool(coordinator and coordinator.rename_person(person_id, new_name) is not None)
 
     def pin_block_reason(self, person_id: str) -> str | None:
         """Return a human-readable reason why *person_id* cannot be pinned."""
@@ -275,10 +447,10 @@ class PeopleService:
             coordinator.set_group_order(group_ids)
 
     def set_cluster_hidden(self, person_id: str, hidden: bool) -> bool:
-        repository = self.repository()
-        if repository is None:
+        if self._library_root is None:
             return False
-        return repository.set_person_hidden(person_id, hidden)
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.set_person_hidden(person_id, hidden))
 
     def is_cluster_hidden(self, person_id: str) -> bool:
         repository = self.repository()
@@ -290,10 +462,167 @@ class PeopleService:
         if self._library_root is None:
             return False
         coordinator = self.coordinator
-        return bool(coordinator and coordinator.merge_persons(
-            source_person_id,
-            target_person_id,
-        ))
+        return bool(
+            coordinator
+            and coordinator.merge_persons(
+                source_person_id,
+                target_person_id,
+            )
+        )
+
+    def recognition_mutation_pending(self) -> bool:
+        coordinator = self.coordinator
+        return bool(coordinator and coordinator.recovery_pending)
+
+    def merge_identities(
+        self, source_identity: str, target_identity: str
+    ) -> IdentityMergeResult | None:
+        if self._library_root is None:
+            return None
+        source = _parse_identity_id(source_identity)
+        target = _parse_identity_id(target_identity)
+        if source is None or target is None or source == target:
+            return None
+        source_kind, source_id = source
+        target_kind, target_id = target
+        if source_kind == target_kind:
+            return None
+
+        repository = self.repository()
+        paths = self.paths()
+        if repository is None or paths is None:
+            return None
+        state_repository = FaceStateRepository(paths.state_db_path)
+        redirects = {
+            (redirect.source_kind, redirect.source_id): (
+                redirect.target_kind,
+                redirect.target_id,
+            )
+            for redirect in state_repository.get_identity_redirects()
+        }
+        existing_target = redirects.get(source)
+        if existing_target == target:
+            repository.refresh_all_group_assets()
+            return IdentityMergeResult(
+                merged=True,
+                source_kind=source_kind,
+                source_id=source_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                group_redirects={},
+            )
+        if existing_target is not None or target in redirects:
+            return None
+
+        person_summaries = {
+            summary.person_id: summary
+            for summary in repository.get_person_summaries(include_hidden=True)
+        }
+        pet_root = ensure_work_dir(self._library_root) / "pets"
+        pet_repository = PetRepository(
+            pet_root / "pet_index.db",
+            pet_root / "pet_state.db",
+        )
+        pet_summaries = {
+            summary.pet_id: summary
+            for summary in pet_repository.get_pet_summaries(include_hidden=True)
+        }
+
+        source_hidden = self._identity_hidden(
+            source_kind, source_id, person_summaries, pet_summaries
+        )
+        target_hidden = self._identity_hidden(
+            target_kind, target_id, person_summaries, pet_summaries
+        )
+        if source_hidden is None or target_hidden is None:
+            return None
+
+        ensured = state_repository.merge_identity_redirect_and_groups(
+            source_kind=source_kind,
+            source_id=source_id,
+            target_kind=target_kind,
+            target_id=target_id,
+        )
+        if not ensured.succeeded:
+            return None
+        repository.refresh_all_group_assets()
+        return IdentityMergeResult(
+            merged=True,
+            source_kind=source_kind,
+            source_id=source_id,
+            target_kind=target_kind,
+            target_id=target_id,
+            group_redirects=ensured.group_redirects,
+        )
+
+    def reassign_detection_identity(
+        self,
+        *,
+        source_kind: str,
+        source_annotation_id: str,
+        target_identity: str,
+    ) -> bool:
+        """Assign one detection to a cross-kind identity without converting it."""
+
+        if self._library_root is None or source_kind not in {"person", "pet"}:
+            return False
+        target = _parse_identity_id(target_identity)
+        if target is None or target[0] == source_kind or not source_annotation_id:
+            return False
+        target_kind, target_id = target
+        repository = self.repository()
+        paths = self.paths()
+        if repository is None or paths is None:
+            return False
+        target_exists = (
+            self.has_cluster(target_id) if target_kind == "person" else self.has_pet(target_id)
+        )
+        if not target_exists:
+            return False
+        if source_kind == "person":
+            source_exists = repository.has_face(source_annotation_id)
+        else:
+            pet_root = ensure_work_dir(self._library_root) / "pets"
+            source_exists = (
+                PetRepository(
+                    pet_root / "pet_index.db",
+                    pet_root / "pet_state.db",
+                ).get_detection(source_annotation_id)
+                is not None
+            )
+        if not source_exists:
+            return False
+
+        payload = {
+            "source_kind": source_kind,
+            "source_annotation_id": source_annotation_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+        }
+        journal = self._ensure_mutation_coordinator()
+        journal.register_recovery_handler(
+            {"recognition_detection_assignment"},
+            self._recover_assignment_operation,
+        )
+        with journal.mutation_scope():
+            if not journal.recover_pending():
+                return False
+            operation_id = journal.try_prepare("recognition_detection_assignment", payload)
+            if operation_id is None:
+                return False
+            changed = apply_detection_assignment_with_group_refresh(
+                self._library_root,
+                payload,
+            )
+            if not changed:
+                journal.transition(operation_id, "finalized", error="assignment_rejected")
+                return False
+            journal.commit_and_dispatch(
+                operation_id,
+                {"kind": "recognition_detection_assignment", **payload},
+                lambda: None,
+            )
+            return True
 
     def delete_face(self, annotation_face_id: str) -> bool:
         if self._library_root is None or not annotation_face_id:
@@ -335,6 +664,8 @@ class PeopleService:
         repository = self.repository()
         if repository is None or self._library_root is None:
             return []
+        if person_id in self._redirected_source_ids("person"):
+            return []
         asset_ids = repository.get_asset_ids_by_person(person_id)
         return self._valid_asset_ids(asset_ids)
 
@@ -345,7 +676,12 @@ class PeopleService:
         repository = self.repository()
         if repository is None or not person_id:
             return False
-        return any(summary.person_id == person_id for summary in repository.get_person_summaries())
+        if person_id in self._redirected_source_ids("person"):
+            return False
+        return any(
+            summary.person_id == person_id
+            for summary in repository.get_person_summaries(include_hidden=True)
+        )
 
     def group_asset_ids(self, group_id: str) -> list[str]:
         repository = self.repository()
@@ -359,6 +695,14 @@ class PeopleService:
 
     def has_group(self, group_id: str) -> bool:
         return self.get_group_summary(group_id) is not None
+
+    def has_pet(self, pet_id: str) -> bool:
+        if pet_id in self._redirected_source_ids("pet"):
+            return False
+        return any(
+            summary.pet_id == pet_id
+            for summary in self._list_pet_summaries(include_candidates=True)
+        )
 
     def list_asset_face_annotations(self, asset_id: str) -> list[AssetFaceAnnotation]:
         repository = self.repository()
@@ -405,11 +749,9 @@ class PeopleService:
         asset_rel = str(row.get("rel") or row.get("path") or "").strip()
         if not asset_rel:
             raise ManualFaceValidationError("The selected photo path could not be resolved.")
-        resolved_library_root = library_root.resolve()
-        image_path = (resolved_library_root / asset_rel).resolve()
         try:
-            image_path.relative_to(resolved_library_root)
-        except ValueError as exc:
+            image_path = resolve_library_asset_path(library_root, asset_rel)
+        except LibraryAssetPathError as exc:
             raise ManualFaceValidationError("The selected photo path is invalid.") from exc
         if not image_path.is_file():
             raise ManualFaceValidationError("The selected photo file could not be found.")
@@ -469,6 +811,7 @@ class PeopleService:
         repository: FaceRepository,
         group: PeopleGroupRecord,
         summaries_by_id: dict[str, PersonSummary],
+        pet_summaries_by_id: dict[str, PetSummary],
         cover_paths_by_asset_id: dict[str, Path] | None = None,
     ) -> PeopleGroupSummary | None:
         if self._library_root is None:
@@ -478,7 +821,12 @@ class PeopleService:
             for person_id in group.member_person_ids
             if person_id in summaries_by_id
         )
-        if len(members) < 2:
+        pet_members = tuple(
+            pet_summaries_by_id[member.entity_id]
+            for member in group.member_entities
+            if member.kind == "pet" and member.entity_id in pet_summaries_by_id
+        )
+        if len(members) + len(pet_members) < 2:
             return None
 
         asset_ids = self._valid_asset_ids(repository.get_common_asset_ids_for_group(group.group_id))
@@ -490,7 +838,7 @@ class PeopleService:
 
         return PeopleGroupSummary(
             group_id=group.group_id,
-            name=_format_group_name(member.name for member in members),
+            name=_format_group_name(_identity_display_names(members, pet_members)),
             member_person_ids=tuple(member.person_id for member in members),
             members=members,
             asset_count=len(asset_ids),
@@ -499,6 +847,8 @@ class PeopleService:
                 rows_by_id=cover_paths_by_asset_id,
             ),
             created_at=group.created_at,
+            member_entities=group.member_entities,
+            pet_members=pet_members,
         )
 
     def _build_group_summaries(
@@ -506,8 +856,17 @@ class PeopleService:
         repository: FaceRepository,
         groups: list[PeopleGroupRecord],
         summaries_by_id: dict[str, PersonSummary],
+        pet_summaries_by_id: dict[str, PetSummary],
     ) -> list[PeopleGroupSummary]:
-        prepared: list[tuple[PeopleGroupRecord, tuple[PersonSummary, ...], list[str], list[str]]] = []
+        prepared: list[
+            tuple[
+                PeopleGroupRecord,
+                tuple[PersonSummary, ...],
+                tuple[PetSummary, ...],
+                list[str],
+                list[str],
+            ]
+        ] = []
         all_cover_candidate_ids: list[str] = []
         for group in groups:
             members = tuple(
@@ -515,23 +874,32 @@ class PeopleService:
                 for person_id in group.member_person_ids
                 if person_id in summaries_by_id
             )
-            if len(members) < 2:
+            pet_members = tuple(
+                pet_summaries_by_id[member.entity_id]
+                for member in group.member_entities
+                if member.kind == "pet" and member.entity_id in pet_summaries_by_id
+            )
+            if len(members) + len(pet_members) < 2:
                 continue
-            asset_ids = self._valid_asset_ids(repository.get_common_asset_ids_for_group(group.group_id))
+            asset_ids = self._valid_asset_ids(
+                repository.get_common_asset_ids_for_group(group.group_id)
+            )
             cover_asset_id = repository.get_group_cover_asset_id(group.group_id)
             cover_candidates = []
             if cover_asset_id is not None:
                 cover_candidates.append(cover_asset_id)
-            cover_candidates.extend(asset_id for asset_id in asset_ids if asset_id != cover_asset_id)
+            cover_candidates.extend(
+                asset_id for asset_id in asset_ids if asset_id != cover_asset_id
+            )
             all_cover_candidate_ids.extend(cover_candidates)
-            prepared.append((group, members, asset_ids, cover_candidates))
+            prepared.append((group, members, pet_members, asset_ids, cover_candidates))
 
         cover_paths_by_asset_id = self._cover_asset_paths(all_cover_candidate_ids)
         summaries: list[PeopleGroupSummary] = []
-        for group, members, asset_ids, cover_candidates in prepared:
+        for group, members, pet_members, asset_ids, cover_candidates in prepared:
             summary = PeopleGroupSummary(
                 group_id=group.group_id,
-                name=_format_group_name(member.name for member in members),
+                name=_format_group_name(_identity_display_names(members, pet_members)),
                 member_person_ids=tuple(member.person_id for member in members),
                 members=members,
                 asset_count=len(asset_ids),
@@ -540,9 +908,96 @@ class PeopleService:
                     rows_by_id=cover_paths_by_asset_id,
                 ),
                 created_at=group.created_at,
+                member_entities=group.member_entities,
+                pet_members=pet_members,
             )
             summaries.append(summary)
         return summaries
+
+    def _list_pet_summaries(
+        self,
+        *,
+        include_candidates: bool = False,
+    ) -> list[PetSummary]:
+        if self._library_root is None:
+            return []
+        pet_root = ensure_work_dir(self._library_root) / "pets"
+        repository = PetRepository(
+            pet_root / "pet_index.db",
+            pet_root / "pet_state.db",
+        )
+        face_paths = self.paths()
+        redirects = (
+            FaceStateRepository(face_paths.state_db_path).get_identity_redirects()
+            if face_paths is not None
+            else []
+        )
+        redirected_pets = {
+            redirect.source_id for redirect in redirects if redirect.source_kind == "pet"
+        }
+        summaries = [
+            summary
+            for summary in repository.get_pet_summaries(include_hidden=True)
+            if summary.pet_id not in redirected_pets
+            and (
+                include_candidates
+                or summary.promotion_state in VISIBLE_PROMOTION_STATES
+            )
+        ]
+        assets_by_pet = repository.get_asset_ids_by_pets(summary.pet_id for summary in summaries)
+        source_pet_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "pet"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        source_pet_assets = (
+            repository.get_asset_ids_by_pets(source_pet_ids) if source_pet_ids else {}
+        )
+        source_person_ids = tuple(
+            dict.fromkeys(
+                redirect.source_id
+                for redirect in redirects
+                if redirect.source_kind == "person"
+                and redirect.target_kind == "pet"
+                and redirect.target_id in assets_by_pet
+            )
+        )
+        face_repository = self.repository()
+        source_person_assets = (
+            face_repository.get_asset_ids_by_people(source_person_ids)
+            if face_repository is not None and source_person_ids
+            else {}
+        )
+        for redirect in redirects:
+            if redirect.target_kind != "pet" or redirect.target_id not in assets_by_pet:
+                continue
+            source_assets = (
+                source_person_assets.get(redirect.source_id, ())
+                if redirect.source_kind == "person"
+                else source_pet_assets.get(redirect.source_id, ())
+            )
+            assets_by_pet[redirect.target_id] = list(
+                dict.fromkeys((*assets_by_pet[redirect.target_id], *source_assets))
+            )
+        all_asset_ids = list(
+            dict.fromkeys(
+                asset_id for asset_ids in assets_by_pet.values() for asset_id in asset_ids
+            )
+        )
+        valid_ids = set(self._valid_asset_ids(all_asset_ids))
+        return [
+            replace(
+                summary,
+                asset_count=sum(
+                    asset_id in valid_ids for asset_id in assets_by_pet.get(summary.pet_id, ())
+                ),
+            )
+            for summary in summaries
+        ]
 
     def _valid_asset_ids(self, asset_ids: list[str]) -> list[str]:
         if self._library_root is None or not asset_ids:
@@ -552,6 +1007,58 @@ class PeopleService:
             return list(asset_ids)
         rows_by_id = asset_repository.get_rows_by_ids(asset_ids)
         return [asset_id for asset_id in asset_ids if asset_id in rows_by_id]
+
+    def _with_valid_person_asset_counts(
+        self,
+        summaries: list[PersonSummary],
+        repository: FaceRepository,
+    ) -> list[PersonSummary]:
+        if self._library_root is None or not summaries:
+            return summaries
+        assets_by_person = repository.get_asset_ids_by_people(
+            summary.person_id for summary in summaries
+        )
+        all_asset_ids = list(
+            dict.fromkeys(
+                asset_id for asset_ids in assets_by_person.values() for asset_id in asset_ids
+            )
+        )
+        valid_ids = set(self._valid_asset_ids(all_asset_ids))
+        return [
+            replace(
+                summary,
+                asset_count=sum(
+                    asset_id in valid_ids
+                    for asset_id in assets_by_person.get(summary.person_id, ())
+                ),
+            )
+            for summary in summaries
+        ]
+
+    def _redirected_source_ids(self, kind: str) -> set[str]:
+        paths = self.paths()
+        if paths is None:
+            return set()
+        return {
+            redirect.source_id
+            for redirect in FaceStateRepository(paths.state_db_path).get_identity_redirects()
+            if redirect.source_kind == kind
+        }
+
+    def _identity_hidden(
+        self,
+        kind: str,
+        entity_id: str,
+        people: dict[str, PersonSummary],
+        pets: dict[str, PetSummary],
+    ) -> bool | None:
+        if kind == "person":
+            summary = people.get(entity_id)
+        else:
+            summary = pets.get(entity_id)
+        if summary is None:
+            return None
+        return bool(summary.is_hidden)
 
     def _cover_asset_paths(self, asset_ids: list[str]) -> dict[str, Path]:
         if self._library_root is None or not asset_ids:
@@ -622,6 +1129,35 @@ def _format_group_name(names: object) -> str:
     return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
 
 
+def _identity_display_names(
+    people: tuple[PersonSummary, ...],
+    pets: tuple[PetSummary, ...],
+) -> list[str]:
+    names: list[str] = []
+    for person in people:
+        label = str(person.name or "").strip()
+        if label:
+            names.append(label)
+    for pet in pets:
+        label = str(pet.name or "").strip()
+        if not label:
+            label = "Unnamed"
+        names.append(label)
+    return names
+
+
+def _parse_identity_id(identity_id: str) -> tuple[str, str] | None:
+    text = str(identity_id or "").strip()
+    if not text:
+        return None
+    if ":" not in text:
+        return "person", text
+    kind, entity_id = (part.strip() for part in text.split(":", 1))
+    if kind not in {"person", "pet"} or not entity_id:
+        return None
+    return kind, entity_id
+
+
 def _ordered_valid_person_ids(
     person_ids: list[str] | tuple[str, ...],
     summaries_by_id: dict[str, PersonSummary],
@@ -633,4 +1169,31 @@ def _ordered_valid_person_ids(
             continue
         seen.add(person_id)
         valid.append(person_id)
+    return valid
+
+
+def _ordered_valid_identity_members(
+    member_ids: list[str] | tuple[str, ...],
+    summaries_by_id: dict[str, PersonSummary],
+    pet_summaries_by_id: dict[str, PetSummary],
+) -> list[IdentityGroupMember]:
+    valid: list[IdentityGroupMember] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_id in member_ids:
+        text = str(raw_id or "").strip()
+        if not text:
+            continue
+        if ":" in text:
+            kind, entity_id = (part.strip() for part in text.split(":", 1))
+        else:
+            kind, entity_id = "person", text
+        if kind == "person" and entity_id not in summaries_by_id:
+            continue
+        if kind == "pet" and entity_id not in pet_summaries_by_id:
+            continue
+        key = (kind, entity_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        valid.append(IdentityGroupMember(kind=kind, entity_id=entity_id))
     return valid

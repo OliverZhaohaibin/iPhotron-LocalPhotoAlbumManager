@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,18 +14,29 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPainter, QPixmap, QWindow
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QWidget,
+)
 
+from iPhoto.application.ports import MapRuntimeCapabilities
 from iPhoto.gui.i18n import formatters
 from iPhoto.gui.ui.widgets import info_location_map as info_location_map_module
 from iPhoto.gui.ui.widgets import info_panel as info_panel_module
+from iPhoto.gui.ui.widgets import map_widget_factory as map_widget_factory_module
 from iPhoto.gui.ui.widgets.info_panel import (
     _FACE_ADD_BUTTON_SIZE,
     _FACE_ADD_ICON_SIZE,
     _FACE_AVATAR_DIAMETER,
     InfoPanel,
+)
+from iPhoto.gui.ui.widgets.recognition_annotations import (
+    RecognitionAnnotation,
+    RecognitionIdentitySuggestion,
 )
 from maps.map_sources import MapBackendMetadata, MapSourceSpec
 
@@ -43,12 +56,15 @@ class _FakeMiniMapWidget(QWidget):
     viewChanged = Signal(float, float, float)
     panned = Signal(QPointF)
     panFinished = Signal()
+    firstFramePresented = Signal()
 
     def __init__(self, parent: QWidget | None = None, *, map_source: MapSourceSpec | None = None) -> None:
         super().__init__(parent)
         self._map_source = map_source
         self._zoom = 2.0
         self._center: tuple[float, float] = (0.0, 0.0)
+        self.shutdown_calls = 0
+        self.auto_present_first_frame = True
         self.setMinimumSize(640, 480)
 
     @property
@@ -79,10 +95,116 @@ class _FakeMiniMapWidget(QWidget):
         return QPointF(self.width() / 2.0, self.height() / 2.0)
 
     def shutdown(self) -> None:
-        return None
+        self.shutdown_calls += 1
 
     def map_backend_metadata(self) -> MapBackendMetadata:
         return MapBackendMetadata(2.0, 19.0, True, "raster", "xyz")
+
+    def present_first_frame(self) -> None:
+        self.firstFramePresented.emit()
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_info_panels_after_test(qapp: QApplication):
+    """Keep reusable map runtimes from leaking between widget tests."""
+
+    yield
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, InfoPanel):
+            widget.shutdown()
+            widget.close()
+    qapp.processEvents()
+
+
+def _process_deferred_panel_content(qapp: QApplication) -> None:
+    for _ in range(4):
+        qapp.processEvents()
+        for widget in QApplication.topLevelWidgets():
+            if not isinstance(widget, InfoPanel):
+                continue
+            map_widget = widget._location_map._map_widget
+            if isinstance(map_widget, _FakeMiniMapWidget) and map_widget.auto_present_first_frame:
+                map_widget.present_first_frame()
+
+
+@pytest.fixture
+def mini_map_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Exercise the real backend chooser with controllable QWidget surfaces."""
+
+    created = []
+    attempts = []
+    failures = {}
+
+    class _RuntimeMap(_FakeMiniMapWidget):
+        kind = "cpu"
+
+        def __init__(self, parent=None, *, map_source=None):
+            attempts.append(self.kind)
+            if failures.get(self.kind) == "construct":
+                raise RuntimeError("map construction unavailable")
+            super().__init__(parent, map_source=map_source)
+            self.auto_present_first_frame = False
+            created.append(self)
+
+        def prepare_surface(self):
+            if failures.get(self.kind) == "surface":
+                raise RuntimeError("map surface unavailable")
+
+        def start_deferred_content(self):
+            if failures.get(self.kind) == "content":
+                raise RuntimeError("map content unavailable")
+
+    class _GLMap(_RuntimeMap):
+        kind = "gl"
+
+    class _NativeMap(_RuntimeMap):
+        kind = "native"
+
+    def python_widget(*, use_opengl):
+        return _GLMap if use_opengl else _RuntimeMap
+
+    monkeypatch.setattr(map_widget_factory_module, "NativeOsmAndWidget", _NativeMap)
+    monkeypatch.setattr(map_widget_factory_module, "_preferred_python_widget_class", python_widget)
+    monkeypatch.setattr(info_location_map_module, "_preferred_python_widget_class", python_widget)
+    runtime = SimpleNamespace(
+        root=tmp_path,
+        snapshot=MapRuntimeCapabilities(
+            display_available=True,
+            preferred_backend="osmand_python",
+            python_gl_available=False,
+            native_widget_available=False,
+            osmand_extension_available=True,
+            location_search_available=False,
+            status_message="Python map available",
+        ),
+    )
+    runtime.capabilities = lambda: runtime.snapshot
+    runtime.package_root = lambda: runtime.root
+    panel = InfoPanel()
+    panel.set_map_runtime(runtime)
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {"rel": "map.jpg", "name": "map.jpg", "gps": {"lat": 48.137154, "lon": 11.576124}}
+    )
+    return SimpleNamespace(
+        panel=panel,
+        view=panel._location_map,
+        runtime=runtime,
+        created=created,
+        attempts=attempts,
+        failures=failures,
+    )
+
+
+def _expected_panel_size(panel: InfoPanel) -> QSize:
+    screen = panel._panel_screen()
+    if screen is None:
+        return QSize(panel._PANEL_WIDTH, panel._PANEL_HEIGHT)
+    available = screen.availableGeometry()
+    return QSize(
+        min(panel._PANEL_WIDTH, available.width() - panel._SCREEN_HORIZONTAL_MARGIN),
+        min(panel._PANEL_HEIGHT, available.height() - panel._SCREEN_VERTICAL_MARGIN),
+    )
 
 
 class _DelayedProjectionMiniMapWidget(_FakeMiniMapWidget):
@@ -355,6 +477,146 @@ def test_info_panel_video_shows_lens_when_available(qapp: QApplication) -> None:
     panel.close()
 
 
+def test_info_panel_body_scrolls_long_content_without_resizing_or_changing_width(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    sparse = {
+        "rel": "photo.jpg",
+        "name": "photo.jpg",
+        "make": "Apple",
+        "model": "iPhone 16 Pro",
+    }
+    panel.set_asset_metadata(sparse)
+    panel.show()
+    qapp.processEvents()
+
+    panel_size = panel.size()
+    viewport_width = panel._body_scroll.viewport().width()
+    body_scrollbar = panel._body_scroll.verticalScrollBar()
+    assert panel_size == _expected_panel_size(panel)
+    assert not hasattr(panel, "_metadata_scroll")
+    assert body_scrollbar.maximum() == 0
+    assert not body_scrollbar.isEnabled()
+    assert "transparent" in body_scrollbar.styleSheet()
+    assert panel._body_scroll.horizontalScrollBar().maximum() == 0
+
+    rich = dict(sparse)
+    rich.update(
+        {
+            "lens": "iPhone 16 Pro back triple camera " * 100,
+            "w": 4032,
+            "h": 3024,
+            "bytes": 901_600,
+            "codec": "heif",
+        }
+    )
+    panel.set_asset_metadata(rich)
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert panel.size() == panel_size
+    assert panel._body_scroll.viewport().width() == viewport_width
+    assert body_scrollbar.maximum() > 0
+    assert body_scrollbar.isEnabled()
+    assert body_scrollbar.styleSheet() == ""
+    assert panel._body_scroll.horizontalScrollBar().maximum() == 0
+
+    body_scrollbar.setValue(min(40, body_scrollbar.maximum()))
+    retained_scroll = body_scrollbar.value()
+    panel.set_asset_metadata({**rich, "iso": 640})
+    qapp.processEvents()
+    assert body_scrollbar.value() == retained_scroll
+
+    panel.set_asset_metadata({**sparse, "rel": "other.jpg", "name": "other.jpg"})
+    qapp.processEvents()
+    assert panel.size() == panel_size
+    assert body_scrollbar.value() == 0
+    assert body_scrollbar.maximum() == 0
+
+
+def test_info_panel_short_content_keeps_natural_section_gaps_and_bottom_slack(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.set_asset_metadata(
+        {
+            "rel": "IMG_1424.HEIC",
+            "name": "IMG_1424.HEIC",
+            "dt": "2026-01-27T18:43:16Z",
+            "make": "Apple",
+            "model": "Apple iPhone 16 Pro",
+            "lens": "iPhone 16 Pro back triple camera 6.765mm f/1.78",
+            "w": 3024,
+            "h": 4032,
+            "bytes": 901_600,
+            "codec": "heif",
+            "iso": 640,
+            "focal_length": 6.8,
+            "exposure_compensation": 0,
+            "f_number": 1.78,
+            "exposure_time": "1/25",
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+
+    spacing = panel._content_layout.spacing()
+    adjacent_sections = (
+        (panel._filename_label, panel._timestamp_label),
+        (panel._timestamp_label, panel._metadata_frame),
+        (panel._exposure_container, panel._face_separator),
+    )
+    for previous, following in adjacent_sections:
+        assert following.y() - (previous.y() + previous.height()) == spacing
+
+    tail_item = panel._content_layout.itemAt(panel._content_layout.count() - 1)
+    tail_spacer = tail_item.spacerItem()
+    assert tail_spacer is not None
+    assert tail_spacer.geometry().height() > 0
+    assert tail_spacer.geometry().top() >= (
+        panel._location_container.y() + panel._location_container.height()
+    )
+    assert panel.size() == _expected_panel_size(panel)
+    panel.close()
+
+
+def test_info_panel_long_text_wraps_fully_before_body_scrolls(qapp: QApplication) -> None:
+    panel = InfoPanel()
+    panel.set_asset_metadata(
+        {
+            "rel": "long.jpg",
+            "name": "very-long-file-name-" * 30,
+            "lens": "Long translated lens metadata " * 50,
+        }
+    )
+    panel._set_label_text(
+        panel._timestamp_label,
+        "Long localized timestamp value " * 20,
+    )
+    panel._set_label_text(
+        panel._exposure_label,
+        "Long localized exposure value " * 20,
+    )
+    panel._refresh_panel_geometry()
+    panel.show()
+    for _ in range(3):
+        qapp.processEvents()
+
+    for label in (
+        panel._filename_label,
+        panel._timestamp_label,
+        panel._lens_label,
+        panel._exposure_label,
+    ):
+        assert label.wordWrap() is True
+        assert label.height() >= label.heightForWidth(label.width())
+
+    assert panel._body_scroll.verticalScrollBar().maximum() > 0
+    assert panel.size() == _expected_panel_size(panel)
+    panel.close()
+
+
 def test_info_panel_video_missing_details_shows_fallback(qapp: QApplication) -> None:
     """When metadata is sparse the video fallback string should be displayed."""
 
@@ -400,19 +662,28 @@ def test_info_panel_frameless_window_flags(qapp: QApplication) -> None:
     panel.close()
 
 
-def test_info_panel_close_event_shuts_down_location_map(qapp: QApplication, monkeypatch) -> None:
+def test_info_panel_close_event_dismisses_without_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     panel = InfoPanel()
     shutdown_calls: list[bool] = []
+    dismissed_calls: list[bool] = []
 
     monkeypatch.setattr(panel, "shutdown", lambda: shutdown_calls.append(True))
+    panel.dismissed.connect(lambda: dismissed_calls.append(True))
 
+    panel.show()
+    qapp.processEvents()
     panel.close()
     qapp.processEvents()
 
-    assert shutdown_calls == [True]
+    assert not panel.isVisible()
+    assert dismissed_calls == [True]
+    assert shutdown_calls == []
 
 
-def test_info_panel_location_map_recreates_after_close_shutdown(
+def test_info_panel_location_map_is_reused_until_explicit_shutdown(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -433,23 +704,449 @@ def test_info_panel_location_map_recreates_after_close_shutdown(
             "location": "San Francisco",
         }
     )
-    assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    map_widget = panel._location_map._map_widget
+    assert isinstance(map_widget, _FakeMiniMapWidget)
 
-    panel.close()
-    qapp.processEvents()
+    map_widget.center_on(139.65, 35.6764)
+    map_widget.set_zoom(12.0)
+    for _ in range(20):
+        panel.close()
+        qapp.processEvents()
+        assert panel._location_map._map_widget is map_widget
+        assert map_widget.center_lonlat() == (139.65, 35.6764)
+        assert map_widget.zoom == 12.0
+        assert map_widget.shutdown_calls == 0
+        panel.show()
+        qapp.processEvents()
+        assert panel._location_map._map_widget is map_widget
+
+    panel.shutdown()
+    panel.shutdown()
+
     assert panel._location_map._map_widget is None
+    assert map_widget.shutdown_calls == 1
 
+
+def test_info_panel_map_placeholder_precedes_lazy_backend_without_resizing(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
     panel.set_asset_metadata(
         {
             "rel": "map.jpg",
             "name": "map.jpg",
-            "gps": {"lat": 37.7749, "lon": -122.4194},
-            "location": "San Francisco",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+            "location": "Munich",
         }
     )
 
+    panel.prepare_for_presentation()
+
+    map_view = panel._location_map
+    panel_size = panel.size()
+    assert isinstance(map_view._map_widget, _FakeMiniMapWidget)
+    map_view._map_widget.auto_present_first_frame = False
+    assert not map_view._placeholder.isHidden()
+    assert map_view.width() == map_view.height()
+    placeholder = QPixmap(map_view._map_clip_frame.size())
+    map_view._map_clip_frame.render(placeholder)
+    center = placeholder.toImage().pixelColor(
+        placeholder.width() // 2,
+        placeholder.height() // 2,
+    )
+    assert center.name().lower() == "#88a8c2"
+
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    assert not map_view._placeholder.isHidden()
+
+    map_view._map_widget.present_first_frame()
+    qapp.processEvents()
+
+    assert map_view._placeholder.isHidden()
+    assert panel.size() == panel_size
+
+
+def test_info_panel_dismiss_before_first_frame_reuses_stable_map_surface(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+        }
+    )
+
+    panel.show()
+    map_widget = panel._location_map._map_widget
+    panel.dismiss()
+    _process_deferred_panel_content(qapp)
+
+    assert isinstance(map_widget, _FakeMiniMapWidget)
+    assert panel._location_map._map_widget is map_widget
+    assert map_widget.shutdown_calls == 0
+
+    panel.show()
+    _process_deferred_panel_content(qapp)
+    assert panel._location_map._map_widget is map_widget
+
+
+def test_info_panel_deferred_native_failure_falls_back_behind_placeholder(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingDeferredNativeMap(_FakeMiniMapWidget):
+        def start_deferred_content(self) -> None:
+            raise RuntimeError("native resources unavailable")
+
+    source = MapSourceSpec.legacy_default(Path.cwd()).resolved(Path.cwd())
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        lambda *_args, **_kwargs: (_FailingDeferredNativeMap, source, "osmand_native"),
+    )
+    monkeypatch.setattr(
+        info_location_map_module,
+        "_preferred_python_widget_class",
+        lambda **_kwargs: _FakeMiniMapWidget,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+        }
+    )
+
+    panel.prepare_for_presentation()
+    native_widget = panel._location_map._map_widget
+    panel.show()
+    _process_deferred_panel_content(qapp)
+
     assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
+    assert not isinstance(panel._location_map._map_widget, _FailingDeferredNativeMap)
+    assert panel._location_map._backend_kind == "osmand_python"
+    assert panel._location_map._map_widget.center_lonlat() == (11.576124, 48.137154)
+    assert panel._location_map._map_widget.zoom == panel._location_map.DEFAULT_ZOOM
+    assert panel._location_map._placeholder.isHidden()
+    assert native_widget.shutdown_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("changes", "kind", "backend"),
+    [
+        (
+            {"native_widget_available": True, "preferred_backend": "osmand_native"},
+            "native",
+            "osmand_native",
+        ),
+        ({"python_gl_available": True}, "gl", "osmand_python"),
+        ({"osmand_extension_available": False}, "cpu", "osmand_python"),
+        ({"preferred_backend": "unavailable"}, "cpu", "osmand_python"),
+    ],
+)
+def test_info_panel_capabilities_change_rebuilds_map(
+    qapp, mini_map_runtime, changes, kind, backend,
+):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    old_widget.present_first_frame()
+    h.view.set_location(48.137154, 11.576124, zoom=11.0)
+
+    h.runtime.snapshot = replace(h.runtime.snapshot, **changes)
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+
+    new_widget = h.view.map_widget()
+    assert new_widget is not old_widget
+    assert new_widget.kind == kind
+    assert old_widget.shutdown_calls == 1
+    assert h.view._backend_kind == backend
+    assert not h.view._placeholder.isHidden()
+    new_widget.present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert new_widget.center_lonlat() == (11.576124, 48.137154)
+    assert new_widget.zoom == 11.0
+
+
+def test_info_panel_visible_runtime_root_change_rebuilds_without_reopening(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    old_widget.present_first_frame()
+    size = h.panel.size()
+
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    new_widget = h.view.map_widget()
+    assert new_widget is not old_widget
+    assert old_widget.shutdown_calls == 1
+    assert h.panel.isVisible()
+    assert not h.view._placeholder.isHidden()
+    assert Path(new_widget._map_source.data_path) == (
+        h.runtime.root / "tiles" / "extension" / "World_basemap_2.obf"
+    )
+    new_widget.present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert new_widget.center_lonlat() == (11.576124, 48.137154)
+    assert h.panel.size() == size
+
+
+@pytest.mark.parametrize("loading", [False, True])
+@pytest.mark.parametrize(
+    "changes",
+    [{"display_available": False}, {"location_search_available": True}, {"status_message": "new"}],
+)
+def test_info_panel_nonconstruction_runtime_change_keeps_first_frame_valid(
+    qapp, mini_map_runtime, loading, changes,
+):
+    h = mini_map_runtime
+    h.panel.prepare_for_presentation()
+    if loading:
+        h.panel.show()
+        _process_deferred_panel_content(qapp)
+    widget = h.view.map_widget()
+    generation = h.view._map_creation_generation
+    h.runtime.snapshot = replace(h.runtime.snapshot, **changes)
+    h.panel.set_map_runtime(h.runtime)
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+
+    assert h.view.map_widget() is widget
+    assert h.view._map_creation_generation == generation
+    assert widget.shutdown_calls == 0
+    widget.present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert widget.center_lonlat() == (11.576124, 48.137154)
+
+
+def test_info_panel_runtime_rebuild_rejects_queued_old_signals_and_uses_latest_gps(
+    qapp, mini_map_runtime,
+):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+
+    def emit_old_signals():
+        old_widget.firstFramePresented.emit()
+        old_widget.panned.emit(QPointF(100.0, 100.0))
+        old_widget.viewChanged.emit(0.5, 0.5, 2.0)
+        old_widget.panFinished.emit()
+
+    # Cross-thread emission queues callbacks on the GUI thread before release.
+    worker = Thread(target=emit_old_signals)
+    worker.start()
+    worker.join()
+    assert h.view._map_lifecycle.name == "LOADING"
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    new_widget = h.view.map_widget()
+    h.panel.set_asset_metadata(
+        {"rel": "tokyo.jpg", "name": "tokyo.jpg", "gps": {"lat": 35.6764, "lon": 139.65}}
+    )
+    _process_deferred_panel_content(qapp)
+
+    assert old_widget.shutdown_calls == 1
+    assert h.view._map_lifecycle.name == "LOADING"
+    assert not h.view._placeholder.isHidden()
+    new_widget.present_first_frame()
+    assert h.view._placeholder.isHidden()
+    assert new_widget.center_lonlat() == (139.65, 35.6764)
+
+
+def test_info_panel_hidden_runtime_rebuild_is_lazy_and_preserves_viewport(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    old_widget.present_first_frame()
+    h.view.set_location(48.137154, 11.576124, zoom=10.0)
+    h.panel.dismiss()
+
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    assert h.view.map_widget() is None
+    assert h.view.current_location() == (48.137154, 11.576124)
+    assert old_widget.shutdown_calls == 1
+    assert len(h.created) == 1
+
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    new_widget = h.view.map_widget()
+    assert len(h.created) == 2
+    new_widget.present_first_frame()
+    assert new_widget.center_lonlat() == (11.576124, 48.137154)
+    assert new_widget.zoom == 10.0
+    assert h.view._placeholder.isHidden()
+
+
+@pytest.mark.parametrize(
+    ("native_failure", "python_failure"),
+    [("content", "construct"), ("content", "surface"), ("content", "content"),
+     ("construct", "construct"), ("surface", "content")],
+)
+def test_info_panel_failed_fallback_shows_error_and_recovers_on_runtime_change(
+    qapp, mini_map_runtime, native_failure, python_failure,
+):
+    h = mini_map_runtime
+    h.failures.update(native=native_failure, cpu=python_failure)
+    h.runtime.snapshot = replace(
+        h.runtime.snapshot, native_widget_available=True, preferred_backend="osmand_native",
+    )
+    h.panel.set_map_runtime(h.runtime)
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+
+    assert h.view._map_lifecycle.name == "FAILED"
+    assert h.view.map_widget() is None
+    assert h.view._placeholder.isHidden()
+    assert not h.view._message_label.isHidden()
+    assert h.attempts == ["native", "cpu"]
+    assert all(widget.shutdown_calls == 1 for widget in h.created)
+    # Metadata refresh must not replace a terminal error with a loading cover.
+    h.view.set_location(35.6764, 139.65)
+    assert h.view._placeholder.isHidden()
+    assert not h.view._message_label.isHidden()
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    assert h.attempts == ["native", "cpu"]
+
+    h.failures.clear()
+    h.runtime.root /= "recovered-root"
+    h.panel.set_map_runtime(h.runtime)
+    _process_deferred_panel_content(qapp)
+    h.view.map_widget().present_first_frame()
+    assert h.view._map_lifecycle.name == "READY"
+    assert h.view._placeholder.isHidden()
+    assert h.view._message_label.isHidden()
+    assert h.view.map_widget().center_lonlat() == (11.576124, 48.137154)
+
+
+def test_info_panel_rebinding_same_construction_does_not_retry_native(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.failures["native"] = "content"
+    h.runtime.snapshot = replace(
+        h.runtime.snapshot, native_widget_available=True, preferred_backend="osmand_native",
+    )
+    h.panel.set_map_runtime(h.runtime)
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    widget = h.view.map_widget()
+    generation = h.view._map_creation_generation
+    assert h.attempts == ["native", "cpu"]
+
+    for _ in range(3):
+        h.runtime.snapshot = replace(h.runtime.snapshot, status_message="updated")
+        h.panel.set_map_runtime(
+            SimpleNamespace(
+                capabilities=h.runtime.capabilities, package_root=h.runtime.package_root,
+            )
+        )
+        _process_deferred_panel_content(qapp)
+    assert h.view.map_widget() is widget
+    assert h.view._map_creation_generation == generation
+    assert h.view._native_fallback_attempted
+    assert h.attempts == ["native", "cpu"]
+    widget.present_first_frame()
+    assert h.view._placeholder.isHidden()
+    assert widget.center_lonlat() == (11.576124, 48.137154)
+
+
+def test_info_panel_shutdown_rejects_runtime_location_and_old_frame(qapp, mini_map_runtime):
+    h = mini_map_runtime
+    h.panel.show()
+    _process_deferred_panel_content(qapp)
+    old_widget = h.view.map_widget()
+    h.panel.shutdown()
+    h.runtime.root /= "new-root"
+    h.panel.set_map_runtime(h.runtime)
+    h.view.set_location(35.6764, 139.65)
+    old_widget.present_first_frame()
+    old_widget.panned.emit(QPointF(10.0, 10.0))
+    h.view.prepare_surface()
+    h.view.schedule_deferred_content()
+    h.view.start_deferred_content()
+    _process_deferred_panel_content(qapp)
+
+    assert h.view._map_lifecycle.name == "SHUTDOWN"
+    assert h.view.map_widget() is None
+    assert h.view.current_location() == (None, None)
+    assert not h.view._pending_viewport_sync
+    assert not h.view._pending_viewport_sync_queue
+    assert not h.view._pending_pin_sync_queue
+    assert old_widget.shutdown_calls == 1
+    assert len(h.created) == 1
+
+
+def test_info_panel_lazy_map_uses_latest_location_and_does_not_recreate_after_shutdown(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 48.137154, "lon": 11.576124},
+        }
+    )
+    panel.show()
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 35.6764, "lon": 139.6500},
+        }
+    )
+
+    _process_deferred_panel_content(qapp)
+
+    map_widget = panel._location_map._map_widget
+    assert isinstance(map_widget, _FakeMiniMapWidget)
+    assert map_widget.center_lonlat() == (139.6500, 35.6764)
+
     panel.shutdown()
+    _process_deferred_panel_content(qapp)
+    assert panel._location_map._map_widget is None
 
 
 def test_info_panel_close_button_matches_main_window(qapp: QApplication) -> None:
@@ -582,7 +1279,7 @@ def test_info_panel_face_avatar_context_menu_labels_and_submenu(qapp: QApplicati
     assert not_this_label == "Not Alice"
     assert submenu_labels == (
         ("choose_someone_else", "Choose Someone Else…"),
-        ("new_person", "New Person…"),
+        ("new_person", "New Name…"),
     )
     menu = avatar._build_context_menu()
     assert menu is not None
@@ -619,7 +1316,7 @@ def test_info_panel_face_avatar_context_menu_uses_fallback_name_when_unnamed(
 
     avatar = panel._face_layout.itemAt(0).widget()
     assert avatar is not None
-    assert avatar._menu_action_labels()[1] == "Not This Person"
+    assert avatar._menu_action_labels()[1] == "Not This Name"
     panel.close()
 
 
@@ -759,12 +1456,125 @@ def test_info_panel_choose_person_reuses_group_people_dialog(
     assert len(dialog_calls) == 1
     assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == ["person-2"]
     assert dialog_calls[0]["kwargs"]["title_text"] == "Choose Someone Else"
-    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Assign this face to"
+    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Assign to"
     assert dialog_calls[0]["kwargs"]["confirm_text"] == "Choose"
     assert dialog_calls[0]["kwargs"]["min_selection"] == 1
     assert dialog_calls[0]["kwargs"]["max_selection"] == 1
     assert dialog_calls[0]["kwargs"]["dark_mode"] is False
     assert moved == [(annotation, "person-2")]
+    avatar.close()
+
+
+def test_info_panel_choose_person_filters_current_prefixed_identity(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    from iPhoto.people.repository import AssetFaceAnnotation
+
+    dialog_calls: list[dict[str, object]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **kwargs) -> None:
+            dialog_calls.append({"summaries": summaries, "kwargs": kwargs})
+
+        def exec(self) -> int:
+            return 0
+
+        def selected_person_ids(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr(info_panel_module, "GroupPeopleDialog", _FakeDialog)
+
+    annotation = AssetFaceAnnotation(
+        face_id="face-1",
+        person_id="person-1",
+        display_name="Alice",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+    avatar = info_panel_module._FaceAvatarWidget(
+        annotation,
+        [
+            RecognitionIdentitySuggestion("person:person-1", "Alice", None, 3),
+            RecognitionIdentitySuggestion("person:person-2", "Bob", None, 2),
+        ],
+    )
+
+    avatar._prompt_choose_person()
+
+    assert len(dialog_calls) == 1
+    assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == [
+        "person:person-2"
+    ]
+    avatar.close()
+
+
+def test_info_panel_pet_avatar_uses_neutral_menu_and_mixed_candidate_shape(
+    monkeypatch,
+    qapp: QApplication,
+) -> None:
+    dialog_calls: list[dict[str, object]] = []
+
+    class _FakeDialog:
+        def __init__(self, summaries, **kwargs) -> None:
+            dialog_calls.append({"summaries": summaries, "kwargs": kwargs})
+
+        def exec(self) -> int:
+            return 1
+
+        def selected_person_ids(self) -> list[str]:
+            return ["pet:pet-b"]
+
+    monkeypatch.setattr(info_panel_module, "GroupPeopleDialog", _FakeDialog)
+
+    annotation = RecognitionAnnotation(
+        source_detection_kind="pet",
+        source_annotation_id="det-a",
+        source_identity_kind="pet",
+        source_identity_id="pet-a",
+        canonical_identity_kind="pet",
+        canonical_identity_id="pet-a",
+        canonical_display_name="Miso",
+        box_x=0,
+        box_y=0,
+        box_w=10,
+        box_h=10,
+        image_width=100,
+        image_height=100,
+    )
+    avatar = info_panel_module._FaceAvatarWidget(
+        annotation,
+        [
+            RecognitionIdentitySuggestion("person:person-a", "Alice", None, 3),
+            RecognitionIdentitySuggestion("pet:pet-a", "Miso", None, 1),
+            RecognitionIdentitySuggestion("pet:pet-b", "Nori", None, 2),
+        ],
+    )
+    moved: list[tuple[object, str]] = []
+    avatar.moveRequested.connect(lambda face, identity_key: moved.append((face, identity_key)))
+
+    delete_label, not_this_label, submenu_labels = avatar._menu_action_labels()
+    assert delete_label == "Delete"
+    assert not_this_label == "Not Miso"
+    assert submenu_labels == (
+        ("choose_someone_else", "Choose Someone Else…"),
+        ("new_person", "New Name…"),
+    )
+
+    avatar._prompt_choose_person()
+
+    assert len(dialog_calls) == 1
+    summaries = dialog_calls[0]["summaries"]
+    assert [summary.person_id for summary in summaries] == ["pet:pet-b"]
+    assert [summary.name for summary in summaries] == ["Nori"]
+    assert dialog_calls[0]["kwargs"]["title_text"] == "Choose Someone Else"
+    assert dialog_calls[0]["kwargs"]["prompt_text"] == "Assign to"
+    assert all("pet:" not in str(summary.name) for summary in summaries)
+    assert moved == [(annotation, "pet:pet-b")]
     avatar.close()
 
 
@@ -873,16 +1683,17 @@ def test_info_panel_centers_on_parent(qapp: QApplication) -> None:
     parent.close()
 
 
-def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication) -> None:
-    """Updating metadata while hidden should expand the panel on the next show."""
+def test_info_panel_metadata_enrichment_keeps_panel_height_stable(qapp: QApplication) -> None:
+    """Async metadata enrichment must not resize the visible Info Panel."""
 
     sparse = {
-        "rel": "clip.MOV",
-        "name": "clip.MOV",
-        "is_video": True,
+        "rel": "IMG_3686.HEIC",
+        "name": "IMG_3686.HEIC",
+        "is_video": False,
+        "_metadata_loading": True,
     }
     rich = {
-        "rel": "IMG_3686.HEIC",
+        **sparse,
         "name": "IMG_3686.HEIC",
         "dt": "2025-09-16T12:08:36Z",
         "make": "Apple",
@@ -903,45 +1714,98 @@ def test_info_panel_hidden_metadata_update_recomputes_height(qapp: QApplication)
     qapp.processEvents()
     sparse_height = panel.height()
 
-    panel.hide()
-    qapp.processEvents()
     panel.set_asset_metadata(rich)
+    for _ in range(3):
+        qapp.processEvents()
 
-    panel.show()
-    qapp.processEvents()
-    layout = panel.layout()
-    expected_height = layout.totalHeightForWidth(max(panel.width(), panel.minimumWidth()))
-    assert panel.height() > sparse_height
-    assert panel.height() >= expected_height
+    assert panel.height() == sparse_height
     panel.close()
 
 
-def test_info_panel_first_show_schedules_post_show_reflow(
+def test_info_panel_first_show_uses_fixed_shell_without_deferred_resize(
     qapp: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The panel should queue a deferred geometry reflow on the first show."""
+    """The first presentation should use the screen-bounded design shell."""
 
     panel = InfoPanel()
-    schedule = Mock()
-
-    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
-
     panel.show()
+    first_size = panel.size()
     qapp.processEvents()
 
-    schedule.assert_called_once_with(recenter=True)
+    assert first_size == _expected_panel_size(panel)
+    assert panel.size() == first_size
     panel.close()
 
 
-def test_info_panel_visible_metadata_update_schedules_post_show_reflow(
+def test_info_panel_shell_is_capped_once_for_small_screen(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Visible metadata refreshes should queue a deferred reflow."""
+    del qapp
+
+    class _SmallScreen:
+        @staticmethod
+        def name() -> str:
+            return "small-screen"
+
+        @staticmethod
+        def availableGeometry() -> QRect:
+            return QRect(0, 0, 500, 600)
 
     panel = InfoPanel()
-    schedule = Mock()
+    monkeypatch.setattr(panel, "_panel_screen", lambda: _SmallScreen())
+
+    assert panel._apply_shell_size(force=True) is True
+    expected_size = QSize(InfoPanel._PANEL_WIDTH, 520)
+    assert panel.size() == expected_size
+
+    panel.set_asset_metadata(
+        {
+            "rel": "long.jpg",
+            "name": "long.jpg",
+            "lens": "Long translated metadata " * 100,
+        }
+    )
+    assert panel.size() == expected_size
+
+
+def test_info_panel_faces_wrap_without_horizontal_overflow(qapp: QApplication) -> None:
+    from iPhoto.people.repository import AssetFaceAnnotation
+
+    panel = InfoPanel()
+    panel.set_asset_faces(
+        [
+            AssetFaceAnnotation(
+                face_id=f"face-{index}",
+                person_id=f"person-{index}",
+                display_name=f"Person {index}",
+                box_x=0,
+                box_y=0,
+                box_w=10,
+                box_h=10,
+                image_width=100,
+                image_height=100,
+            )
+            for index in range(14)
+        ]
+    )
+    panel.show()
+    qapp.processEvents()
+
+    assert panel._face_container.height() > _FACE_AVATAR_DIAMETER
+    assert panel._body_scroll.horizontalScrollBar().maximum() == 0
+    assert panel._body_content.width() == panel._body_scroll.viewport().width()
+    assert panel.size() == _expected_panel_size(panel)
+    panel.close()
+
+
+def test_info_panel_visible_metadata_update_refreshes_body_without_resizing_shell(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Visible metadata updates should affect only scrollable body geometry."""
+
+    panel = InfoPanel()
     metadata = {
         "rel": "clip.MOV",
         "name": "clip.MOV",
@@ -951,11 +1815,14 @@ def test_info_panel_visible_metadata_update_schedules_post_show_reflow(
 
     panel.show()
     qapp.processEvents()
-    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
+    panel_size = panel.size()
+    refresh = Mock(wraps=panel._refresh_panel_geometry)
+    monkeypatch.setattr(panel, "_refresh_panel_geometry", refresh)
 
     panel.set_asset_metadata(metadata)
 
-    schedule.assert_called_once_with(recenter=False)
+    assert refresh.call_count >= 1
+    assert panel.size() == panel_size
     panel.close()
 
 
@@ -1010,17 +1877,134 @@ def test_info_panel_title_label_drag_moves_panel(
     panel.close()
 
 
-def test_info_panel_has_shadow_margin(qapp: QApplication) -> None:
-    """The root layout should reserve right/bottom margins for the shadow."""
+def test_info_panel_card_preserves_visible_size_inside_symmetric_shadow_margin(
+    qapp: QApplication,
+) -> None:
+    """The transparent shell should reserve enough space on every shadow edge."""
 
     panel = InfoPanel()
+    panel.show()
+    qapp.processEvents()
+
     layout = panel.layout()
     margins = layout.contentsMargins()
-    shadow = InfoPanel._SHADOW_SIZE
-    assert margins.left() == 0
-    assert margins.top() == 0
-    assert margins.right() == shadow
-    assert margins.bottom() == shadow
+    padding = InfoPanel._SHADOW_PADDING
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+        padding,
+        padding,
+        padding,
+        padding,
+    )
+    assert panel.size() == QSize(InfoPanel._PANEL_WIDTH, InfoPanel._PANEL_HEIGHT)
+    assert panel._card.geometry() == QRect(
+        padding,
+        padding,
+        InfoPanel._CARD_WIDTH,
+        InfoPanel._CARD_HEIGHT,
+    )
+    assert panel._shadow_surface.geometry() == panel._card.geometry()
+    assert panel._shadow_surface.parentWidget() is panel
+    assert panel._card.parentWidget() is panel
+    assert isinstance(layout, QGridLayout)
+    assert layout.itemAt(0).widget() is panel._shadow_surface
+    assert layout.itemAt(1).widget() is panel._card
+    assert panel._title_bar.width() == InfoPanel._CARD_WIDTH
+    assert panel._body_scroll.width() == InfoPanel._CARD_WIDTH
+    panel.close()
+
+
+def test_info_panel_uses_qt_shadow_effect_and_disables_native_shadow(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    panel = InfoPanel()
+
+    effect = panel._shadow_surface.graphicsEffect()
+    assert isinstance(effect, QGraphicsDropShadowEffect)
+    assert effect.blurRadius() == InfoPanel._SHADOW_BLUR_RADIUS
+    assert effect.offset() == QPointF(0.0, InfoPanel._SHADOW_OFFSET_Y)
+    assert effect.color().getRgb() == (0, 0, 0, InfoPanel._SHADOW_ALPHA)
+    assert panel._card.graphicsEffect() is None
+    assert panel._shadow_surface.findChildren(QWidget) == []
+    assert panel._shadow_surface.testAttribute(
+        Qt.WidgetAttribute.WA_TransparentForMouseEvents
+    )
+    assert panel.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
+    assert panel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert panel.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not panel.autoFillBackground()
+    panel.close()
+
+
+def test_info_panel_map_subtree_has_no_graphics_effect_ancestor(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(info_location_map_module, "check_opengl_support", lambda: False)
+    monkeypatch.setattr(
+        info_location_map_module,
+        "choose_map_widget_backend",
+        _fake_choose_map_widget_backend,
+    )
+
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "map.jpg",
+            "name": "map.jpg",
+            "gps": {"lat": 37.7749, "lon": -122.4194},
+            "location": "San Francisco",
+        }
+    )
+    panel.show()
+    _process_deferred_panel_content(qapp)
+
+    map_widget = panel._location_map._map_widget
+    assert isinstance(map_widget, _FakeMiniMapWidget)
+    for descendant in (
+        map_widget,
+        panel._location_map,
+        panel._body_scroll.viewport(),
+    ):
+        current: QWidget | None = descendant
+        while current is not None and current is not panel:
+            assert current.graphicsEffect() is None
+            current = current.parentWidget()
+        assert current is panel
+    assert not panel._shadow_surface.isAncestorOf(map_widget)
+    panel.close()
+
+
+def test_info_panel_render_contains_unclipped_shadow_on_all_four_sides(
+    qapp: QApplication,
+) -> None:
+    panel = InfoPanel()
+    panel.show()
+    qapp.processEvents()
+
+    rendered = QPixmap(panel.size())
+    rendered.fill(Qt.GlobalColor.transparent)
+    panel.render(rendered)
+    image = rendered.toImage()
+    card = panel._card.geometry()
+    sample_gap = 5
+    samples = (
+        (card.center().x(), card.top() - sample_gap),
+        (card.left() - sample_gap, card.center().y()),
+        (card.right() + sample_gap, card.center().y()),
+        (card.center().x(), card.bottom() + sample_gap),
+    )
+
+    assert all(image.pixelColor(x, y).alpha() > 0 for x, y in samples)
+    assert image.pixelColor(card.center()).alpha() == 255
+    outer_edge_samples = (
+        (image.width() // 2, 0),
+        (0, image.height() // 2),
+        (image.width() - 1, image.height() // 2),
+        (image.width() // 2, image.height() - 1),
+    )
+    assert all(image.pixelColor(x, y).alpha() == 0 for x, y in outer_edge_samples)
     panel.close()
 
 
@@ -1137,7 +2121,7 @@ def test_info_panel_location_map_stays_square(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     assert map_view.width() == map_view.height()
@@ -1167,7 +2151,7 @@ def test_info_panel_location_map_restores_outer_rounded_corners(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     assert not map_view.mask().contains(QPoint(0, 0))
@@ -1204,7 +2188,7 @@ def test_info_panel_location_map_clips_embedded_event_target_corners(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -1240,7 +2224,7 @@ def test_info_panel_location_map_clips_qwindow_event_target_corners(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -1275,7 +2259,7 @@ def test_info_panel_repeated_same_gps_metadata_does_not_reset_location_map(
     panel.set_location_capability(enabled=True)
     panel.set_asset_metadata(metadata)
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     set_location = Mock(wraps=panel._location_map.set_location)
     monkeypatch.setattr(panel._location_map, "set_location", set_location)
@@ -1309,7 +2293,7 @@ def test_info_panel_missing_location_hides_map_without_repaint(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -1414,18 +2398,16 @@ def test_info_panel_location_map_reflow_stabilizes_on_first_event_pass(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
-    first_height = panel.height()
-    layout = panel.layout()
-    expected_height = layout.totalHeightForWidth(max(panel.width(), panel.minimumWidth()))
-    assert first_height >= expected_height
+    first_size = panel.size()
+    assert first_size == _expected_panel_size(panel)
     assert panel._location_map.width() == panel._location_map.height()
 
     for _ in range(3):
         qapp.processEvents()
 
-    assert panel.height() == first_height
+    assert panel.size() == first_size
     panel.close()
 
 
@@ -1454,6 +2436,32 @@ def test_info_panel_location_suggestions_use_non_focus_floating_tool(
     assert panel._location_results.focusPolicy() == Qt.FocusPolicy.NoFocus
     assert panel._location_layout.indexOf(panel._location_results) == -1
     assert panel.height() == height_before
+    panel.close()
+
+
+def test_info_panel_body_scroll_hides_location_suggestions(qapp: QApplication) -> None:
+    panel = InfoPanel()
+    panel.set_location_capability(enabled=True)
+    panel.set_asset_metadata(
+        {
+            "rel": "long.jpg",
+            "name": "long.jpg",
+            "lens": "Long metadata content " * 100,
+        }
+    )
+    panel.show()
+    qapp.processEvents()
+    panel.set_location_suggestions(
+        [SimpleNamespace(display_name="Munich", secondary_text="Germany")]
+    )
+    assert not panel._location_results.isHidden()
+
+    scrollbar = panel._body_scroll.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    scrollbar.setValue(min(40, scrollbar.maximum()))
+    qapp.processEvents()
+
+    assert panel._location_results.isHidden()
     panel.close()
 
 
@@ -1549,7 +2557,7 @@ def test_info_panel_location_keyboard_escape_closes_suggestions_without_confirm(
     panel.close()
 
 
-def test_info_panel_common_location_show_path_queues_one_post_show_reflow(
+def test_info_panel_common_location_show_path_keeps_fixed_shell(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1560,8 +2568,6 @@ def test_info_panel_common_location_show_path_queues_one_post_show_reflow(
         _fake_choose_map_widget_backend,
     )
     panel = InfoPanel()
-    schedule = Mock()
-    monkeypatch.setattr(panel, "_schedule_post_show_reflow", schedule)
 
     panel.set_location_capability(enabled=True)
     panel.set_asset_metadata(
@@ -1575,7 +2581,8 @@ def test_info_panel_common_location_show_path_queues_one_post_show_reflow(
     panel.show()
     qapp.processEvents()
 
-    schedule.assert_called_once_with(recenter=True)
+    assert panel.size() == _expected_panel_size(panel)
+    assert panel._location_map.width() == panel._location_map.height()
     panel.close()
 
 
@@ -1720,10 +2727,12 @@ def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
         }
     )
     panel.show()
-    qapp.processEvents()
+    panel_size = panel.size()
+    _process_deferred_panel_content(qapp)
 
     assert panel._location_map._map_widget is None
     assert not panel._location_map._message_label.isHidden()
+    assert panel.size() == panel_size
 
     panel.set_map_runtime(
         SimpleNamespace(
@@ -1734,11 +2743,12 @@ def test_info_panel_retries_map_preview_when_runtime_is_bound_after_metadata(
             )
         )
     )
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     assert isinstance(panel._location_map._map_widget, _FakeMiniMapWidget)
     assert panel._location_map._message_label.isHidden()
     assert not panel._location_map.isHidden()
+    assert panel.size() == panel_size
     panel.close()
 
 
@@ -1778,7 +2788,10 @@ def test_info_location_map_unavailable_message_retranslates(
     view = info_location_map_module.InfoLocationMapView()
     try:
         view.set_location(37.7749, -122.4194)
-        qapp.processEvents()
+        view.prepare_surface()
+        view.show()
+        view.start_deferred_content()
+        _process_deferred_panel_content(qapp)
 
         assert not view._message_label.isHidden()
         assert view._message_label.text() == "Map preview unavailable"
@@ -1842,7 +2855,7 @@ def test_info_panel_map_runtime_package_root_controls_embedded_map_source(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     assert captured_map_source
     assert Path(captured_map_source[-1].data_path) == (
@@ -1873,7 +2886,7 @@ def test_info_panel_location_map_overlay_tracks_actual_embedded_map_size(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -1922,7 +2935,7 @@ def test_info_panel_location_map_drag_cursor_tracks_event_target(
             }
         )
         panel.show()
-        qapp.processEvents()
+        _process_deferred_panel_content(qapp)
 
         map_view = panel._location_map
         map_widget = map_view._map_widget
@@ -1995,7 +3008,7 @@ def test_info_panel_location_map_drag_cursor_resets_on_hide_and_shutdown(
             }
         )
         panel.show()
-        qapp.processEvents()
+        _process_deferred_panel_content(qapp)
 
         map_view = panel._location_map
         map_widget = map_view._map_widget
@@ -2057,33 +3070,50 @@ def test_info_panel_location_map_drag_cursor_uses_global_map_host_filter(
             }
         )
         panel.show()
-        qapp.processEvents()
+        _process_deferred_panel_content(qapp)
 
         map_view = panel._location_map
         fallback_receiver = QWidget(map_view._map_host)
         fallback_receiver.setGeometry(0, 0, 24, 24)
         fallback_receiver.show()
 
-        _send_mouse_event(
-            fallback_receiver,
+        assert map_view._application_event_filter_installed is True
+        local_pos = QPointF(12.0, 12.0)
+        outside_host = QPointF(-10_000.0, -10_000.0)
+        press_event = QMouseEvent(
             QEvent.Type.MouseButtonPress,
-            button=Qt.MouseButton.LeftButton,
-            buttons=Qt.MouseButton.LeftButton,
+            local_pos,
+            outside_host,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
         )
+        map_view.eventFilter(fallback_receiver, press_event)
 
         override_cursor = QApplication.overrideCursor()
         assert fallback_receiver not in map_view._map_event_targets
-        assert override_cursor is not None
+        assert override_cursor is not None, (
+            "map-host application filter did not start drag: "
+            f"installed={map_view._application_event_filter_installed}, "
+            f"dragging={map_view._dragging}, "
+            f"receiver_parent_is_host={fallback_receiver.parent() is map_view._map_host}"
+        )
         assert override_cursor.shape() == Qt.CursorShape.ClosedHandCursor
 
-        _send_mouse_event(
-            fallback_receiver,
+        release_event = QMouseEvent(
             QEvent.Type.MouseButtonRelease,
-            button=Qt.MouseButton.LeftButton,
-            buttons=Qt.MouseButton.NoButton,
+            local_pos,
+            outside_host,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
         )
+        map_view.eventFilter(fallback_receiver, release_event)
 
-        assert QApplication.overrideCursor() is None
+        assert QApplication.overrideCursor() is None, (
+            "map-host application filter did not release the drag cursor: "
+            f"dragging={map_view._dragging}"
+        )
     finally:
         panel.shutdown()
         panel.close()
@@ -2163,7 +3193,7 @@ def test_info_panel_location_map_uses_post_render_pin_when_available(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -2216,7 +3246,7 @@ def test_info_panel_location_map_resyncs_pin_after_delayed_zoom_projection(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget
@@ -2254,7 +3284,7 @@ def test_info_panel_location_map_recenters_view_after_widget_becomes_visible(
         }
     )
     panel.show()
-    qapp.processEvents()
+    _process_deferred_panel_content(qapp)
 
     map_view = panel._location_map
     map_widget = map_view._map_widget

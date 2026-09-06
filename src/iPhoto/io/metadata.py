@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from iPhoto.core.raw_processor import is_raw_extension
+
 from ..errors import ExternalToolError
 from ..utils.deps import load_pillow
 from ..utils.exiftool import get_metadata_batch
@@ -44,6 +46,7 @@ def read_image_meta_with_exiftool(
 
     info = _empty_media_info()
     exif_payload: Optional[Any] = None
+    orientation: int | None = None
 
     if isinstance(metadata, dict):
         exif_group = _extract_group(metadata, "EXIF") or {}
@@ -74,7 +77,6 @@ def read_image_meta_with_exiftool(
                 info["mime"] = mime or None
 
         # Check for orientation-based dimension swapping
-        orientation = None
         # Try finding Orientation in common groups
         for group in (ifd0_group, exif_group, exif_ifd_group, quicktime_group):
             val = group.get("Orientation")
@@ -99,6 +101,8 @@ def read_image_meta_with_exiftool(
         # Orientation flags 5-8 indicate 90 or 270 degree rotation
         if orientation in (5, 6, 7, 8) and info["w"] and info["h"]:
             info["w"], info["h"] = info["h"], info["w"]
+        if orientation in range(1, 9):
+            info["image_orientation"] = orientation
 
         gps_payload = _extract_gps_from_exiftool(metadata)
         if gps_payload is not None:
@@ -218,8 +222,15 @@ def read_image_meta_with_exiftool(
 
     geometry_missing = info["w"] is None or info["h"] is None
     need_dt_fallback = info["dt"] is None
+    need_orientation_fallback = orientation is None
 
-    if (geometry_missing or need_dt_fallback) and Image is not None and UnidentifiedImageError is not None and path.exists():
+    if (
+        (geometry_missing or need_dt_fallback or need_orientation_fallback)
+        and not is_raw_extension(path.suffix)
+        and Image is not None
+        and UnidentifiedImageError is not None
+        and path.exists()
+    ):
         LOGGER.debug("Opening %s with Pillow to backfill metadata", path)
         try:
             with Image.open(path) as img:
@@ -228,12 +239,23 @@ def read_image_meta_with_exiftool(
                     info["h"] = img.height
                     if info["mime"] is None:
                         info["mime"] = Image.MIME.get(img.format, None)
-                if need_dt_fallback:
+                if need_dt_fallback or need_orientation_fallback:
                     exif_payload = img.getexif() if hasattr(img, "getexif") else None
         except UnidentifiedImageError as exc:
             raise ExternalToolError(f"Unable to read image metadata for {path}") from exc
         except OSError as exc:
             raise ExternalToolError(f"OS error while reading {path}: {exc}") from exc
+
+    if orientation is None and exif_payload:
+        raw_orientation = exif_payload.get(274)
+        try:
+            orientation = int(raw_orientation)
+        except (TypeError, ValueError):
+            orientation = None
+        if orientation in (5, 6, 7, 8) and info["w"] and info["h"]:
+            info["w"], info["h"] = info["h"], info["w"]
+
+    info["image_orientation"] = orientation if orientation in range(1, 9) else 1
 
     if info["dt"] is None and exif_payload:
         fallback_dt = exif_payload.get(36867) or exif_payload.get(306)
@@ -454,6 +476,7 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
 
     streams = ffprobe_meta.get("streams", []) if isinstance(ffprobe_meta, dict) else []
     if isinstance(streams, list):
+        primary_video_seen = False
         for stream in streams:
             if not isinstance(stream, dict):
                 continue
@@ -466,6 +489,9 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
 
             codec_type = stream.get("codec_type")
             if codec_type == "video":
+                if primary_video_seen:
+                    continue
+                primary_video_seen = True
                 codec = stream.get("codec_name")
                 if isinstance(codec, str) and codec:
                     info["codec"] = codec
@@ -477,6 +503,37 @@ def read_video_meta(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Di
                 if isinstance(width, int) and isinstance(height, int):
                     info["w"] = width
                     info["h"] = height
+
+                rotation = 0.0
+                side_data = stream.get("side_data_list")
+                if isinstance(side_data, list):
+                    for value in side_data:
+                        if not isinstance(value, dict):
+                            continue
+                        if value.get("side_data_type") != "Display Matrix":
+                            continue
+                        try:
+                            rotation = float(value.get("rotation", 0.0))
+                        except (TypeError, ValueError):
+                            rotation = 0.0
+                        break
+                snapped = round(rotation / 90.0) * 90
+                rotation_cw = int(-snapped) % 360
+                info["video_rotation_cw"] = rotation_cw
+                linux_180_hint = False
+                if rotation_cw == 180:
+                    format_tags = fmt.get("tags", {}) if isinstance(fmt, dict) else {}
+                    major_brand = (
+                        str(format_tags.get("major_brand", "")).strip().lower()
+                        if isinstance(format_tags, dict)
+                        else ""
+                    )
+                    handler_name = str(tags.get("handler_name", "")).strip().lower()
+                    linux_180_hint = (
+                        major_brand == "qt"
+                        or "core media video" in handler_name
+                    )
+                info["video_linux_180_hint"] = linux_180_hint
 
                 frame_rate = _coerce_fractional(stream.get("avg_frame_rate"))
                 if frame_rate is None:

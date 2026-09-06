@@ -1292,16 +1292,20 @@ class TestVideoArea:
     def test_reset_relayout_resets_direct_video_renderer(self, qapp, mocker):
         """Unadjusted playback should restore its native fit on fullscreen exit."""
         va = VideoArea()
-        renderer_reset = mocker.patch.object(va._renderer, "reset_zoom")
+        va._renderer._zoom_factor = 1.0
+        renderer_update = mocker.patch.object(va._renderer, "update")
         edit_request = mocker.patch.object(
             va._edit_viewer,
             "request_viewport_relayout",
         )
         va._adjusted_preview_enabled = False
 
+        va._renderer.reset_zoom()
+        renderer_update.assert_not_called()
+
         va.request_viewport_relayout(reset_view=True)
 
-        renderer_reset.assert_called_once_with()
+        renderer_update.assert_called_once_with()
         edit_request.assert_not_called()
 
     def test_playback_preview_keeps_crop_framing_disabled(self, qapp):

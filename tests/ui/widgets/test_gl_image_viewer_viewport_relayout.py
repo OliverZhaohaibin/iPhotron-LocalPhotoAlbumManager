@@ -4,7 +4,8 @@ from collections.abc import Mapping
 
 import pytest
 from PySide6.QtCore import QPointF, QRectF, QSize
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QResizeEvent
+from PySide6.QtTest import QSignalSpy
 
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 
@@ -107,6 +108,43 @@ def test_uncropped_media_keeps_full_frame_fit_after_target_change(qapp) -> None:
     assert image_rect.height() <= viewer.height() + 1.0
 
 
+def test_resize_notifies_observers_only_after_real_target_is_synchronised(qapp) -> None:
+    viewer = _make_cropped_viewer(
+        {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 1.0, "Crop_H": 1.0}
+    )
+    old_target = QSize(1920, 1080)
+    new_target = QSize(1200, 800)
+    viewer._last_render_target_size = old_target
+    viewer._last_layout_target_size = old_target
+    viewer._viewport_relayout_pending = False
+    observed: list[tuple[tuple[float, float] | None, QRectF]] = []
+    viewer.viewTransformChanged.connect(
+        lambda: observed.append(
+            (
+                viewer._render_target_device_size(),
+                viewer.image_rect_to_viewport(0.0, 0.0, 400.0, 300.0),
+            )
+        )
+    )
+    viewport_spy = QSignalSpy(viewer.viewportMetricsChanged)
+
+    viewer.resizeEvent(QResizeEvent(viewer.size(), viewer.size()))
+
+    assert observed == []
+    assert viewport_spy.count() == 0
+
+    viewer._last_render_target_size = new_target
+    viewer._sync_view_transform_for_render_target(new_target)
+
+    assert len(observed) == 1
+    assert viewport_spy.count() == 1
+    observed_target, image_rect = observed[-1]
+    assert observed_target == (1200.0, 800.0)
+    assert image_rect.center().x() == pytest.approx(300.0, abs=1.0)
+    assert image_rect.center().y() == pytest.approx(200.0, abs=1.0)
+    assert image_rect.height() == pytest.approx(viewer.height(), abs=1.0)
+
+
 def test_playback_crop_center_lock_reflows_against_restored_target(qapp) -> None:
     viewer = _make_cropped_viewer(
         {"Crop_CX": 0.70, "Crop_CY": 0.62, "Crop_W": 0.55, "Crop_H": 0.58}
@@ -183,6 +221,7 @@ def test_fullscreen_exit_reset_restores_crop_fit_after_lock_was_cleared(qapp) ->
     viewer._cancel_auto_crop_lock()
     viewer._transform_controller.set_zoom_factor_direct(2.25)
     viewer._transform_controller.set_pan_pixels(QPointF(37.0, -19.0))
+    viewport_spy = QSignalSpy(viewer.viewportMetricsChanged)
 
     viewer.request_viewport_relayout(reset_view=True)
     # A later resize event may add a preserving request, but must not downgrade
@@ -200,6 +239,23 @@ def test_fullscreen_exit_reset_restores_crop_fit_after_lock_was_cleared(qapp) ->
         restored_rect.width() == pytest.approx(viewer.width(), abs=1.0)
         or restored_rect.height() == pytest.approx(viewer.height(), abs=1.0)
     )
+    assert viewport_spy.count() == 1
+
+
+def test_active_crop_notifies_after_target_sync_without_reframing(qapp, mocker) -> None:
+    viewer = _make_cropped_viewer(
+        {"Crop_CX": 0.70, "Crop_CY": 0.62, "Crop_W": 0.55, "Crop_H": 0.58}
+    )
+    mocker.patch.object(viewer._crop_controller, "is_active", return_value=True)
+    reapply = mocker.patch.object(viewer, "_reapply_locked_crop_view")
+    transform_spy = QSignalSpy(viewer.viewTransformChanged)
+    viewport_spy = QSignalSpy(viewer.viewportMetricsChanged)
+
+    _publish_target_and_sync(viewer, (1200, 800))
+
+    reapply.assert_not_called()
+    assert transform_spy.count() == 1
+    assert viewport_spy.count() == 1
 
 
 def test_identical_target_is_coalesced_until_relayout_is_requested(qapp, mocker) -> None:
@@ -209,11 +265,17 @@ def test_identical_target_is_coalesced_until_relayout_is_requested(qapp, mocker)
     target = QSize(1200, 800)
     viewer._last_render_target_size = target
     reapply = mocker.patch.object(viewer, "_reapply_locked_crop_view")
+    transform_spy = QSignalSpy(viewer.viewTransformChanged)
+    viewport_spy = QSignalSpy(viewer.viewportMetricsChanged)
 
     viewer._sync_view_transform_for_render_target(target)
     viewer._sync_view_transform_for_render_target(target)
     assert reapply.call_count == 1
+    assert transform_spy.count() == 1
+    assert viewport_spy.count() == 1
 
     viewer.request_viewport_relayout()
     viewer._sync_view_transform_for_render_target(target)
     assert reapply.call_count == 2
+    assert transform_spy.count() == 2
+    assert viewport_spy.count() == 2

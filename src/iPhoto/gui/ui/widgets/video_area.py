@@ -669,6 +669,7 @@ class VideoArea(QWidget):
                 self._edit_viewer.request_viewport_relayout()
         elif reset_view:
             self._renderer.reset_zoom()
+            self._renderer.update()
         else:
             # The direct video renderer derives its fit from every render
             # target and therefore only needs another frame requested.

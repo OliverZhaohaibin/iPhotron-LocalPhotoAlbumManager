@@ -615,13 +615,17 @@ class GLImageViewer(QRhiWidget):
 
         if reset_view:
             self.reset_zoom()
-            return
-        if self._crop_controller.is_active():
-            return
-        if self._auto_crop_view_locked:
-            self._reapply_locked_crop_view()
-        elif self._auto_crop_center_locked:
-            self._reapply_locked_crop_center()
+        elif not self._crop_controller.is_active():
+            if self._auto_crop_view_locked:
+                self._reapply_locked_crop_view()
+            elif self._auto_crop_center_locked:
+                self._reapply_locked_crop_center()
+
+        # Viewport-coordinate consumers (for example face annotations) must
+        # only observe the transform after the authoritative QRhi target and
+        # every target-dependent crop/cover update agree.
+        self.viewTransformChanged.emit()
+        self.viewportMetricsChanged.emit()
 
     @staticmethod
     def _should_log_diag_frame(index: int) -> bool:
@@ -2491,8 +2495,6 @@ class GLImageViewer(QRhiWidget):
             return
         self._loading_overlay.update_geometry(self.size())
         self.request_viewport_relayout()
-        self.viewTransformChanged.emit()
-        self.viewportMetricsChanged.emit()
         if sys.platform.startswith("linux"):
             _LOGGER.warning(
                 "[diag][gl_viewer] resize widget=%sx%s rt=%sx%s using_video=%s dirty=%s",

@@ -1,5 +1,7 @@
+from unittest.mock import Mock
+
 import pytest
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPoint, QPointF, Qt
 
 from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
 
@@ -22,6 +24,12 @@ class FakeViewer:
 
     def update(self) -> None:
         self.update_count += 1
+
+    def setCursor(self, _cursor) -> None:  # noqa: N802 - Qt-compatible test seam
+        return None
+
+    def unsetCursor(self) -> None:  # noqa: N802 - Qt-compatible test seam
+        return None
 
 
 def make_controller(
@@ -90,6 +98,47 @@ def test_zoom_anchor_defaults_to_render_target_center() -> None:
     image_center = controller.convert_viewport_to_image(QPointF(50.0, 50.0))
     assert image_center.x() == pytest.approx(50.0)
     assert image_center.y() == pytest.approx(50.0)
+
+
+def test_pan_reports_change_only_after_nonzero_drag() -> None:
+    viewer = FakeViewer()
+    controller = make_controller(viewer, (200.0, 200.0))
+    press = Mock()
+    press.button.return_value = Qt.MouseButton.LeftButton
+    press.position.return_value = QPointF(25.0, 25.0)
+    stationary_move = Mock()
+    stationary_move.position.return_value = QPointF(25.0, 25.0)
+    drag_move = Mock()
+    drag_move.position.return_value = QPointF(35.0, 30.0)
+
+    controller.handle_mouse_press(press)
+
+    assert controller.handle_mouse_move(stationary_move) is False
+    assert controller.handle_mouse_move(drag_move) is True
+    assert controller.get_pan_pixels() != QPointF()
+
+
+def test_wheel_reports_only_zoom_changes() -> None:
+    viewer = FakeViewer()
+    next_item = Mock()
+    controller = ViewTransformController(
+        viewer,
+        texture_size_provider=lambda: (100, 100),
+        display_texture_size_provider=lambda: (100, 100),
+        device_view_size_provider=lambda: (200.0, 200.0),
+        on_zoom_changed=lambda _zoom: None,
+        on_next_item=next_item,
+    )
+    event = Mock()
+    event.angleDelta.return_value = QPoint(0, -120)
+    event.position.return_value = QPointF(50.0, 50.0)
+
+    controller.set_wheel_action("navigate")
+    assert controller.handle_wheel(event) is False
+    next_item.assert_called_once_with()
+
+    controller.set_wheel_action("zoom")
+    assert controller.handle_wheel(event) is True
 
 
 def test_image_viewport_roundtrip_with_non_square_target_and_pan_zoom() -> None:

@@ -1274,6 +1274,40 @@ class TestVideoArea:
         va = VideoArea()
         assert va.video_viewport() is va._renderer
 
+    def test_viewport_relayout_routes_to_adjusted_video_viewer(self, qapp, mocker):
+        """Cropped video relayout should use the shared crop-aware viewer."""
+        va = VideoArea()
+        request_relayout = mocker.patch.object(
+            va._edit_viewer,
+            "request_viewport_relayout",
+        )
+        renderer_update = mocker.patch.object(va._renderer, "update")
+        va._adjusted_preview_enabled = True
+
+        va.request_viewport_relayout()
+
+        request_relayout.assert_called_once_with()
+        renderer_update.assert_not_called()
+
+    def test_reset_relayout_resets_direct_video_renderer(self, qapp, mocker):
+        """Unadjusted playback should restore its native fit on fullscreen exit."""
+        va = VideoArea()
+        va._renderer._zoom_factor = 1.0
+        renderer_update = mocker.patch.object(va._renderer, "update")
+        edit_request = mocker.patch.object(
+            va._edit_viewer,
+            "request_viewport_relayout",
+        )
+        va._adjusted_preview_enabled = False
+
+        va._renderer.reset_zoom()
+        renderer_update.assert_not_called()
+
+        va.request_viewport_relayout(reset_view=True)
+
+        renderer_update.assert_called_once_with()
+        edit_request.assert_not_called()
+
     def test_playback_preview_keeps_crop_framing_disabled(self, qapp):
         """Playback should avoid edit-style crop zooming by default."""
         va = VideoArea()

@@ -345,26 +345,44 @@ class ViewTransformController:
             self._pan_start_pos = event.position()
             self._viewer.setCursor(Qt.CursorShape.ClosedHandCursor)
 
-    def handle_mouse_move(self, event: QMouseEvent) -> None:
+    def handle_mouse_move(self, event: QMouseEvent) -> bool:
+        """Apply an active pan and report whether the transform changed."""
+
         if not self._is_panning:
-            return
+            return False
         delta = event.position() - self._pan_start_pos
         self._pan_start_pos = event.position()
         delta_device = self.viewport_delta_logical_to_device(delta)
-        self.set_pan_pixels(self._pan_px + QPointF(delta_device.x(), -delta_device.y()))
+        target_pan = self._pan_px + QPointF(delta_device.x(), -delta_device.y())
+        if (
+            abs(target_pan.x() - self._pan_px.x()) < 1e-6
+            and abs(target_pan.y() - self._pan_px.y()) < 1e-6
+        ):
+            return False
+        self.set_pan_pixels(target_pan)
+        return True
 
     def handle_mouse_release(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_panning = False
             self._viewer.unsetCursor()
 
-    def handle_wheel(self, event: QWheelEvent) -> None:
+    def handle_wheel(self, event: QWheelEvent) -> bool:
+        """Handle zoom/navigation and report whether zoom actually changed."""
+
+        transform_changed = False
         if self._wheel_action == "zoom":
             angle = event.angleDelta().y()
             if angle > 0:
-                self.set_zoom(self._zoom_factor * 1.1, anchor=event.position())
+                transform_changed = self.set_zoom(
+                    self._zoom_factor * 1.1,
+                    anchor=event.position(),
+                )
             elif angle < 0:
-                self.set_zoom(self._zoom_factor / 1.1, anchor=event.position())
+                transform_changed = self.set_zoom(
+                    self._zoom_factor / 1.1,
+                    anchor=event.position(),
+                )
         else:
             delta = event.angleDelta()
             step = delta.y() or delta.x()
@@ -373,6 +391,7 @@ class ViewTransformController:
             elif step > 0 and self._on_prev_item is not None:
                 self._on_prev_item()
         event.accept()
+        return transform_changed
 
     # ------------------------------------------------------------------
     # Coordinate transformation utilities

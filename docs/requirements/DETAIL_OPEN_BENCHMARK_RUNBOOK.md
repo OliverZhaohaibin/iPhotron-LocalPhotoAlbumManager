@@ -45,9 +45,12 @@ Windows Playback fullscreen 样本还必须保留同一 `transition_id` 下的
 `fullscreen_updates_resumed`。播放中的视频随后应出现
 `fullscreen_playback_resumed`；若 native state event 丢失，必须出现有界的
 `fullscreen_enter_timeout`，并收敛为完成或 `fullscreen_enter_rollback`。确认前不得
-恢复顶层 updates，确认后每个 transaction 只允许一次 viewport relayout 和一次顶层
-update。`fullscreen_resize` 与 `fullscreen_update_requested` 用于关联 DWM/Qt 事件数量，
-不得当作 terminal event。
+恢复顶层 updates，确认后每个 transaction 只允许一次 viewport relayout。恢复
+updates 时不得再显式调用 `window.update()`；Qt 隐式排队的最终请求必须记录为
+`fullscreen_update_requested` 并归属于同一 transaction。250 ms 内未观察到该事件时
+记录 `fullscreen_final_update_unobserved`，但不得回滚已确认的 fullscreen。
+两条路径最终都记录 `fullscreen_transition_finished` 及原因；`fullscreen_resize`
+只用于关联 DWM/Qt 事件数量，不得当作 terminal event。
 
 启动应用前指定结构化输出文件：
 
@@ -171,6 +174,9 @@ Windows fullscreen compositor 回归必须使用 packaged `auto/opengl` 连续�
 maximized、125%/150% DPI 与双显示器。屏幕录像中不得出现桌面暴露、透明帧、
 黑屏与媒体画面交替或播放恢复造成的整窗闪烁；最多允许一次正常系统级状态过渡。
 同机 `opengl`/`d3d11` 只作为根因 A/B，不能替代生产 OpenGL 通过记录。
+另以正在播放的视频执行 `enter→exit→enter→exit` 快速序列，每步间隔小于 120 ms；
+过期 resume callback 必须全部被 generation 拒绝，最终只恢复一次播放且播放状态与
+首次切换前一致。
 
 任何失败组必须保留原 events/summary/validation，按 queue、surface cache、decode、GPU upload、draw 定位；修正后
 先重跑失败组，再完整重跑该平台矩阵。不得用删除失败样本、合并取消事务或降低重复次数的方式通过门槛。

@@ -265,6 +265,7 @@ jobs:
           tests/gui/test_detail_render_session.py
           tests/ui/controllers/test_player_view_controller_adjustments.py
           tests/ui/controllers/test_player_view_init_cover.py
+          tests/ui/test_window_manager_fullscreen.py
           tests/ui/widgets/test_gl_image_viewer_post_load_signal.py
           tests/ui/widgets/test_still_texture_residency.py
           tests/ui/widgets/test_video_area.py

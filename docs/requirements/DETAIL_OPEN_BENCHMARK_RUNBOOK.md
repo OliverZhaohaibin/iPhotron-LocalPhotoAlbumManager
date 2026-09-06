@@ -47,8 +47,9 @@ Windows Playback fullscreen 样本还必须保留同一 `transition_id` 下的
 `fullscreen_enter_timeout`，并收敛为完成或 `fullscreen_enter_rollback`。确认前不得
 恢复顶层 updates，确认后每个 transaction 只允许一次 viewport relayout。恢复
 updates 时不得再显式调用 `window.update()`；Qt 隐式排队的最终请求必须记录为
-`fullscreen_update_requested` 并归属于同一 transaction。250 ms 内未观察到该事件时
-记录 `fullscreen_final_update_unobserved`，但不得回滚已确认的 fullscreen。
+`fullscreen_update_requested` 并归属于同一 transaction。这只能证明至少观察到一个
+预期的最终请求；Qt 可能合并请求，timeline 不用于断言请求总数恰好为一。
+250 ms 内未观察到该事件时记录 `fullscreen_final_update_unobserved`，但不得回滚已确认的 fullscreen。
 两条路径最终都记录 `fullscreen_transition_finished` 及原因；`fullscreen_resize`
 只用于关联 DWM/Qt 事件数量，不得当作 terminal event。
 

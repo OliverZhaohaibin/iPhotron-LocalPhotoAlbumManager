@@ -319,13 +319,24 @@ class FramelessWindowManager(QObject):
             return
 
         playback_generation, resume_after_transition = self._begin_playback_transition()
-        ready = self._detail_coordinator.prepare_fullscreen_asset()
-        if not ready:
-            self._detail_coordinator.show_placeholder_in_viewer()
+        try:
+            ready = self._detail_coordinator.prepare_fullscreen_asset()
+            if not ready:
+                self._detail_coordinator.show_placeholder_in_viewer()
 
-        self._previous_geometry = self._window.saveGeometry()
-        self._previous_window_state = self._window.windowState()
-        self._splitter_sizes = self._ui.splitter.sizes()
+            self._previous_geometry = self._window.saveGeometry()
+            self._previous_window_state = self._window.windowState()
+            self._splitter_sizes = self._ui.splitter.sizes()
+        except Exception:
+            # No native/window transaction exists yet, but playback may have
+            # been paused. Preserve the original resume intent and let the
+            # generation guard reject this callback if another transition wins.
+            self._schedule_playback_resume(
+                expect_immersive=False,
+                resume=resume_after_transition,
+                playback_generation=playback_generation,
+            )
+            raise
 
         if sys.platform == "win32":
             self._begin_windows_fullscreen_enter(

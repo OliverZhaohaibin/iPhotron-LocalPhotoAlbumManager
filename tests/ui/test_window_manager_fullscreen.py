@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QWidget
 from iPhoto.gui.ui.window_manager import (
     FULLSCREEN_ENTER_TIMEOUT_MS,
     FULLSCREEN_FINAL_UPDATE_TIMEOUT_MS,
+    PLAYBACK_RESUME_DELAY_MS,
     FramelessWindowManager,
     _FullscreenTransitionPhase,
     _WindowsFullscreenTransition,
@@ -157,6 +158,55 @@ def test_stale_shadow_restore_is_ignored_after_fullscreen_reentry() -> None:
     callbacks[0]()
 
     manager._set_playback_header_shadow_suppressed.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ("asset", "placeholder", "geometry", "window_state", "splitter"),
+)
+def test_enter_preflight_failure_resumes_suspended_playback(
+    failure_stage: str,
+) -> None:
+    manager = _make_windows_enter_manager()
+    manager._detail_coordinator.suspend_playback_for_transition.return_value = True
+    manager._detail_coordinator.prepare_fullscreen_asset.return_value = True
+    error = RuntimeError(failure_stage)
+    callbacks: list[Callable[[], None]] = []
+    single_shot = MagicMock(side_effect=lambda _delay, callback: callbacks.append(callback))
+
+    if failure_stage == "asset":
+        manager._detail_coordinator.prepare_fullscreen_asset.side_effect = error
+    elif failure_stage == "placeholder":
+        manager._detail_coordinator.prepare_fullscreen_asset.return_value = False
+        manager._detail_coordinator.show_placeholder_in_viewer.side_effect = error
+    elif failure_stage == "geometry":
+        manager._window.saveGeometry.side_effect = error
+    elif failure_stage == "window_state":
+        manager._window.windowState.side_effect = error
+    else:
+        manager._ui.splitter.sizes.side_effect = error
+
+    with (
+        patch("iPhoto.gui.ui.window_manager.sys.platform", "win32"),
+        patch(
+            "iPhoto.gui.ui.window_manager.QTimer.singleShot",
+            single_shot,
+        ),
+        pytest.raises(RuntimeError, match=failure_stage),
+    ):
+        manager.enter_fullscreen()
+
+    assert manager._fullscreen_transition is None
+    assert manager._playback_resume_pending is True
+    manager._window.setUpdatesEnabled.assert_not_called()
+    manager._window.showFullScreen.assert_not_called()
+    assert len(callbacks) == 1
+    assert single_shot.call_args.args[0] == PLAYBACK_RESUME_DELAY_MS
+
+    callbacks[0]()
+
+    manager._detail_coordinator.resume_playback_after_transition.assert_called_once_with()
+    assert manager._playback_resume_pending is False
 
 
 def test_windows_enter_suppresses_updates_before_visible_mutations() -> None:

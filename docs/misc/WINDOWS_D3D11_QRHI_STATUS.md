@@ -61,12 +61,14 @@ The production OpenGL path keeps top-level updates disabled while Windows
 applies the native fullscreen state. Chrome visibility, splitter geometry, and
 the immersive backdrop are changed within that transaction; updates resume
 only after a confirmed `WindowStateChange`, followed by one viewport relayout
-and the implicit `UpdateRequest` produced by re-enabling QWidget updates. No
+and an expected final `UpdateRequest` produced by re-enabling QWidget updates. No
 additional `window.update()` is issued. A one-second deadline either completes
 an already-landed fullscreen state or rolls the UI back to its saved windowed
 state, so a missing native event cannot leave painting disabled. Exceptions
 in the preparation, native request, or diagnostics paths also converge through
 a best-effort rollback whose final step restores the original updates state.
+Failures before the window transaction exists resume any suspended playback and
+re-raise; they do not manufacture a rollback transaction or diagnostic id.
 
 When Detail profiling is enabled, the `fullscreen_*` timeline records the
 transaction id, window state and geometry, update state, selected backend, and

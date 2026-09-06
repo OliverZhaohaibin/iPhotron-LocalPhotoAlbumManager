@@ -86,12 +86,16 @@ first-frame leak fix.
 Fullscreen traces must keep one transaction id from
 `fullscreen_enter_requested` through `fullscreen_native_state_confirmed` and
 `fullscreen_updates_resumed`. Re-enabling QWidget updates implicitly queues the
-only top-level update; the trace must attribute it as
-`fullscreen_update_requested` and then emit `fullscreen_transition_finished`
-with `reason=final_update_observed`. If the request cannot be observed within
-250 ms, `fullscreen_final_update_unobserved` is diagnostic-only and must not
-exit an already confirmed fullscreen state. A preparation/native failure must
-instead emit `fullscreen_enter_rollback` and restore painting.
+expected final top-level update; the trace must attribute at least one such
+request as `fullscreen_update_requested` and then emit
+`fullscreen_transition_finished` with `reason=final_update_observed`. If the
+request cannot be observed within 250 ms, `fullscreen_final_update_unobserved`
+is diagnostic-only and must not exit an already confirmed fullscreen state.
+The trace does not prove the exact number of Qt update requests because Qt may
+coalesce them. A preflight failure resumes suspended playback and re-raises
+without creating a window transaction; an in-transaction preparation/native
+failure instead emits
+`fullscreen_enter_rollback` and restores painting.
 
 Also test a playing video with `enter→exit→enter→exit`, keeping every interval
 below 120 ms. Stale resume callbacks must not play during an intermediate state;

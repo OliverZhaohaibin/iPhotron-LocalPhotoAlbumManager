@@ -37,5 +37,9 @@ def test_fullscreen_round_trip_resets_and_relayouts_active_video_viewport(qapp) 
 
     active_video_viewport.reset_zoom.assert_called_once_with()
     assert active_video_viewport.request_viewport_relayout.call_count == 2
+    assert active_video_viewport.request_viewport_relayout.call_args_list[0].kwargs == {}
+    assert active_video_viewport.request_viewport_relayout.call_args_list[1].kwargs == {
+        "reset_view": True
+    }
     fallback_still_viewport.reset_zoom.assert_not_called()
     fallback_still_viewport.request_viewport_relayout.assert_not_called()

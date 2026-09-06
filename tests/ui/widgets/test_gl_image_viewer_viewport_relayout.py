@@ -176,6 +176,32 @@ def test_viewport_sync_preserves_manual_transform_without_auto_crop_lock(qapp) -
     assert viewer._transform_controller.get_pan_pixels() == QPointF(37.0, -19.0)
 
 
+def test_fullscreen_exit_reset_restores_crop_fit_after_lock_was_cleared(qapp) -> None:
+    viewer = _make_cropped_viewer(
+        {"Crop_CX": 0.70, "Crop_CY": 0.62, "Crop_W": 0.55, "Crop_H": 0.58}
+    )
+    viewer._cancel_auto_crop_lock()
+    viewer._transform_controller.set_zoom_factor_direct(2.25)
+    viewer._transform_controller.set_pan_pixels(QPointF(37.0, -19.0))
+
+    viewer.request_viewport_relayout(reset_view=True)
+    # A later resize event may add a preserving request, but must not downgrade
+    # the fullscreen-exit reset before the new render target is available.
+    viewer.request_viewport_relayout()
+    _publish_target_and_sync(viewer, (1200, 800))
+
+    restored_rect = _crop_viewport_rect(viewer)
+    assert viewer._auto_crop_view_locked is True
+    assert restored_rect.center().x() == pytest.approx(300.0, abs=1.0)
+    assert restored_rect.center().y() == pytest.approx(200.0, abs=1.0)
+    assert restored_rect.width() <= viewer.width() + 1.0
+    assert restored_rect.height() <= viewer.height() + 1.0
+    assert (
+        restored_rect.width() == pytest.approx(viewer.width(), abs=1.0)
+        or restored_rect.height() == pytest.approx(viewer.height(), abs=1.0)
+    )
+
+
 def test_identical_target_is_coalesced_until_relayout_is_requested(qapp, mocker) -> None:
     viewer = _make_cropped_viewer(
         {"Crop_CX": 0.70, "Crop_CY": 0.60, "Crop_W": 0.5, "Crop_H": 0.6}

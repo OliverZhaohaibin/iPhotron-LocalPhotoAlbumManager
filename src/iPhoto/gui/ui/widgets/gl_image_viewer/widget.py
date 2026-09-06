@@ -313,6 +313,7 @@ class GLImageViewer(QRhiWidget):
         # its target, so keep a separate dirty bit and synchronised target
         # size instead of calculating pan against the previous frame here.
         self._viewport_relayout_pending = False
+        self._viewport_reset_pending = False
         self._last_layout_target_size = QSize()
         self._diag_video_frame_set_count = 0
         self._diag_video_render_count = 0
@@ -571,10 +572,18 @@ class GLImageViewer(QRhiWidget):
             float(self._last_render_target_size.height()),
         )
 
-    def request_viewport_relayout(self) -> None:
-        """Rebuild automatic media framing against the next real render target."""
+    def request_viewport_relayout(self, *, reset_view: bool = False) -> None:
+        """Rebuild media framing against the next real render target.
+
+        ``reset_view`` is sticky until the request is consumed so a normal
+        resize event cannot downgrade a fullscreen-exit reset to a transform-
+        preserving relayout.
+        """
 
         self._viewport_relayout_pending = True
+        self._viewport_reset_pending = (
+            self._viewport_reset_pending or bool(reset_view)
+        )
         self.update()
 
     def _sync_view_transform_for_render_target(self, output_size: QSize) -> None:
@@ -596,12 +605,17 @@ class GLImageViewer(QRhiWidget):
         ):
             return
 
+        reset_view = self._viewport_reset_pending
         self._viewport_relayout_pending = False
+        self._viewport_reset_pending = False
         self._last_layout_target_size = target_size
 
         straighten, rotate_steps, _ = self._rotation_parameters()
         self._update_cover_scale(straighten, rotate_steps)
 
+        if reset_view:
+            self.reset_zoom()
+            return
         if self._crop_controller.is_active():
             return
         if self._auto_crop_view_locked:

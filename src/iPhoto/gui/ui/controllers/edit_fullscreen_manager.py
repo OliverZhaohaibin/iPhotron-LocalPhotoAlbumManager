@@ -174,7 +174,10 @@ class EditFullscreenManager(QObject):
         self._fullscreen_splitter_sizes = None
 
         self._fullscreen_active = False
-        self._request_viewport_relayout(self._active_viewport())
+        self._request_viewport_relayout(
+            self._active_viewport(),
+            reset_view=True,
+        )
 
         return True
 
@@ -189,10 +192,17 @@ class EditFullscreenManager(QObject):
         return self._ui.edit_image_viewer
 
     @staticmethod
-    def _request_viewport_relayout(viewport: object) -> None:
+    def _request_viewport_relayout(
+        viewport: object,
+        *,
+        reset_view: bool = False,
+    ) -> None:
         request_relayout = getattr(viewport, "request_viewport_relayout", None)
         if callable(request_relayout):
-            request_relayout()
+            if reset_view:
+                request_relayout(reset_view=True)
+            else:
+                request_relayout()
 
     def _sanitise_splitter_sizes(
         self,

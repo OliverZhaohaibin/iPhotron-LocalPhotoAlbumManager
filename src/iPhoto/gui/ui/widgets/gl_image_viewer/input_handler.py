@@ -83,7 +83,6 @@ class InputEventHandler:
             if self._live_replay_enabled:
                 self._on_replay_requested()
             else:
-                self._on_cancel_auto_crop_lock()
                 self._transform_controller.handle_mouse_press(event)
         
         return False
@@ -101,7 +100,9 @@ class InputEventHandler:
             return True
         
         if not self._live_replay_enabled:
-            self._transform_controller.handle_mouse_move(event)
+            transform_changed = self._transform_controller.handle_mouse_move(event)
+            if transform_changed:
+                self._on_cancel_auto_crop_lock()
         
         return False
     
@@ -161,5 +162,6 @@ class InputEventHandler:
             self._crop_controller.handle_wheel(event)
             return
         
-        self._on_cancel_auto_crop_lock()
-        self._transform_controller.handle_wheel(event)
+        transform_changed = self._transform_controller.handle_wheel(event)
+        if transform_changed:
+            self._on_cancel_auto_crop_lock()

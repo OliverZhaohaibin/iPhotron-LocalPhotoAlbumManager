@@ -55,6 +55,33 @@ The following pieces exist and are covered by code-level contracts:
 This is sufficient for focused Detail compositor A/B experiments. It is not a
 complete application graphics contract.
 
+### Playback fullscreen compositor hotfix
+
+The production OpenGL path keeps top-level updates disabled while Windows
+applies the native fullscreen state. Chrome visibility, splitter geometry, and
+the immersive backdrop are changed within that transaction; updates resume
+only after a confirmed `WindowStateChange`, followed by one viewport relayout
+and an expected final `UpdateRequest` produced by re-enabling QWidget updates. No
+additional `window.update()` is issued. A one-second deadline either completes
+an already-landed fullscreen state or rolls the UI back to its saved windowed
+state, so a missing native event cannot leave painting disabled. Exceptions
+in the preparation, native request, or diagnostics paths also converge through
+a best-effort rollback whose final step restores the original updates state.
+Failures before the window transaction exists resume any suspended playback and
+re-raise; they do not manufacture a rollback transaction or diagnostic id.
+
+When Detail profiling is enabled, the `fullscreen_*` timeline records the
+transaction id, window state and geometry, update state, selected backend, and
+known render-target sizes. A packaged Windows run must compare `opengl` and
+`d3d11` on the same host and retain both the timeline and a screen recording.
+The transition remains attributable until the implicit final update is
+observed, or until a 250 ms diagnostic-only observation deadline records
+`fullscreen_final_update_unobserved`. Playback resume callbacks use a separate
+generation and preserve the original resume intent across rapid toggles.
+The A/B result is diagnostic only: D3D11 remains experimental and cannot become
+the production default until the application-wide graphics and Maps contract
+below is complete.
+
 ### Guarantee boundary of the extra submission
 
 The Windows reveal workaround proves that Qt/QRhi submitted an additional

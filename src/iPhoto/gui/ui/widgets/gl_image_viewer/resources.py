@@ -111,6 +111,15 @@ class TextureResourceManager:
             return True
         return False
 
+    def stage_still_texture(self, source: object, image: QImage) -> bool:
+        """Upload a foreground LOD without replacing the active texture."""
+
+        renderer = self._renderer_provider()
+        stage = getattr(renderer, "stage_still_texture", None)
+        if callable(stage):
+            return bool(stage(source, image))
+        return False
+
     def clear_still_residency(self) -> None:
         renderer = self._renderer_provider()
         clear = getattr(renderer, "clear_still_residency", None)

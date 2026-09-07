@@ -50,6 +50,11 @@ class _RendererStub:
         self._has_texture = True
         return True
 
+    def stage_still_texture(self, key: object, image: QImage) -> bool:
+        assert not image.isNull()
+        self.resident.add(key)
+        return True
+
     def clear_still_residency(self) -> None:
         self.resident.clear()
         self.active = None
@@ -112,6 +117,21 @@ def test_stable_still_key_uploads_once_and_then_activates_resident_texture() -> 
     assert manager.has_resident_texture("still-a") is True
     assert manager.activate_resident_texture("still-a") is True
     assert renderer.still_uploads == ["still-a"]
+
+
+def test_staging_surface_does_not_change_resource_manager_current_source() -> None:
+    renderer = _RendererStub()
+    manager = _manager(renderer)
+    image = QImage(32, 24, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF556677)
+    manager.set_image(image, "current")
+    manager.upload_texture_if_needed(image)
+
+    assert manager.stage_still_texture("higher-lod", image) is True
+
+    assert manager.get_current_image_source() == "current"
+    assert renderer.active == "current"
+    assert "higher-lod" in renderer.resident
 
 
 def test_residency_deletion_runs_with_the_render_context_current() -> None:

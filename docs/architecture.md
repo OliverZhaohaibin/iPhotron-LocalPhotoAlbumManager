@@ -550,7 +550,9 @@ sequenceDiagram
 it intentionally excludes `.ipo` revision. Initial quality is selected from
 physical viewport demand rather than full sensor dimensions. Zoom, crop,
 rotation, or perspective may request a higher LOD, but the prior texture stays
-visible until the replacement is drawn. Current/previous/next GPU residency is
+visible while the replacement is staged as a non-active foreground resident.
+Only a later render may activate and draw that LOD, and the render session does
+not adopt it until the matching window submission. Current/previous/next GPU residency is
 bounded by both three textures and 192MB. Source changes invalidate neutral
 surfaces and textures; sidecar changes replace render state only.
 

@@ -36,6 +36,7 @@ from iPhoto.gui.ui.controllers.player_view_controller import (
     PreparedStillState,
     _AdjustmentPreparationSignals,
     _AdjustmentPreparationWorker,
+    _LOD_IDLE_DELAY_MS,
     _PreparedRequestIntent,
 )
 from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
@@ -133,6 +134,8 @@ class _FakeImageViewer(QWidget):
         self._current_source = None
         self._adjustments = {}
         self._presentation_suppressed_generation = None
+        self.lod_promotions = []
+        self.lod_promotion_cancel_count = 0
         self.setMouseTracking(True)
 
     def set_image(self, *args, **kwargs):
@@ -155,6 +158,12 @@ class _FakeImageViewer(QWidget):
 
     def cancel_presentation_transition(self) -> None:
         self._presentation_suppressed_generation = None
+
+    def promote_still_surface(self, surface, adjustments, *, generation: int) -> None:
+        self.lod_promotions.append((surface, dict(adjustments), int(generation)))
+
+    def cancel_still_lod_promotion(self) -> None:
+        self.lod_promotion_cancel_count += 1
 
     def set_adjustments(self, adjustments):
         self._adjustments = dict(adjustments)
@@ -282,6 +291,9 @@ class TestInitCoverTracking:
         assert controller._pool is not QThreadPool.globalInstance()
         assert controller._pool.maxThreadCount() == 2
         assert controller._preparation_pool.maxThreadCount() == 2
+
+    def test_zoom_lod_uses_idle_debounce(self, controller):
+        assert controller._lod_timer.interval() == _LOD_IDLE_DELAY_MS == 200
 
     def test_image_decode_primes_qrhi_surface_under_pending_cover(
         self,
@@ -1173,6 +1185,47 @@ class TestInitCoverTracking:
         assert handle.session_id not in controller._render_session_pending_surfaces
         present.assert_called_once()
         controller.finish_render_session(acquired, committed=False)
+
+    def test_zoom_lod_promotion_commits_session_only_after_submission(
+        self,
+        controller,
+    ):
+        path = Path("/tmp/edited-zoom-lod.jpg")
+        initial = _surface(
+            path,
+            QImage(1024, 768, QImage.Format.Format_RGBA8888),
+            level=1024,
+        )
+        upgraded = _surface(
+            path,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=2048,
+        )
+        adjustments = {"Exposure": 0.4, "Crop_W": 0.7}
+        handle = controller._upsert_render_session(initial, adjustments)
+        controller._active_adjustments = dict(adjustments)
+        controller._request_generation = 7
+        controller._request_reason_by_generation[7] = "zoom"
+        controller._loading_source = path
+        controller._loading_started_at = time.perf_counter()
+
+        controller._present_scheduled_image(7, upgraded)
+
+        assert handle.current_surface is initial
+        assert len(controller._image_viewer.lod_promotions) == 1
+        promoted_surface, promoted_adjustments, promoted_generation = (
+            controller._image_viewer.lod_promotions[0]
+        )
+        assert promoted_surface is upgraded
+        assert promoted_adjustments == dict(handle.edit_state.shader_adjustments)
+        assert promoted_generation == 7
+        assert controller._pending_present_session == (7, handle, upgraded.decode_key)
+
+        controller._image_viewer.stillFrameSubmitted.emit(upgraded.decode_key, 7)
+
+        assert handle.current_surface is upgraded
+        assert controller._current_decode_level == 2048
+        assert controller._pending_present_session is None
 
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""

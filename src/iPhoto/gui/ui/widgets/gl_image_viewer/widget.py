@@ -146,6 +146,18 @@ class _PendingVideoUploadState:
     final_rotation: int
 
 
+@dataclass(slots=True)
+class _StillLodPromotion:
+    surface: Any
+    adjustments: dict[str, Any]
+    generation: int
+    phase: str
+
+    @property
+    def key(self) -> object:
+        return self.surface.decode_key
+
+
 def _crop_preview_adjustments(adjustments: Mapping[str, float]) -> dict[str, float]:
     """Return adjustments that expose the full transformed source in Crop mode."""
 
@@ -283,6 +295,7 @@ class GLImageViewer(QRhiWidget):
         self._tracked_gpu_resources: dict[object, object] = {}
         self._still_surface_refs: OrderedDict[object, DecodedSurface] = OrderedDict()
         self._pending_warm_surfaces: list[DecodedSurface] = []
+        self._still_lod_promotion: _StillLodPromotion | None = None
         self._still_generation_by_key: dict[object, int] = {}
         self._pending_resident_activation: object | None = None
         self._still_presentation_pending = False
@@ -694,6 +707,9 @@ class GLImageViewer(QRhiWidget):
             pan state.  Passing ``False`` keeps the current transform so edit
             mode can reuse the detail view framing without a visible jump.
         """
+        promotion = self._still_lod_promotion
+        if promotion is not None and image_source != promotion.key:
+            self.cancel_still_lod_promotion()
         self._video_frame = None
         self._pending_video_image = None
         self._pending_video_image_pre_rotated = False
@@ -804,6 +820,53 @@ class GLImageViewer(QRhiWidget):
             self._pending_warm_surfaces = self._pending_warm_surfaces[-2:]
             self.update()
 
+    def promote_still_surface(
+        self,
+        surface: DecodedSurface,
+        adjustments: Mapping[str, Any] | None = None,
+        *,
+        generation: int,
+    ) -> None:
+        """Stage a same-asset LOD while the active texture keeps rendering."""
+
+        self.cancel_still_lod_promotion()
+        self._remember_still_surface(surface)
+        generation = max(0, int(generation))
+        self._still_generation_by_key[surface.decode_key] = generation
+        phase = (
+            "resident"
+            if self._texture_manager.has_resident_texture(surface.decode_key)
+            else "queued"
+        )
+        self._still_lod_promotion = _StillLodPromotion(
+            surface=surface,
+            adjustments=dict(adjustments or {}),
+            generation=generation,
+            phase=phase,
+        )
+        emit_detail_event(
+            "lod_upgrade_resident" if phase == "resident" else "lod_upgrade_staging",
+            generation=generation,
+            decode_level=surface.decode_level,
+            gpu_cache_hit=phase == "resident",
+        )
+        self.update()
+
+    def cancel_still_lod_promotion(self) -> None:
+        """Cancel pending promotion ownership without evicting resident textures."""
+
+        promotion = self._still_lod_promotion
+        if promotion is None:
+            return
+        if self._pending_resident_activation == promotion.key:
+            self._pending_resident_activation = None
+        if (
+            promotion.phase == "activating"
+            and self._texture_manager.get_current_image_source() == promotion.key
+        ):
+            self._still_presentation_pending = False
+        self._still_lod_promotion = None
+
     def activate_resident_surface(
         self,
         key: object,
@@ -835,6 +898,7 @@ class GLImageViewer(QRhiWidget):
         return True
 
     def clear_still_residency(self) -> None:
+        self.cancel_still_lod_promotion()
         self._pending_warm_surfaces.clear()
         self._pending_resident_activation = None
         self._still_surface_refs.clear()
@@ -925,6 +989,7 @@ class GLImageViewer(QRhiWidget):
 
         starting_video_source = not self._using_video_frame_source
         if starting_video_source:
+            self.cancel_still_lod_promotion()
             self._texture_manager.clear_image()
             self._source_image_dimensions = None
             self._still_presentation_pending = False
@@ -1726,6 +1791,7 @@ class GLImageViewer(QRhiWidget):
     def releaseResources(self) -> None:  # type: ignore[override]
         """QRhiWidget override: release renderer resources."""
         self._gl_initialized = False
+        self.cancel_still_lod_promotion()
         if self._runtime_ready:
             if self._renderer is not None:
                 rhi = self.rhi()
@@ -1847,11 +1913,8 @@ class GLImageViewer(QRhiWidget):
 
         uploaded_new_still_texture = False
         staged_video_upload: _PendingVideoUploadState | None = None
-        if self._pending_resident_activation is not None:
-            key = self._pending_resident_activation
-            self._pending_resident_activation = None
-            if not self._texture_manager.activate_resident_texture(key):
-                self._texture_manager.mark_texture_lost()
+        self._prepare_still_lod_promotion_for_render()
+        self._activate_pending_resident_texture()
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
@@ -1927,7 +1990,7 @@ class GLImageViewer(QRhiWidget):
                 generation=self._still_generation_by_key.get(current_key, 0),
                 key=str(current_key),
             )
-        elif self._pending_warm_surfaces:
+        elif self._pending_warm_surfaces and self._still_lod_promotion is None:
             warm = self._pending_warm_surfaces.pop(0)
             if self._warm_still_with_tracking(warm):
                 emit_detail_event(
@@ -2026,6 +2089,7 @@ class GLImageViewer(QRhiWidget):
                 else 0.0
             ),
         )
+        self._consume_still_upload_result()
 
         if self._crop_controller.is_active():
             crop_rect = self._crop_controller.current_crop_rect_pixels()
@@ -2094,11 +2158,8 @@ class GLImageViewer(QRhiWidget):
 
         uploaded_new_still_texture = False
         staged_video_upload: _PendingVideoUploadState | None = None
-        if self._pending_resident_activation is not None:
-            key = self._pending_resident_activation
-            self._pending_resident_activation = None
-            if not self._texture_manager.activate_resident_texture(key):
-                self._texture_manager.mark_texture_lost()
+        self._prepare_still_lod_promotion_for_render()
+        self._activate_pending_resident_texture()
         if (
             self._using_video_frame_source
             and self._video_frame_dirty
@@ -2150,7 +2211,7 @@ class GLImageViewer(QRhiWidget):
                 generation=self._still_generation_by_key.get(current_key, 0),
                 key=str(current_key),
             )
-        elif self._pending_warm_surfaces:
+        elif self._pending_warm_surfaces and self._still_lod_promotion is None:
             warm = self._pending_warm_surfaces.pop(0)
             if self._warm_still_with_tracking(warm):
                 emit_detail_event(
@@ -2221,6 +2282,7 @@ class GLImageViewer(QRhiWidget):
             crop_rect=crop_rect,
             crop_faded=crop_faded,
         )
+        self._consume_still_upload_result()
 
         if staged_video_upload is not None and suppressed_video_generation is not None:
             self._commit_pending_video_source(staged_video_upload)
@@ -2260,16 +2322,102 @@ class GLImageViewer(QRhiWidget):
             )
         return None
 
-    def _consume_still_upload_result(self) -> bool:
-        """Publish a foreground allocation failure and suppress false presentation."""
+    def _prepare_still_lod_promotion_for_render(self) -> None:
+        promotion = self._still_lod_promotion
+        if promotion is None:
+            return
+        if promotion.phase == "resident":
+            self._pending_resident_activation = promotion.key
+            return
+        if promotion.phase != "queued":
+            return
 
+        queued = self._texture_manager.stage_still_texture(
+            promotion.key,
+            promotion.surface.image,
+        )
+        if queued:
+            self._observe_upload_staging(promotion.key, promotion.surface.image)
+            promotion.phase = "staging"
+            self._consume_still_upload_result()
+            return
+        if self._texture_manager.has_resident_texture(promotion.key):
+            promotion.phase = "resident"
+            emit_detail_event(
+                "lod_upgrade_resident",
+                generation=promotion.generation,
+                decode_level=promotion.surface.decode_level,
+                gpu_cache_hit=True,
+            )
+            self.update()
+            return
+        if not self._consume_still_upload_result():
+            self._fail_still_lod_promotion(promotion, "staging_rejected")
+
+    def _activate_pending_resident_texture(self) -> None:
+        key = self._pending_resident_activation
+        if key is None:
+            return
+        self._pending_resident_activation = None
+        activated = self._texture_manager.activate_resident_texture(key)
+        promotion = self._still_lod_promotion
+        if promotion is None or promotion.key != key:
+            if not activated:
+                self._texture_manager.mark_texture_lost()
+            return
+        if not activated:
+            self._texture_manager.mark_texture_lost()
+            self._fail_still_lod_promotion(promotion, "resident_activation_failed")
+            return
+
+        surface = promotion.surface
+        self._image = surface.image
+        self._source_image_dimensions = surface.source_size
+        self._adjustments = dict(promotion.adjustments)
+        self._update_crop_perspective_state()
+        self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
+        self._still_presentation_pending = True
+        promotion.phase = "activating"
+        emit_detail_event(
+            "lod_upgrade_activated",
+            generation=promotion.generation,
+            decode_level=surface.decode_level,
+        )
+
+    def _take_still_upload_result(self) -> dict[str, object] | None:
         take_result = getattr(self._renderer, "take_still_upload_result", None)
         if not callable(take_result):
-            return False
+            return None
         result = take_result()
         if result is not None:
             self._release_upload_staging(result.get("key"))
             self._sync_gpu_residency()
+        return result
+
+    def _consume_still_upload_result(self) -> bool:
+        """Publish a foreground allocation failure and suppress false presentation."""
+
+        result = GLImageViewer._take_still_upload_result(self)
+        if result is not None and result.get("purpose") == "lod_promotion":
+            promotion = self._still_lod_promotion
+            if promotion is None or result.get("key") != promotion.key:
+                return False
+            if result.get("success"):
+                promotion.phase = "resident"
+                emit_detail_event(
+                    "lod_upgrade_resident",
+                    generation=promotion.generation,
+                    decode_level=promotion.surface.decode_level,
+                    gpu_cache_hit=False,
+                )
+                self.update()
+            else:
+                self._fail_still_lod_promotion(
+                    promotion,
+                    str(result.get("reason", "staging_failed")),
+                )
+            return False
         failed = bool(
             result is not None
             and result.get("activate")
@@ -2285,6 +2433,20 @@ class GLImageViewer(QRhiWidget):
             str(result.get("reason", "allocation_failed")),
         )
         return True
+
+    def _fail_still_lod_promotion(
+        self,
+        promotion: _StillLodPromotion,
+        reason: str,
+    ) -> None:
+        if self._still_lod_promotion is not promotion:
+            return
+        self._still_lod_promotion = None
+        self.stillTextureAllocationFailed.emit(
+            promotion.key,
+            promotion.generation,
+            str(reason),
+        )
 
     def _upload_current_still_with_tracking(self) -> None:
         key = self.current_image_source()
@@ -2381,8 +2543,19 @@ class GLImageViewer(QRhiWidget):
             self._last_composed_content_identity = submission
             kind, identity, serial, _revision = submission
             if kind == "still":
+                promotion = self._still_lod_promotion
+                promotion_submitted = bool(
+                    promotion is not None
+                    and promotion.phase == "activating"
+                    and promotion.key == identity
+                    and promotion.generation == serial
+                )
                 self.stillFrameSubmitted.emit(identity, serial)
                 self.stillFramePresented.emit(identity)
+                if promotion_submitted and self._still_lod_promotion is promotion:
+                    self._still_lod_promotion = None
+                    if self._pending_warm_surfaces:
+                        self.update()
             else:
                 self.videoFramePresented.emit(int(identity), serial)
 

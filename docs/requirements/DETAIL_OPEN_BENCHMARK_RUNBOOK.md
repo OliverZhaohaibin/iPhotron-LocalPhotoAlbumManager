@@ -117,8 +117,12 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
   texture 的 `gpu_upload` 增量也为 0。
 
 同时保留 `surface_cache_write/corrupt`、`gpu_cache_miss/upload/evict`、
-`lod_upgrade_requested/presented` 和 `context_rebuild`。主动 zoom 用独立 generation 统计；LOD 替换前的旧层
-继续显示，但只有新纹理实际 draw 后才能记录 `lod_upgrade_presented`。`tools/detail_benchmark.py` schema 2
+`still_zoom_changed`、`lod_upgrade_requested/staging/resident/activated/presented`
+和 `context_rebuild`。主动 zoom 使用 200 ms idle debounce 和独立 generation；LOD
+替换必须先以 `purpose=lod_promotion` 非激活 staging，staging frame 继续绘制旧层，
+后续 frame 才能 activate/draw，且只有 matching window submission 后才能记录
+`lod_upgrade_presented`。stale/failed promotion 不得替换 active texture 或更新 render session。
+`tools/detail_benchmark.py` schema 2
 兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
 
 Phase 4 增加共享 render session 采样。每张静态照片在已完成首次 Detail 呈现后，分别执行至少 30 次：

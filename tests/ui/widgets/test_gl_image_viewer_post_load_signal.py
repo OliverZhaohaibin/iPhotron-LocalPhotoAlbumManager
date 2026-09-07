@@ -359,6 +359,71 @@ def test_visible_windows_transition_never_exposes_previous_still(qapp) -> None:
     host.close()
 
 
+@pytest.mark.gpu
+@pytest.mark.windows_compositor
+def test_visible_windows_lod_promotion_never_exposes_backdrop(qapp) -> None:
+    """Keep the old still visible until a staged edited LOD is submitted."""
+
+    if sys.platform != "win32":
+        pytest.skip("requires a visible Windows compositor integration runner")
+    if QApplication.platformName().lower() in {"offscreen", "minimal"}:
+        pytest.skip("requires a visible platform QRhi compositor")
+
+    host = QWidget()
+    layout = QGridLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    viewer = GLImageViewer(host)
+    layout.addWidget(viewer, 0, 0)
+    host.resize(640, 360)
+    host.showFullScreen()
+    qapp.processEvents()
+
+    submitted = QSignalSpy(viewer.stillFrameSubmitted)
+    low = QImage(640, 360, QImage.Format.Format_RGBA8888)
+    low.fill(0xFFFF0000)
+    viewer._still_generation_by_key["lod-1024"] = 1
+    viewer.set_image(low, {}, image_source="lod-1024", source_size=(4000, 3000))
+    viewer.update()
+
+    deadline = time.monotonic() + 5.0
+    while submitted.count() < 1 and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    assert submitted.count() >= 1
+
+    high = QImage(1280, 720, QImage.Format.Format_RGBA8888)
+    high.fill(0xFF0000FF)
+    surface = SimpleNamespace(
+        image=high,
+        decode_key="lod-2048",
+        source_size=(4000, 3000),
+        decode_level=2048,
+    )
+    viewer.promote_still_surface(
+        surface,
+        {"Exposure": 0.1, "Crop_W": 0.8},
+        generation=2,
+    )
+
+    screen = qapp.primaryScreen()
+    assert screen is not None
+    observed = []
+    deadline = time.monotonic() + 5.0
+    while submitted.count() < 2 and time.monotonic() < deadline:
+        qapp.processEvents()
+        grabbed = screen.grabWindow(int(host.winId())).toImage()
+        assert not grabbed.isNull()
+        pixel = grabbed.pixelColor(grabbed.width() // 2, grabbed.height() // 2)
+        observed.append(pixel)
+        assert pixel.alpha() == 255
+        assert max(pixel.red(), pixel.blue()) > 80
+        time.sleep(0.005)
+
+    assert submitted.count() >= 2
+    assert observed
+    host.close()
+
+
 def test_still_surface_retains_transaction_generation_until_gpu_upload(qapp) -> None:
     viewer = GLImageViewer()
     image = QImage(32, 24, QImage.Format.Format_RGBA8888)
@@ -372,6 +437,74 @@ def test_still_surface_retains_transaction_generation_until_gpu_upload(qapp) -> 
     viewer.set_still_surface(surface, {}, generation=7)
 
     assert viewer._still_generation_by_key[surface.decode_key] == 7
+
+
+def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
+    qapp,
+    mocker,
+) -> None:
+    viewer = GLImageViewer()
+    image = QImage(64, 48, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF345678)
+    surface = SimpleNamespace(
+        image=image,
+        decode_key="asset-lod-2048",
+        source_size=(4000, 3000),
+        decode_level=2048,
+    )
+    active = {"key": "asset-lod-1024"}
+    resident = {"asset-lod-1024"}
+    texture_manager = mocker.Mock()
+    texture_manager.get_current_image_source.side_effect = lambda: active["key"]
+    texture_manager.has_resident_texture.side_effect = lambda key: key in resident
+
+    def stage(key, _image):
+        resident.add(key)
+        return True
+
+    def activate(key):
+        if key not in resident:
+            return False
+        active["key"] = key
+        return True
+
+    texture_manager.stage_still_texture.side_effect = stage
+    texture_manager.activate_resident_texture.side_effect = activate
+    viewer._texture_manager = texture_manager
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.take_still_upload_result.side_effect = [
+        {
+            "key": surface.decode_key,
+            "activate": False,
+            "success": True,
+            "reason": "uploaded",
+            "purpose": "lod_promotion",
+        },
+        None,
+    ]
+    viewer._renderer.still_residency_bytes.return_value = {}
+    mocker.patch.object(viewer, "_update_crop_perspective_state")
+    viewer._adjustment_applicator = mocker.Mock()
+    submitted = QSignalSpy(viewer.stillFrameSubmitted)
+
+    viewer.promote_still_surface(surface, {"Exposure": 0.4}, generation=9)
+    viewer._prepare_still_lod_promotion_for_render()
+
+    assert active["key"] == "asset-lod-1024"
+    assert viewer._still_lod_promotion.phase == "resident"
+
+    viewer._prepare_still_lod_promotion_for_render()
+    viewer._activate_pending_resident_texture()
+
+    assert active["key"] == surface.decode_key
+    assert viewer._still_lod_promotion.phase == "activating"
+    assert viewer._still_presentation_pending is True
+
+    viewer._rendered_content_identity = viewer._take_pending_content_submission()
+    viewer._on_frame_submitted()
+
+    assert submitted.count() == 1
+    assert viewer._still_lod_promotion is None
 
 
 def test_gl_image_viewer_maps_full_resolution_face_box_onto_viewport_surface(qapp) -> None:

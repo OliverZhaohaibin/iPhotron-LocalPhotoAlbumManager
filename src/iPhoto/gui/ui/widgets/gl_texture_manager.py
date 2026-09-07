@@ -185,7 +185,7 @@ class TextureManager:
 
         if self.activate_still_texture(key):
             return self._texture_id, self._texture_width, self._texture_height
-        self._upload_new_still_texture(key, image, activate=True)
+        self._upload_new_still_texture(key, image, activate=True, purpose="foreground")
         return self._texture_id, self._texture_width, self._texture_height
 
     def _upload_new_still_texture(
@@ -194,6 +194,7 @@ class TextureManager:
         image: QImage,
         *,
         activate: bool,
+        purpose: str,
     ) -> bool:
         if image.isNull():
             raise ValueError("Cannot upload a null QImage")
@@ -237,11 +238,7 @@ class TextureManager:
                 len(self._still_textures) >= 3
                 or resident_bytes + byte_count > self._still_budget_bytes
             ):
-                event = (
-                    "gpu_texture_allocation_failed"
-                    if activate
-                    else "gpu_prefetch_dropped"
-                )
+                event = self._still_failure_event(activate=activate, purpose=purpose)
                 emit_detail_event(
                     event,
                     generation=0,
@@ -256,6 +253,8 @@ class TextureManager:
                     "success": False,
                     "reason": "residency_budget",
                 }
+                if purpose == "lod_promotion":
+                    self._last_still_upload_result["purpose"] = purpose
                 return False
             created = gl.glGenTextures(1)
             if isinstance(created, (tuple, list)):
@@ -265,6 +264,7 @@ class TextureManager:
                 self._record_still_upload_failure(
                     key,
                     activate=activate,
+                    purpose=purpose,
                     width=width,
                     height=height,
                     byte_count=byte_count,
@@ -328,6 +328,7 @@ class TextureManager:
             self._record_still_upload_failure(
                 key,
                 activate=activate,
+                purpose=purpose,
                 width=width,
                 height=height,
                 byte_count=byte_count,
@@ -357,6 +358,8 @@ class TextureManager:
             "success": True,
             "reason": "uploaded",
         }
+        if purpose == "lod_promotion":
+            self._last_still_upload_result["purpose"] = purpose
         return True
 
     def _record_still_upload_failure(
@@ -364,12 +367,13 @@ class TextureManager:
         key: object,
         *,
         activate: bool,
+        purpose: str,
         width: int,
         height: int,
         byte_count: int,
         reason: str,
     ) -> None:
-        event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
+        event = self._still_failure_event(activate=activate, purpose=purpose)
         emit_detail_event(
             event,
             generation=0,
@@ -384,6 +388,14 @@ class TextureManager:
             "success": False,
             "reason": reason,
         }
+        if purpose == "lod_promotion":
+            self._last_still_upload_result["purpose"] = purpose
+
+    @staticmethod
+    def _still_failure_event(*, activate: bool, purpose: str) -> str:
+        if activate or purpose == "lod_promotion":
+            return "gpu_texture_allocation_failed"
+        return "gpu_prefetch_dropped"
 
     @staticmethod
     def _clear_gl_errors() -> None:
@@ -450,7 +462,24 @@ class TextureManager:
     def warm_still_texture(self, key: object, image: QImage) -> bool:
         if self.touch_still_texture(key):
             return False
-        return self._upload_new_still_texture(key, image, activate=False)
+        return self._upload_new_still_texture(
+            key,
+            image,
+            activate=False,
+            purpose="prefetch",
+        )
+
+    def stage_still_texture(self, key: object, image: QImage) -> bool:
+        """Upload a foreground LOD without changing the active still."""
+
+        if self.touch_still_texture(key):
+            return False
+        return self._upload_new_still_texture(
+            key,
+            image,
+            activate=False,
+            purpose="lod_promotion",
+        )
 
     def has_still_texture(self, key: object) -> bool:
         return key in self._still_textures

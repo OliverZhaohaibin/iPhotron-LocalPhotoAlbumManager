@@ -148,6 +148,52 @@ def test_warming_a_resident_rhi_texture_refreshes_its_lru_position() -> None:
     assert tuple(renderer._still_textures) == ("stale", "current", "previous")
 
 
+def test_staging_lod_keeps_current_rhi_texture_active() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi()
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+
+    assert renderer.stage_still_texture("higher-lod", _image(12, 10)) is True
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert "higher-lod" in renderer._still_textures
+    assert renderer.take_still_upload_result() == {
+        "key": "higher-lod",
+        "activate": False,
+        "success": True,
+        "reason": "uploaded",
+        "purpose": "lod_promotion",
+    }
+
+
+def test_failed_rhi_lod_staging_preserves_active_texture() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi()
+    renderer._still_budget_bytes = 256
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+
+    assert renderer.stage_still_texture("higher-lod", _image(12, 10)) is True
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert renderer.take_still_upload_result() == {
+        "key": "higher-lod",
+        "activate": False,
+        "success": False,
+        "reason": "residency_budget",
+        "purpose": "lod_promotion",
+    }
+
+
 def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
     renderer = RhiImageRenderer()
     stale = _FakeTexture()

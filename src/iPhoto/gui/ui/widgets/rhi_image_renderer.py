@@ -182,7 +182,7 @@ class RhiImageRenderer:
         self._tex_uv_fmt: QRhiTexture.Format | None = None
 
         self._pending_rgba_image: QImage | None = None
-        self._pending_still: tuple[object, QImage, bool] | None = None
+        self._pending_still: tuple[object, QImage, bool, str] | None = None
         self._last_still_upload_result: dict[str, object] | None = None
         self._still_textures: OrderedDict[object, tuple[QRhiTexture, int]] = OrderedDict()
         self._active_still_key: object | None = None
@@ -367,7 +367,7 @@ class RhiImageRenderer:
         if image.isNull():
             raise ValueError("Cannot upload a null QImage")
         qimage = _qimage_to_rgba(image)
-        self._pending_still = (key, qimage, True)
+        self._pending_still = (key, qimage, True, "foreground")
         self._pending_rgba_image = None
         self._pending_video_planes = None
         self._has_rgba_texture = True
@@ -385,7 +385,38 @@ class RhiImageRenderer:
         if self._pending_still is not None and self._pending_still[2]:
             emit_detail_event("gpu_prefetch_dropped", generation=0, reason="foreground_pending")
             return False
-        self._pending_still = (key, _qimage_to_rgba(image), False)
+        self._pending_still = (key, _qimage_to_rgba(image), False, "prefetch")
+        return True
+
+    def stage_still_texture(self, key: object, image: QImage) -> bool:
+        """Queue a foreground LOD upload without changing the active still."""
+
+        if self.touch_still_texture(key):
+            return False
+        if image.isNull():
+            return False
+        if self._pending_still is not None and self._pending_still[3] == "prefetch":
+            emit_detail_event(
+                "gpu_prefetch_dropped",
+                generation=0,
+                reason="lod_promotion_pending",
+            )
+            self._pending_still = None
+        elif self._pending_still is not None:
+            emit_detail_event(
+                "gpu_texture_allocation_failed",
+                generation=0,
+                reason="upload_pending",
+            )
+            self._last_still_upload_result = {
+                "key": key,
+                "activate": False,
+                "success": False,
+                "reason": "upload_pending",
+                "purpose": "lod_promotion",
+            }
+            return False
+        self._pending_still = (key, _qimage_to_rgba(image), False, "lod_promotion")
         return True
 
     def take_still_upload_result(self) -> dict[str, object] | None:
@@ -922,7 +953,7 @@ class RhiImageRenderer:
         self._pending_still = None
         if pending is None:
             return
-        key, image, activate = pending
+        key, image, activate, purpose = pending
         size = QSize(image.width(), image.height())
         byte_count = max(0, int(image.bytesPerLine()) * int(image.height()))
         resident_bytes = sum(entry[1] for entry in self._still_textures.values())
@@ -956,7 +987,11 @@ class RhiImageRenderer:
             over_budget = resident_bytes + byte_count > self._still_budget_bytes
             over_count = len(self._still_textures) >= 3
             if over_budget or over_count:
-                event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
+                event = (
+                    "gpu_texture_allocation_failed"
+                    if activate or purpose == "lod_promotion"
+                    else "gpu_prefetch_dropped"
+                )
                 emit_detail_event(
                     event,
                     generation=0,
@@ -971,6 +1006,8 @@ class RhiImageRenderer:
                     "success": False,
                     "reason": "residency_budget",
                 }
+                if purpose == "lod_promotion":
+                    self._last_still_upload_result["purpose"] = purpose
                 self._has_rgba_texture = self._active_still_key in self._still_textures
                 return
             try:
@@ -983,7 +1020,7 @@ class RhiImageRenderer:
             except (MemoryError, RuntimeError):
                 event = (
                     "gpu_texture_allocation_failed"
-                    if activate
+                    if activate or purpose == "lod_promotion"
                     else "gpu_prefetch_dropped"
                 )
                 emit_detail_event(
@@ -1001,6 +1038,8 @@ class RhiImageRenderer:
                     "success": False,
                     "reason": "create_failed",
                 }
+                if purpose == "lod_promotion":
+                    self._last_still_upload_result["purpose"] = purpose
                 self._has_rgba_texture = self._active_still_key in self._still_textures
                 return
 
@@ -1024,7 +1063,7 @@ class RhiImageRenderer:
                 old_entry[0].destroy()
             event = (
                 "gpu_texture_allocation_failed"
-                if activate
+                if activate or purpose == "lod_promotion"
                 else "gpu_prefetch_dropped"
             )
             emit_detail_event(
@@ -1042,6 +1081,8 @@ class RhiImageRenderer:
                 "success": False,
                 "reason": "upload_failed",
             }
+            if purpose == "lod_promotion":
+                self._last_still_upload_result["purpose"] = purpose
             self._has_rgba_texture = self._active_still_key in self._still_textures
             return
 
@@ -1065,6 +1106,8 @@ class RhiImageRenderer:
             "success": True,
             "reason": "uploaded",
         }
+        if purpose == "lod_promotion":
+            self._last_still_upload_result["purpose"] = purpose
 
     def _upload_lut_texture(self, ru, current: QRhiTexture | None, lut: np.ndarray) -> QRhiTexture:
         lut_format = _texture_format("RGBA32F", QRhiTexture.Format.RGBA8)

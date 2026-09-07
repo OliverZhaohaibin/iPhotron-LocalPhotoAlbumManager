@@ -54,6 +54,8 @@ from ..widgets.gl_image_viewer import GLImageViewer, preload_opengl_python_runti
 from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
 
+_LOD_IDLE_DELAY_MS = 200
+
 
 class _StillSurfaceDecodeSignals(QObject):
     """Relay neutral-surface completion events back to the GUI thread."""
@@ -460,7 +462,7 @@ class PlayerViewController(QObject):
         self._pending_zoom_factor = 1.0
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
-        self._lod_timer.setInterval(80)
+        self._lod_timer.setInterval(_LOD_IDLE_DELAY_MS)
         self._lod_timer.timeout.connect(self._request_higher_lod)
         zoom_changed = getattr(self._image_viewer, "zoomChanged", None)
         if zoom_changed is not None:
@@ -1018,6 +1020,13 @@ class PlayerViewController(QObject):
 
         self._advance_surface_transition_epoch("image_transition_started")
         generation = int(generation)
+        cancel_promotion = getattr(
+            self._image_viewer,
+            "cancel_still_lod_promotion",
+            None,
+        )
+        if callable(cancel_promotion):
+            cancel_promotion()
         suppress_presentation = getattr(
             self._image_viewer,
             "begin_presentation_transition",
@@ -1535,6 +1544,27 @@ class PlayerViewController(QObject):
                 session.baseline_state = state
             render_adjustments = dict(session.edit_state.shader_adjustments)
         decode_key = DetailDecodeKey.from_request(request)
+        if request.reason in {"zoom", "resize"}:
+            geometry_state = request.geometry
+            emit_detail_event(
+                "lod_upgrade_requested",
+                generation=request.generation,
+                asset_id=request.asset_id,
+                reason=request.reason,
+                old_decode_level=self._current_decode_level,
+                new_decode_level=request.decode_level,
+                zoom_factor=float(request.zoom_factor),
+                viewport_physical_size=physical_size,
+                adjustments_present=bool(adjustments),
+                edit_geometry_present=bool(
+                    geometry_state.crop_width < 1.0
+                    or geometry_state.crop_height < 1.0
+                    or geometry_state.rotate90
+                    or geometry_state.straighten
+                    or geometry_state.perspective_vertical
+                    or geometry_state.perspective_horizontal
+                ),
+            )
         defer_presentation = bool(
             self._defer_still_updates
             and self._player_stack.currentWidget() is self._video_area
@@ -1555,6 +1585,21 @@ class PlayerViewController(QObject):
                 deferred_surface,
                 render_adjustments,
             )
+            self._loading_source = None
+            self._loading_started_at = None
+            return True
+
+        if (
+            request.reason in {"zoom", "resize"}
+            and session is not None
+            and deferred_surface is not None
+            and self._queue_still_lod_promotion(
+                request.generation,
+                deferred_surface,
+                render_adjustments,
+                session,
+            )
+        ):
             self._loading_source = None
             self._loading_started_at = None
             return True
@@ -1595,15 +1640,34 @@ class PlayerViewController(QObject):
                     decode_key,
                 )
             return True
-        if request.reason in {"zoom", "resize"}:
-            emit_detail_event(
-                "lod_upgrade_requested",
-                generation=request.generation,
-                asset_id=request.asset_id,
-                decode_level=request.decode_level,
-                reason=request.reason,
-            )
         return self._still_scheduler.request(request)
+
+    def _queue_still_lod_promotion(
+        self,
+        generation: int,
+        surface: DecodedSurface,
+        adjustments: Mapping[str, object],
+        session: PhotoRenderSessionHandle,
+    ) -> bool:
+        promoter = getattr(self._image_viewer, "promote_still_surface", None)
+        if not callable(promoter):
+            return False
+        self._present_generation = int(generation)
+        self._present_started_at = self._loading_started_at
+        self._present_source = surface.decode_key.source
+        self._current_full_image = QImage(surface.image)
+        self._pending_present_session = (
+            int(generation),
+            session,
+            surface.decode_key,
+        )
+        promoter(
+            surface,
+            dict(adjustments),
+            generation=int(generation),
+        )
+        self.show_image_surface()
+        return True
 
     @staticmethod
     def _is_higher_level(candidate: object, current: object) -> bool:
@@ -1619,6 +1683,16 @@ class PlayerViewController(QObject):
 
     def _on_viewer_zoom_changed(self, factor: float) -> None:
         self._pending_zoom_factor = max(1.0, float(factor))
+        window_getter = getattr(self._image_viewer, "window", None)
+        window = window_getter() if callable(window_getter) else None
+        emit_detail_event(
+            "still_zoom_changed",
+            generation=self._request_generation,
+            zoom_factor=self._pending_zoom_factor,
+            current_decode_level=self._current_decode_level,
+            fullscreen=bool(window is not None and window.isFullScreen()),
+            adjustments_present=bool(self._active_adjustments),
+        )
         if self._active_source_identity is not None:
             if not self._defer_lod_for_active_render_interaction():
                 self._lod_timer.start()
@@ -1639,10 +1713,20 @@ class PlayerViewController(QObject):
 
     def _request_higher_lod(self) -> None:
         identity = self._active_source_identity
-        if identity is None or self._loading_source is not None:
+        if identity is None:
+            return
+        if self._loading_source is not None:
+            self._lod_timer.start()
             return
         self._request_generation += 1
         generation = self._request_generation
+        cancel_promotion = getattr(
+            self._image_viewer,
+            "cancel_still_lod_promotion",
+            None,
+        )
+        if callable(cancel_promotion):
+            cancel_promotion()
         self._loading_source = identity.path
         self._loading_started_at = time.perf_counter()
         intent = _PreparedRequestIntent(
@@ -1961,6 +2045,7 @@ class PlayerViewController(QObject):
         if generation <= 0 or started_at is None:
             return
 
+        previous_decode_level = self._current_decode_level
         if isinstance(source, DetailDecodeKey):
             pending_session = self._pending_present_session
             if (
@@ -1987,7 +2072,8 @@ class PlayerViewController(QObject):
                 "lod_upgrade_presented",
                 generation=generation,
                 media_type="image",
-                decode_level=self._current_decode_level,
+                old_decode_level=previous_decode_level,
+                new_decode_level=self._current_decode_level,
             )
         self._present_started_at = None
         self._present_source = None
@@ -2014,6 +2100,19 @@ class PlayerViewController(QObject):
         if pending_session is not None and pending_session[2] == key:
             self._pending_present_session = None
         request_reason = self._request_reason_by_generation.get(generation)
+        if request_reason in {"zoom", "resize"}:
+            if self._loading_source == key.source:
+                self._loading_source = None
+                self._loading_started_at = None
+            emit_detail_event(
+                "lod_upgrade_failed",
+                generation=generation,
+                asset_id=self._active_asset_id,
+                reason=request_reason,
+                message=str(reason),
+            )
+            return
+
         previous_key = self._last_presented_decode_key
         if previous_key is not None:
             for candidate_session in self._render_sessions.values():
@@ -2706,9 +2805,28 @@ class PlayerViewController(QObject):
                 self._present_generation,
                 surface.decode_key,
             )
-        self._current_full_image = QImage(image)
         session_key = self._render_session_key_for_surface(surface)
         session = self._render_sessions.get(session_key)
+        if (
+            reason in {"zoom", "resize"}
+            and session is not None
+            and self._queue_still_lod_promotion(
+                self._present_generation,
+                surface,
+                adjustments,
+                session,
+            )
+        ):
+            log_detail_profile(
+                "player_view",
+                "still.stage_lod",
+                (time.perf_counter() - apply_started) * 1000.0,
+                path=source.name,
+                has_adjustments=bool(adjustments),
+            )
+            return
+
+        self._current_full_image = QImage(image)
         if session is not None:
             self._pending_present_session = (
                 self._present_generation,

@@ -101,6 +101,15 @@ Also test a playing video with `enter→exit→enter→exit`, keeping every inte
 below 120 ms. Stale resume callbacks must not play during an intermediate state;
 the newest callback must restore playback exactly once after the final exit.
 
+For fullscreen still zoom, correlate `still_zoom_changed` with actual LOD
+threshold crossings. A promotion must record
+`lod_upgrade_requested→lod_upgrade_staging→lod_upgrade_resident→lod_upgrade_activated`
+and only reach `lod_upgrade_presented` after the matching window submission.
+During staging the old LOD remains active; a failed or stale promotion may add
+an inactive resident entry but must not change the active key or render-session
+surface. Run unedited, exposure-only, curve-only, crop, straighten, perspective,
+and crop-plus-colour samples at 100%, 125%, and 150% DPI.
+
 Transition traces must show `presentation_suppressed` before the exposed
 surface's `video_surface_blank_requested`/blank submission and
 `presentation_resumed` only after matching new content is installed. A rapid

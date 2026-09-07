@@ -162,7 +162,8 @@ class _FakeImageViewer(QWidget):
     def promote_still_surface(self, surface, adjustments, *, generation: int) -> None:
         self.lod_promotions.append((surface, dict(adjustments), int(generation)))
 
-    def cancel_still_lod_promotion(self) -> None:
+    def cancel_still_lod_promotion(self, *, reason: str = "superseded") -> None:
+        del reason
         self.lod_promotion_cancel_count += 1
 
     def set_adjustments(self, adjustments):
@@ -1203,6 +1204,8 @@ class TestInitCoverTracking:
         )
         adjustments = {"Exposure": 0.4, "Crop_W": 0.7}
         handle = controller._upsert_render_session(initial, adjustments)
+        controller._current_full_image = QImage(initial.image)
+        initial_cache_key = controller._current_full_image.cacheKey()
         controller._active_adjustments = dict(adjustments)
         controller._request_generation = 7
         controller._request_reason_by_generation[7] = "zoom"
@@ -1220,12 +1223,76 @@ class TestInitCoverTracking:
         assert promoted_adjustments == dict(handle.edit_state.shader_adjustments)
         assert promoted_generation == 7
         assert controller._pending_present_session == (7, handle, upgraded.decode_key)
+        assert controller._current_full_image.cacheKey() == initial_cache_key
 
         controller._image_viewer.stillFrameSubmitted.emit(upgraded.decode_key, 7)
 
         assert handle.current_surface is upgraded
         assert controller._current_decode_level == 2048
         assert controller._pending_present_session is None
+        assert controller._current_full_image.cacheKey() == upgraded.image.cacheKey()
+
+    def test_failed_zoom_lod_keeps_controller_surface_state(self, controller):
+        path = Path("/tmp/failed-edited-zoom-lod.jpg")
+        initial = _surface(
+            path,
+            QImage(1024, 768, QImage.Format.Format_RGBA8888),
+            level=1024,
+        )
+        upgraded = _surface(
+            path,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=2048,
+        )
+        handle = controller._upsert_render_session(initial, {"Exposure": 0.4})
+        controller._current_full_image = QImage(initial.image)
+        initial_cache_key = controller._current_full_image.cacheKey()
+        controller._current_decode_level = 1024
+        controller._request_generation = 7
+        controller._request_reason_by_generation[7] = "zoom"
+        controller._active_asset_id = "asset-1"
+        controller._loading_source = path
+        controller._loading_started_at = time.perf_counter()
+        controller._pending_present_session = (7, handle, upgraded.decode_key)
+
+        controller._on_still_texture_allocation_failed(
+            upgraded.decode_key,
+            7,
+            "residency_budget",
+        )
+
+        assert handle.current_surface is initial
+        assert controller._current_decode_level == 1024
+        assert controller._current_full_image.cacheKey() == initial_cache_key
+        assert controller._pending_present_session is None
+
+    def test_cancelled_zoom_submission_cannot_commit_stale_surface(self, controller):
+        path = Path("/tmp/cancelled-edited-zoom-lod.jpg")
+        initial = _surface(
+            path,
+            QImage(1024, 768, QImage.Format.Format_RGBA8888),
+            level=1024,
+        )
+        upgraded = _surface(
+            path,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=2048,
+        )
+        handle = controller._upsert_render_session(initial, {})
+        controller._current_full_image = QImage(initial.image)
+        initial_cache_key = controller._current_full_image.cacheKey()
+        controller._current_decode_level = 1024
+        controller._present_generation = 7
+        controller._present_started_at = time.perf_counter()
+        controller._present_source = path
+        controller._request_reason_by_generation[7] = "zoom"
+        controller._pending_present_session = None
+
+        controller._accept_still_frame_presented(upgraded.decode_key, 7)
+
+        assert handle.current_surface is initial
+        assert controller._current_decode_level == 1024
+        assert controller._current_full_image.cacheKey() == initial_cache_key
 
     def test_image_first_render_sets_flag(self, controller):
         """_on_image_first_render should mark image as rendered."""

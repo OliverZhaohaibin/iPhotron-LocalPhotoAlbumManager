@@ -122,6 +122,9 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
 替换必须先以 `purpose=lod_promotion` 非激活 staging，staging frame 继续绘制旧层，
 后续 frame 才能 activate/draw，且只有 matching window submission 后才能记录
 `lod_upgrade_presented`。stale/failed promotion 不得替换 active texture 或更新 render session。
+promotion 期间的 edit-state 更新必须覆盖 pending shader snapshot，不能在 activation
+时恢复旧 adjustment；取消尚未 flush 的 RHI promotion 必须释放对应 staging ownership，
+且 allocation failure 前后 controller current surface 必须与 committed render session 一致。
 `tools/detail_benchmark.py` schema 2
 兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
 

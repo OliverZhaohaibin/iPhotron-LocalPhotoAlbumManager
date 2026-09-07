@@ -120,6 +120,16 @@ class TextureResourceManager:
             return bool(stage(source, image))
         return False
 
+    def cancel_pending_still_upload(
+        self,
+        source: object,
+        *,
+        purpose: str,
+    ) -> bool:
+        renderer = self._renderer_provider()
+        cancel = getattr(renderer, "cancel_pending_still_upload", None)
+        return bool(callable(cancel) and cancel(source, purpose=purpose))
+
     def clear_still_residency(self) -> None:
         renderer = self._renderer_provider()
         clear = getattr(renderer, "clear_still_residency", None)

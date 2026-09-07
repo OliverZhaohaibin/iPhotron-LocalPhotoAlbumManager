@@ -1026,7 +1026,8 @@ class PlayerViewController(QObject):
             None,
         )
         if callable(cancel_promotion):
-            cancel_promotion()
+            cancel_promotion(reason="asset_change")
+        self._pending_present_session = None
         suppress_presentation = getattr(
             self._image_viewer,
             "begin_presentation_transition",
@@ -1655,7 +1656,6 @@ class PlayerViewController(QObject):
         self._present_generation = int(generation)
         self._present_started_at = self._loading_started_at
         self._present_source = surface.decode_key.source
-        self._current_full_image = QImage(surface.image)
         self._pending_present_session = (
             int(generation),
             session,
@@ -1726,7 +1726,17 @@ class PlayerViewController(QObject):
             None,
         )
         if callable(cancel_promotion):
-            cancel_promotion()
+            cancel_promotion(reason="superseded")
+        pending_session = self._pending_present_session
+        if (
+            pending_session is not None
+            and self._request_reason_by_generation.get(pending_session[0])
+            in {"zoom", "resize"}
+        ):
+            if self._present_generation == pending_session[0]:
+                self._present_started_at = None
+                self._present_source = None
+            self._pending_present_session = None
         self._loading_source = identity.path
         self._loading_started_at = time.perf_counter()
         intent = _PreparedRequestIntent(
@@ -2046,17 +2056,23 @@ class PlayerViewController(QObject):
             return
 
         previous_decode_level = self._current_decode_level
+        request_reason = self._request_reason_by_generation.get(generation)
         if isinstance(source, DetailDecodeKey):
             pending_session = self._pending_present_session
-            if (
+            pending_matches = bool(
                 pending_session is not None
                 and pending_session[0] == generation
                 and pending_session[2] == source
-            ):
+            )
+            if request_reason in {"zoom", "resize"} and not pending_matches:
+                return
+            if pending_matches:
                 _pending_generation, session, _key = pending_session
-                session.activate_surface(source)
+                if not session.activate_surface(source):
+                    return
                 self._current_render_session = session
                 self._current_decode_level = source.decode_level
+                self._current_full_image = QImage(session.current_surface.image)
                 self._touch_render_session(session)
                 self._pending_present_session = None
             self._last_presented_decode_key = source
@@ -2067,7 +2083,7 @@ class PlayerViewController(QObject):
             path=Path(presented_path).name if presented_path is not None else "",
             generation=generation,
         )
-        if self._request_reason_by_generation.get(generation) in {"zoom", "resize"}:
+        if request_reason in {"zoom", "resize"}:
             emit_detail_event(
                 "lod_upgrade_presented",
                 generation=generation,

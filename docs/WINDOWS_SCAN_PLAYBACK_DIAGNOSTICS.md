@@ -109,6 +109,10 @@ During staging the old LOD remains active; a failed or stale promotion may add
 an inactive resident entry but must not change the active key or render-session
 surface. Run unedited, exposure-only, curve-only, crop, straighten, perspective,
 and crop-plus-colour samples at 100%, 125%, and 150% DPI.
+`lod_upgrade_cancelled` must include the cancelled phase and reason. A live edit
+made between staging and activation must remain visible after activation; an
+allocation failure or cancelled submission must leave the controller surface,
+session surface, and decode level on the last matching submitted LOD.
 
 Transition traces must show `presentation_suppressed` before the exposed
 surface's `video_surface_blank_requested`/blank submission and

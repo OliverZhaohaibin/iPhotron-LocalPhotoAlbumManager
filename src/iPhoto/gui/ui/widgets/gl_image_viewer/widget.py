@@ -709,7 +709,7 @@ class GLImageViewer(QRhiWidget):
         """
         promotion = self._still_lod_promotion
         if promotion is not None and image_source != promotion.key:
-            self.cancel_still_lod_promotion()
+            self.cancel_still_lod_promotion(reason="asset_change")
         self._video_frame = None
         self._pending_video_image = None
         self._pending_video_image_pre_rotated = False
@@ -829,7 +829,7 @@ class GLImageViewer(QRhiWidget):
     ) -> None:
         """Stage a same-asset LOD while the active texture keeps rendering."""
 
-        self.cancel_still_lod_promotion()
+        self.cancel_still_lod_promotion(reason="superseded")
         self._remember_still_surface(surface)
         generation = max(0, int(generation))
         self._still_generation_by_key[surface.decode_key] = generation
@@ -852,12 +852,22 @@ class GLImageViewer(QRhiWidget):
         )
         self.update()
 
-    def cancel_still_lod_promotion(self) -> None:
+    def cancel_still_lod_promotion(self, *, reason: str = "superseded") -> None:
         """Cancel pending promotion ownership without evicting resident textures."""
 
         promotion = self._still_lod_promotion
         if promotion is None:
             return
+        cancel_upload = getattr(
+            self._texture_manager,
+            "cancel_pending_still_upload",
+            None,
+        )
+        if callable(cancel_upload) and cancel_upload(
+            promotion.key,
+            purpose="lod_promotion",
+        ):
+            self._release_upload_staging(promotion.key)
         if self._pending_resident_activation == promotion.key:
             self._pending_resident_activation = None
         if (
@@ -865,6 +875,20 @@ class GLImageViewer(QRhiWidget):
             and self._texture_manager.get_current_image_source() == promotion.key
         ):
             self._still_presentation_pending = False
+        rendered = self._rendered_content_identity
+        if (
+            rendered is not None
+            and rendered[0] == "still"
+            and rendered[1] == promotion.key
+            and rendered[2] == promotion.generation
+        ):
+            self._rendered_content_identity = None
+        emit_detail_event(
+            "lod_upgrade_cancelled",
+            generation=promotion.generation,
+            phase=promotion.phase,
+            reason=str(reason),
+        )
         self._still_lod_promotion = None
 
     def activate_resident_surface(
@@ -898,7 +922,7 @@ class GLImageViewer(QRhiWidget):
         return True
 
     def clear_still_residency(self) -> None:
-        self.cancel_still_lod_promotion()
+        self.cancel_still_lod_promotion(reason="resource_release")
         self._pending_warm_surfaces.clear()
         self._pending_resident_activation = None
         self._still_surface_refs.clear()
@@ -989,7 +1013,7 @@ class GLImageViewer(QRhiWidget):
 
         starting_video_source = not self._using_video_frame_source
         if starting_video_source:
-            self.cancel_still_lod_promotion()
+            self.cancel_still_lod_promotion(reason="asset_change")
             self._texture_manager.clear_image()
             self._source_image_dimensions = None
             self._still_presentation_pending = False
@@ -1219,6 +1243,12 @@ class GLImageViewer(QRhiWidget):
 
         mapped_adjustments = dict(adjustments or {})
         self._adjustments = mapped_adjustments
+        promotion = self._still_lod_promotion
+        if promotion is not None:
+            # LOD surfaces are neutral. Keep the promotion aligned with the
+            # newest live shader state instead of restoring its creation-time
+            # snapshot when the resident texture is activated.
+            promotion.adjustments = dict(mapped_adjustments)
         self._update_crop_perspective_state()
 
         # Handle curve LUT update if curve data changed
@@ -1791,7 +1821,7 @@ class GLImageViewer(QRhiWidget):
     def releaseResources(self) -> None:  # type: ignore[override]
         """QRhiWidget override: release renderer resources."""
         self._gl_initialized = False
-        self.cancel_still_lod_promotion()
+        self.cancel_still_lod_promotion(reason="resource_release")
         if self._runtime_ready:
             if self._renderer is not None:
                 rhi = self.rhi()

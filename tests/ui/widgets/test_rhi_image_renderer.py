@@ -194,6 +194,30 @@ def test_failed_rhi_lod_staging_preserves_active_texture() -> None:
     }
 
 
+def test_cancelled_rhi_lod_upload_cannot_block_newer_promotion() -> None:
+    renderer = RhiImageRenderer()
+    renderer._rhi = _FakeTextureRhi()
+
+    assert renderer.stage_still_texture("lod-a", _image(8, 8)) is True
+    assert renderer.cancel_pending_still_upload(
+        "lod-a",
+        purpose="lod_promotion",
+    ) is True
+    assert renderer.stage_still_texture("lod-b", _image(12, 10)) is True
+
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert "lod-a" not in renderer._still_textures
+    assert "lod-b" in renderer._still_textures
+    assert renderer.take_still_upload_result() == {
+        "key": "lod-b",
+        "activate": False,
+        "success": True,
+        "reason": "uploaded",
+        "purpose": "lod_promotion",
+    }
+
+
 def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
     renderer = RhiImageRenderer()
     stale = _FakeTexture()

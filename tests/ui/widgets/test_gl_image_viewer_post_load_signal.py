@@ -493,11 +493,23 @@ def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
     assert active["key"] == "asset-lod-1024"
     assert viewer._still_lod_promotion.phase == "resident"
 
+    newest_adjustments = {
+        "Exposure": 0.8,
+        "Crop_W": 0.7,
+        "Crop_Straighten": 3.0,
+        "Perspective_Vertical": 0.2,
+        "Curve_Points": [(0.0, 0.0), (1.0, 0.9)],
+        "Levels_Black": 0.05,
+    }
+    viewer.set_adjustments(newest_adjustments)
+
     viewer._prepare_still_lod_promotion_for_render()
     viewer._activate_pending_resident_texture()
 
     assert active["key"] == surface.decode_key
     assert viewer._still_lod_promotion.phase == "activating"
+    assert viewer._still_lod_promotion.adjustments == newest_adjustments
+    assert viewer._adjustments == newest_adjustments
     assert viewer._still_presentation_pending is True
 
     viewer._rendered_content_identity = viewer._take_pending_content_submission()
@@ -505,6 +517,26 @@ def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
 
     assert submitted.count() == 1
     assert viewer._still_lod_promotion is None
+
+
+def test_cancelled_activating_lod_cannot_emit_stale_submission(qapp, mocker) -> None:
+    viewer = GLImageViewer()
+    promotion = mocker.Mock()
+    promotion.key = "lod-a"
+    promotion.generation = 4
+    promotion.phase = "activating"
+    viewer._still_lod_promotion = promotion
+    viewer._still_presentation_pending = False
+    viewer._rendered_content_identity = ("still", "lod-a", 4, 1)
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.return_value = "lod-a"
+    submitted = QSignalSpy(viewer.stillFrameSubmitted)
+
+    viewer.cancel_still_lod_promotion(reason="superseded")
+    viewer._on_frame_submitted()
+
+    assert viewer._rendered_content_identity is None
+    assert submitted.count() == 0
 
 
 def test_gl_image_viewer_maps_full_resolution_face_box_onto_viewport_surface(qapp) -> None:

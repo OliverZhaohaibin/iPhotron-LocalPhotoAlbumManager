@@ -395,11 +395,19 @@ class RhiImageRenderer:
             return False
         if image.isNull():
             return False
-        if self._pending_still is not None and self._pending_still[3] == "prefetch":
+        if self._pending_still is not None and self._pending_still[3] in {
+            "prefetch",
+            "lod_promotion",
+        }:
+            previous_purpose = self._pending_still[3]
             emit_detail_event(
-                "gpu_prefetch_dropped",
+                (
+                    "lod_upgrade_cancelled"
+                    if previous_purpose == "lod_promotion"
+                    else "gpu_prefetch_dropped"
+                ),
                 generation=0,
-                reason="lod_promotion_pending",
+                reason="lod_promotion_superseded",
             )
             self._pending_still = None
         elif self._pending_still is not None:
@@ -417,6 +425,13 @@ class RhiImageRenderer:
             }
             return False
         self._pending_still = (key, _qimage_to_rgba(image), False, "lod_promotion")
+        return True
+
+    def cancel_pending_still_upload(self, key: object, *, purpose: str) -> bool:
+        pending = self._pending_still
+        if pending is None or pending[0] != key or pending[3] != purpose:
+            return False
+        self._pending_still = None
         return True
 
     def take_still_upload_result(self) -> dict[str, object] | None:

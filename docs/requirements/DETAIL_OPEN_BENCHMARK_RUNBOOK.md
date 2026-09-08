@@ -138,6 +138,10 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
   以 `Path` 为 key 的新 GPU upload。
 - Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
   stale/failed upgrade 不得替换 current texture。
+- Fullscreen crop relayout：记录 `crop_viewport_relayout` 的 target、framing mode、
+  cover/effective scale、zoom、pan 和 center error。off-center crop 与 straighten、
+  perspective、flip、quarter-turn rotation 的组合在 normal→fullscreen→normal 后
+  center error 必须不超过 1 logical pixel，10 次往返不得累计漂移。
 
 同时保留 `render_session_created/acquired/released`、`edit_state_updated` 和 `surface_owner_*` 诊断事件。ColorStats 从 surface cache v3 header
 复用；同 source revision 跨 LOD 的统计计算次数必须为 1。packaged 日志只能证明实际运行结果，不能以

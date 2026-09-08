@@ -537,9 +537,12 @@ class ViewTransformController:
         if fit_result is None:
             return False
 
-        target_zoom, target_scale = fit_result
+        target_zoom, _target_scale = fit_result
         self.set_zoom_factor_direct(target_zoom)
-        self.apply_image_center_pixels(rect.center(), scale=target_scale)
+        # The final renderer scale also includes the straighten cover factor.
+        # Recompute it after applying zoom so off-centre crops use the same
+        # scale for pan as the shader uses for drawing.
+        self.apply_image_center_pixels(rect.center())
         return True
 
     def compute_texture_rect_fit(self, rect: QRectF) -> tuple[float, float] | None:

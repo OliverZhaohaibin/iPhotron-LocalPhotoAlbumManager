@@ -37,6 +37,19 @@ def _publish_target_and_sync(
     viewer._sync_view_transform_for_render_target(size)
 
 
+def _enable_texture_renderer(viewer: GLImageViewer) -> None:
+    class _Renderer:
+        @staticmethod
+        def has_texture() -> bool:
+            return True
+
+        @staticmethod
+        def texture_size() -> tuple[int, int]:
+            return (400, 300)
+
+    viewer._renderer = _Renderer()
+
+
 def _crop_viewport_rect(viewer: GLImageViewer) -> QRectF:
     crop_rect = viewer._compute_crop_rect_pixels()
     assert crop_rect is not None
@@ -179,10 +192,149 @@ def test_render_target_sync_handles_rotation_and_high_dpi_target(qapp) -> None:
     assert restored_rect.center().y() == pytest.approx(200.0, abs=1.0)
 
 
+@pytest.mark.parametrize("dpr", [1.0, 1.25, 1.5], ids=["100pct", "125pct", "150pct"])
+@pytest.mark.parametrize(
+    "adjustments",
+    [
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Crop_Straighten": 5.0,
+        },
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Perspective_Vertical": 0.25,
+        },
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Perspective_Horizontal": -0.2,
+        },
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Perspective_Vertical": 0.25,
+            "Perspective_Horizontal": -0.2,
+        },
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Crop_Straighten": -5.0,
+            "Perspective_Vertical": -0.2,
+            "Perspective_Horizontal": 0.25,
+            "Crop_FlipH": 1.0,
+            "Crop_Rotate90": 1.0,
+        },
+        {
+            "Crop_CX": 0.30,
+            "Crop_CY": 0.38,
+            "Crop_W": 0.5,
+            "Crop_H": 0.6,
+            "Crop_Straighten": 4.0,
+            "Crop_FlipH": 1.0,
+            "Crop_Rotate90": 2.0,
+        },
+        {
+            "Crop_CX": 0.68,
+            "Crop_CY": 0.35,
+            "Crop_W": 0.5,
+            "Crop_H": 0.6,
+            "Crop_Straighten": -4.0,
+            "Perspective_Vertical": 0.2,
+            "Crop_Rotate90": 3.0,
+        },
+    ],
+    ids=[
+        "straighten",
+        "vertical-perspective",
+        "horizontal-perspective",
+        "both-perspective",
+        "all-with-rotate90",
+        "flip-rotate180",
+        "perspective-rotate270",
+    ],
+)
+def test_transformed_crop_stays_centered_across_fullscreen_targets(
+    qapp,
+    adjustments: Mapping[str, float],
+    dpr: float,
+) -> None:
+    viewer = _make_cropped_viewer(adjustments)
+    _enable_texture_renderer(viewer)
+    viewer._update_crop_perspective_state()
+    viewer.reset_zoom()
+    expected_center = QPointF(viewer.width() / 2.0, viewer.height() / 2.0)
+
+    for logical_target in ((1200, 800), (1920, 1080), (1200, 800)):
+        target = tuple(round(value * dpr) for value in logical_target)
+        _publish_target_and_sync(viewer, target)
+        crop_rect = _crop_viewport_rect(viewer)
+        assert crop_rect.center().x() == pytest.approx(expected_center.x(), abs=1.0)
+        assert crop_rect.center().y() == pytest.approx(expected_center.y(), abs=1.0)
+
+
+def test_crop_relayout_diagnostic_reports_final_effective_scale(qapp, mocker) -> None:
+    viewer = _make_cropped_viewer(
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Crop_Straighten": 5.0,
+        }
+    )
+    _enable_texture_renderer(viewer)
+    viewer._update_crop_perspective_state()
+    viewer.reset_zoom()
+    emit_event = mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget.emit_detail_event"
+    )
+
+    viewer.request_viewport_relayout()
+    _publish_target_and_sync(viewer, (1920, 1080))
+
+    relayout = next(
+        event
+        for event in emit_event.call_args_list
+        if event.args == ("crop_viewport_relayout",)
+    )
+    assert relayout.kwargs["framing_mode"] == "frame"
+    assert relayout.kwargs["target_width"] == 1920
+    assert relayout.kwargs["target_height"] == 1080
+    assert relayout.kwargs["cover_scale"] > 1.0
+    assert relayout.kwargs["effective_scale"] > 0.0
+    assert relayout.kwargs["center_error_x"] == pytest.approx(0.0, abs=1.0)
+    assert relayout.kwargs["center_error_y"] == pytest.approx(0.0, abs=1.0)
+
+
 def test_repeated_fullscreen_round_trips_do_not_accumulate_crop_drift(qapp) -> None:
     viewer = _make_cropped_viewer(
-        {"Crop_CX": 0.70, "Crop_CY": 0.62, "Crop_W": 0.55, "Crop_H": 0.58}
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Crop_Straighten": 5.0,
+            "Perspective_Vertical": 0.2,
+            "Perspective_Horizontal": -0.15,
+            "Crop_FlipH": 1.0,
+            "Crop_Rotate90": 1.0,
+        }
     )
+    _enable_texture_renderer(viewer)
+    viewer._update_crop_perspective_state()
+    viewer.reset_zoom()
     normal_target = (1200, 800)
     fullscreen_target = (1920, 1080)
     restored_rects: list[QRectF] = []

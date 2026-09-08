@@ -559,6 +559,11 @@ Current/previous/next GPU residency is
 bounded by both three textures and 192MB. Source changes invalidate neutral
 surfaces and textures; sidecar changes replace render state only.
 
+Automatic crop framing derives pan from the final effective render scale after
+base fit, straighten cover, and zoom agree. Render-target relayout does not
+reproject the logical crop mask through the perspective matrix: both GL and
+QRhi shaders apply that mask in logical display UV before perspective sampling.
+
 Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
 with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,
 half-size, then full fallback sequence. All stale generations are rejected at

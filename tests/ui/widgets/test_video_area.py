@@ -3058,6 +3058,45 @@ def test_gl_image_viewer_center_crop_uses_partial_fit_zoom(qapp, mocker):
     assert viewer._auto_crop_center_locked is True
 
 
+def test_adjusted_video_edit_crop_stays_centered_after_fullscreen_relayout(
+    qapp,
+    mocker,
+):
+    area = VideoArea()
+    viewer = area.edit_viewer
+    viewer.resize(600, 400)
+    viewer._image = QImage(400, 300, QImage.Format.Format_RGBA8888)
+    renderer = mocker.Mock()
+    renderer.has_texture.return_value = True
+    renderer.texture_size.return_value = (400, 300)
+    viewer._renderer = renderer
+    viewer._adjustments = {
+        "Crop_CX": 0.70,
+        "Crop_CY": 0.62,
+        "Crop_W": 0.55,
+        "Crop_H": 0.58,
+        "Crop_Straighten": 5.0,
+        "Perspective_Vertical": 0.2,
+    }
+    viewer.set_crop_framing_enabled(True)
+    viewer._last_render_target_size = QSize(1200, 800)
+    viewer._last_layout_target_size = QSize(1200, 800)
+    viewer._update_crop_perspective_state()
+    viewer.reset_zoom()
+
+    viewer._last_render_target_size = QSize(1920, 1080)
+    viewer._sync_view_transform_for_render_target(QSize(1920, 1080))
+
+    crop_rect = viewer._compute_crop_rect_pixels()
+    assert crop_rect is not None
+    viewport_center = viewer._transform_controller.convert_image_to_viewport(
+        crop_rect.center().x(),
+        crop_rect.center().y(),
+    )
+    assert viewport_center.x() == pytest.approx(viewer.width() * 0.5, abs=1.0)
+    assert viewport_center.y() == pytest.approx(viewer.height() * 0.5, abs=1.0)
+
+
 def test_view_transform_compute_texture_rect_fit_uses_cover_when_fill_enabled(qapp):
     """Fill-mode framing should scale crop previews with a cover fit."""
 

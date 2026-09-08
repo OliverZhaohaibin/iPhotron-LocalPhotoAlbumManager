@@ -634,11 +634,51 @@ class GLImageViewer(QRhiWidget):
             elif self._auto_crop_center_locked:
                 self._reapply_locked_crop_center()
 
+        self._emit_crop_viewport_relayout(target_size)
+
         # Viewport-coordinate consumers (for example face annotations) must
         # only observe the transform after the authoritative QRhi target and
         # every target-dependent crop/cover update agree.
         self.viewTransformChanged.emit()
         self.viewportMetricsChanged.emit()
+
+    def _emit_crop_viewport_relayout(self, target_size: QSize) -> None:
+        """Record the final automatic crop framing against one real target."""
+
+        if self._crop_controller.is_active():
+            return
+        mode = (
+            "frame"
+            if self._auto_crop_view_locked
+            else "center"
+            if self._auto_crop_center_locked
+            else None
+        )
+        if mode is None:
+            return
+        crop_rect = self._compute_crop_rect_pixels()
+        if crop_rect is None:
+            return
+        viewport_center = self._transform_controller.convert_image_to_viewport(
+            crop_rect.center().x(),
+            crop_rect.center().y(),
+        )
+        expected_center = QPointF(self.width() * 0.5, self.height() * 0.5)
+        pan = self._transform_controller.get_pan_pixels()
+        emit_detail_event(
+            "crop_viewport_relayout",
+            generation=self._still_generation_by_key.get(self.current_image_source(), 0),
+            framing_mode=mode,
+            target_width=target_size.width(),
+            target_height=target_size.height(),
+            cover_scale=self._transform_controller.get_image_cover_scale(),
+            effective_scale=self._transform_controller.get_effective_scale(),
+            zoom_factor=self._transform_controller.get_zoom_factor(),
+            pan_x=pan.x(),
+            pan_y=pan.y(),
+            center_error_x=viewport_center.x() - expected_center.x(),
+            center_error_y=viewport_center.y() - expected_center.y(),
+        )
 
     @staticmethod
     def _should_log_diag_frame(index: int) -> bool:

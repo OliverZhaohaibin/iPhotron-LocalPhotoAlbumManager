@@ -1,7 +1,7 @@
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 
 from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
 
@@ -152,6 +152,26 @@ def test_image_viewport_roundtrip_with_non_square_target_and_pan_zoom() -> None:
 
     assert image_point.x() == pytest.approx(280.0)
     assert image_point.y() == pytest.approx(140.0)
+
+
+def test_frame_texture_rect_centers_with_non_unit_cover_scale() -> None:
+    viewer = FakeViewer(width=200, height=100, dpr=2.0)
+    controller = make_controller(
+        viewer,
+        (600.0, 250.0),
+        texture_size=(400, 300),
+    )
+    controller.set_image_cover_scale(1.35)
+    crop_rect = QRectF(180.0, 105.0, 160.0, 120.0)
+
+    assert controller.frame_texture_rect(crop_rect) is True
+
+    viewport_center = controller.convert_image_to_viewport(
+        crop_rect.center().x(),
+        crop_rect.center().y(),
+    )
+    assert viewport_center.x() == pytest.approx(100.0, abs=1e-6)
+    assert viewport_center.y() == pytest.approx(50.0, abs=1e-6)
 
 
 def test_shader_fragment_mapping_matches_view_transform_for_both_origins() -> None:

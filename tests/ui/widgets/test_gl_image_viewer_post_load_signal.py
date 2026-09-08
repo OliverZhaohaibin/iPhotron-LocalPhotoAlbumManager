@@ -16,7 +16,10 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QGridLayout, QWidget
 
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
-from iPhoto.gui.ui.widgets.gl_image_viewer.widget import _crop_preview_adjustments
+from iPhoto.gui.ui.widgets.gl_image_viewer.widget import (
+    _StillLodPromotion,
+    _crop_preview_adjustments,
+)
 
 
 @pytest.fixture(scope="module")
@@ -521,22 +524,180 @@ def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
 
 def test_cancelled_activating_lod_cannot_emit_stale_submission(qapp, mocker) -> None:
     viewer = GLImageViewer()
-    promotion = mocker.Mock()
-    promotion.key = "lod-a"
-    promotion.generation = 4
-    promotion.phase = "activating"
+    previous_image = QImage(32, 24, QImage.Format.Format_RGBA8888)
+    promoted_image = QImage(64, 48, QImage.Format.Format_RGBA8888)
+    previous_surface = SimpleNamespace(
+        image=previous_image,
+        decode_key="lod-a",
+        source_size=(4000, 3000),
+    )
+    promoted_surface = SimpleNamespace(
+        image=promoted_image,
+        decode_key="lod-b",
+        source_size=(4000, 3000),
+    )
+    promotion = _StillLodPromotion(
+        surface=promoted_surface,
+        adjustments={},
+        generation=4,
+        phase="activating",
+        previous_key="lod-a",
+    )
     viewer._still_lod_promotion = promotion
     viewer._still_presentation_pending = False
-    viewer._rendered_content_identity = ("still", "lod-a", 4, 1)
+    viewer._rendered_content_identity = ("still", "lod-b", 4, 1)
+    viewer._last_composed_content_identity = ("still", "lod-a", 3, 1)
+    viewer._still_surface_refs["lod-a"] = previous_surface
+    viewer._still_surface_refs["lod-b"] = promoted_surface
     viewer._texture_manager = mocker.Mock()
-    viewer._texture_manager.get_current_image_source.return_value = "lod-a"
+    active = {"key": "lod-b"}
+    viewer._texture_manager.get_current_image_source.side_effect = lambda: active["key"]
+    viewer._texture_manager.has_resident_texture.side_effect = (
+        lambda key: key in {"lod-a", "lod-b"}
+    )
+
+    def activate(key):
+        active["key"] = key
+        return True
+
+    viewer._texture_manager.activate_resident_texture.side_effect = activate
     submitted = QSignalSpy(viewer.stillFrameSubmitted)
 
     viewer.cancel_still_lod_promotion(reason="superseded")
     viewer._on_frame_submitted()
 
     assert viewer._rendered_content_identity is None
+    assert viewer._pending_resident_activation == "lod-a"
+    assert viewer._image is previous_image
     assert submitted.count() == 0
+
+    viewer._activate_pending_resident_texture()
+
+    assert active["key"] == "lod-a"
+    assert viewer._still_presentation_pending is False
+    viewer._on_frame_submitted()
+    assert submitted.count() == 0
+
+
+def test_new_promotion_preserves_committed_restore_before_resident_activation(
+    qapp,
+    mocker,
+) -> None:
+    viewer = GLImageViewer()
+    images = {
+        key: QImage(size, size, QImage.Format.Format_RGBA8888)
+        for key, size in (("lod-a", 32), ("lod-b", 48), ("lod-c", 64))
+    }
+    surfaces = {
+        key: SimpleNamespace(
+            image=image,
+            decode_key=key,
+            source_size=(4000, 3000),
+            decode_level=level,
+        )
+        for (key, image), level in zip(images.items(), (1024, 2048, 3072), strict=True)
+    }
+    viewer._still_surface_refs.update(surfaces)
+    viewer._last_composed_content_identity = ("still", "lod-a", 1, 1)
+    active = {"key": "lod-b"}
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.side_effect = lambda: active["key"]
+    viewer._texture_manager.has_resident_texture.return_value = True
+
+    def activate(key):
+        active["key"] = key
+        return True
+
+    viewer._texture_manager.activate_resident_texture.side_effect = activate
+    viewer._still_lod_promotion = _StillLodPromotion(
+        surface=surfaces["lod-b"],
+        adjustments={},
+        generation=2,
+        phase="activating",
+        previous_key="lod-a",
+    )
+    viewer._rendered_content_identity = ("still", "lod-b", 2, 2)
+
+    viewer.promote_still_surface(surfaces["lod-c"], {}, generation=3)
+
+    assert viewer._still_lod_promotion.previous_key == "lod-a"
+    assert viewer._pending_resident_activation == "lod-a"
+
+    viewer._prepare_still_lod_promotion_for_render()
+    viewer._activate_pending_resident_texture()
+
+    assert active["key"] == "lod-a"
+    assert viewer._still_lod_promotion.phase == "resident"
+
+    viewer._prepare_still_lod_promotion_for_render()
+    viewer._activate_pending_resident_texture()
+
+    assert active["key"] == "lod-c"
+    assert viewer._still_lod_promotion.phase == "activating"
+
+
+def test_missing_committed_lod_reports_rollback_failure(qapp, mocker) -> None:
+    viewer = GLImageViewer()
+    promoted_surface = SimpleNamespace(
+        image=QImage(64, 48, QImage.Format.Format_RGBA8888),
+        decode_key="lod-b",
+        source_size=(4000, 3000),
+    )
+    viewer._still_lod_promotion = _StillLodPromotion(
+        surface=promoted_surface,
+        adjustments={},
+        generation=4,
+        phase="activating",
+        previous_key="missing-lod-a",
+    )
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.return_value = "lod-b"
+    viewer._texture_manager.has_resident_texture.return_value = False
+    emit_event = mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget.emit_detail_event"
+    )
+
+    viewer.cancel_still_lod_promotion(reason="superseded")
+
+    emit_event.assert_any_call(
+        "lod_upgrade_rollback_failed",
+        generation=4,
+        phase="activating",
+        reason="previous_not_resident",
+    )
+    assert viewer._pending_resident_activation is None
+
+
+@pytest.mark.parametrize("reason", ["asset_change", "resource_release"])
+def test_terminal_lod_cancel_does_not_restore_previous_texture(
+    qapp,
+    mocker,
+    reason,
+) -> None:
+    viewer = GLImageViewer()
+    promoted_surface = SimpleNamespace(
+        image=QImage(64, 48, QImage.Format.Format_RGBA8888),
+        decode_key="lod-b",
+        source_size=(4000, 3000),
+    )
+    viewer._still_lod_promotion = _StillLodPromotion(
+        surface=promoted_surface,
+        adjustments={},
+        generation=4,
+        phase="activating",
+        previous_key="lod-a",
+    )
+    viewer._still_surface_refs["lod-a"] = SimpleNamespace(
+        image=QImage(32, 24, QImage.Format.Format_RGBA8888),
+        source_size=(4000, 3000),
+    )
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.return_value = "lod-b"
+    viewer._texture_manager.has_resident_texture.return_value = True
+
+    viewer.cancel_still_lod_promotion(reason=reason)
+
+    assert viewer._pending_resident_activation is None
 
 
 def test_gl_image_viewer_maps_full_resolution_face_box_onto_viewport_surface(qapp) -> None:

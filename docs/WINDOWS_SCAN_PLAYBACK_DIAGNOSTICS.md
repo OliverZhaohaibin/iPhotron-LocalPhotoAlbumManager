@@ -113,6 +113,9 @@ and crop-plus-colour samples at 100%, 125%, and 150% DPI.
 made between staging and activation must remain visible after activation; an
 allocation failure or cancelled submission must leave the controller surface,
 session surface, and decode level on the last matching submitted LOD.
+If cancellation occurs after activation but before submission, the trace must
+show the last composed still becoming active again before any newer promotion;
+missing committed residency must emit `lod_upgrade_rollback_failed`.
 
 Transition traces must show `presentation_suppressed` before the exposed
 surface's `video_surface_blank_requested`/blank submission and

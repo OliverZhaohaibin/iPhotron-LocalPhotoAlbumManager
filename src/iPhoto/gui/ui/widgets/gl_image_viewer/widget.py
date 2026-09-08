@@ -152,6 +152,7 @@ class _StillLodPromotion:
     adjustments: dict[str, Any]
     generation: int
     phase: str
+    previous_key: object | None
 
     @property
     def key(self) -> object:
@@ -869,6 +870,7 @@ class GLImageViewer(QRhiWidget):
     ) -> None:
         """Stage a same-asset LOD while the active texture keeps rendering."""
 
+        previous_key = self._committed_still_key()
         self.cancel_still_lod_promotion(reason="superseded")
         self._remember_still_surface(surface)
         generation = max(0, int(generation))
@@ -883,6 +885,7 @@ class GLImageViewer(QRhiWidget):
             adjustments=dict(adjustments or {}),
             generation=generation,
             phase=phase,
+            previous_key=previous_key,
         )
         emit_detail_event(
             "lod_upgrade_resident" if phase == "resident" else "lod_upgrade_staging",
@@ -923,6 +926,12 @@ class GLImageViewer(QRhiWidget):
             and rendered[2] == promotion.generation
         ):
             self._rendered_content_identity = None
+        if (
+            reason == "superseded"
+            and promotion.phase == "activating"
+            and self._texture_manager.get_current_image_source() == promotion.key
+        ):
+            self._queue_committed_lod_restore(promotion)
         emit_detail_event(
             "lod_upgrade_cancelled",
             generation=promotion.generation,
@@ -930,6 +939,35 @@ class GLImageViewer(QRhiWidget):
             reason=str(reason),
         )
         self._still_lod_promotion = None
+
+    def _committed_still_key(self) -> object | None:
+        composed = self._last_composed_content_identity
+        if composed is not None and composed[0] == "still":
+            return composed[1]
+        return self._texture_manager.get_current_image_source()
+
+    def _queue_committed_lod_restore(self, promotion: _StillLodPromotion) -> bool:
+        previous_key = promotion.previous_key
+        previous_surface = self._still_surface_refs.get(previous_key)
+        if (
+            previous_key is None
+            or previous_key == promotion.key
+            or previous_surface is None
+            or not self._texture_manager.has_resident_texture(previous_key)
+        ):
+            emit_detail_event(
+                "lod_upgrade_rollback_failed",
+                generation=promotion.generation,
+                phase=promotion.phase,
+                reason="previous_not_resident",
+            )
+            return False
+        self._pending_resident_activation = previous_key
+        self._image = previous_surface.image
+        self._source_image_dimensions = previous_surface.source_size
+        self._still_presentation_pending = False
+        self.update()
+        return True
 
     def activate_resident_surface(
         self,
@@ -2397,7 +2435,8 @@ class GLImageViewer(QRhiWidget):
         if promotion is None:
             return
         if promotion.phase == "resident":
-            self._pending_resident_activation = promotion.key
+            if self._pending_resident_activation is None:
+                self._pending_resident_activation = promotion.key
             return
         if promotion.phase != "queued":
             return
@@ -2434,6 +2473,8 @@ class GLImageViewer(QRhiWidget):
         if promotion is None or promotion.key != key:
             if not activated:
                 self._texture_manager.mark_texture_lost()
+            elif promotion is not None and promotion.phase == "resident":
+                self.update()
             return
         if not activated:
             self._texture_manager.mark_texture_lost()

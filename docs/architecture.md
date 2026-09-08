@@ -554,7 +554,9 @@ visible while the replacement is staged as a non-active foreground resident.
 Only a later render may activate and draw that LOD, and the render session does
 not adopt it until the matching window submission. Live edit-state changes update
 the pending promotion's shader snapshot without decoding again; cancellation
-removes matching unflushed RHI work and cannot commit a delayed submission.
+removes matching unflushed RHI work and cannot commit a delayed submission. If
+an unsubmitted LOD was already activated, cancellation queues the last composed
+still key for render-thread restoration before any newer promotion activates.
 Current/previous/next GPU residency is
 bounded by both three textures and 192MB. Source changes invalidate neutral
 surfaces and textures; sidecar changes replace render state only.

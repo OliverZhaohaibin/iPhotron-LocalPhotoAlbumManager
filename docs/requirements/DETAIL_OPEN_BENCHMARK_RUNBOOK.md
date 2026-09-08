@@ -125,6 +125,8 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
 promotion 期间的 edit-state 更新必须覆盖 pending shader snapshot，不能在 activation
 时恢复旧 adjustment；取消尚未 flush 的 RHI promotion 必须释放对应 staging ownership，
 且 allocation failure 前后 controller current surface 必须与 committed render session 一致。
+取消已 activating 但尚未 submitted 的 LOD 时，下一 render 必须先恢复最后一次 composed
+still key；恢复过程不得产生伪 `stillFrameSubmitted` 或修改 session/decode level。
 `tools/detail_benchmark.py` schema 2
 兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
 

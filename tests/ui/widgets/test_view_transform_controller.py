@@ -3,7 +3,10 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 
-from iPhoto.gui.ui.widgets.view_transform_controller import ViewTransformController
+from iPhoto.gui.ui.widgets.view_transform_controller import (
+    ViewTransformController,
+    compute_rotation_cover_scale,
+)
 
 
 class FakeViewer:
@@ -172,11 +175,57 @@ def test_frame_texture_rect_centers_with_non_unit_cover_scale() -> None:
     )
     assert viewport_center.x() == pytest.approx(100.0, abs=1e-6)
     assert viewport_center.y() == pytest.approx(50.0, abs=1e-6)
+    fit = controller.compute_texture_rect_fit(crop_rect)
+    assert fit is not None
+    _zoom, target_scale = fit
+    assert controller.get_effective_scale() == pytest.approx(target_scale)
+
+
+@pytest.mark.parametrize("angle", [-11.0, -5.0, 5.0, 11.0])
+def test_straighten_cover_factor_is_independent_of_lod(angle: float) -> None:
+    factors = [
+        compute_rotation_cover_scale(size, angle)
+        for size in ((1024, 768), (2048, 1536), (4000, 3000))
+    ]
+
+    assert factors[0] > 1.0
+    assert factors[1:] == pytest.approx([factors[0], factors[0]])
+
+
+def test_transform_transaction_coalesces_automatic_publication() -> None:
+    viewer = FakeViewer(width=200, height=100, dpr=2.0)
+    zoom_events: list[float] = []
+    transform_events: list[None] = []
+    controller = ViewTransformController(
+        viewer,
+        texture_size_provider=lambda: (400, 300),
+        display_texture_size_provider=lambda: (400, 300),
+        device_view_size_provider=lambda: (600.0, 250.0),
+        on_zoom_changed=zoom_events.append,
+        on_view_transform_changed=lambda: transform_events.append(None),
+    )
+
+    with controller.transform_transaction(emit_zoom=False):
+        controller.set_image_cover_scale(1.2)
+        controller.set_zoom_factor_direct(1.7)
+        controller.set_pan_pixels(QPointF(20.0, -10.0))
+
+    assert viewer.update_count == 1
+    assert zoom_events == []
+    assert transform_events == [None]
+
+    controller.set_zoom_factor_direct(1.8)
+    assert viewer.update_count == 2
+    assert zoom_events == [pytest.approx(1.8)]
+    assert transform_events == [None, None]
 
 
 def test_shader_fragment_mapping_matches_view_transform_for_both_origins() -> None:
     viewer = FakeViewer(width=200, height=100, dpr=2.0)
     controller = make_controller(viewer, (600.0, 250.0), texture_size=(400, 300))
+    controller.set_image_cover_scale(
+        compute_rotation_cover_scale((400, 300), 6.0)
+    )
     controller.set_zoom_factor_direct(1.4)
     controller.set_pan_pixels(QPointF(-41.0, 18.0))
 

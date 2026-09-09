@@ -54,7 +54,22 @@ from ..widgets.gl_image_viewer import GLImageViewer, preload_opengl_python_runti
 from ..widgets.live_badge import LiveBadge
 from ..widgets.video_area import VideoArea
 
-_LOD_IDLE_DELAY_MS = 200
+_LOD_ZOOM_IDLE_MS = 180
+_LOD_RESIZE_SETTLE_MS = 16
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingLodEvaluation:
+    reason: Literal["zoom", "resize"]
+    zoom_factor: float
+    sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LodPlan:
+    action: Literal["noop", "cancel", "reuse", "submit"]
+    decode_key: DetailDecodeKey
+    pending_key: object | None
 
 
 class _StillSurfaceDecodeSignals(QObject):
@@ -460,10 +475,13 @@ class PlayerViewController(QObject):
         self._current_decode_level: int | str | None = None
         self._request_reason_by_generation: dict[int, str] = {}
         self._pending_zoom_factor = 1.0
+        self._lod_evaluation_sequence = 0
+        self._pending_lod_evaluation: _PendingLodEvaluation | None = None
+        self._fullscreen_lod_gate = False
+        self._fullscreen_resize_pending = False
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
-        self._lod_timer.setInterval(_LOD_IDLE_DELAY_MS)
-        self._lod_timer.timeout.connect(self._request_higher_lod)
+        self._lod_timer.timeout.connect(self._run_pending_lod_evaluation)
         zoom_changed = getattr(self._image_viewer, "zoomChanged", None)
         if zoom_changed is not None:
             zoom_changed.connect(self._on_viewer_zoom_changed)
@@ -1523,11 +1541,14 @@ class PlayerViewController(QObject):
             )
         if request.reason == "prefetch":
             return self._still_scheduler.prefetch(request)
-        if request.reason in {"zoom", "resize"} and not self._is_higher_level(
-            request.decode_level,
-            self._current_decode_level,
-        ):
-            return False
+        decode_key = DetailDecodeKey.from_request(request)
+        if request.reason in {"zoom", "resize"}:
+            plan_result = self._commit_lod_plan(
+                self._plan_lod_request(request, decode_key),
+                request,
+            )
+            if plan_result is not None:
+                return plan_result
         self._active_asset_id = request.asset_id
         self._active_source_identity = request.source_identity
         self._active_adjustments = dict(adjustments)
@@ -1544,7 +1565,6 @@ class PlayerViewController(QObject):
                 session.edit_state = state
                 session.baseline_state = state
             render_adjustments = dict(session.edit_state.shader_adjustments)
-        decode_key = DetailDecodeKey.from_request(request)
         if request.reason in {"zoom", "resize"}:
             geometry_state = request.geometry
             emit_detail_event(
@@ -1643,6 +1663,74 @@ class PlayerViewController(QObject):
             return True
         return self._still_scheduler.request(request)
 
+    def _plan_lod_request(
+        self,
+        request: DetailRenderRequest,
+        decode_key: DetailDecodeKey,
+    ) -> _LodPlan:
+        """Classify a desired LOD without mutating scheduler or presentation state."""
+
+        pending_key_getter = getattr(
+            self._image_viewer,
+            "pending_still_lod_key",
+            None,
+        )
+        pending_key = pending_key_getter() if callable(pending_key_getter) else None
+        if not self._is_higher_level(
+            request.decode_level,
+            self._current_decode_level,
+        ):
+            action: Literal["noop", "cancel", "reuse", "submit"] = (
+                "cancel" if pending_key is not None else "noop"
+            )
+        elif pending_key == decode_key:
+            action = "reuse"
+        else:
+            action = "submit"
+        return _LodPlan(
+            action=action,
+            decode_key=decode_key,
+            pending_key=pending_key,
+        )
+
+    def _commit_lod_plan(
+        self,
+        plan: _LodPlan,
+        request: DetailRenderRequest,
+    ) -> bool | None:
+        """Apply one precomputed plan; ``None`` continues request dispatch."""
+
+        if plan.action in {"noop", "cancel"}:
+            if plan.action == "cancel":
+                self._cancel_pending_lod_promotion(reason="planned_not_needed")
+                emit_detail_event(
+                    "lod_plan_cancelled",
+                    generation=self._request_generation,
+                    reason=request.reason,
+                    outcome="not_higher_than_committed",
+                )
+            return False
+        if plan.action == "reuse":
+            emit_detail_event(
+                "lod_plan_reused",
+                generation=self._request_generation,
+                reason=request.reason,
+                decode_level=request.decode_level,
+            )
+            return True
+        if plan.pending_key is not None:
+            self._cancel_pending_lod_promotion(reason="planned_superseded")
+        self._request_generation = request.generation
+        self._loading_source = request.source_identity.path
+        self._loading_started_at = time.perf_counter()
+        emit_detail_event(
+            "lod_plan_submitted",
+            generation=request.generation,
+            reason=request.reason,
+            decode_level=request.decode_level,
+        )
+        return None
+
     def _queue_still_lod_promotion(
         self,
         generation: int,
@@ -1695,7 +1783,69 @@ class PlayerViewController(QObject):
         )
         if self._active_source_identity is not None:
             if not self._defer_lod_for_active_render_interaction():
-                self._lod_timer.start()
+                self._schedule_lod_evaluation("zoom")
+
+    def begin_fullscreen_viewport_transition(self) -> None:
+        """Defer LOD work until the committed texture draws fullscreen once."""
+
+        self._fullscreen_lod_gate = True
+        self._fullscreen_resize_pending = True
+        if self._lod_timer.isActive():
+            self._lod_timer.stop()
+        pending_key_getter = getattr(
+            self._image_viewer,
+            "pending_still_lod_key",
+            None,
+        )
+        pending_key = pending_key_getter() if callable(pending_key_getter) else None
+        current_reason = self._request_reason_by_generation.get(self._request_generation)
+        if pending_key is not None:
+            self._cancel_pending_lod_promotion(reason="fullscreen_gate")
+            emit_detail_event(
+                "lod_plan_cancelled",
+                generation=self._request_generation,
+                reason="resize",
+                outcome="fullscreen_first_frame_gate",
+            )
+        if current_reason in {"zoom", "resize"} and self._loading_source is not None:
+            self._still_scheduler.cancel_foreground()
+            self._loading_source = None
+            self._loading_started_at = None
+        emit_detail_event(
+            "fullscreen_lod_gate_started",
+            generation=self._request_generation,
+        )
+
+    def complete_fullscreen_viewport_transition(self, *, reason: str) -> None:
+        if not self._fullscreen_lod_gate:
+            return
+        self._fullscreen_lod_gate = False
+        should_schedule = self._fullscreen_resize_pending
+        self._fullscreen_resize_pending = False
+        emit_detail_event(
+            "fullscreen_lod_gate_released",
+            generation=self._request_generation,
+            reason=reason,
+        )
+        if not should_schedule:
+            return
+        if self._pending_lod_evaluation is not None:
+            self._arm_pending_lod_evaluation()
+        else:
+            self._schedule_lod_evaluation("resize")
+
+    def cancel_fullscreen_viewport_transition(self) -> None:
+        if not self._fullscreen_lod_gate:
+            return
+        self._fullscreen_lod_gate = False
+        self._fullscreen_resize_pending = False
+        self._pending_lod_evaluation = None
+        self._lod_timer.stop()
+        emit_detail_event(
+            "fullscreen_lod_gate_released",
+            generation=self._request_generation,
+            reason="cancelled",
+        )
 
     def _on_viewport_metrics_changed(self) -> None:
         if self._pending_layout_intent is not None:
@@ -1709,24 +1859,95 @@ class PlayerViewController(QObject):
             float(zoom_getter()) if callable(zoom_getter) else self._pending_zoom_factor,
         )
         if not self._defer_lod_for_active_render_interaction():
-            self._lod_timer.start()
+            self._schedule_lod_evaluation("resize")
 
-    def _request_higher_lod(self) -> None:
+    def _schedule_lod_evaluation(self, reason: Literal["zoom", "resize"]) -> None:
+        if (
+            reason == "resize"
+            and self._pending_lod_evaluation is not None
+            and self._pending_lod_evaluation.reason == "zoom"
+        ):
+            if self._fullscreen_lod_gate:
+                self._fullscreen_resize_pending = True
+            return
+        self._lod_evaluation_sequence += 1
+        pending = _PendingLodEvaluation(
+            reason=reason,
+            zoom_factor=self._pending_zoom_factor,
+            sequence=self._lod_evaluation_sequence,
+        )
+        self._pending_lod_evaluation = pending
+        if self._fullscreen_lod_gate:
+            self._fullscreen_resize_pending = True
+            delay_ms = _LOD_ZOOM_IDLE_MS if reason == "zoom" else _LOD_RESIZE_SETTLE_MS
+        else:
+            delay_ms = self._arm_pending_lod_evaluation()
+        emit_detail_event(
+            "lod_evaluation_scheduled",
+            generation=self._request_generation,
+            reason=reason,
+            delay_ms=delay_ms,
+            sequence=pending.sequence,
+            gated=self._fullscreen_lod_gate,
+        )
+
+    def _arm_pending_lod_evaluation(self) -> int:
+        pending = self._pending_lod_evaluation
+        if pending is None:
+            return 0
+        delay_ms = (
+            _LOD_ZOOM_IDLE_MS
+            if pending.reason == "zoom"
+            else _LOD_RESIZE_SETTLE_MS
+        )
+        self._lod_timer.setInterval(delay_ms)
+        self._lod_timer.start()
+        return delay_ms
+
+    def _run_pending_lod_evaluation(self) -> None:
+        pending = self._pending_lod_evaluation
+        if pending is None:
+            return
+        if self._fullscreen_lod_gate:
+            self._fullscreen_resize_pending = True
+            return
+        self._pending_lod_evaluation = None
+        self._request_higher_lod(
+            reason=pending.reason,
+            zoom_factor=pending.zoom_factor,
+        )
+
+    def _request_higher_lod(
+        self,
+        *,
+        reason: Literal["zoom", "resize"] = "zoom",
+        zoom_factor: float | None = None,
+    ) -> None:
         identity = self._active_source_identity
         if identity is None:
             return
         if self._loading_source is not None:
-            self._lod_timer.start()
+            self._schedule_lod_evaluation(reason)
             return
-        self._request_generation += 1
-        generation = self._request_generation
+        intent = _PreparedRequestIntent(
+            asset_id=self._active_asset_id,
+            source_identity=identity,
+            generation=self._request_generation + 1,
+            reason=reason,
+            zoom_factor=max(1.0, float(zoom_factor or self._pending_zoom_factor)),
+        )
+        if not self._dispatch_prepared_intent(intent, dict(self._active_adjustments)):
+            self._loading_source = None
+            self._loading_started_at = None
+
+    def _cancel_pending_lod_promotion(self, *, reason: str) -> None:
         cancel_promotion = getattr(
             self._image_viewer,
             "cancel_still_lod_promotion",
             None,
         )
         if callable(cancel_promotion):
-            cancel_promotion(reason="superseded")
+            cancel_promotion(reason=reason)
         pending_session = self._pending_present_session
         if (
             pending_session is not None
@@ -1737,18 +1958,6 @@ class PlayerViewController(QObject):
                 self._present_started_at = None
                 self._present_source = None
             self._pending_present_session = None
-        self._loading_source = identity.path
-        self._loading_started_at = time.perf_counter()
-        intent = _PreparedRequestIntent(
-            asset_id=self._active_asset_id,
-            source_identity=identity,
-            generation=generation,
-            reason="zoom",
-            zoom_factor=self._pending_zoom_factor,
-        )
-        if not self._dispatch_prepared_intent(intent, dict(self._active_adjustments)):
-            self._loading_source = None
-            self._loading_started_at = None
 
     def _retry_pending_layout_intent(self) -> None:
         pending = self._pending_layout_intent
@@ -2456,7 +2665,7 @@ class PlayerViewController(QObject):
         """Debounce one render-session LOD reevaluation."""
 
         self._pending_zoom_factor = max(1.0, self._image_viewer.zoom_factor())
-        self._lod_timer.start()
+        self._schedule_lod_evaluation("resize")
 
     def _defer_lod_for_active_render_interaction(self) -> bool:
         """Record a pending LOD check when the current session is interactive."""

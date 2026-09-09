@@ -117,10 +117,26 @@ def test_media_qsb_assets_include_hlsl_50_for_d3d11() -> None:
     )
 
     for shader_name in shader_names:
-        shader = QShader.fromSerialized((shader_dir / shader_name).read_bytes())
+        shader_bytes = (shader_dir / shader_name).read_bytes()
+        shader = QShader.fromSerialized(shader_bytes)
+        sources = {key.source() for key in shader.availableShaders()}
+        assert {
+            QShader.Source.SpirvShader,
+            QShader.Source.GlslShader,
+            QShader.Source.HlslShader,
+            QShader.Source.MslShader,
+        }.issubset(sources), shader_name
         hlsl_versions = {
             key.sourceVersion().version()
             for key in shader.availableShaders()
             if key.source() == QShader.Source.HlslShader
         }
         assert 50 in hlsl_versions, shader_name
+        if shader_name == "image_viewer_rhi.frag.qsb":
+            translated_sources = [
+                bytes(shader.shader(key).shader())
+                for key in shader.availableShaders()
+                if key.source() != QShader.Source.SpirvShader
+            ]
+            assert translated_sources
+            assert all(b"uImgScale" not in source for source in translated_sources)

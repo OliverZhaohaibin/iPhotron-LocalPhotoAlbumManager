@@ -624,23 +624,37 @@ class GLImageViewer(QRhiWidget):
         self._viewport_reset_pending = False
         self._last_layout_target_size = target_size
 
-        straighten, rotate_steps, _ = self._rotation_parameters()
-        self._update_cover_scale(straighten, rotate_steps)
+        with self._transform_controller.transform_transaction(
+            emit_zoom=False,
+            force_notify=True,
+        ):
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
 
-        if reset_view:
-            self.reset_zoom()
-        elif not self._crop_controller.is_active():
-            if self._auto_crop_view_locked:
-                self._reapply_locked_crop_view()
-            elif self._auto_crop_center_locked:
-                self._reapply_locked_crop_center()
+            if reset_view:
+                self.reset_zoom()
+            elif not self._crop_controller.is_active():
+                if self._auto_crop_view_locked:
+                    self._reapply_locked_crop_view()
+                elif self._auto_crop_center_locked:
+                    self._reapply_locked_crop_center()
 
+        emit_detail_event(
+            "transform_transaction_committed",
+            generation=self._still_generation_by_key.get(
+                self.current_image_source(),
+                0,
+            ),
+            reason="viewport_relayout",
+            emit_zoom=False,
+            target_width=target_size.width(),
+            target_height=target_size.height(),
+        )
         self._emit_crop_viewport_relayout(target_size)
 
         # Viewport-coordinate consumers (for example face annotations) must
         # only observe the transform after the authoritative QRhi target and
         # every target-dependent crop/cover update agree.
-        self.viewTransformChanged.emit()
         self.viewportMetricsChanged.emit()
 
     def _emit_crop_viewport_relayout(self, target_size: QSize) -> None:
@@ -927,7 +941,7 @@ class GLImageViewer(QRhiWidget):
         ):
             self._rendered_content_identity = None
         if (
-            reason == "superseded"
+            reason not in {"asset_change", "resource_release"}
             and promotion.phase == "activating"
             and self._texture_manager.get_current_image_source() == promotion.key
         ):
@@ -939,6 +953,10 @@ class GLImageViewer(QRhiWidget):
             reason=str(reason),
         )
         self._still_lod_promotion = None
+
+    def pending_still_lod_key(self) -> object | None:
+        promotion = self._still_lod_promotion
+        return promotion.key if promotion is not None else None
 
     def _committed_still_key(self) -> object | None:
         composed = self._last_composed_content_identity
@@ -2189,7 +2207,6 @@ class GLImageViewer(QRhiWidget):
             pan=view_pan,
             adjustments=effective_adjustments,
             time_value=time_value,
-            img_scale=cover_scale,
             logical_tex_size=(float(logical_tex_w), float(logical_tex_h)),
             corner_radius_px=(
                 self._rounded_clip_radius * self.devicePixelRatioF()
@@ -2350,7 +2367,6 @@ class GLImageViewer(QRhiWidget):
             return
 
         effective_scale = self._transform_controller.get_effective_scale()
-        cover_scale = self._transform_controller.get_image_cover_scale()
         time_value = time.monotonic() - self._time_base
         view_pan = self._transform_controller.get_pan_pixels()
 
@@ -2380,7 +2396,6 @@ class GLImageViewer(QRhiWidget):
             pan=view_pan,
             adjustments=effective_adjustments,
             time_value=time_value,
-            img_scale=cover_scale,
             logical_tex_size=(float(logical_tex_w), float(logical_tex_h)),
             corner_radius_px=(
                 self._rounded_clip_radius * self.devicePixelRatioF()

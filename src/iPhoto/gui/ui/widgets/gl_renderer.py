@@ -257,7 +257,6 @@ class GLRenderer:
         pan: QPointF,
         adjustments: Mapping[str, float],
         time_value: float | None = None,
-        img_scale: float = 1.0,
         img_offset: Optional[QPointF] = None,
         logical_tex_size: tuple[float, float] | None = None,
         corner_radius_px: float = 0.0,
@@ -486,7 +485,6 @@ class GLRenderer:
                 self._set_uniform1f("uTime", time_value)
 
             safe_scale = max(scale, 1e-6)
-            safe_img_scale = max(img_scale, 1e-6)
             self._set_uniform1f("uScale", safe_scale)
             self._set_uniform2f("uViewSize", max(view_width, 1.0), max(view_height, 1.0))
 
@@ -509,7 +507,6 @@ class GLRenderer:
             self._set_uniform2f("uTexSize", safe_logical_w, safe_logical_h)
 
             self._set_uniform2f("uPan", float(pan.x()), float(pan.y()))
-            self._set_uniform1f("uImgScale", safe_img_scale)
             self._set_uniform2f(
                 "uImgOffset",
                 float(offset_value.x()),

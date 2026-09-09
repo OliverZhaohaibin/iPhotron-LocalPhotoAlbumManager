@@ -45,13 +45,15 @@ Windows Playback fullscreen 样本还必须保留同一 `transition_id` 下的
 `fullscreen_updates_resumed`。播放中的视频随后应出现
 `fullscreen_playback_resumed`；若 native state event 丢失，必须出现有界的
 `fullscreen_enter_timeout`，并收敛为完成或 `fullscreen_enter_rollback`。确认前不得
-恢复顶层 updates，确认后每个 transaction 只允许一次 viewport relayout。恢复
-updates 时不得再显式调用 `window.update()`；Qt 隐式排队的最终请求必须记录为
-`fullscreen_update_requested` 并归属于同一 transaction。这只能证明至少观察到一个
-预期的最终请求；Qt 可能合并请求，timeline 不用于断言请求总数恰好为一。
-250 ms 内未观察到该事件时记录 `fullscreen_final_update_unobserved`，但不得回滚已确认的 fullscreen。
-两条路径最终都记录 `fullscreen_transition_finished` 及原因；`fullscreen_resize`
-只用于关联 DWM/Qt 事件数量，不得当作 terminal event。
+恢复 painting，但 `showFullScreen()` 同步调用返回时必须恢复原始 updates 状态，不能跨
+Windows 异步 native transition 冻结窗口；恢复时不得再显式调用 `window.update()`。
+确认后每个 transaction 只允许一次 authoritative viewport relayout，并记录
+`fullscreen_first_frame_requested`。当前 committed image 的 `frameSubmitted` 或 active
+video 的 `surfaceCompositionSubmitted` 到达时记录 `fullscreen_first_frame_submitted`，
+释放 fullscreen LOD gate 后才允许高清 LOD decode/stage/activate 以及播放恢复。500 ms
+未提交时记录 `fullscreen_first_frame_timeout` 并 fail-open 释放 gate，不回滚已确认的
+fullscreen。`fullscreen_update_requested` 只用于关联 Qt 事件，不是 media-frame terminal，
+也不能证明请求数量。所有收敛路径最终记录 `fullscreen_transition_finished` 及原因。
 
 启动应用前指定结构化输出文件：
 
@@ -118,7 +120,11 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
 
 同时保留 `surface_cache_write/corrupt`、`gpu_cache_miss/upload/evict`、
 `still_zoom_changed`、`lod_upgrade_requested/staging/resident/activated/presented`
-和 `context_rebuild`。主动 zoom 使用 200 ms idle debounce 和独立 generation；LOD
+和 `context_rebuild`。主动 zoom 使用 180 ms idle evaluation，authoritative resize/fullscreen
+target 使用 16 ms settle；活跃 zoom intent 不得被 resize 抢占。LOD planner 必须先计算
+desired `DetailDecodeKey`：相同 pending key 记录 `lod_plan_reused` 且不得递增 generation，
+不高于 committed key 时只取消不再需要的 promotion，不同且更高的 key 才记录
+`lod_plan_submitted` 并进入 decode。LOD
 替换必须先以 `purpose=lod_promotion` 非激活 staging，staging frame 继续绘制旧层，
 后续 frame 才能 activate/draw，且只有 matching window submission 后才能记录
 `lod_upgrade_presented`。stale/failed promotion 不得替换 active texture 或更新 render session。
@@ -191,6 +197,11 @@ maximized、125%/150% DPI 与双显示器。屏幕录像中不得出现桌面暴
 另以正在播放的视频执行 `enter→exit→enter→exit` 快速序列，每步间隔小于 120 ms；
 过期 resume callback 必须全部被 generation 拒绝，最终只恢复一次播放且播放状态与
 首次切换前一致。
+每次 fullscreen 还必须验证 committed LOD 首帧先于高清 promotion：
+`fullscreen_lod_gate_started → fullscreen_first_frame_submitted|timeout → fullscreen_lod_gate_released`
+后才可出现新的 `lod_plan_submitted`/`lod_upgrade_staging`。分别比较 click→首个 fullscreen
+frame 与首帧→高清 LOD submission；不设置未经基线确认的绝对阈值，但 candidate 的
+click→first-frame P50/P95 不得劣于 #929 前同机 baseline。
 
 任何失败组必须保留原 events/summary/validation，按 queue、surface cache、decode、GPU upload、draw 定位；修正后
 先重跑失败组，再完整重跑该平台矩阵。不得用删除失败样本、合并取消事务或降低重复次数的方式通过门槛。

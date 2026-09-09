@@ -10,12 +10,8 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 
-from . import crop_logic
-from . import geometry
-from ..view_transform_controller import (
-    compute_fit_to_view_scale,
-    compute_rotation_cover_scale,
-)
+from ..view_transform_controller import compute_rotation_cover_scale
+from . import crop_logic, geometry
 
 if TYPE_CHECKING:
     from .widget import GLImageViewer
@@ -65,24 +61,10 @@ def update_cover_scale(
         viewer._transform_controller.set_image_cover_scale(1.0)
         return
 
-    tex_w, tex_h = texture_dimensions(viewer)
-    if tex_w <= 0 or tex_h <= 0:
-        viewer._transform_controller.set_image_cover_scale(1.0)
-        return
-
     display_w, display_h = display_texture_dimensions(viewer)
-    view_width, view_height = viewer._zoom_ctrl.view_dimensions_device_px()
-
-    base_scale = compute_fit_to_view_scale(
-        (display_w, display_h), float(view_width), float(view_height)
-    )
-
     rotation_cover_scale = compute_rotation_cover_scale(
         (display_w, display_h),
-        base_scale,
         straighten_deg,
-        rotate_steps,
-        physical_texture_size=(tex_w, tex_h),
     )
 
     viewer._transform_controller.set_image_cover_scale(rotation_cover_scale)

@@ -36,7 +36,8 @@ from iPhoto.gui.ui.controllers.player_view_controller import (
     PreparedStillState,
     _AdjustmentPreparationSignals,
     _AdjustmentPreparationWorker,
-    _LOD_IDLE_DELAY_MS,
+    _LOD_RESIZE_SETTLE_MS,
+    _LOD_ZOOM_IDLE_MS,
     _PreparedRequestIntent,
 )
 from iPhoto.gui.ui.widgets.detail_page import DetailPageWidget
@@ -136,6 +137,7 @@ class _FakeImageViewer(QWidget):
         self._presentation_suppressed_generation = None
         self.lod_promotions = []
         self.lod_promotion_cancel_count = 0
+        self._pending_lod_key = None
         self.setMouseTracking(True)
 
     def set_image(self, *args, **kwargs):
@@ -161,10 +163,15 @@ class _FakeImageViewer(QWidget):
 
     def promote_still_surface(self, surface, adjustments, *, generation: int) -> None:
         self.lod_promotions.append((surface, dict(adjustments), int(generation)))
+        self._pending_lod_key = surface.decode_key
 
     def cancel_still_lod_promotion(self, *, reason: str = "superseded") -> None:
         del reason
         self.lod_promotion_cancel_count += 1
+        self._pending_lod_key = None
+
+    def pending_still_lod_key(self):
+        return self._pending_lod_key
 
     def set_adjustments(self, adjustments):
         self._adjustments = dict(adjustments)
@@ -294,7 +301,158 @@ class TestInitCoverTracking:
         assert controller._preparation_pool.maxThreadCount() == 2
 
     def test_zoom_lod_uses_idle_debounce(self, controller):
-        assert controller._lod_timer.interval() == _LOD_IDLE_DELAY_MS == 200
+        controller._schedule_lod_evaluation("zoom")
+        assert controller._lod_timer.interval() == _LOD_ZOOM_IDLE_MS == 180
+        controller._schedule_lod_evaluation("resize")
+        assert controller._lod_timer.interval() == _LOD_ZOOM_IDLE_MS
+        controller._pending_lod_evaluation = None
+        controller._schedule_lod_evaluation("resize")
+        assert controller._lod_timer.interval() == _LOD_RESIZE_SETTLE_MS == 16
+
+    def test_fullscreen_gate_defers_and_rearms_zoom_evaluation(
+        self,
+        controller,
+        mocker,
+    ):
+        request = mocker.patch.object(controller, "_request_higher_lod")
+
+        controller.begin_fullscreen_viewport_transition()
+        controller._pending_zoom_factor = 2.0
+        controller._schedule_lod_evaluation("zoom")
+
+        assert not controller._lod_timer.isActive()
+        assert controller._pending_lod_evaluation is not None
+        assert controller._pending_lod_evaluation.reason == "zoom"
+
+        controller.complete_fullscreen_viewport_transition(reason="image_submission")
+
+        assert controller._lod_timer.isActive()
+        assert controller._lod_timer.interval() == _LOD_ZOOM_IDLE_MS
+        controller._lod_timer.stop()
+        controller._run_pending_lod_evaluation()
+        request.assert_called_once_with(reason="zoom", zoom_factor=2.0)
+
+    def test_fullscreen_gate_release_schedules_fast_resize(self, controller):
+        controller.begin_fullscreen_viewport_transition()
+
+        controller.complete_fullscreen_viewport_transition(reason="timeout")
+
+        assert controller._pending_lod_evaluation is not None
+        assert controller._pending_lod_evaluation.reason == "resize"
+        assert controller._lod_timer.interval() == _LOD_RESIZE_SETTLE_MS
+
+    def test_fullscreen_gate_cancels_inflight_lod_before_first_frame(
+        self,
+        controller,
+        mocker,
+        tmp_path,
+    ):
+        controller._request_generation = 9
+        controller._request_reason_by_generation[9] = "resize"
+        controller._loading_source = tmp_path / "pending.jpg"
+        controller._loading_started_at = time.perf_counter()
+        controller._image_viewer._pending_lod_key = object()
+        cancel_foreground = mocker.patch.object(
+            controller._still_scheduler,
+            "cancel_foreground",
+        )
+
+        controller.begin_fullscreen_viewport_transition()
+
+        assert controller._fullscreen_lod_gate is True
+        assert controller._image_viewer.lod_promotion_cancel_count == 1
+        assert controller._image_viewer.pending_still_lod_key() is None
+        cancel_foreground.assert_called_once_with()
+        assert controller._loading_source is None
+
+    def test_lod_plan_reuses_matching_pending_key_without_new_generation(
+        self,
+        controller,
+        mocker,
+        tmp_path,
+    ):
+        identity = AssetSourceIdentity.create(
+            tmp_path / "reuse.jpg",
+            width=4096,
+            height=3072,
+            source_mtime_ns=1,
+        )
+        desired_key = object()
+        controller._request_generation = 5
+        controller._current_decode_level = 1024
+        controller._image_viewer._pending_lod_key = desired_key
+        mocker.patch.object(controller, "_viewport_metrics", return_value=((2400, 1600), 1.0))
+        mocker.patch.object(controller, "_is_higher_level", return_value=True)
+        mocker.patch.object(DetailDecodeKey, "from_request", return_value=desired_key)
+        request = mocker.patch.object(controller._still_scheduler, "request")
+
+        assert controller._dispatch_prepared_intent(
+            _PreparedRequestIntent("asset-1", identity, 6, "resize"),
+            {},
+        )
+
+        assert controller._request_generation == 5
+        assert controller._image_viewer.lod_promotion_cancel_count == 0
+        request.assert_not_called()
+
+    def test_lod_plan_cancels_unneeded_pending_without_submitting(
+        self,
+        controller,
+        mocker,
+        tmp_path,
+    ):
+        identity = AssetSourceIdentity.create(
+            tmp_path / "cancel.jpg",
+            width=4096,
+            height=3072,
+            source_mtime_ns=1,
+        )
+        controller._request_generation = 5
+        controller._current_decode_level = 4096
+        controller._image_viewer._pending_lod_key = object()
+        mocker.patch.object(controller, "_viewport_metrics", return_value=((800, 600), 1.0))
+        mocker.patch.object(controller, "_is_higher_level", return_value=False)
+        request = mocker.patch.object(controller._still_scheduler, "request")
+
+        assert not controller._dispatch_prepared_intent(
+            _PreparedRequestIntent("asset-1", identity, 6, "zoom"),
+            {},
+        )
+
+        assert controller._request_generation == 5
+        assert controller._image_viewer.lod_promotion_cancel_count == 1
+        request.assert_not_called()
+
+    def test_lod_plan_supersedes_only_when_desired_key_changes(
+        self,
+        controller,
+        mocker,
+        tmp_path,
+    ):
+        identity = AssetSourceIdentity.create(
+            tmp_path / "supersede.jpg",
+            width=4096,
+            height=3072,
+            source_mtime_ns=1,
+        )
+        desired_key = object()
+        controller._request_generation = 5
+        controller._current_decode_level = 1024
+        controller._image_viewer._pending_lod_key = object()
+        mocker.patch.object(controller, "_viewport_metrics", return_value=((2400, 1600), 1.0))
+        mocker.patch.object(controller, "_is_higher_level", return_value=True)
+        mocker.patch.object(DetailDecodeKey, "from_request", return_value=desired_key)
+        mocker.patch.object(controller, "_session_for_request", return_value=None)
+        request = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+
+        assert controller._dispatch_prepared_intent(
+            _PreparedRequestIntent("asset-1", identity, 6, "resize"),
+            {},
+        )
+
+        assert controller._request_generation == 6
+        assert controller._image_viewer.lod_promotion_cancel_count == 1
+        request.assert_called_once()
 
     def test_image_decode_primes_qrhi_surface_under_pending_cover(
         self,

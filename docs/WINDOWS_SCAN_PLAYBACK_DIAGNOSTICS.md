@@ -85,17 +85,19 @@ first-frame leak fix.
 
 Fullscreen traces must keep one transaction id from
 `fullscreen_enter_requested` through `fullscreen_native_state_confirmed` and
-`fullscreen_updates_resumed`. Re-enabling QWidget updates implicitly queues the
-expected final top-level update; the trace must attribute at least one such
-request as `fullscreen_update_requested` and then emit
-`fullscreen_transition_finished` with `reason=final_update_observed`. If the
-request cannot be observed within 250 ms, `fullscreen_final_update_unobserved`
-is diagnostic-only and must not exit an already confirmed fullscreen state.
-The trace does not prove the exact number of Qt update requests because Qt may
-coalesce them. A preflight failure resumes suspended playback and re-raises
-without creating a window transaction; an in-transaction preparation/native
-failure instead emits
-`fullscreen_enter_rollback` and restores painting.
+`fullscreen_updates_resumed`. Updates must resume as soon as the synchronous
+chrome/layout/backdrop mutation and `showFullScreen()` call return; they must
+not remain disabled while Windows completes the asynchronous native state
+transition. After `fullscreen_native_state_confirmed`, the trace must record
+`fullscreen_first_frame_requested` and then either a matching active image/video
+`fullscreen_first_frame_submitted`, or `fullscreen_first_frame_timeout` after
+the bounded 500 ms fail-open. That terminal releases the fullscreen LOD gate
+and only then starts the playback-resume delay. `fullscreen_update_requested`
+remains useful supporting evidence but is not a media-frame fence and does not
+finish the transaction. A preflight failure resumes suspended playback and
+re-raises without creating a window transaction; an in-transaction
+preparation/native failure instead emits `fullscreen_enter_rollback`, restores
+painting, and cancels the gate.
 
 Also test a playing video with `enter→exit→enter→exit`, keeping every interval
 below 120 ms. Stale resume callbacks must not play during an intermediate state;
@@ -116,6 +118,12 @@ session surface, and decode level on the last matching submitted LOD.
 If cancellation occurs after activation but before submission, the trace must
 show the last composed still becoming active again before any newer promotion;
 missing committed residency must emit `lod_upgrade_rollback_failed`.
+The fullscreen gate must prevent decode, staging, and activation until the
+committed active surface has submitted once at the authoritative fullscreen
+target. Its release schedules a 16 ms resize evaluation; wheel zoom uses a
+180 ms idle evaluation, and an already pending zoom intent is not replaced by
+resize. `lod_plan_reused`, `lod_plan_cancelled`, and `lod_plan_submitted` show
+whether desired-key planning avoided a redundant generation or rollback.
 
 Transition traces must show `presentation_suppressed` before the exposed
 surface's `video_surface_blank_requested`/blank submission and

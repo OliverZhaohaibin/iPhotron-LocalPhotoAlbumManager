@@ -158,6 +158,35 @@ def test_resize_notifies_observers_only_after_real_target_is_synchronised(qapp) 
     assert image_rect.height() == pytest.approx(viewer.height(), abs=1.0)
 
 
+def test_automatic_target_sync_commits_one_transform_without_zoom_signal(
+    qapp,
+    mocker,
+) -> None:
+    viewer = _make_cropped_viewer(
+        {
+            "Crop_CX": 0.70,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Crop_Straighten": 5.0,
+        }
+    )
+    _enable_texture_renderer(viewer)
+    viewer._update_crop_perspective_state()
+    viewer.request_viewport_relayout()
+    update = mocker.patch.object(viewer, "update")
+    transform_spy = QSignalSpy(viewer.viewTransformChanged)
+    zoom_spy = QSignalSpy(viewer.zoomChanged)
+    viewport_spy = QSignalSpy(viewer.viewportMetricsChanged)
+
+    _publish_target_and_sync(viewer, (1920, 1080))
+
+    update.assert_called_once_with()
+    assert transform_spy.count() == 1
+    assert zoom_spy.count() == 0
+    assert viewport_spy.count() == 1
+
+
 def test_playback_crop_center_lock_reflows_against_restored_target(qapp) -> None:
     viewer = _make_cropped_viewer(
         {"Crop_CX": 0.70, "Crop_CY": 0.62, "Crop_W": 0.55, "Crop_H": 0.58}

@@ -629,7 +629,6 @@ class RhiImageRenderer:
         pan: QPointF,
         adjustments: Mapping[str, float],
         time_value: float | None = None,
-        img_scale: float = 1.0,
         img_offset: QPointF | None = None,
         logical_tex_size: tuple[float, float] | None = None,
         corner_radius_px: float = 0.0,
@@ -655,7 +654,6 @@ class RhiImageRenderer:
             pan=pan,
             adjustments=adjustments,
             time_value=time_value,
-            img_scale=img_scale,
             img_offset=img_offset,
             logical_tex_size=logical_tex_size,
             corner_radius_px=corner_radius_px,
@@ -1155,7 +1153,6 @@ class RhiImageRenderer:
         pan: QPointF,
         adjustments: Mapping[str, float],
         time_value: float | None,
-        img_scale: float,
         img_offset: QPointF | None,
         logical_tex_size: tuple[float, float] | None,
         corner_radius_px: float,
@@ -1227,12 +1224,11 @@ class RhiImageRenderer:
             if bool(adjustments.get("Vignette_Enabled", False))
             else 0.1,
             132: max(float(scale), 1e-6),
-            136: max(float(img_scale), 1e-6),
-            140: max(0.0, float(corner_radius_px)),
-            144: value("Crop_CX", 0.5),
-            148: value("Crop_CY", 0.5),
-            152: value("Crop_W", 1.0),
-            156: value("Crop_H", 1.0),
+            136: max(0.0, float(corner_radius_px)),
+            140: value("Crop_CX", 0.5),
+            144: value("Crop_CY", 0.5),
+            148: value("Crop_W", 1.0),
+            152: value("Crop_H", 1.0),
         }
         for offset, float_value in scalar_offsets.items():
             pack_float(offset, float_value)

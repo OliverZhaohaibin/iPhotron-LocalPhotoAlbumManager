@@ -561,10 +561,25 @@ Current/previous/next GPU residency is
 bounded by both three textures and 192MB. Source changes invalidate neutral
 surfaces and textures; sidecar changes replace render state only.
 
+LOD evaluation is intent-specific: wheel input uses a 180 ms idle window while
+authoritative resize/fullscreen metrics settle for 16 ms. Planning computes the
+desired decode key before mutating promotion ownership. A key already pending is
+reused without a new generation; a key no higher than the committed surface only
+cancels obsolete work; only a distinct higher key may supersede and decode.
+During Windows fullscreen entry a first-frame gate keeps all new LOD work out of
+the critical path until the committed image or active video has submitted at the
+confirmed target (or a bounded fail-open releases the gate).
+
 Automatic crop framing derives pan from the final effective render scale after
 base fit, straighten cover, and zoom agree. Render-target relayout does not
 reproject the logical crop mask through the perspective matrix: both GL and
 QRhi shaders apply that mask in logical display UV before perspective sampling.
+The straighten cover factor is dimensionless and depends only on the displayed
+aspect ratio and angle, so it is identical across equivalent LODs, viewports and
+DPRs. `ViewTransformController` owns the single final
+`base-fit × straighten-cover × user-zoom` scale used by pan, CPU mapping, raw GL
+and QRhi; shaders do not apply a second cover multiplier. Automatic target
+relayout publishes one transform transaction and never masquerades as user zoom.
 
 Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
 with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,

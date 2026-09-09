@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QWidget
 
 from iPhoto.gui.ui.window_manager import (
     FULLSCREEN_ENTER_TIMEOUT_MS,
-    FULLSCREEN_FINAL_UPDATE_TIMEOUT_MS,
+    FULLSCREEN_MEDIA_FRAME_TIMEOUT_MS,
     PLAYBACK_RESUME_DELAY_MS,
     FramelessWindowManager,
     _FullscreenTransitionPhase,
@@ -216,6 +216,9 @@ def test_windows_enter_suppresses_updates_before_visible_mutations() -> None:
     manager._window.setUpdatesEnabled.side_effect = lambda enabled: events.append(
         f"updates:{enabled}"
     )
+    manager._detail_coordinator.begin_fullscreen_viewport_transition.side_effect = (
+        lambda: events.append("lod-gate")
+    )
     manager._start_fullscreen_transition_deadline.side_effect = lambda *_args, **_kwargs: (
         events.append("deadline")
     )
@@ -228,11 +231,13 @@ def test_windows_enter_suppresses_updates_before_visible_mutations() -> None:
 
     assert events == [
         "updates:False",
+        "lod-gate",
         "deadline",
         "shadow",
         "visibility",
         "backdrop",
         "fullscreen",
+        "updates:True",
     ]
     transition = manager._fullscreen_transition
     assert transition is not None
@@ -240,7 +245,9 @@ def test_windows_enter_suppresses_updates_before_visible_mutations() -> None:
     assert transition.phase is _FullscreenTransitionPhase.AWAITING_NATIVE
     assert transition.playback_generation == 4
     assert transition.resume_playback is True
+    assert transition.updates_restored is True
     assert manager._immersive_active is True
+    manager._detail_coordinator.begin_fullscreen_viewport_transition.assert_called_once_with()
     manager._window.update.assert_not_called()
     manager._start_fullscreen_transition_deadline.assert_called_once_with(
         transition,
@@ -254,6 +261,7 @@ def test_windows_enter_suppresses_updates_before_visible_mutations() -> None:
     "failure_stage",
     (
         "updates",
+        "updates_restore",
         "deadline",
         "shadow",
         "visibility",
@@ -271,6 +279,10 @@ def test_windows_enter_restores_updates_when_mutation_raises(failure_stage: str)
     if failure_stage == "updates":
         manager._window.setUpdatesEnabled.side_effect = lambda enabled: (
             (_ for _ in ()).throw(error) if not enabled else None
+        )
+    elif failure_stage == "updates_restore":
+        manager._window.setUpdatesEnabled.side_effect = lambda enabled: (
+            (_ for _ in ()).throw(error) if enabled else None
         )
     elif failure_stage == "deadline":
         manager._start_fullscreen_transition_deadline.side_effect = error
@@ -369,13 +381,14 @@ def test_windows_enter_survives_diagnostic_writer_failure() -> None:
         manager._complete_windows_fullscreen_enter(transition.transition_id)
 
     assert manager._fullscreen_transition is transition
-    assert transition.phase is _FullscreenTransitionPhase.AWAITING_FINAL_UPDATE
+    assert transition.phase is _FullscreenTransitionPhase.AWAITING_MEDIA_FRAME
     manager._window.setUpdatesEnabled.assert_called_with(True)
 
 
-def test_windows_enter_waits_for_implicit_final_update() -> None:
+def test_windows_enter_waits_for_matching_media_frame() -> None:
     manager = _make_windows_enter_manager()
-    transition = _transition(7, playback_generation=5)
+    transition = _transition(7, playback_generation=5, updates_enabled_before=True)
+    transition.updates_restored = True
     manager._fullscreen_transition = transition
     manager._fullscreen_transition_generation = 7
     manager._immersive_active = True
@@ -386,59 +399,67 @@ def test_windows_enter_waits_for_implicit_final_update() -> None:
     manager._complete_windows_fullscreen_enter(7)
 
     assert manager._fullscreen_transition is transition
-    assert transition.phase is _FullscreenTransitionPhase.AWAITING_FINAL_UPDATE
+    assert transition.phase is _FullscreenTransitionPhase.AWAITING_MEDIA_FRAME
     manager._request_media_viewport_relayout.assert_called_once_with()
-    manager._window.setUpdatesEnabled.assert_called_once_with(True)
+    manager._window.setUpdatesEnabled.assert_not_called()
     manager._window.update.assert_not_called()
     manager._update_fullscreen_button_icon.assert_called_once_with()
-    manager._schedule_playback_resume.assert_called_once_with(
-        expect_immersive=True,
-        resume=True,
-        playback_generation=5,
-        transition_id=7,
-    )
+    manager._schedule_playback_resume.assert_not_called()
     manager._start_fullscreen_transition_deadline.assert_called_once_with(
         transition,
-        timeout_ms=FULLSCREEN_FINAL_UPDATE_TIMEOUT_MS,
-        callback=manager._handle_fullscreen_final_update_timeout,
+        timeout_ms=FULLSCREEN_MEDIA_FRAME_TIMEOUT_MS,
+        callback=manager._handle_fullscreen_media_frame_timeout,
     )
 
 
-def test_final_update_timeout_cannot_finish_new_transition() -> None:
+def test_media_frame_timeout_cannot_finish_new_transition() -> None:
     manager = _make_windows_enter_manager()
     old_transition = _transition(
         8,
-        phase=_FullscreenTransitionPhase.AWAITING_FINAL_UPDATE,
+        phase=_FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
     )
     manager._fullscreen_transition = _transition(9)
     manager._finish_fullscreen_transition_observation = MagicMock()
 
-    manager._handle_fullscreen_final_update_timeout(old_transition.transition_id)
+    manager._handle_fullscreen_media_frame_timeout(old_transition.transition_id)
 
     manager._finish_fullscreen_transition_observation.assert_not_called()
 
 
-def test_final_update_timeout_is_diagnostic_only() -> None:
+def test_media_frame_timeout_releases_lod_gate_without_rolling_back() -> None:
     manager = _make_windows_enter_manager()
     transition = _transition(
         8,
-        phase=_FullscreenTransitionPhase.AWAITING_FINAL_UPDATE,
+        phase=_FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
     )
     manager._fullscreen_transition = transition
     manager._immersive_active = True
+    manager._schedule_playback_resume = MagicMock()
 
-    manager._handle_fullscreen_final_update_timeout(8)
+    manager._handle_fullscreen_media_frame_timeout(8)
 
     assert manager._fullscreen_transition is None
     assert manager._immersive_active is True
     manager._window.showNormal.assert_not_called()
     manager._emit_fullscreen_transition_event.assert_any_call(
-        "fullscreen_final_update_unobserved",
+        "fullscreen_first_frame_timeout",
         8,
+    )
+    assert call("fullscreen_first_frame_submitted", 8, reason="timeout") not in (
+        manager._emit_fullscreen_transition_event.call_args_list
+    )
+    manager._detail_coordinator.complete_fullscreen_viewport_transition.assert_called_once_with(
+        reason="timeout"
+    )
+    manager._schedule_playback_resume.assert_called_once_with(
+        expect_immersive=True,
+        resume=True,
+        playback_generation=1,
+        transition_id=8,
     )
 
 
-def test_qt_event_loop_attributes_implicit_update_to_transition(qapp) -> None:
+def test_qt_update_request_is_diagnostic_and_does_not_finish_transition(qapp) -> None:
     window = QWidget()
     manager = FramelessWindowManager.__new__(FramelessWindowManager)
     QObject.__init__(manager, window)
@@ -447,7 +468,7 @@ def test_qt_event_loop_attributes_implicit_update_to_transition(qapp) -> None:
     manager._drag_sources = set()
     transition = _transition(
         10,
-        phase=_FullscreenTransitionPhase.AWAITING_FINAL_UPDATE,
+        phase=_FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
     )
     manager._fullscreen_transition = transition
     manager._emit_fullscreen_transition_event = MagicMock()
@@ -461,16 +482,78 @@ def test_qt_event_loop_attributes_implicit_update_to_transition(qapp) -> None:
     QCoreApplication.sendPostedEvents(window, QEvent.Type.UpdateRequest)
     qapp.processEvents()
 
-    assert manager._fullscreen_transition is None
+    assert manager._fullscreen_transition is transition
     assert call("fullscreen_update_requested", 10) in (
         manager._emit_fullscreen_transition_event.call_args_list
     )
-    manager._emit_fullscreen_transition_event.assert_any_call(
-        "fullscreen_transition_finished",
-        10,
-        reason="final_update_observed",
-    )
     window.close()
+
+
+@pytest.mark.parametrize(
+    ("surface", "reason"),
+    (("image", "image_submission"), ("video", "video_submission")),
+)
+def test_matching_media_submission_completes_transition(
+    surface: str,
+    reason: str,
+) -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        13,
+        phase=_FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
+        playback_generation=6,
+    )
+    manager._fullscreen_transition = transition
+    manager._immersive_active = True
+    manager._schedule_playback_resume = MagicMock()
+    if surface == "image":
+        manager._ui.player_stack.currentWidget.return_value = manager._ui.image_viewer
+        manager._on_fullscreen_image_frame_submitted()
+    else:
+        manager._ui.player_stack.currentWidget.return_value = manager._ui.video_area
+        manager._on_fullscreen_video_frame_submitted()
+
+    assert manager._fullscreen_transition is None
+    assert transition.phase is _FullscreenTransitionPhase.COMPLETE
+    manager._detail_coordinator.complete_fullscreen_viewport_transition.assert_called_once_with(
+        reason=reason
+    )
+    manager._schedule_playback_resume.assert_called_once_with(
+        expect_immersive=True,
+        resume=True,
+        playback_generation=6,
+        transition_id=13,
+    )
+    manager._emit_fullscreen_transition_event.assert_any_call(
+        "fullscreen_first_frame_submitted",
+        13,
+        reason=reason,
+    )
+
+
+def test_media_submission_finishes_when_lod_gate_release_raises() -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        14,
+        phase=_FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
+    )
+    manager._fullscreen_transition = transition
+    manager._ui.player_stack.currentWidget.return_value = manager._ui.image_viewer
+    manager._detail_coordinator.complete_fullscreen_viewport_transition.side_effect = (
+        RuntimeError("gate")
+    )
+    manager._schedule_playback_resume = MagicMock()
+
+    manager._on_fullscreen_image_frame_submitted()
+
+    assert manager._fullscreen_transition is None
+    assert transition.phase is _FullscreenTransitionPhase.COMPLETE
+    manager._schedule_playback_resume.assert_called_once_with(
+        expect_immersive=True,
+        resume=True,
+        playback_generation=1,
+        transition_id=14,
+    )
 
 
 def test_windows_enter_timeout_rolls_back_when_native_state_failed() -> None:
@@ -518,25 +601,24 @@ def test_exit_during_pending_windows_enter_uses_rollback() -> None:
     )
 
 
-def test_exit_after_confirmation_finishes_observation_without_rollback() -> None:
+def test_exit_while_waiting_for_media_frame_cancels_gate_and_rolls_back() -> None:
     manager = _make_windows_enter_manager()
     transition = _transition(
         11,
-        phase=_FullscreenTransitionPhase.AWAITING_FINAL_UPDATE,
+        phase=_FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
     )
     manager._fullscreen_transition = transition
     manager._immersive_active = True
     manager._playback_resume_pending = True
     manager._ui.view_stack.currentWidget.return_value = object()
     manager._suspend_layout_updates = MagicMock(return_value=nullcontext())
-    manager._rollback_windows_fullscreen_enter = MagicMock()
     manager._schedule_playback_resume = MagicMock()
 
     manager.exit_fullscreen()
 
-    manager._rollback_windows_fullscreen_enter.assert_not_called()
     assert manager._fullscreen_transition is None
     manager._window.showNormal.assert_called_once_with()
+    manager._detail_coordinator.cancel_fullscreen_viewport_transition.assert_called_once_with()
 
 
 def test_rapid_fullscreen_toggles_only_latest_callback_resumes_playback() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import struct
 
 import pytest
 
@@ -18,6 +19,41 @@ def _image(width: int = 8, height: int = 8) -> QImage:
     image = QImage(width, height, QImage.Format.Format_RGBA8888)
     image.fill(0xFF123456)
     return image
+
+
+def test_image_ubo_offsets_match_single_scale_shader_layout() -> None:
+    renderer = RhiImageRenderer()
+    renderer._ubuf = object()
+    batch = _FakeResourceUpdateBatch()
+
+    renderer._update_uniforms(
+        batch,
+        view_width=1200.0,
+        view_height=800.0,
+        scale=2.5,
+        pan=QPointF(12.0, -8.0),
+        adjustments={
+            "Crop_CX": 0.4,
+            "Crop_CY": 0.6,
+            "Crop_W": 0.7,
+            "Crop_H": 0.8,
+            "Color_Gain_R": 0.9,
+            "Color_Gain_G": 1.0,
+            "Color_Gain_B": 1.1,
+        },
+        time_value=None,
+        img_offset=None,
+        logical_tex_size=(4000.0, 3000.0),
+        corner_radius_px=3.0,
+    )
+
+    _buffer, offset, size, data = batch.dynamic_updates[-1]
+    assert offset == 0
+    assert size == len(data) == 480
+    assert struct.unpack_from("f", data, 132)[0] == pytest.approx(2.5)
+    assert struct.unpack_from("f", data, 136)[0] == pytest.approx(3.0)
+    assert struct.unpack_from("4f", data, 140) == pytest.approx((0.4, 0.6, 0.7, 0.8))
+    assert struct.unpack_from("3f", data, 160) == pytest.approx((0.9, 1.0, 1.1))
 
 
 class _FakeBuffer:

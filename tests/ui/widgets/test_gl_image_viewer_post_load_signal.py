@@ -522,7 +522,15 @@ def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
     assert viewer._still_lod_promotion is None
 
 
-def test_cancelled_activating_lod_cannot_emit_stale_submission(qapp, mocker) -> None:
+@pytest.mark.parametrize(
+    "reason",
+    ["superseded", "planned_superseded", "planned_not_needed"],
+)
+def test_cancelled_activating_lod_cannot_emit_stale_submission(
+    qapp,
+    mocker,
+    reason,
+) -> None:
     viewer = GLImageViewer()
     previous_image = QImage(32, 24, QImage.Format.Format_RGBA8888)
     promoted_image = QImage(64, 48, QImage.Format.Format_RGBA8888)
@@ -563,7 +571,7 @@ def test_cancelled_activating_lod_cannot_emit_stale_submission(qapp, mocker) -> 
     viewer._texture_manager.activate_resident_texture.side_effect = activate
     submitted = QSignalSpy(viewer.stillFrameSubmitted)
 
-    viewer.cancel_still_lod_promotion(reason="superseded")
+    viewer.cancel_still_lod_promotion(reason=reason)
     viewer._on_frame_submitted()
 
     assert viewer._rendered_content_identity is None

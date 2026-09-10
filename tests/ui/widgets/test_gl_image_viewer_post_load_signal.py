@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QGridLayout, QWidget
 
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_image_viewer.widget import (
+    _PendingStillActivation,
     _StillLodPromotion,
     _crop_preview_adjustments,
 )
@@ -31,17 +32,46 @@ def qapp():
     yield app
 
 
-def test_gl_image_viewer_queues_one_post_load_view_transform(qapp) -> None:
+def test_new_still_geometry_precedes_stale_renderer_texture(qapp, mocker) -> None:
     viewer = GLImageViewer()
-    viewer._pending_post_load_view_transform = True
+    viewer.resize(600, 400)
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.has_texture.return_value = True
+    viewer._renderer.texture_size.return_value = (1600, 900)
+    image = QImage(400, 300, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF202020)
+    adjustments = {
+        "Crop_CX": 0.7,
+        "Crop_CY": 0.62,
+        "Crop_W": 0.55,
+        "Crop_H": 0.58,
+        "Crop_Straighten": 5.0,
+    }
+    zoom_spy = QSignalSpy(viewer.zoomChanged)
 
-    spy = QSignalSpy(viewer.viewTransformChanged)
-    viewer._schedule_post_load_view_transform()
-    qapp.processEvents()
+    viewer.set_image(
+        image,
+        adjustments,
+        image_source="new-cropped-still",
+        source_size=(4000, 3000),
+        reset_view=True,
+    )
 
-    assert spy.count() == 1
-    assert viewer._pending_post_load_view_transform is False
-    assert viewer._post_load_view_transform_scheduled is False
+    assert viewer._texture_dimensions() == (400, 300)
+    assert viewer._viewport_relayout_pending is True
+    assert viewer._viewport_reset_pending is True
+    viewer._last_render_target_size = QSize(1200, 800)
+    viewer._sync_view_transform_for_render_target(QSize(1200, 800))
+
+    crop_rect = viewer._compute_crop_rect_pixels()
+    assert crop_rect is not None
+    center = viewer._transform_controller.convert_image_to_viewport(
+        crop_rect.center().x(),
+        crop_rect.center().y(),
+    )
+    assert center.x() == pytest.approx(300.0, abs=1.0)
+    assert center.y() == pytest.approx(200.0, abs=1.0)
+    assert zoom_spy.count() == 0
 
 
 def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None:
@@ -79,6 +109,57 @@ def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None
     assert image_point.y() == pytest.approx(160.0)
 
 
+def test_resident_initial_hit_uses_authoritative_first_frame_relayout(
+    qapp,
+    mocker,
+) -> None:
+    viewer = GLImageViewer()
+    viewer.resize(600, 400)
+    image = QImage(400, 300, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF303030)
+    surface = SimpleNamespace(
+        image=image,
+        decode_key="resident-crop",
+        source_size=(4000, 3000),
+    )
+    viewer._still_surface_refs[surface.decode_key] = surface
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.has_resident_texture.return_value = True
+    viewer._texture_manager.get_current_image_source.return_value = "old-texture"
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.has_texture.return_value = True
+    viewer._renderer.texture_size.return_value = (1600, 900)
+    zoom_spy = QSignalSpy(viewer.zoomChanged)
+
+    assert viewer.activate_resident_surface(
+        surface.decode_key,
+        {
+            "Crop_CX": 0.7,
+            "Crop_CY": 0.62,
+            "Crop_W": 0.55,
+            "Crop_H": 0.58,
+            "Crop_Straighten": 5.0,
+        },
+        source_size=surface.source_size,
+        reset_view=True,
+        generation=8,
+    )
+    viewer._last_render_target_size = QSize(1200, 800)
+    viewer._sync_view_transform_for_render_target(QSize(1200, 800))
+
+    assert viewer._pending_still_activation is not None
+    assert viewer._pending_still_activation.purpose == "presentation"
+    crop_rect = viewer._compute_crop_rect_pixels()
+    assert crop_rect is not None
+    center = viewer._transform_controller.convert_image_to_viewport(
+        crop_rect.center().x(),
+        crop_rect.center().y(),
+    )
+    assert center.x() == pytest.approx(300.0, abs=1.0)
+    assert center.y() == pytest.approx(200.0, abs=1.0)
+    assert zoom_spy.count() == 0
+
+
 def test_presentation_transition_is_generation_bound_and_preserves_texture(qapp) -> None:
     viewer = GLImageViewer()
     image = QImage(32, 24, QImage.Format.Format_RGBA8888)
@@ -104,7 +185,7 @@ def test_raw_gl_suppression_clears_without_drawing_or_mutating_residency() -> No
     viewer._gl_funcs = Mock()
     viewer._presentation_suppressed_generation = 9
     viewer._renderer.has_texture.return_value = True
-    viewer._pending_resident_activation = "new-still"
+    viewer._pending_still_activation = "new-still"
     viewer._pending_warm_surfaces = ["neighbor"]
     target = Mock()
     target.pixelSize.return_value = QSize(320, 240)
@@ -118,7 +199,7 @@ def test_raw_gl_suppression_clears_without_drawing_or_mutating_residency() -> No
     viewer._renderer.render.assert_not_called()
     viewer._texture_manager.activate_resident_texture.assert_not_called()
     viewer._texture_manager.needs_texture_upload.assert_not_called()
-    assert viewer._pending_resident_activation == "new-still"
+    assert viewer._pending_still_activation == "new-still"
     assert viewer._pending_warm_surfaces == ["neighbor"]
     assert viewer._rendered_content_identity is None
 
@@ -127,7 +208,7 @@ def test_rhi_suppression_clears_without_drawing_or_consuming_new_surface() -> No
     viewer = Mock()
     viewer._gl_initialized = True
     viewer._presentation_suppressed_generation = 10
-    viewer._pending_resident_activation = "new-still"
+    viewer._pending_still_activation = "new-still"
     viewer._pending_warm_surfaces = ["neighbor"]
     target = Mock()
     target.pixelSize.return_value = QSize(320, 240)
@@ -140,7 +221,7 @@ def test_rhi_suppression_clears_without_drawing_or_consuming_new_surface() -> No
     viewer._renderer.render.assert_not_called()
     viewer._texture_manager.activate_resident_texture.assert_not_called()
     viewer._texture_manager.needs_texture_upload.assert_not_called()
-    assert viewer._pending_resident_activation == "new-still"
+    assert viewer._pending_still_activation == "new-still"
     assert viewer._pending_warm_surfaces == ["neighbor"]
     assert viewer._rendered_content_identity is None
 
@@ -170,7 +251,7 @@ def test_adjusted_video_resumes_only_after_gpu_draw(
     viewer._video_frame_presentation_pending = False
     viewer._pending_source_rotate90_steps = 0
     viewer._pending_video_reset_view = False
-    viewer._pending_resident_activation = None
+    viewer._pending_still_activation = None
     viewer._pending_warm_surfaces = []
     viewer._image = None
     viewer.begin_presentation_transition(9)
@@ -217,7 +298,7 @@ def test_adjusted_video_upload_failure_keeps_suppression_and_retry_input(
     viewer._video_frame_content_serial = 5
     viewer._pending_source_rotate90_steps = 0
     viewer._pending_video_reset_view = False
-    viewer._pending_resident_activation = None
+    viewer._pending_still_activation = None
     viewer._pending_warm_surfaces = []
     viewer._image = None
     viewer.begin_presentation_transition(10)
@@ -263,7 +344,7 @@ def test_adjusted_video_draw_failure_keeps_suppression_and_retry_input(
     viewer._video_frame_content_serial = 6
     viewer._pending_source_rotate90_steps = 0
     viewer._pending_video_reset_view = False
-    viewer._pending_resident_activation = None
+    viewer._pending_still_activation = None
     viewer._pending_warm_surfaces = []
     viewer._image = None
     viewer.begin_presentation_transition(11)
@@ -424,6 +505,33 @@ def test_visible_windows_lod_promotion_never_exposes_backdrop(qapp) -> None:
 
     assert submitted.count() >= 2
     assert observed
+
+    highest = QImage(1920, 1080, QImage.Format.Format_RGBA8888)
+    highest.fill(0xFF00FF00)
+    highest_surface = SimpleNamespace(
+        image=highest,
+        decode_key="lod-full",
+        source_size=(4000, 3000),
+        decode_level="full",
+    )
+    viewer.promote_still_surface(
+        highest_surface,
+        {"Exposure": 0.1, "Crop_W": 0.8},
+        generation=3,
+    )
+    deadline = time.monotonic() + 5.0
+    while submitted.count() < 3 and time.monotonic() < deadline:
+        qapp.processEvents()
+        grabbed = screen.grabWindow(int(host.winId())).toImage()
+        assert not grabbed.isNull()
+        pixel = grabbed.pixelColor(grabbed.width() // 2, grabbed.height() // 2)
+        assert pixel.alpha() == 255
+        # After B submitted, C promotion may show B or C but must never expose
+        # the old red A or the opaque viewer backdrop.
+        assert max(pixel.blue(), pixel.green()) > 80
+        time.sleep(0.005)
+
+    assert submitted.count() >= 3
     host.close()
 
 
@@ -461,7 +569,7 @@ def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
     texture_manager.get_current_image_source.side_effect = lambda: active["key"]
     texture_manager.has_resident_texture.side_effect = lambda key: key in resident
 
-    def stage(key, _image):
+    def stage(key, _image, **_kwargs):
         resident.add(key)
         return True
 
@@ -507,7 +615,7 @@ def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
     viewer.set_adjustments(newest_adjustments)
 
     viewer._prepare_still_lod_promotion_for_render()
-    viewer._activate_pending_resident_texture()
+    viewer._activate_pending_still_texture()
 
     assert active["key"] == surface.decode_key
     assert viewer._still_lod_promotion.phase == "activating"
@@ -520,6 +628,166 @@ def test_lod_promotion_stages_before_activation_and_finishes_on_submission(
 
     assert submitted.count() == 1
     assert viewer._still_lod_promotion is None
+
+
+def test_wheel_hold_blocks_resident_lod_activation_until_release(qapp, mocker) -> None:
+    viewer = GLImageViewer()
+    surface = SimpleNamespace(
+        image=QImage(64, 48, QImage.Format.Format_RGBA8888),
+        decode_key="lod-b",
+        source_size=(4000, 3000),
+        decode_level=2048,
+    )
+    viewer._still_lod_promotion = _StillLodPromotion(
+        surface=surface,
+        adjustments={},
+        generation=4,
+        phase="resident",
+        previous_key="lod-a",
+    )
+
+    assert viewer.hold_still_lod_activation() == "resident"
+    viewer._prepare_still_lod_promotion_for_render()
+    assert viewer._pending_still_activation is None
+
+    assert viewer.release_still_lod_activation("lod-b", 4)
+    viewer._prepare_still_lod_promotion_for_render()
+    assert viewer._pending_still_activation is not None
+    assert viewer._pending_still_activation.purpose == "promotion"
+
+
+def test_failed_rollback_activation_keeps_current_gpu_and_cpu_surface(
+    qapp,
+    mocker,
+) -> None:
+    viewer = GLImageViewer()
+    promoted = SimpleNamespace(
+        image=QImage(64, 48, QImage.Format.Format_RGBA8888),
+        decode_key="lod-b",
+        source_size=(4000, 3000),
+    )
+    previous = SimpleNamespace(
+        image=QImage(32, 24, QImage.Format.Format_RGBA8888),
+        decode_key="lod-a",
+        source_size=(4000, 3000),
+    )
+    viewer._image = promoted.image
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.return_value = "lod-b"
+    viewer._texture_manager.activate_resident_texture.return_value = False
+    viewer._pending_still_activation = _PendingStillActivation(
+        key="lod-a",
+        generation=4,
+        surface=previous,
+        purpose="rollback",
+    )
+    failed = QSignalSpy(viewer.stillLodRollbackFailed)
+
+    assert not viewer._activate_pending_still_texture(purpose="rollback")
+
+    assert viewer._image is promoted.image
+    assert viewer.current_image_source() == "lod-b"
+    viewer._texture_manager.mark_texture_lost.assert_not_called()
+    assert failed.count() == 1
+
+
+def test_rollback_activation_precedes_new_lod_staging(qapp, mocker) -> None:
+    viewer = GLImageViewer()
+    surfaces = {
+        key: SimpleNamespace(
+            image=QImage(size, size, QImage.Format.Format_RGBA8888),
+            decode_key=key,
+            source_size=(4000, 3000),
+            decode_level=level,
+        )
+        for key, size, level in (
+            ("lod-a", 32, 1024),
+            ("lod-b", 48, 2048),
+            ("lod-c", 64, 3072),
+        )
+    }
+    viewer._still_surface_refs.update(surfaces)
+    viewer._image = surfaces["lod-b"].image
+    viewer._last_composed_content_identity = ("still", "lod-a", 1, 1)
+    viewer._still_lod_promotion = _StillLodPromotion(
+        surface=surfaces["lod-c"],
+        adjustments={},
+        generation=3,
+        phase="queued",
+        previous_key="lod-a",
+    )
+    viewer._pending_still_activation = _PendingStillActivation(
+        key="lod-a",
+        generation=2,
+        surface=surfaces["lod-a"],
+        purpose="rollback",
+    )
+    viewer._texture_manager = mocker.Mock()
+    active = {"key": "lod-b"}
+    events: list[str] = []
+    viewer._texture_manager.get_current_image_source.side_effect = lambda: active["key"]
+    viewer._texture_manager.has_resident_texture.side_effect = (
+        lambda key: key in {"lod-a", "lod-b"}
+    )
+
+    def activate(key):
+        events.append(f"activate:{key}")
+        active["key"] = key
+        return True
+
+    def stage(key, _image, *, protected_keys):
+        events.append(f"stage:{key}")
+        assert "lod-a" in protected_keys
+        return True
+
+    viewer._texture_manager.activate_resident_texture.side_effect = activate
+    viewer._texture_manager.stage_still_texture.side_effect = stage
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.take_still_upload_result.return_value = None
+    mocker.patch.object(viewer, "_update_crop_perspective_state")
+
+    viewer._activate_pending_still_texture(purpose="rollback")
+    viewer._prepare_still_lod_promotion_for_render()
+
+    assert events == ["activate:lod-a", "stage:lod-c"]
+    assert viewer._image is surfaces["lod-a"].image
+
+
+def test_cpu_surface_lru_protects_committed_and_rollback_keys(qapp, mocker) -> None:
+    viewer = GLImageViewer()
+
+    def surface(key: str, size: int):
+        return SimpleNamespace(
+            image=QImage(size, size, QImage.Format.Format_RGBA8888),
+            decode_key=key,
+            source_size=(4000, 3000),
+        )
+
+    surfaces = {
+        key: surface(key, size)
+        for key, size in (
+            ("lod-a", 32),
+            ("prefetch", 40),
+            ("lod-b", 48),
+            ("lod-c", 64),
+        )
+    }
+    viewer._still_surface_refs.update(
+        (key, surfaces[key]) for key in ("lod-a", "prefetch", "lod-b")
+    )
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.return_value = "lod-b"
+    viewer._last_composed_content_identity = ("still", "lod-a", 1, 1)
+    viewer._pending_still_activation = _PendingStillActivation(
+        key="lod-a",
+        generation=2,
+        surface=surfaces["lod-a"],
+        purpose="rollback",
+    )
+
+    viewer._remember_still_surface(surfaces["lod-c"])
+
+    assert set(viewer._still_surface_refs) == {"lod-a", "lod-b", "lod-c"}
 
 
 @pytest.mark.parametrize(
@@ -552,6 +820,7 @@ def test_cancelled_activating_lod_cannot_emit_stale_submission(
         previous_key="lod-a",
     )
     viewer._still_lod_promotion = promotion
+    viewer._image = promoted_image
     viewer._still_presentation_pending = False
     viewer._rendered_content_identity = ("still", "lod-b", 4, 1)
     viewer._last_composed_content_identity = ("still", "lod-a", 3, 1)
@@ -575,13 +844,15 @@ def test_cancelled_activating_lod_cannot_emit_stale_submission(
     viewer._on_frame_submitted()
 
     assert viewer._rendered_content_identity is None
-    assert viewer._pending_resident_activation == "lod-a"
-    assert viewer._image is previous_image
+    assert viewer._pending_still_activation is not None
+    assert viewer._pending_still_activation.key == "lod-a"
+    assert viewer._image is promoted_image
     assert submitted.count() == 0
 
-    viewer._activate_pending_resident_texture()
+    viewer._activate_pending_still_texture()
 
     assert active["key"] == "lod-a"
+    assert viewer._image is previous_image
     assert viewer._still_presentation_pending is False
     viewer._on_frame_submitted()
     assert submitted.count() == 0
@@ -629,16 +900,17 @@ def test_new_promotion_preserves_committed_restore_before_resident_activation(
     viewer.promote_still_surface(surfaces["lod-c"], {}, generation=3)
 
     assert viewer._still_lod_promotion.previous_key == "lod-a"
-    assert viewer._pending_resident_activation == "lod-a"
+    assert viewer._pending_still_activation is not None
+    assert viewer._pending_still_activation.key == "lod-a"
 
     viewer._prepare_still_lod_promotion_for_render()
-    viewer._activate_pending_resident_texture()
+    viewer._activate_pending_still_texture(purpose="rollback")
 
     assert active["key"] == "lod-a"
     assert viewer._still_lod_promotion.phase == "resident"
 
     viewer._prepare_still_lod_promotion_for_render()
-    viewer._activate_pending_resident_texture()
+    viewer._activate_pending_still_texture()
 
     assert active["key"] == "lod-c"
     assert viewer._still_lod_promotion.phase == "activating"
@@ -673,7 +945,7 @@ def test_missing_committed_lod_reports_rollback_failure(qapp, mocker) -> None:
         phase="activating",
         reason="previous_not_resident",
     )
-    assert viewer._pending_resident_activation is None
+    assert viewer._pending_still_activation is None
 
 
 @pytest.mark.parametrize("reason", ["asset_change", "resource_release"])
@@ -705,7 +977,7 @@ def test_terminal_lod_cancel_does_not_restore_previous_texture(
 
     viewer.cancel_still_lod_promotion(reason=reason)
 
-    assert viewer._pending_resident_activation is None
+    assert viewer._pending_still_activation is None
 
 
 def test_gl_image_viewer_maps_full_resolution_face_box_onto_viewport_surface(qapp) -> None:
@@ -915,7 +1187,7 @@ def test_rhi_first_texture_failure_is_reported_before_no_texture_return() -> Non
     viewer._video_frame = None
     viewer._pending_video_image = None
     viewer._image = None
-    viewer._pending_resident_activation = None
+    viewer._pending_still_activation = None
     viewer._pending_warm_surfaces = []
     viewer._still_presentation_pending = True
     viewer._still_generation_by_key = {"first-still": 12}
@@ -958,7 +1230,7 @@ def test_windows_gl_first_texture_failure_is_reported_before_no_texture_return(
     viewer._video_frame = None
     viewer._pending_video_image = None
     viewer._image = None
-    viewer._pending_resident_activation = None
+    viewer._pending_still_activation = None
     viewer._pending_warm_surfaces = []
     viewer._still_presentation_pending = True
     viewer._still_generation_by_key = {"first-gl-still": 15}

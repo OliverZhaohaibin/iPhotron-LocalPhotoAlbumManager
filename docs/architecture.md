@@ -554,10 +554,13 @@ visible while the replacement is staged as a non-active foreground resident.
 Only a later render may activate and draw that LOD, and the render session does
 not adopt it until the matching window submission. Live edit-state changes update
 the pending promotion's shader snapshot without decoding again; cancellation
-removes matching unflushed RHI work and cannot commit a delayed submission. If
-an unsubmitted LOD was already activated, cancellation queues the last composed
-still key for render-thread restoration before any newer promotion activates.
-Current/previous/next GPU residency is
+removes matching unflushed RHI work and cannot commit a delayed submission.
+Wheel input holds queued/staging/resident activation until idle planning. Once
+a same-asset LOD has already drawn, it is treated as forward-only: its matching
+submission commits before the latest desired key is evaluated, avoiding a
+visible B-to-A rollback. A bounded missing-submission path restores the last
+composed key before any newer staging. Active, committed, and rollback keys are
+protected from CPU/GPU eviction and storage reuse. Current/previous/next GPU residency is
 bounded by both three textures and 192MB. Source changes invalidate neutral
 surfaces and textures; sidecar changes replace render state only.
 
@@ -580,6 +583,10 @@ DPRs. `ViewTransformController` owns the single final
 `base-fit × straighten-cover × user-zoom` scale used by pan, CPU mapping, raw GL
 and QRhi; shaders do not apply a second cover multiplier. Automatic target
 relayout publishes one transform transaction and never masquerades as user zoom.
+For stills, the viewer-owned presentation image is the geometry authority even
+before GPU upload; renderer residency never supplies stale dimensions for a new
+surface. Initial crop framing is therefore committed against the real render
+target before the first draw, with no post-submission correction frame.
 
 Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
 with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,

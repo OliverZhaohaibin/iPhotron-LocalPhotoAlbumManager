@@ -182,7 +182,9 @@ class RhiImageRenderer:
         self._tex_uv_fmt: QRhiTexture.Format | None = None
 
         self._pending_rgba_image: QImage | None = None
-        self._pending_still: tuple[object, QImage, bool, str] | None = None
+        self._pending_still: (
+            tuple[object, QImage, bool, str, frozenset[object]] | None
+        ) = None
         self._last_still_upload_result: dict[str, object] | None = None
         self._still_textures: OrderedDict[object, tuple[QRhiTexture, int]] = OrderedDict()
         self._active_still_key: object | None = None
@@ -367,7 +369,7 @@ class RhiImageRenderer:
         if image.isNull():
             raise ValueError("Cannot upload a null QImage")
         qimage = _qimage_to_rgba(image)
-        self._pending_still = (key, qimage, True, "foreground")
+        self._pending_still = (key, qimage, True, "foreground", frozenset())
         self._pending_rgba_image = None
         self._pending_video_planes = None
         self._has_rgba_texture = True
@@ -377,7 +379,13 @@ class RhiImageRenderer:
         self._texture_height = qimage.height()
         return 0, self._texture_width, self._texture_height
 
-    def warm_still_texture(self, key: object, image: QImage) -> bool:
+    def warm_still_texture(
+        self,
+        key: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
         if self.touch_still_texture(key):
             return False
         if image.isNull():
@@ -385,10 +393,22 @@ class RhiImageRenderer:
         if self._pending_still is not None and self._pending_still[2]:
             emit_detail_event("gpu_prefetch_dropped", generation=0, reason="foreground_pending")
             return False
-        self._pending_still = (key, _qimage_to_rgba(image), False, "prefetch")
+        self._pending_still = (
+            key,
+            _qimage_to_rgba(image),
+            False,
+            "prefetch",
+            protected_keys,
+        )
         return True
 
-    def stage_still_texture(self, key: object, image: QImage) -> bool:
+    def stage_still_texture(
+        self,
+        key: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
         """Queue a foreground LOD upload without changing the active still."""
 
         if self.touch_still_texture(key):
@@ -424,7 +444,13 @@ class RhiImageRenderer:
                 "purpose": "lod_promotion",
             }
             return False
-        self._pending_still = (key, _qimage_to_rgba(image), False, "lod_promotion")
+        self._pending_still = (
+            key,
+            _qimage_to_rgba(image),
+            False,
+            "lod_promotion",
+            protected_keys,
+        )
         return True
 
     def cancel_pending_still_upload(self, key: object, *, purpose: str) -> bool:
@@ -488,9 +514,13 @@ class RhiImageRenderer:
         if self._srb is not None:
             self._rebuild_srb()
 
-    def trim_still_residency(self) -> None:
+    def trim_still_residency(
+        self,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> None:
         for key in tuple(self._still_textures):
-            if key == self._active_still_key:
+            if key == self._active_still_key or key in protected_keys:
                 continue
             texture, size = self._still_textures.pop(key)
             texture.destroy()
@@ -931,6 +961,7 @@ class RhiImageRenderer:
         *,
         incoming_bytes: int,
         resident_bytes: int,
+        protected_keys: frozenset[object] = frozenset(),
     ) -> None:
         """Destroy non-active QRhi textures before allocating new storage."""
 
@@ -943,6 +974,7 @@ class RhiImageRenderer:
                     candidate
                     for candidate in self._still_textures
                     if candidate != self._active_still_key
+                    and candidate not in protected_keys
                 ),
                 None,
             )
@@ -966,7 +998,7 @@ class RhiImageRenderer:
         self._pending_still = None
         if pending is None:
             return
-        key, image, activate, purpose = pending
+        key, image, activate, purpose, protected_keys = pending
         size = QSize(image.width(), image.height())
         byte_count = max(0, int(image.bytesPerLine()) * int(image.height()))
         resident_bytes = sum(entry[1] for entry in self._still_textures.values())
@@ -981,6 +1013,7 @@ class RhiImageRenderer:
                     candidate
                     for candidate, entry in self._still_textures.items()
                     if candidate != self._active_still_key
+                    and candidate not in protected_keys
                     and entry[0].pixelSize() == size
                 ),
                 None,
@@ -995,11 +1028,17 @@ class RhiImageRenderer:
             self._evict_before_still_allocation(
                 incoming_bytes=byte_count,
                 resident_bytes=resident_bytes,
+                protected_keys=protected_keys,
             )
             resident_bytes = sum(entry[1] for entry in self._still_textures.values())
             over_budget = resident_bytes + byte_count > self._still_budget_bytes
             over_count = len(self._still_textures) >= 3
             if over_budget or over_count:
+                failure_reason = (
+                    "protected_residency_budget"
+                    if protected_keys
+                    else "residency_budget"
+                )
                 event = (
                     "gpu_texture_allocation_failed"
                     if activate or purpose == "lod_promotion"
@@ -1011,13 +1050,13 @@ class RhiImageRenderer:
                     width=size.width(),
                     height=size.height(),
                     bytes=byte_count,
-                    reason="residency_budget",
+                    reason=failure_reason,
                 )
                 self._last_still_upload_result = {
                     "key": key,
                     "activate": bool(activate),
                     "success": False,
-                    "reason": "residency_budget",
+                    "reason": failure_reason,
                 }
                 if purpose == "lod_promotion":
                     self._last_still_upload_result["purpose"] = purpose

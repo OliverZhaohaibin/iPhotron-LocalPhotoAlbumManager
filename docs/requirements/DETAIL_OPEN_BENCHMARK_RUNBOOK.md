@@ -131,8 +131,13 @@ desired `DetailDecodeKey`：相同 pending key 记录 `lod_plan_reused` 且不�
 promotion 期间的 edit-state 更新必须覆盖 pending shader snapshot，不能在 activation
 时恢复旧 adjustment；取消尚未 flush 的 RHI promotion 必须释放对应 staging ownership，
 且 allocation failure 前后 controller current surface 必须与 committed render session 一致。
-取消已 activating 但尚未 submitted 的 LOD 时，下一 render 必须先恢复最后一次 composed
-still key；恢复过程不得产生伪 `stillFrameSubmitted` 或修改 session/decode level。
+wheel 期间 queued/staging/resident promotion 必须记录 `lod_activation_held`，idle planning
+后才可 release。已 activating/draw 的 B 不再正常回滚 A：先等待 B matching submission
+并记录 `lod_superseded_after_submit`，再按最新 desired key 规划 C。250 ms 异常 timeout
+才允许 rollback，且 `lod_rollback_frame_submitted` 必须先于任何 C staging；active、committed
+与 rollback key 在 CPU/GPU residency 中均不得被驱逐或复用。rollback 失败必须继续绘制
+当前有效 texture，禁止调用 texture-lost 路径暴露 backdrop。首次裁剪 still 必须在首个
+submission 前记录 `still_first_frame_transform_committed`，之后不得再发生 framing 修正。
 `tools/detail_benchmark.py` schema 2
 兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
 

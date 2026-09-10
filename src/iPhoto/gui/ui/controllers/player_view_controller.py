@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from collections import OrderedDict
@@ -56,20 +57,24 @@ from ..widgets.video_area import VideoArea
 
 _LOD_ZOOM_IDLE_MS = 180
 _LOD_RESIZE_SETTLE_MS = 16
+_LOD_SUBMISSION_TIMEOUT_MS = 250
 
 
 @dataclass(frozen=True, slots=True)
-class _PendingLodEvaluation:
+class _DesiredLodIntent:
     reason: Literal["zoom", "resize"]
     zoom_factor: float
     sequence: int
+    viewport_physical_size: tuple[int, int] | None
+    not_before_monotonic: float
 
 
 @dataclass(frozen=True, slots=True)
 class _LodPlan:
-    action: Literal["noop", "cancel", "reuse", "submit"]
+    action: Literal["noop", "cancel", "reuse", "submit", "wait_for_submission"]
     decode_key: DetailDecodeKey
     pending_key: object | None
+    pending_generation: int = 0
 
 
 class _StillSurfaceDecodeSignals(QObject):
@@ -476,7 +481,16 @@ class PlayerViewController(QObject):
         self._request_reason_by_generation: dict[int, str] = {}
         self._pending_zoom_factor = 1.0
         self._lod_evaluation_sequence = 0
-        self._pending_lod_evaluation: _PendingLodEvaluation | None = None
+        self._pending_lod_evaluation: _DesiredLodIntent | None = None
+        self._lod_plan_waiting_for_submission = False
+        self._lod_submission_wait_generation = 0
+        self._lod_submission_deadline = QTimer(self)
+        self._lod_submission_deadline.setSingleShot(True)
+        self._lod_submission_deadline.setInterval(_LOD_SUBMISSION_TIMEOUT_MS)
+        self._lod_submission_deadline.timeout.connect(
+            self._on_lod_submission_timeout
+        )
+        self._lod_blocked_by_failed_rollback = False
         self._fullscreen_lod_gate = False
         self._fullscreen_resize_pending = False
         self._lod_timer = QTimer(self)
@@ -553,6 +567,16 @@ class PlayerViewController(QObject):
             still_presented = getattr(self._image_viewer, "stillFramePresented", None)
             if still_presented is not None:
                 still_presented.connect(self._on_still_frame_presented)
+        rollback_submitted = getattr(
+            self._image_viewer,
+            "stillLodRollbackSubmitted",
+            None,
+        )
+        if rollback_submitted is not None:
+            rollback_submitted.connect(self._on_lod_rollback_submitted)
+        rollback_failed = getattr(self._image_viewer, "stillLodRollbackFailed", None)
+        if rollback_failed is not None:
+            rollback_failed.connect(self._on_lod_rollback_failed)
         image_composed = getattr(self._image_viewer, "frameSubmitted", None)
         if image_composed is not None:
             image_composed.connect(self._on_image_composition_submitted)
@@ -1037,6 +1061,9 @@ class PlayerViewController(QObject):
         """Expose the still QRhi surface under the cover while decode runs."""
 
         self._advance_surface_transition_epoch("image_transition_started")
+        self._cancel_lod_submission_wait()
+        self._pending_lod_evaluation = None
+        self._lod_blocked_by_failed_rollback = False
         generation = int(generation)
         cancel_promotion = getattr(
             self._image_viewer,
@@ -1670,19 +1697,32 @@ class PlayerViewController(QObject):
     ) -> _LodPlan:
         """Classify a desired LOD without mutating scheduler or presentation state."""
 
-        pending_key_getter = getattr(
+        snapshot_getter = getattr(
             self._image_viewer,
-            "pending_still_lod_key",
+            "still_lod_promotion_snapshot",
             None,
         )
-        pending_key = pending_key_getter() if callable(pending_key_getter) else None
-        if not self._is_higher_level(
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        if snapshot is None:
+            pending_key_getter = getattr(
+                self._image_viewer,
+                "pending_still_lod_key",
+                None,
+            )
+            pending_key = pending_key_getter() if callable(pending_key_getter) else None
+            pending_generation = 0
+            pending_phase = ""
+        else:
+            pending_key = snapshot[0]
+            pending_generation = int(snapshot[1])
+            pending_phase = str(snapshot[2])
+        if pending_key is not None and pending_phase == "activating":
+            action = "wait_for_submission"
+        elif not self._is_higher_level(
             request.decode_level,
             self._current_decode_level,
         ):
-            action: Literal["noop", "cancel", "reuse", "submit"] = (
-                "cancel" if pending_key is not None else "noop"
-            )
+            action = "cancel" if pending_key is not None else "noop"
         elif pending_key == decode_key:
             action = "reuse"
         else:
@@ -1691,6 +1731,7 @@ class PlayerViewController(QObject):
             action=action,
             decode_key=decode_key,
             pending_key=pending_key,
+            pending_generation=pending_generation,
         )
 
     def _commit_lod_plan(
@@ -1701,6 +1742,7 @@ class PlayerViewController(QObject):
         """Apply one precomputed plan; ``None`` continues request dispatch."""
 
         if plan.action in {"noop", "cancel"}:
+            self._cancel_lod_submission_wait()
             if plan.action == "cancel":
                 self._cancel_pending_lod_promotion(reason="planned_not_needed")
                 emit_detail_event(
@@ -1711,6 +1753,10 @@ class PlayerViewController(QObject):
                 )
             return False
         if plan.action == "reuse":
+            self._cancel_lod_submission_wait()
+            release = getattr(self._image_viewer, "release_still_lod_activation", None)
+            if callable(release):
+                release(plan.pending_key, plan.pending_generation)
             emit_detail_event(
                 "lod_plan_reused",
                 generation=self._request_generation,
@@ -1718,6 +1764,19 @@ class PlayerViewController(QObject):
                 decode_level=request.decode_level,
             )
             return True
+        if plan.action == "wait_for_submission":
+            self._lod_plan_waiting_for_submission = True
+            if self._lod_submission_wait_generation != plan.pending_generation:
+                self._lod_submission_wait_generation = plan.pending_generation
+                self._lod_submission_deadline.start()
+            emit_detail_event(
+                "lod_plan_waiting_for_submission",
+                generation=plan.pending_generation,
+                reason=request.reason,
+                desired_decode_level=request.decode_level,
+            )
+            return True
+        self._cancel_lod_submission_wait()
         if plan.pending_key is not None:
             self._cancel_pending_lod_promotion(reason="planned_superseded")
         self._request_generation = request.generation
@@ -1771,6 +1830,13 @@ class PlayerViewController(QObject):
 
     def _on_viewer_zoom_changed(self, factor: float) -> None:
         self._pending_zoom_factor = max(1.0, float(factor))
+        hold_activation = getattr(
+            self._image_viewer,
+            "hold_still_lod_activation",
+            None,
+        )
+        if callable(hold_activation):
+            hold_activation()
         window_getter = getattr(self._image_viewer, "window", None)
         window = window_getter() if callable(window_getter) else None
         emit_detail_event(
@@ -1800,6 +1866,7 @@ class PlayerViewController(QObject):
         pending_key = pending_key_getter() if callable(pending_key_getter) else None
         current_reason = self._request_reason_by_generation.get(self._request_generation)
         if pending_key is not None:
+            self._cancel_lod_submission_wait()
             self._cancel_pending_lod_promotion(reason="fullscreen_gate")
             emit_detail_event(
                 "lod_plan_cancelled",
@@ -1830,7 +1897,12 @@ class PlayerViewController(QObject):
         if not should_schedule:
             return
         if self._pending_lod_evaluation is not None:
-            self._arm_pending_lod_evaluation()
+            delay_override = (
+                _LOD_RESIZE_SETTLE_MS
+                if self._pending_lod_evaluation.reason == "resize"
+                else None
+            )
+            self._arm_pending_lod_evaluation(delay_override=delay_override)
         else:
             self._schedule_lod_evaluation("resize")
 
@@ -1841,6 +1913,8 @@ class PlayerViewController(QObject):
         self._fullscreen_resize_pending = False
         self._pending_lod_evaluation = None
         self._lod_timer.stop()
+        self._cancel_lod_submission_wait()
+        self._lod_blocked_by_failed_rollback = False
         emit_detail_event(
             "fullscreen_lod_gate_released",
             generation=self._request_generation,
@@ -1871,17 +1945,20 @@ class PlayerViewController(QObject):
                 self._fullscreen_resize_pending = True
             return
         self._lod_evaluation_sequence += 1
-        pending = _PendingLodEvaluation(
+        metrics = self._viewport_metrics()
+        delay_ms = _LOD_ZOOM_IDLE_MS if reason == "zoom" else _LOD_RESIZE_SETTLE_MS
+        pending = _DesiredLodIntent(
             reason=reason,
             zoom_factor=self._pending_zoom_factor,
             sequence=self._lod_evaluation_sequence,
+            viewport_physical_size=metrics[0] if metrics is not None else None,
+            not_before_monotonic=time.perf_counter() + delay_ms / 1000.0,
         )
         self._pending_lod_evaluation = pending
         if self._fullscreen_lod_gate:
             self._fullscreen_resize_pending = True
-            delay_ms = _LOD_ZOOM_IDLE_MS if reason == "zoom" else _LOD_RESIZE_SETTLE_MS
         else:
-            delay_ms = self._arm_pending_lod_evaluation()
+            self._arm_pending_lod_evaluation(delay_override=delay_ms)
         emit_detail_event(
             "lod_evaluation_scheduled",
             generation=self._request_generation,
@@ -1889,16 +1966,22 @@ class PlayerViewController(QObject):
             delay_ms=delay_ms,
             sequence=pending.sequence,
             gated=self._fullscreen_lod_gate,
+            viewport_physical_size=pending.viewport_physical_size,
         )
 
-    def _arm_pending_lod_evaluation(self) -> int:
+    def _arm_pending_lod_evaluation(self, *, delay_override: int | None = None) -> int:
         pending = self._pending_lod_evaluation
         if pending is None:
             return 0
         delay_ms = (
-            _LOD_ZOOM_IDLE_MS
-            if pending.reason == "zoom"
-            else _LOD_RESIZE_SETTLE_MS
+            int(delay_override)
+            if delay_override is not None
+            else max(
+                0,
+                math.ceil(
+                    (pending.not_before_monotonic - time.perf_counter()) * 1000.0
+                ),
+            )
         )
         self._lod_timer.setInterval(delay_ms)
         self._lod_timer.start()
@@ -1911,24 +1994,24 @@ class PlayerViewController(QObject):
         if self._fullscreen_lod_gate:
             self._fullscreen_resize_pending = True
             return
-        self._pending_lod_evaluation = None
-        self._request_higher_lod(
+        keep_intent = self._request_higher_lod(
             reason=pending.reason,
             zoom_factor=pending.zoom_factor,
         )
+        if not keep_intent and self._pending_lod_evaluation is pending:
+            self._pending_lod_evaluation = None
 
     def _request_higher_lod(
         self,
         *,
         reason: Literal["zoom", "resize"] = "zoom",
         zoom_factor: float | None = None,
-    ) -> None:
+    ) -> bool:
         identity = self._active_source_identity
-        if identity is None:
-            return
+        if identity is None or self._lod_blocked_by_failed_rollback:
+            return False
         if self._loading_source is not None:
-            self._schedule_lod_evaluation(reason)
-            return
+            return True
         intent = _PreparedRequestIntent(
             asset_id=self._active_asset_id,
             source_identity=identity,
@@ -1939,6 +2022,7 @@ class PlayerViewController(QObject):
         if not self._dispatch_prepared_intent(intent, dict(self._active_adjustments)):
             self._loading_source = None
             self._loading_started_at = None
+        return self._lod_plan_waiting_for_submission
 
     def _cancel_pending_lod_promotion(self, *, reason: str) -> None:
         cancel_promotion = getattr(
@@ -1958,6 +2042,78 @@ class PlayerViewController(QObject):
                 self._present_started_at = None
                 self._present_source = None
             self._pending_present_session = None
+
+    def _cancel_lod_submission_wait(self) -> None:
+        self._lod_submission_deadline.stop()
+        self._lod_plan_waiting_for_submission = False
+        self._lod_submission_wait_generation = 0
+
+    def _resume_pending_lod_after_loading(self) -> None:
+        if (
+            self._loading_source is None
+            and self._pending_lod_evaluation is not None
+            and not self._fullscreen_lod_gate
+            and not self._lod_plan_waiting_for_submission
+            and not self._lod_blocked_by_failed_rollback
+        ):
+            self._arm_pending_lod_evaluation()
+
+    def _on_lod_submission_timeout(self) -> None:
+        generation = self._lod_submission_wait_generation
+        if generation <= 0 or not self._lod_plan_waiting_for_submission:
+            return
+        snapshot_getter = getattr(
+            self._image_viewer,
+            "still_lod_promotion_snapshot",
+            None,
+        )
+        snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        if (
+            snapshot is None
+            or int(snapshot[1]) != generation
+            or str(snapshot[2]) != "activating"
+        ):
+            self._cancel_lod_submission_wait()
+            if self._pending_lod_evaluation is not None:
+                self._arm_pending_lod_evaluation()
+            return
+        emit_detail_event(
+            "lod_submission_timeout",
+            generation=generation,
+        )
+        self._cancel_pending_lod_promotion(reason="submission_timeout")
+
+    def _on_lod_rollback_submitted(self, _key: object, generation: int) -> None:
+        if int(generation) != self._lod_submission_wait_generation:
+            return
+        self._cancel_lod_submission_wait()
+        if self._pending_lod_evaluation is not None:
+            self._arm_pending_lod_evaluation()
+
+    def _on_lod_rollback_failed(self, _key: object, generation: int) -> None:
+        if int(generation) != self._lod_submission_wait_generation:
+            return
+        self._cancel_lod_submission_wait()
+        self._lod_blocked_by_failed_rollback = True
+        emit_detail_event(
+            "lod_rollback_failed",
+            generation=int(generation),
+            reason="committed_surface_unavailable",
+        )
+
+    def _resume_lod_after_committed_submission(self, generation: int) -> None:
+        if (
+            not self._lod_plan_waiting_for_submission
+            or int(generation) != self._lod_submission_wait_generation
+        ):
+            return
+        self._cancel_lod_submission_wait()
+        emit_detail_event(
+            "lod_superseded_after_submit",
+            generation=int(generation),
+        )
+        if self._pending_lod_evaluation is not None:
+            self._arm_pending_lod_evaluation()
 
     def _retry_pending_layout_intent(self) -> None:
         pending = self._pending_layout_intent
@@ -2162,6 +2318,9 @@ class PlayerViewController(QObject):
             if self._loading_source == source:
                 self._loading_source = None
                 self._loading_started_at = None
+            resume_pending = getattr(self, "_resume_pending_lod_after_loading", None)
+            if callable(resume_pending):
+                resume_pending()
             emit_detail_event(
                 "lod_upgrade_failed",
                 generation=generation,
@@ -2300,6 +2459,7 @@ class PlayerViewController(QObject):
                 old_decode_level=previous_decode_level,
                 new_decode_level=self._current_decode_level,
             )
+            self._resume_lod_after_committed_submission(generation)
         self._present_started_at = None
         self._present_source = None
         self.stillFramePresented.emit(presented_path, generation)
@@ -2329,6 +2489,9 @@ class PlayerViewController(QObject):
             if self._loading_source == key.source:
                 self._loading_source = None
                 self._loading_started_at = None
+            resume_pending = getattr(self, "_resume_pending_lod_after_loading", None)
+            if callable(resume_pending):
+                resume_pending()
             emit_detail_event(
                 "lod_upgrade_failed",
                 generation=generation,
@@ -2834,6 +2997,9 @@ class PlayerViewController(QObject):
         self._residency_window_generation += 1
         self._preparation_prefetch_queue.clear()
         self._lod_timer.stop()
+        self._cancel_lod_submission_wait()
+        self._pending_lod_evaluation = None
+        self._lod_blocked_by_failed_rollback = False
         self._cancel_stale_image_workers()
         self._loading_source = None
         self._loading_started_at = None
@@ -2999,6 +3165,9 @@ class PlayerViewController(QObject):
         if self._loading_source == source:
             self._loading_source = None
             self._loading_started_at = None
+        resume_pending = getattr(self, "_resume_pending_lod_after_loading", None)
+        if callable(resume_pending):
+            resume_pending()
 
     def _on_adjusted_image_failed(self, source: Path, message: str) -> None:
         """Propagate worker failures while ensuring stale results are ignored."""

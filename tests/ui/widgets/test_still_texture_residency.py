@@ -127,6 +127,26 @@ def test_staging_lod_keeps_current_gl_texture_active(mocker) -> None:
     }
 
 
+def test_gl_staging_never_reuses_committed_or_active_texture(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    manager.upload_still_texture("committed-a", _image(8, 8))
+    manager.upload_still_texture("prefetch", _image(12, 10))
+    manager.upload_still_texture("active-b", _image(16, 12))
+
+    assert manager.stage_still_texture(
+        "desired-c",
+        _image(12, 10),
+        protected_keys=frozenset({"committed-a", "active-b"}),
+    )
+
+    assert manager.has_still_texture("committed-a")
+    assert manager.has_still_texture("active-b")
+    assert manager.has_still_texture("desired-c")
+    assert not manager.has_still_texture("prefetch")
+    assert manager._active_still_key == "active-b"
+
+
 def test_failed_gl_lod_staging_preserves_active_texture(mocker) -> None:
     _mock_gl_uploads(mocker)
     manager = TextureManager()

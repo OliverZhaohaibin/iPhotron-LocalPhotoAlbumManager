@@ -155,8 +155,35 @@ class GLRenderer:
     def touch_still_texture(self, key: object) -> bool:
         return self._tex_mgr.touch_still_texture(key)
 
-    def warm_still_texture(self, key: object, image: QImage) -> bool:
-        return self._tex_mgr.warm_still_texture(key, image)
+    def warm_still_texture(
+        self,
+        key: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
+        return self._tex_mgr.warm_still_texture(
+            key,
+            image,
+            protected_keys=protected_keys,
+        )
+
+    def stage_still_texture(
+        self,
+        key: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
+        return self._tex_mgr.stage_still_texture(
+            key,
+            image,
+            protected_keys=protected_keys,
+        )
+
+    def cancel_pending_still_upload(self, key: object, *, purpose: str) -> bool:
+        del key, purpose
+        return False
 
     def take_still_upload_result(self) -> dict[str, object] | None:
         return self._tex_mgr.take_still_upload_result()
@@ -175,8 +202,12 @@ class GLRenderer:
     def clear_still_residency(self) -> None:
         self._tex_mgr.clear_still_residency()
 
-    def trim_still_residency(self) -> None:
-        self._tex_mgr.trim_still_residency()
+    def trim_still_residency(
+        self,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> None:
+        self._tex_mgr.trim_still_residency(protected_keys=protected_keys)
 
     def upload_video_frame(self, frame) -> tuple[int, int]:
         """Upload a decoded video frame directly as shader-readable textures."""

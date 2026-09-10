@@ -115,15 +115,23 @@ and crop-plus-colour samples at 100%, 125%, and 150% DPI.
 made between staging and activation must remain visible after activation; an
 allocation failure or cancelled submission must leave the controller surface,
 session surface, and decode level on the last matching submitted LOD.
-If cancellation occurs after activation but before submission, the trace must
-show the last composed still becoming active again before any newer promotion;
-missing committed residency must emit `lod_upgrade_rollback_failed`.
+Wheel input must record `lod_activation_held` for a queued/staging/resident
+promotion and release it only after final idle planning. If the promotion is
+already activating, `lod_plan_waiting_for_submission` must be followed by its
+matching presentation and `lod_superseded_after_submit`; the normal path must
+not visibly return to the previous LOD. A 250 ms missing-submission fallback may
+restore the last composed key, but `lod_rollback_frame_submitted` must precede
+new staging. `lod_rollback_failed` must preserve the currently drawable texture
+and freeze further LOD work instead of exposing the backdrop.
 The fullscreen gate must prevent decode, staging, and activation until the
 committed active surface has submitted once at the authoritative fullscreen
 target. Its release schedules a 16 ms resize evaluation; wheel zoom uses a
 180 ms idle evaluation, and an already pending zoom intent is not replaced by
 resize. `lod_plan_reused`, `lod_plan_cancelled`, and `lod_plan_submitted` show
 whether desired-key planning avoided a redundant generation or rollback.
+Initial cropped still traces must include
+`still_first_frame_transform_committed` before their first matching submission;
+there must be no post-submit framing correction.
 
 Transition traces must show `presentation_suppressed` before the exposed
 surface's `video_surface_blank_requested`/blank submission and

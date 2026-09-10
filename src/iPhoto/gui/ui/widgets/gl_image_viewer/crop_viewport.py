@@ -20,11 +20,23 @@ if TYPE_CHECKING:
 # ── Texture dimension helpers ──────────────────────────────────────────
 
 def texture_dimensions(viewer: GLImageViewer) -> tuple[int, int]:
-    """Return the current texture size or ``(0, 0)`` when unavailable."""
+    """Return the viewer-owned presentation size or ``(0, 0)``.
+
+    Still geometry follows ``_image`` rather than renderer residency. A new
+    surface owns framing before its upload, while an LOD promotion does not
+    replace ``_image`` until resident activation succeeds. Video resets are
+    deliberately deferred until their renderer upload, so they retain the GPU
+    size fallback.
+    """
+    image = viewer._image
+    if (
+        not viewer._using_video_frame_source
+        and image is not None
+        and not image.isNull()
+    ):
+        return (image.width(), image.height())
     if viewer._renderer is not None and viewer._renderer.has_texture():
         return viewer._renderer.texture_size()
-    if viewer._image is not None and not viewer._image.isNull():
-        return (viewer._image.width(), viewer._image.height())
     return (0, 0)
 
 

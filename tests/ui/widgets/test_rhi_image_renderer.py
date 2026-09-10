@@ -275,6 +275,33 @@ def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
     assert tuple(renderer._still_textures) == ("previous", "current")
 
 
+def test_rhi_staging_never_reuses_committed_or_active_texture() -> None:
+    renderer = RhiImageRenderer()
+    committed = _FakeTexture(QSize(8, 8))
+    prefetch = _FakeTexture(QSize(12, 10))
+    active = _FakeTexture(QSize(16, 12))
+    renderer._rhi = _FakeTextureRhi()
+    renderer._still_textures["committed-a"] = (committed, 256)
+    renderer._still_textures["prefetch"] = (prefetch, 480)
+    renderer._still_textures["active-b"] = (active, 768)
+    renderer._active_still_key = "active-b"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+
+    assert renderer.stage_still_texture(
+        "desired-c",
+        _image(12, 10),
+        protected_keys=frozenset({"committed-a", "active-b"}),
+    )
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert "committed-a" in renderer._still_textures
+    assert "active-b" in renderer._still_textures
+    assert "desired-c" in renderer._still_textures
+    assert "prefetch" not in renderer._still_textures
+    assert renderer._active_still_key == "active-b"
+    assert renderer._tex_rgba is active
+
+
 def test_rhi_tracks_mipmap_availability_per_texture_source() -> None:
     renderer = RhiImageRenderer()
 

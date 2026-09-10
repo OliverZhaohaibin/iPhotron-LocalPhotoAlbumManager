@@ -36,6 +36,7 @@ from iPhoto.gui.ui.controllers.player_view_controller import (
     PreparedStillState,
     _AdjustmentPreparationSignals,
     _AdjustmentPreparationWorker,
+    _DesiredLodIntent,
     _LOD_RESIZE_SETTLE_MS,
     _LOD_ZOOM_IDLE_MS,
     _PreparedRequestIntent,
@@ -125,6 +126,8 @@ class _FakeImageViewer(QWidget):
     firstFrameReady = Signal()
     renderResourcesInvalidated = Signal()
     stillFrameSubmitted = Signal(object, int)
+    stillLodRollbackSubmitted = Signal(object, int)
+    stillLodRollbackFailed = Signal(object, int)
     frameSubmitted = Signal()
     replayRequested = Signal()
     viewTransformChanged = Signal()
@@ -138,6 +141,10 @@ class _FakeImageViewer(QWidget):
         self.lod_promotions = []
         self.lod_promotion_cancel_count = 0
         self._pending_lod_key = None
+        self._pending_lod_generation = 0
+        self._pending_lod_phase = ""
+        self._pending_lod_held = False
+        self.lod_activation_release_count = 0
         self.setMouseTracking(True)
 
     def set_image(self, *args, **kwargs):
@@ -164,14 +171,47 @@ class _FakeImageViewer(QWidget):
     def promote_still_surface(self, surface, adjustments, *, generation: int) -> None:
         self.lod_promotions.append((surface, dict(adjustments), int(generation)))
         self._pending_lod_key = surface.decode_key
+        self._pending_lod_generation = int(generation)
+        self._pending_lod_phase = "queued"
+        self._pending_lod_held = False
 
     def cancel_still_lod_promotion(self, *, reason: str = "superseded") -> None:
         del reason
         self.lod_promotion_cancel_count += 1
         self._pending_lod_key = None
+        self._pending_lod_generation = 0
+        self._pending_lod_phase = ""
+        self._pending_lod_held = False
 
     def pending_still_lod_key(self):
         return self._pending_lod_key
+
+    def still_lod_promotion_snapshot(self):
+        if self._pending_lod_key is None:
+            return None
+        return (
+            self._pending_lod_key,
+            self._pending_lod_generation,
+            self._pending_lod_phase,
+            self._pending_lod_held,
+        )
+
+    def hold_still_lod_activation(self):
+        if self._pending_lod_key is None:
+            return None
+        if self._pending_lod_phase in {"queued", "staging", "resident"}:
+            self._pending_lod_held = True
+        return self._pending_lod_phase
+
+    def release_still_lod_activation(self, key, generation: int) -> bool:
+        if (
+            self._pending_lod_key != key
+            or self._pending_lod_generation != int(generation)
+        ):
+            return False
+        self._pending_lod_held = False
+        self.lod_activation_release_count += 1
+        return True
 
     def set_adjustments(self, adjustments):
         self._adjustments = dict(adjustments)
@@ -365,6 +405,24 @@ class TestInitCoverTracking:
         cancel_foreground.assert_called_once_with()
         assert controller._loading_source is None
 
+    def test_wheel_holds_pending_resident_activation_until_idle(self, controller):
+        controller._active_source_identity = AssetSourceIdentity.create(
+            Path("/tmp/held-lod.jpg"),
+            width=4096,
+            height=3072,
+            source_mtime_ns=1,
+        )
+        controller._image_viewer._pending_lod_key = object()
+        controller._image_viewer._pending_lod_generation = 7
+        controller._image_viewer._pending_lod_phase = "resident"
+
+        controller._on_viewer_zoom_changed(2.0)
+
+        assert controller._image_viewer._pending_lod_held is True
+        assert controller._pending_lod_evaluation is not None
+        assert controller._pending_lod_evaluation.reason == "zoom"
+        assert controller._lod_timer.interval() == _LOD_ZOOM_IDLE_MS
+
     def test_lod_plan_reuses_matching_pending_key_without_new_generation(
         self,
         controller,
@@ -453,6 +511,146 @@ class TestInitCoverTracking:
         assert controller._request_generation == 6
         assert controller._image_viewer.lod_promotion_cancel_count == 1
         request.assert_called_once()
+
+    def test_activating_lod_commits_before_latest_zoom_is_replanned(
+        self,
+        controller,
+    ):
+        path = Path("/tmp/forward-only-lod.jpg")
+        initial = _surface(
+            path,
+            QImage(1024, 768, QImage.Format.Format_RGBA8888),
+            level=1024,
+        )
+        upgraded = _surface(
+            path,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=2048,
+        )
+        handle = controller._upsert_render_session(initial, {})
+        handle.retain_surface(upgraded)
+        controller._active_source_identity = AssetSourceIdentity.create(
+            path,
+            width=4096,
+            height=3072,
+            source_mtime_ns=1,
+        )
+        controller._active_asset_id = "asset-1"
+        controller._current_decode_level = 1024
+        controller._current_full_image = QImage(initial.image)
+        controller._request_generation = 7
+        controller._request_reason_by_generation[7] = "zoom"
+        controller._present_generation = 7
+        controller._present_started_at = time.perf_counter()
+        controller._present_source = path
+        controller._pending_present_session = (7, handle, upgraded.decode_key)
+        controller._image_viewer._pending_lod_key = upgraded.decode_key
+        controller._image_viewer._pending_lod_generation = 7
+        controller._image_viewer._pending_lod_phase = "activating"
+        controller._pending_lod_evaluation = _DesiredLodIntent(
+            reason="zoom",
+            zoom_factor=3.0,
+            sequence=1,
+            viewport_physical_size=(1600, 900),
+            not_before_monotonic=time.perf_counter() - 1.0,
+        )
+
+        assert controller._request_higher_lod(reason="zoom", zoom_factor=3.0)
+        assert controller._lod_plan_waiting_for_submission is True
+        assert controller._image_viewer.lod_promotion_cancel_count == 0
+        assert handle.current_surface is initial
+
+        controller._image_viewer.stillFrameSubmitted.emit(upgraded.decode_key, 7)
+
+        assert handle.current_surface is upgraded
+        assert controller._current_decode_level == 2048
+        assert controller._current_full_image.cacheKey() == upgraded.image.cacheKey()
+        assert controller._lod_plan_waiting_for_submission is False
+        assert controller._lod_timer.isActive()
+        assert controller._lod_timer.interval() == 0
+
+    def test_lod_submission_timeout_waits_for_rollback_composition(
+        self,
+        controller,
+    ):
+        key = object()
+        controller._image_viewer._pending_lod_key = key
+        controller._image_viewer._pending_lod_generation = 12
+        controller._image_viewer._pending_lod_phase = "activating"
+        controller._lod_plan_waiting_for_submission = True
+        controller._lod_submission_wait_generation = 12
+        controller._pending_lod_evaluation = _DesiredLodIntent(
+            reason="zoom",
+            zoom_factor=3.0,
+            sequence=2,
+            viewport_physical_size=(1600, 900),
+            not_before_monotonic=time.perf_counter() - 1.0,
+        )
+
+        controller._on_lod_submission_timeout()
+
+        assert controller._image_viewer.lod_promotion_cancel_count == 1
+        assert controller._lod_plan_waiting_for_submission is True
+        assert not controller._lod_timer.isActive()
+
+        controller._image_viewer.stillLodRollbackSubmitted.emit(key, 12)
+
+        assert controller._lod_plan_waiting_for_submission is False
+        assert controller._lod_timer.isActive()
+        assert controller._lod_timer.interval() == 0
+
+    def test_submission_does_not_bypass_remaining_wheel_idle_window(
+        self,
+        controller,
+    ):
+        controller._lod_plan_waiting_for_submission = True
+        controller._lod_submission_wait_generation = 14
+        controller._pending_lod_evaluation = _DesiredLodIntent(
+            reason="zoom",
+            zoom_factor=3.0,
+            sequence=3,
+            viewport_physical_size=(1600, 900),
+            not_before_monotonic=time.perf_counter() + 0.18,
+        )
+
+        controller._resume_lod_after_committed_submission(14)
+
+        assert controller._lod_timer.isActive()
+        assert 150 <= controller._lod_timer.interval() <= _LOD_ZOOM_IDLE_MS
+
+    def test_missing_rollback_surface_freezes_only_lod_work(self, controller):
+        controller._lod_plan_waiting_for_submission = True
+        controller._lod_submission_wait_generation = 13
+
+        controller._image_viewer.stillLodRollbackFailed.emit(object(), 13)
+
+        assert controller._lod_plan_waiting_for_submission is False
+        assert controller._lod_blocked_by_failed_rollback is True
+
+    def test_lod_intent_waits_without_timer_loop_while_decode_is_loading(
+        self,
+        controller,
+    ):
+        controller._active_source_identity = AssetSourceIdentity.create(
+            Path("/tmp/loading-lod.jpg"),
+            width=4096,
+            height=3072,
+            source_mtime_ns=1,
+        )
+        controller._loading_source = Path("/tmp/loading-lod.jpg")
+        controller._pending_lod_evaluation = _DesiredLodIntent(
+            reason="resize",
+            zoom_factor=1.0,
+            sequence=5,
+            viewport_physical_size=(1600, 900),
+            not_before_monotonic=time.perf_counter() + 1.0,
+        )
+        controller._lod_timer.stop()
+
+        assert controller._request_higher_lod(reason="resize", zoom_factor=1.0)
+
+        assert not controller._lod_timer.isActive()
+        assert controller._pending_lod_evaluation.sequence == 5
 
     def test_image_decode_primes_qrhi_surface_under_pending_cover(
         self,

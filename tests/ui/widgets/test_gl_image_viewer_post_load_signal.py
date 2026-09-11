@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QGridLayout, QWidget
 from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
 from iPhoto.gui.ui.widgets.gl_image_viewer.widget import (
     _PendingStillActivation,
+    _StillFirstFrameTransformSnapshot,
     _StillLodPromotion,
     _crop_preview_adjustments,
 )
@@ -72,6 +73,45 @@ def test_new_still_geometry_precedes_stale_renderer_texture(qapp, mocker) -> Non
     assert center.x() == pytest.approx(300.0, abs=1.0)
     assert center.y() == pytest.approx(200.0, abs=1.0)
     assert zoom_spy.count() == 0
+
+
+def test_gpu_upload_reports_first_frame_cover_drift(qapp, mocker) -> None:
+    viewer = GLImageViewer()
+    viewer._still_generation_by_key["cold-crop"] = 9
+    viewer._pending_first_frame_transform = _StillFirstFrameTransformSnapshot(
+        generation=9,
+        cover_scale=1.397,
+        effective_scale=4.5,
+        zoom_factor=1.2,
+        pan_x=-120.0,
+        pan_y=40.0,
+    )
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.return_value = "cold-crop"
+    viewer._transform_controller = mocker.Mock()
+    viewer._transform_controller.get_image_cover_scale.return_value = 1.0
+    viewer._transform_controller.get_effective_scale.return_value = 3.2
+    emit_event = mocker.patch(
+        "iPhoto.gui.ui.widgets.gl_image_viewer.widget.emit_detail_event"
+    )
+
+    viewer._emit_still_gpu_upload("cold-crop")
+
+    emit_event.assert_any_call(
+        "gpu_upload",
+        generation=9,
+        key="cold-crop",
+        cover_scale=1.0,
+        effective_scale=3.2,
+    )
+    emit_event.assert_any_call(
+        "still_first_frame_cover_drift",
+        generation=9,
+        cover_before=1.397,
+        cover_after=1.0,
+        effective_before=4.5,
+        effective_after=3.2,
+    )
 
 
 def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None:

@@ -50,6 +50,20 @@ powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_d
    collector window to stop it.
 5. Send back the single ZIP path printed in green. By default it is created on the Desktop.
 
+For the cropped-still cold/warm comparison, start a fresh process, open the
+target once, and press `F` after it is visible. Navigate to another asset,
+reopen the target without exiting, and press `W`. After the collector creates
+its ZIP, compare the two first-frame transactions with:
+
+```powershell
+python .\tools\analyze_windows_crop_framing.py `
+  "$HOME\Desktop\iPhoto-windows-scan-playback-<timestamp>.zip"
+```
+
+The analyzer requires matching target size, cover, zoom and effective scale;
+pan may differ by at most one device pixel and each crop-center error must be
+within one logical pixel.
+
 ## First-media QRhi submission A/B
 
 For the Windows-only first-open leak, run from a fresh process so no Detail
@@ -131,7 +145,10 @@ resize. `lod_plan_reused`, `lod_plan_cancelled`, and `lod_plan_submitted` show
 whether desired-key planning avoided a redundant generation or rollback.
 Initial cropped still traces must include
 `still_first_frame_transform_committed` before their first matching submission;
-there must be no post-submit framing correction.
+there must be no post-submit framing correction. Cold GPU miss and warm resident
+reopen must report the same cover, zoom, effective scale and pan. The matching
+`gpu_upload` must preserve the pre-draw cover/effective scale; any
+`still_first_frame_cover_drift` is a failed run.
 
 Transition traces must show `presentation_suppressed` before the exposed
 surface's `video_surface_blank_requested`/blank submission and

@@ -586,7 +586,10 @@ relayout publishes one transform transaction and never masquerades as user zoom.
 For stills, the viewer-owned presentation image is the geometry authority even
 before GPU upload; renderer residency never supplies stale dimensions for a new
 surface. Initial crop framing is therefore committed against the real render
-target before the first draw, with no post-submission correction frame.
+target before the first draw, with no post-submission correction frame. The
+straighten cover is computed whenever viewer geometry exists, regardless of
+whether the texture is a cold GPU miss or resident hit; still upload changes
+residency only and cannot mutate the committed transform.
 
 Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
 with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,

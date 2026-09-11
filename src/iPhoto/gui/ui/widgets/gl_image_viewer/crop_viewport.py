@@ -29,12 +29,10 @@ def texture_dimensions(viewer: GLImageViewer) -> tuple[int, int]:
     size fallback.
     """
     image = viewer._image
-    if (
-        not viewer._using_video_frame_source
-        and image is not None
-        and not image.isNull()
-    ):
-        return (image.width(), image.height())
+    if not viewer._using_video_frame_source:
+        if image is not None and not image.isNull():
+            return (image.width(), image.height())
+        return (0, 0)
     if viewer._renderer is not None and viewer._renderer.has_texture():
         return viewer._renderer.texture_size()
     return (0, 0)
@@ -61,19 +59,16 @@ def rotation_parameters(viewer: GLImageViewer) -> tuple[float, int, bool]:
     return straighten, rotate_steps, flip
 
 
-def update_cover_scale(
-    viewer: GLImageViewer, straighten_deg: float, rotate_steps: int
-) -> None:
+def update_cover_scale(viewer: GLImageViewer, straighten_deg: float) -> None:
     """Compute the rotation cover scale and forward it to the transform controller."""
-    if not viewer._renderer or not viewer._renderer.has_texture():
-        viewer._transform_controller.set_image_cover_scale(1.0)
-        return
-
     if abs(straighten_deg) <= 1e-5:
         viewer._transform_controller.set_image_cover_scale(1.0)
         return
 
     display_w, display_h = display_texture_dimensions(viewer)
+    if display_w <= 0 or display_h <= 0:
+        viewer._transform_controller.set_image_cover_scale(1.0)
+        return
     rotation_cover_scale = compute_rotation_cover_scale(
         (display_w, display_h),
         straighten_deg,
@@ -100,7 +95,7 @@ def update_crop_perspective_state(viewer: GLImageViewer) -> None:
         flip,
         new_crop_values=logical_values,
     )
-    update_cover_scale(viewer, straighten, rotate_steps)
+    update_cover_scale(viewer, straighten)
 
 
 # ── Crop framing helpers ───────────────────────────────────────────────

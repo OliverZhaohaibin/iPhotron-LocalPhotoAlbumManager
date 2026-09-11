@@ -168,6 +168,16 @@ class _PendingStillActivation:
     purpose: Literal["presentation", "promotion", "rollback"]
 
 
+@dataclass(frozen=True, slots=True)
+class _StillFirstFrameTransformSnapshot:
+    generation: int
+    cover_scale: float
+    effective_scale: float
+    zoom_factor: float
+    pan_x: float
+    pan_y: float
+
+
 def _crop_preview_adjustments(adjustments: Mapping[str, float]) -> dict[str, float]:
     """Return adjustments that expose the full transformed source in Crop mode."""
 
@@ -313,6 +323,9 @@ class GLImageViewer(QRhiWidget):
         self._still_generation_by_key: dict[object, int] = {}
         self._pending_still_activation: _PendingStillActivation | None = None
         self._rollback_submission_pending: tuple[object, int] | None = None
+        self._pending_first_frame_transform: (
+            _StillFirstFrameTransformSnapshot | None
+        ) = None
         self._still_presentation_pending = False
         self._content_revision = 0
         self._rendered_content_identity: tuple[str, object, int, int] | None = None
@@ -634,6 +647,13 @@ class GLImageViewer(QRhiWidget):
             return
 
         reset_view = self._viewport_reset_pending
+        if reset_view and not self._using_video_frame_source:
+            image = self._image
+            if image is None or image.isNull():
+                # A reset belongs to the incoming still geometry. Keep it
+                # pending rather than consuming it against an empty/old GPU
+                # texture; set_image() will schedule the next render.
+                return
         self._viewport_relayout_pending = False
         self._viewport_reset_pending = False
         self._last_layout_target_size = target_size
@@ -642,8 +662,8 @@ class GLImageViewer(QRhiWidget):
             emit_zoom=False,
             force_notify=True,
         ):
-            straighten, rotate_steps, _ = self._rotation_parameters()
-            self._update_cover_scale(straighten, rotate_steps)
+            straighten, _, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten)
 
             if reset_view:
                 self.reset_zoom()
@@ -669,13 +689,53 @@ class GLImageViewer(QRhiWidget):
             target_height=target_size.height(),
         )
         if reset_view and not self._using_video_frame_source:
+            cover_scale = self._transform_controller.get_image_cover_scale()
+            effective_scale = self._transform_controller.get_effective_scale()
+            zoom_factor = self._transform_controller.get_zoom_factor()
+            pan = self._transform_controller.get_pan_pixels()
+            crop_rect = self._compute_crop_rect_pixels()
+            center_error_x = 0.0
+            center_error_y = 0.0
+            if crop_rect is not None:
+                viewport_center = self._transform_controller.convert_image_to_viewport(
+                    crop_rect.center().x(),
+                    crop_rect.center().y(),
+                )
+                center_error_x = viewport_center.x() - self.width() * 0.5
+                center_error_y = viewport_center.y() - self.height() * 0.5
+            if (
+                pending_activation is not None
+                and pending_activation.purpose == "presentation"
+            ):
+                gpu_residency_state = "resident_activation_pending"
+            elif self._texture_manager.needs_texture_upload():
+                gpu_residency_state = "cold_upload_pending"
+            elif self._renderer is not None and self._renderer.has_texture():
+                gpu_residency_state = "active"
+            else:
+                gpu_residency_state = "unavailable"
+            self._pending_first_frame_transform = _StillFirstFrameTransformSnapshot(
+                generation=geometry_generation,
+                cover_scale=cover_scale,
+                effective_scale=effective_scale,
+                zoom_factor=zoom_factor,
+                pan_x=pan.x(),
+                pan_y=pan.y(),
+            )
             emit_detail_event(
                 "still_first_frame_transform_committed",
                 generation=geometry_generation,
                 target_width=target_size.width(),
                 target_height=target_size.height(),
-                cover_scale=self._transform_controller.get_image_cover_scale(),
-                effective_scale=self._transform_controller.get_effective_scale(),
+                geometry_source="viewer_image",
+                gpu_residency_state=gpu_residency_state,
+                cover_scale=cover_scale,
+                effective_scale=effective_scale,
+                zoom_factor=zoom_factor,
+                pan_x=pan.x(),
+                pan_y=pan.y(),
+                center_error_x=center_error_x,
+                center_error_y=center_error_y,
             )
         self._emit_crop_viewport_relayout(target_size)
 
@@ -790,6 +850,8 @@ class GLImageViewer(QRhiWidget):
             mode can reuse the detail view framing without a visible jump.
         """
         promotion = self._still_lod_promotion
+        if image_source != self.current_image_source():
+            self._pending_first_frame_transform = None
         if promotion is not None and image_source != promotion.key:
             self.cancel_still_lod_promotion(reason="asset_change")
         self._video_frame = None
@@ -1141,6 +1203,7 @@ class GLImageViewer(QRhiWidget):
         self._pending_warm_surfaces.clear()
         self._pending_still_activation = None
         self._rollback_submission_pending = None
+        self._pending_first_frame_transform = None
         self._still_surface_refs.clear()
         self._still_generation_by_key.clear()
         tracker = self._surface_residency_tracker
@@ -1361,8 +1424,8 @@ class GLImageViewer(QRhiWidget):
             final_rotation,
             request_update=False,
         )
-        straighten, rotate_steps, _ = self._rotation_parameters()
-        self._update_cover_scale(straighten, rotate_steps)
+        straighten, _, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten)
         if self._pending_video_reset_view:
             self.reset_zoom()
         return _PendingVideoUploadState(
@@ -1725,8 +1788,8 @@ class GLImageViewer(QRhiWidget):
         elif self._auto_crop_center_locked and not self._crop_controller.is_active():
             self._reapply_locked_crop_center()
         if self._renderer is not None and self._renderer.has_texture():
-            straighten, rotate_steps, _ = self._rotation_parameters()
-            self._update_cover_scale(straighten, rotate_steps)
+            straighten, _, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten)
         if request_update:
             self.update()
         self.viewTransformChanged.emit()
@@ -1752,8 +1815,8 @@ class GLImageViewer(QRhiWidget):
             return
         self._fill_viewport_enabled = target
         self._transform_controller.set_fill_viewport_enabled(target)
-        straighten, rotate_steps, _ = self._rotation_parameters()
-        self._update_cover_scale(straighten, rotate_steps)
+        straighten, _, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten)
         self.update()
 
     def set_transparent_rounded_clip(self, radius: float | None) -> None:
@@ -2222,14 +2285,8 @@ class GLImageViewer(QRhiWidget):
                 (time.perf_counter() - upload_started) * 1000.0,
                 path=self._still_source_name(),
             )
-            straighten, rotate_steps, _ = self._rotation_parameters()
-            self._update_cover_scale(straighten, rotate_steps)
             current_key = self.current_image_source()
-            emit_detail_event(
-                "gpu_upload",
-                generation=self._still_generation_by_key.get(current_key, 0),
-                key=str(current_key),
-            )
+            self._emit_still_gpu_upload(current_key)
         elif self._pending_warm_surfaces and self._still_lod_promotion is None:
             warm = self._pending_warm_surfaces.pop(0)
             if self._warm_still_with_tracking(warm):
@@ -2438,14 +2495,8 @@ class GLImageViewer(QRhiWidget):
                 (time.perf_counter() - upload_started) * 1000.0,
                 path=self._still_source_name(),
             )
-            straighten, rotate_steps, _ = self._rotation_parameters()
-            self._update_cover_scale(straighten, rotate_steps)
             current_key = self.current_image_source()
-            emit_detail_event(
-                "gpu_upload",
-                generation=self._still_generation_by_key.get(current_key, 0),
-                key=str(current_key),
-            )
+            self._emit_still_gpu_upload(current_key)
         elif self._pending_warm_surfaces and self._still_lod_promotion is None:
             warm = self._pending_warm_surfaces.pop(0)
             if self._warm_still_with_tracking(warm):
@@ -2739,6 +2790,31 @@ class GLImageViewer(QRhiWidget):
             self._release_upload_staging(key)
             raise
 
+    def _emit_still_gpu_upload(self, key: object) -> None:
+        generation = self._still_generation_by_key.get(key, 0)
+        cover_scale = self._transform_controller.get_image_cover_scale()
+        effective_scale = self._transform_controller.get_effective_scale()
+        emit_detail_event(
+            "gpu_upload",
+            generation=generation,
+            key=str(key),
+            cover_scale=cover_scale,
+            effective_scale=effective_scale,
+        )
+        snapshot = self._pending_first_frame_transform
+        if snapshot is None or snapshot.generation != generation:
+            return
+        if abs(snapshot.cover_scale - cover_scale) <= 1e-4:
+            return
+        emit_detail_event(
+            "still_first_frame_cover_drift",
+            generation=generation,
+            cover_before=snapshot.cover_scale,
+            cover_after=cover_scale,
+            effective_before=snapshot.effective_scale,
+            effective_after=effective_scale,
+        )
+
     def _warm_still_with_tracking(self, surface: DecodedSurface) -> bool:
         queued = self._texture_manager.warm_still_texture(
             surface.decode_key,
@@ -2853,6 +2929,9 @@ class GLImageViewer(QRhiWidget):
                 )
                 self.stillFrameSubmitted.emit(identity, serial)
                 self.stillFramePresented.emit(identity)
+                snapshot = self._pending_first_frame_transform
+                if snapshot is not None and snapshot.generation == serial:
+                    self._pending_first_frame_transform = None
                 if promotion_submitted and self._still_lod_promotion is promotion:
                     self._still_lod_promotion = None
                     self._trim_still_surface_refs()
@@ -2921,8 +3000,8 @@ class GLImageViewer(QRhiWidget):
     def _rotation_parameters(self) -> tuple[float, int, bool]:
         return crop_viewport.rotation_parameters(self)
 
-    def _update_cover_scale(self, straighten_deg: float, rotate_steps: int) -> None:
-        crop_viewport.update_cover_scale(self, straighten_deg, rotate_steps)
+    def _update_cover_scale(self, straighten_deg: float) -> None:
+        crop_viewport.update_cover_scale(self, straighten_deg)
 
 
     # --------------------------- Viewport helpers ---------------------------

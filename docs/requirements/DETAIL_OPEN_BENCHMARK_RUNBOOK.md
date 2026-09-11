@@ -138,6 +138,10 @@ wheel 期间 queued/staging/resident promotion 必须记录 `lod_activation_held
 与 rollback key 在 CPU/GPU residency 中均不得被驱逐或复用。rollback 失败必须继续绘制
 当前有效 texture，禁止调用 texture-lost 路径暴露 backdrop。首次裁剪 still 必须在首个
 submission 前记录 `still_first_frame_transform_committed`，之后不得再发生 framing 修正。
+Windows cold miss 与同进程 warm resident reopen 的 cover、zoom、effective scale、pan
+必须一致；对应 `gpu_upload` 不得改变 pre-draw transform，出现
+`still_first_frame_cover_drift` 即失败。使用 collector 的 `F`/`W` marker 和
+`tools/analyze_windows_crop_framing.py` 保存结构化对比结果。
 `tools/detail_benchmark.py` schema 2
 兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
 

@@ -121,6 +121,28 @@ def test_uncropped_media_keeps_full_frame_fit_after_target_change(qapp) -> None:
     assert image_rect.height() <= viewer.height() + 1.0
 
 
+def test_still_reset_intent_is_not_consumed_before_geometry_exists(qapp) -> None:
+    viewer = GLImageViewer()
+    viewer._image = None
+    viewer._using_video_frame_source = False
+    viewer._renderer = type(
+        "StaleRenderer",
+        (),
+        {
+            "has_texture": staticmethod(lambda: True),
+            "texture_size": staticmethod(lambda: (1600, 900)),
+        },
+    )()
+    viewer._viewport_relayout_pending = True
+    viewer._viewport_reset_pending = True
+
+    viewer._sync_view_transform_for_render_target(QSize(1200, 800))
+
+    assert viewer._viewport_relayout_pending is True
+    assert viewer._viewport_reset_pending is True
+    assert viewer._last_layout_target_size.isEmpty()
+
+
 def test_resize_notifies_observers_only_after_real_target_is_synchronised(qapp) -> None:
     viewer = _make_cropped_viewer(
         {"Crop_CX": 0.5, "Crop_CY": 0.5, "Crop_W": 1.0, "Crop_H": 1.0}
@@ -393,6 +415,72 @@ def test_viewport_sync_preserves_manual_transform_without_auto_crop_lock(qapp) -
 
     assert viewer._transform_controller.get_zoom_factor() == pytest.approx(2.25)
     assert viewer._transform_controller.get_pan_pixels() == QPointF(37.0, -19.0)
+
+
+@pytest.mark.parametrize("dpr", [1.0, 1.25, 1.5])
+@pytest.mark.parametrize("rotate_steps", [0, 1, 2, 3])
+@pytest.mark.parametrize("straighten", [-17.0, 17.0])
+def test_cold_and_resident_first_frame_use_identical_cover_framing(
+    qapp,
+    mocker,
+    dpr: float,
+    rotate_steps: int,
+    straighten: float,
+) -> None:
+    adjustments = {
+        "Crop_CX": 0.70,
+        "Crop_CY": 0.62,
+        "Crop_W": 0.55,
+        "Crop_H": 0.58,
+        "Crop_Straighten": straighten,
+        "Crop_Rotate90": float(rotate_steps),
+        "Perspective_Vertical": 0.2,
+        "Perspective_Horizontal": -0.15,
+        "Crop_FlipH": 1.0,
+    }
+    snapshots = []
+    target = QSize(round(1200 * dpr), round(800 * dpr))
+
+    for resident in (False, True):
+        viewer = _make_cropped_viewer(adjustments)
+        viewer._renderer = mocker.Mock()
+        viewer._renderer.has_texture.return_value = resident
+        viewer._renderer.texture_size.return_value = (1600, 900)
+        viewer._update_crop_perspective_state()
+        viewer.request_viewport_relayout(reset_view=True)
+        _publish_target_and_sync(viewer, (target.width(), target.height()))
+        controller = viewer._transform_controller
+        crop_rect = viewer._compute_crop_rect_pixels()
+        assert crop_rect is not None
+        center = controller.convert_image_to_viewport(
+            crop_rect.center().x(),
+            crop_rect.center().y(),
+        )
+        before_upload = (
+            controller.get_image_cover_scale(),
+            controller.get_zoom_factor(),
+            controller.get_effective_scale(),
+            controller.get_pan_pixels().x(),
+            controller.get_pan_pixels().y(),
+        )
+        assert before_upload[0] > 1.0
+        assert center.x() == pytest.approx(viewer.width() * 0.5, abs=1.0)
+        assert center.y() == pytest.approx(viewer.height() * 0.5, abs=1.0)
+
+        # A cold upload becoming resident must not modify presentation math.
+        viewer._renderer.has_texture.return_value = True
+        viewer._update_cover_scale(straighten)
+        after_upload = (
+            controller.get_image_cover_scale(),
+            controller.get_zoom_factor(),
+            controller.get_effective_scale(),
+            controller.get_pan_pixels().x(),
+            controller.get_pan_pixels().y(),
+        )
+        assert after_upload == pytest.approx(before_upload)
+        snapshots.append(after_upload)
+
+    assert snapshots[1] == pytest.approx(snapshots[0])
 
 
 def test_fullscreen_exit_reset_restores_crop_fit_after_lock_was_cleared(qapp) -> None:

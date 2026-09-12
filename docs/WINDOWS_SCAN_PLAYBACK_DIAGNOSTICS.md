@@ -102,16 +102,32 @@ Fullscreen traces must keep one transaction id from
 `fullscreen_updates_resumed`. Updates must resume as soon as the synchronous
 chrome/layout/backdrop mutation and `showFullScreen()` call return; they must
 not remain disabled while Windows completes the asynchronous native state
-transition. After `fullscreen_native_state_confirmed`, the trace must record
-`fullscreen_first_frame_requested` and then either a matching active image/video
-`fullscreen_first_frame_submitted`, or `fullscreen_first_frame_timeout` after
-the bounded 500 ms fail-open. That terminal releases the fullscreen LOD gate
-and only then starts the playback-resume delay. `fullscreen_update_requested`
-remains useful supporting evidence but is not a media-frame fence and does not
-finish the transaction. A preflight failure resumes suspended playback and
+transition. `fullscreen_snapshot_captured` (or the opaque fallback) must precede
+the native request and remain above the player through the 220 ms geometry
+animation. After `fullscreen_native_state_confirmed`, the trace must record two
+content-qualified `fullscreen_media_frame_submitted` events with ordinal 1 then
+2 at the same target. Pipeline-not-ready, suppressed, no-texture and clear-only
+submissions can only produce `fullscreen_media_candidate_rejected`; raw
+`frameSubmitted`, `surfaceCompositionSubmitted`, and `UpdateRequest` are not
+media-frame fences. The overlay hands off only after both stable media and
+animation completion. A 500 ms first-frame timeout resumes video beneath the
+overlay and waits a further 1000 ms; a 250 ms second-frame timeout may hand off
+the already qualified first frame. Every timeout terminal must record
+`automatic_lod=false`. A preflight failure resumes suspended playback and
 re-raises without creating a window transaction; an in-transaction
 preparation/native failure instead emits `fullscreen_enter_rollback`, restores
-painting, and cancels the gate.
+painting, removes the overlay, and cancels the gate.
+
+Validate each collector directory or ZIP with:
+
+```powershell
+python .\tools\analyze_windows_fullscreen_transition.py `
+  "$HOME\Desktop\iPhoto-windows-scan-playback-<timestamp>.zip"
+```
+
+The analyzer checks transaction ordering, consecutive targets, timeout LOD
+policy, premature promotion work, and playback timing. It cannot observe a DWM
+present fence, so record the packaged 30-cycle matrix as the final evidence.
 
 Also test a playing video with `enter→exit→enter→exit`, keeping every interval
 below 120 ms. Stale resume callbacks must not play during an intermediate state;

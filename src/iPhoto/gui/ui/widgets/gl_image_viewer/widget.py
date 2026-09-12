@@ -278,6 +278,9 @@ class GLImageViewer(QRhiWidget):
     stillLodRollbackFailed = Signal(object, int)
     """Emitted when a committed-LOD restore cannot activate its resident key."""
 
+    fullscreenViewportFrameSubmitted = Signal(int, int, QSize, object)
+    """Emitted only after a requested fullscreen-target media draw submits."""
+
     videoFramePresented = Signal(int, int)
     """Emitted after a newly uploaded video frame is submitted for composition."""
 
@@ -325,6 +328,10 @@ class GLImageViewer(QRhiWidget):
         self._rollback_submission_pending: tuple[object, int] | None = None
         self._pending_first_frame_transform: (
             _StillFirstFrameTransformSnapshot | None
+        ) = None
+        self._fullscreen_frame_request: tuple[int, int] | None = None
+        self._fullscreen_frame_candidate: (
+            tuple[int, int, QSize, object] | None
         ) = None
         self._still_presentation_pending = False
         self._content_revision = 0
@@ -626,6 +633,30 @@ class GLImageViewer(QRhiWidget):
             self._viewport_reset_pending or bool(reset_view)
         )
         self.update()
+
+    def request_fullscreen_viewport_frame(
+        self,
+        transition_id: int,
+        ordinal: int,
+    ) -> None:
+        """Arm one content-qualified draw against the next authoritative target."""
+
+        token = (int(transition_id), int(ordinal))
+        if min(token) <= 0:
+            raise ValueError("fullscreen viewport token values must be positive")
+        self._fullscreen_frame_request = token
+        self._fullscreen_frame_candidate = None
+        self.request_viewport_relayout()
+
+    def cancel_fullscreen_viewport_frame(self, transition_id: int | None = None) -> None:
+        request = self._fullscreen_frame_request
+        candidate = self._fullscreen_frame_candidate
+        if transition_id is not None:
+            owner = request[0] if request is not None else candidate[0] if candidate else None
+            if owner != int(transition_id):
+                return
+        self._fullscreen_frame_request = None
+        self._fullscreen_frame_candidate = None
 
     def _sync_view_transform_for_render_target(self, output_size: QSize) -> None:
         """Synchronise crop-aware zoom and pan with *output_size* once.
@@ -2116,6 +2147,7 @@ class GLImageViewer(QRhiWidget):
         self._content_revision = 0
         self._rendered_content_identity = None
         self._last_composed_content_identity = None
+        self._fullscreen_frame_candidate = None
         if self._runtime_ready:
             source = self._texture_manager.get_current_image_source()
             if source is not None and not self._using_video_frame_source:
@@ -2125,6 +2157,12 @@ class GLImageViewer(QRhiWidget):
 
     def render(self, cb) -> None:  # type: ignore[override]
         """QRhiWidget override: render the current image/video frame."""
+        # A candidate belongs to exactly one render invocation.  Clear an
+        # earlier candidate before any clear-only/early-return path so that a
+        # later ``frameSubmitted`` cannot accidentally acknowledge pixels
+        # drawn by a previous frame.
+        if self._fullscreen_frame_request is not None:
+            self._fullscreen_frame_candidate = None
         self.complete_runtime()
         if not self._uses_raw_gl:
             self._render_rhi(cb)
@@ -2402,6 +2440,7 @@ class GLImageViewer(QRhiWidget):
         if staged_video_upload is not None and suppressed_video_generation is not None:
             self._commit_pending_video_source(staged_video_upload)
             self.complete_presentation_transition(suppressed_video_generation)
+        self._record_fullscreen_frame_candidate(output_size)
         self._queue_first_frame_ready()
         rendered_identity = self._take_pending_content_submission()
         if rendered_identity is not None:
@@ -2571,6 +2610,7 @@ class GLImageViewer(QRhiWidget):
             self._commit_pending_video_source(staged_video_upload)
             self.complete_presentation_transition(suppressed_video_generation)
 
+        self._record_fullscreen_frame_candidate(output_size)
         self._queue_first_frame_ready()
         rendered_identity = self._take_pending_content_submission()
         if rendered_identity is not None:
@@ -2602,6 +2642,55 @@ class GLImageViewer(QRhiWidget):
                 self._content_revision,
             )
         return None
+
+    def _record_fullscreen_frame_candidate(self, output_size: QSize) -> None:
+        request = self._fullscreen_frame_request
+        if request is None:
+            return
+        target = QSize(output_size)
+        if (
+            target.isEmpty()
+            or self._viewport_relayout_pending
+            or target != self._last_layout_target_size
+            or self._renderer is None
+            or not self._renderer.has_texture()
+            or self._presentation_is_suppressed()
+        ):
+            return
+        if self._using_video_frame_source:
+            if self._video_frame_content_serial <= 0:
+                return
+            media_kind = "video"
+            identity: object = (
+                "video",
+                self._video_frame_content_generation,
+                self._video_frame_content_serial,
+            )
+        else:
+            source = self._texture_manager.get_current_image_source()
+            if source is None:
+                return
+            media_kind = "still"
+            identity = (
+                "still",
+                source,
+                self._still_generation_by_key.get(source, 0),
+            )
+        transition_id, ordinal = request
+        self._fullscreen_frame_candidate = (
+            transition_id,
+            ordinal,
+            target,
+            identity,
+        )
+        emit_detail_event(
+            "fullscreen_media_candidate_drawn",
+            generation=0,
+            transition_id=transition_id,
+            ordinal=ordinal,
+            target=(target.width(), target.height()),
+            media_kind=media_kind,
+        )
 
     def _prepare_still_lod_promotion_for_render(self) -> None:
         promotion = self._still_lod_promotion
@@ -2894,6 +2983,26 @@ class GLImageViewer(QRhiWidget):
             self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
+        request = getattr(self, "_fullscreen_frame_request", None)
+        candidate = getattr(self, "_fullscreen_frame_candidate", None)
+        if isinstance(request, tuple) and len(request) == 2:
+            if (
+                isinstance(candidate, tuple)
+                and len(candidate) == 4
+                and candidate[0] == request[0]
+                and candidate[1] == request[1]
+            ):
+                self._fullscreen_frame_request = None
+                self._fullscreen_frame_candidate = None
+                self.fullscreenViewportFrameSubmitted.emit(*candidate)
+            else:
+                emit_detail_event(
+                    "fullscreen_media_candidate_rejected",
+                    generation=0,
+                    transition_id=request[0],
+                    ordinal=request[1],
+                    reason="clear_or_stale_submission",
+                )
         rollback = getattr(self, "_rollback_submission_pending", None)
         if (
             isinstance(rollback, tuple)

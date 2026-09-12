@@ -381,6 +381,23 @@ class TestInitCoverTracking:
         assert controller._pending_lod_evaluation.reason == "resize"
         assert controller._lod_timer.interval() == _LOD_RESIZE_SETTLE_MS
 
+    def test_degraded_fullscreen_handoff_does_not_schedule_automatic_lod(
+        self,
+        controller,
+    ):
+        controller.begin_fullscreen_viewport_transition()
+        controller._pending_zoom_factor = 2.0
+        controller._schedule_lod_evaluation("resize")
+
+        controller.complete_fullscreen_viewport_transition(
+            reason="stable_frame_timeout",
+            allow_automatic_lod=False,
+        )
+
+        assert controller._fullscreen_lod_gate is False
+        assert controller._pending_lod_evaluation is None
+        assert not controller._lod_timer.isActive()
+
     def test_fullscreen_gate_cancels_inflight_lod_before_first_frame(
         self,
         controller,

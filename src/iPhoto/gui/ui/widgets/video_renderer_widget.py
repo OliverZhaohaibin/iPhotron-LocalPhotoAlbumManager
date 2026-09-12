@@ -289,6 +289,7 @@ class VideoRendererWidget(QRhiWidget):
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
     videoFramePresented = Signal(int, int)
+    fullscreenViewportFrameSubmitted = Signal(int, int, QSize, object)
     renderResourcesInvalidated = Signal()
     zoomChanged = Signal(float)
 
@@ -328,6 +329,10 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_content_revision = 0
         self._rendered_content_identity: tuple[int, int, int] | None = None
         self._last_composed_content_identity: tuple[int, int, int] | None = None
+        self._fullscreen_frame_request: tuple[int, int] | None = None
+        self._fullscreen_frame_candidate: (
+            tuple[int, int, QSize, object] | None
+        ) = None
         self._presentation_suppressed_generation: int | None = None
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
@@ -432,6 +437,28 @@ class VideoRendererWidget(QRhiWidget):
                 generation=generation,
                 renderer="video_renderer",
             )
+
+    def request_fullscreen_viewport_frame(
+        self,
+        transition_id: int,
+        ordinal: int,
+    ) -> None:
+        token = (int(transition_id), int(ordinal))
+        if min(token) <= 0:
+            raise ValueError("fullscreen viewport token values must be positive")
+        self._fullscreen_frame_request = token
+        self._fullscreen_frame_candidate = None
+        self.update()
+
+    def cancel_fullscreen_viewport_frame(self, transition_id: int | None = None) -> None:
+        request = self._fullscreen_frame_request
+        candidate = self._fullscreen_frame_candidate
+        if transition_id is not None:
+            owner = request[0] if request is not None else candidate[0] if candidate else None
+            if owner != int(transition_id):
+                return
+        self._fullscreen_frame_request = None
+        self._fullscreen_frame_candidate = None
 
     def _presentation_is_suppressed(self) -> bool:
         return getattr(self, "_presentation_suppressed_generation", None) is not None
@@ -808,6 +835,11 @@ class VideoRendererWidget(QRhiWidget):
 
     def render(self, cb) -> None:  # type: ignore[override]
         """Render the current video frame (or letterbox if no frame is present)."""
+        # Do not let a candidate from an earlier media draw survive a later
+        # clear-only render.  The QRhi submission callback must acknowledge
+        # the content produced by this invocation only.
+        if self._fullscreen_frame_request is not None:
+            self._fullscreen_frame_candidate = None
         if not self._initialized:
             # GPU pipeline not yet ready but we MUST still clear the render
             # target. Normal playback stays opaque; preview popups stay clear.
@@ -929,6 +961,7 @@ class VideoRendererWidget(QRhiWidget):
             self._frame_dirty = False
             self._current_frame = None
             self.complete_presentation_transition(suppressed_generation)
+        self._record_fullscreen_frame_candidate(output_size)
         self._queue_first_frame_ready()
         if self._frame_presentation_pending and not self._frame_dirty:
             self._frame_presentation_pending = False
@@ -943,6 +976,39 @@ class VideoRendererWidget(QRhiWidget):
         if not self._first_render_done:
             self._first_render_submission_pending = True
 
+    def _record_fullscreen_frame_candidate(self, output_size: QSize) -> None:
+        request = self._fullscreen_frame_request
+        target = QSize(output_size)
+        if (
+            request is None
+            or target.isEmpty()
+            or self._presentation_is_suppressed()
+            or not self._has_frame
+            or self._frame_dirty
+            or self._frame_content_serial <= 0
+        ):
+            return
+        transition_id, ordinal = request
+        identity = (
+            "video",
+            self._frame_content_generation,
+            self._frame_content_serial,
+        )
+        self._fullscreen_frame_candidate = (
+            transition_id,
+            ordinal,
+            target,
+            identity,
+        )
+        emit_detail_event(
+            "fullscreen_media_candidate_drawn",
+            generation=0,
+            transition_id=transition_id,
+            ordinal=ordinal,
+            target=(target.width(), target.height()),
+            media_kind="video",
+        )
+
     def _on_frame_submitted(self) -> None:
         """Publish draw acknowledgements after top-level composition submits."""
 
@@ -950,6 +1016,26 @@ class VideoRendererWidget(QRhiWidget):
             self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
+        request = getattr(self, "_fullscreen_frame_request", None)
+        candidate = getattr(self, "_fullscreen_frame_candidate", None)
+        if isinstance(request, tuple) and len(request) == 2:
+            if (
+                isinstance(candidate, tuple)
+                and len(candidate) == 4
+                and candidate[0] == request[0]
+                and candidate[1] == request[1]
+            ):
+                self._fullscreen_frame_request = None
+                self._fullscreen_frame_candidate = None
+                self.fullscreenViewportFrameSubmitted.emit(*candidate)
+            else:
+                emit_detail_event(
+                    "fullscreen_media_candidate_rejected",
+                    generation=0,
+                    transition_id=request[0],
+                    ordinal=request[1],
+                    reason="clear_or_stale_submission",
+                )
         identity = self._rendered_content_identity
         if identity is not None and identity != self._last_composed_content_identity:
             self._last_composed_content_identity = identity
@@ -1001,6 +1087,7 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_content_revision = 0
         self._rendered_content_identity = None
         self._last_composed_content_identity = None
+        self._fullscreen_frame_candidate = None
         self._current_frame = None
         self._frame_dirty = False
         self._has_frame = False

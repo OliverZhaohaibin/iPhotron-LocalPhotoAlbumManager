@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QPropertyAnimation,
+    QSize,
     QSizeF,
     Qt,
     QTimer,
@@ -176,6 +177,7 @@ class VideoArea(QWidget):
     surfaceFrameSubmitted = Signal(int, int)
     surfaceInvalidated = Signal(int, int)
     surfaceCompositionSubmitted = Signal()
+    fullscreenViewportFrameSubmitted = Signal(int, int, QSize, object)
     displaySizeChanged = Signal(QSizeF)
     SHORTCUT_VOLUME_STEP = 5
 
@@ -245,6 +247,7 @@ class VideoArea(QWidget):
             self._renderer: 0,
             self._edit_viewer: 0,
         }
+        self._fullscreen_frame_request: tuple[int, int] | None = None
         self._video_frame_dispatch_pending = False
         self._video_frame_dispatch_generation: int | None = None
         self._media_generation = 0
@@ -459,6 +462,14 @@ class VideoArea(QWidget):
         self._gpu_video_frame_presented_handler = (
             self._gpu_video_frame_presented_handlers.get(target_surface)
         )
+        if self._fullscreen_frame_request is not None:
+            request_fullscreen = getattr(
+                target_surface,
+                "request_fullscreen_viewport_frame",
+                None,
+            )
+            if callable(request_fullscreen):
+                request_fullscreen(*self._fullscreen_frame_request)
         if target:
             self._adjusted_first_frame_pending = True
             self._edit_viewer.set_adjustments(self._current_adjustments)
@@ -674,6 +685,32 @@ class VideoArea(QWidget):
             # The direct video renderer derives its fit from every render
             # target and therefore only needs another frame requested.
             self._renderer.update()
+
+    def request_fullscreen_viewport_frame(
+        self,
+        transition_id: int,
+        ordinal: int,
+    ) -> None:
+        token = (int(transition_id), int(ordinal))
+        if min(token) <= 0:
+            raise ValueError("fullscreen viewport token values must be positive")
+        self._fullscreen_frame_request = token
+        surface = self._surface_stack.currentWidget()
+        request_frame = getattr(surface, "request_fullscreen_viewport_frame", None)
+        if callable(request_frame):
+            request_frame(*token)
+
+    def cancel_fullscreen_viewport_frame(self, transition_id: int | None = None) -> None:
+        token = self._fullscreen_frame_request
+        if transition_id is not None and (
+            token is None or token[0] != int(transition_id)
+        ):
+            return
+        self._fullscreen_frame_request = None
+        for surface in (self._edit_viewer, self._renderer):
+            cancel = getattr(surface, "cancel_fullscreen_viewport_frame", None)
+            if callable(cancel):
+                cancel(transition_id)
 
     def zoom_in(self) -> None:
         if self._adjusted_preview_enabled:
@@ -1852,12 +1889,46 @@ class VideoArea(QWidget):
                 ):
                     owner.surfaceCompositionSubmitted.emit()
 
+            def _handle_fullscreen_frame(
+                transition_id: int,
+                ordinal: int,
+                target_size: QSize,
+                identity: object,
+                *,
+                bound_surface=surface_ref,
+            ) -> None:
+                owner = owner_ref()
+                child = bound_surface()
+                token = (int(transition_id), int(ordinal))
+                if (
+                    owner is None
+                    or child is None
+                    or owner._surface_stack.currentWidget() is not child
+                    or owner._fullscreen_frame_request != token
+                ):
+                    return
+                owner._fullscreen_frame_request = None
+                owner.fullscreenViewportFrameSubmitted.emit(
+                    transition_id,
+                    ordinal,
+                    target_size,
+                    identity,
+                )
+
             self._surface_lifecycle_handlers.extend(
-                (_handle_ready, _handle_invalidated, _handle_composed)
+                (
+                    _handle_ready,
+                    _handle_invalidated,
+                    _handle_composed,
+                    _handle_fullscreen_frame,
+                )
             )
             surface.firstFrameReady.connect(_handle_ready)
             surface.renderResourcesInvalidated.connect(_handle_invalidated)
             surface.frameSubmitted.connect(_handle_composed)
+            surface.fullscreenViewportFrameSubmitted.connect(
+                _handle_fullscreen_frame
+            )
 
     def _on_surface_first_frame_ready(self, surface: QWidget) -> None:
         """Publish readiness only for the currently visible QRhi child."""

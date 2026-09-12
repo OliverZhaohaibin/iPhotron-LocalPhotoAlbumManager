@@ -114,6 +114,38 @@ def test_gpu_upload_reports_first_frame_cover_drift(qapp, mocker) -> None:
     )
 
 
+def test_fullscreen_barrier_rejects_clear_and_accepts_matching_still_draw(
+    qapp,
+    mocker,
+) -> None:
+    viewer = GLImageViewer()
+    viewer.resize(320, 180)
+    viewer._renderer = mocker.Mock()
+    viewer._renderer.has_texture.return_value = True
+    viewer._texture_manager = mocker.Mock()
+    viewer._texture_manager.get_current_image_source.return_value = "still-a"
+    viewer._still_generation_by_key["still-a"] = 4
+    viewer._image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+    viewer._last_layout_target_size = QSize(640, 360)
+    viewer._viewport_relayout_pending = False
+    submitted = QSignalSpy(viewer.fullscreenViewportFrameSubmitted)
+
+    viewer.request_fullscreen_viewport_frame(9, 1)
+    viewer._on_frame_submitted()
+
+    assert submitted.count() == 0
+    assert viewer._fullscreen_frame_request == (9, 1)
+
+    viewer._viewport_relayout_pending = False
+    viewer._last_layout_target_size = QSize(640, 360)
+    viewer._record_fullscreen_frame_candidate(QSize(640, 360))
+    viewer._on_frame_submitted()
+
+    assert submitted.count() == 1
+    assert submitted.at(0)[0:3] == [9, 1, QSize(640, 360)]
+    assert viewer._fullscreen_frame_request is None
+
+
 def test_gl_image_viewer_maps_image_geometry_before_texture_upload(qapp) -> None:
     viewer = GLImageViewer()
     viewer.resize(420, 320)
@@ -227,6 +259,13 @@ def test_raw_gl_suppression_clears_without_drawing_or_mutating_residency() -> No
     viewer._renderer.has_texture.return_value = True
     viewer._pending_still_activation = "new-still"
     viewer._pending_warm_surfaces = ["neighbor"]
+    viewer._fullscreen_frame_request = (7, 1)
+    viewer._fullscreen_frame_candidate = (
+        7,
+        1,
+        QSize(320, 240),
+        ("still", "old-still", 4),
+    )
     target = Mock()
     target.pixelSize.return_value = QSize(320, 240)
     viewer.renderTarget.return_value = target
@@ -242,6 +281,7 @@ def test_raw_gl_suppression_clears_without_drawing_or_mutating_residency() -> No
     assert viewer._pending_still_activation == "new-still"
     assert viewer._pending_warm_surfaces == ["neighbor"]
     assert viewer._rendered_content_identity is None
+    assert viewer._fullscreen_frame_candidate is None
 
 
 def test_rhi_suppression_clears_without_drawing_or_consuming_new_surface() -> None:

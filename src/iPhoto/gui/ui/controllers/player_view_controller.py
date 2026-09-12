@@ -1883,18 +1883,40 @@ class PlayerViewController(QObject):
             generation=self._request_generation,
         )
 
-    def complete_fullscreen_viewport_transition(self, *, reason: str) -> None:
+    def request_fullscreen_viewport_frame(
+        self,
+        transition_id: int,
+        ordinal: int,
+    ) -> None:
+        surface = self._player_stack.currentWidget()
+        request_frame = getattr(surface, "request_fullscreen_viewport_frame", None)
+        if callable(request_frame):
+            request_frame(int(transition_id), int(ordinal))
+
+    def complete_fullscreen_viewport_transition(
+        self,
+        *,
+        reason: str,
+        allow_automatic_lod: bool = True,
+    ) -> None:
         if not self._fullscreen_lod_gate:
             return
         self._fullscreen_lod_gate = False
         should_schedule = self._fullscreen_resize_pending
         self._fullscreen_resize_pending = False
+        for surface in (self._image_viewer, self._video_area):
+            cancel_frame = getattr(surface, "cancel_fullscreen_viewport_frame", None)
+            if callable(cancel_frame):
+                cancel_frame()
         emit_detail_event(
             "fullscreen_lod_gate_released",
             generation=self._request_generation,
             reason=reason,
+            automatic_lod=bool(allow_automatic_lod),
         )
-        if not should_schedule:
+        if not should_schedule or not allow_automatic_lod:
+            self._pending_lod_evaluation = None
+            self._lod_timer.stop()
             return
         if self._pending_lod_evaluation is not None:
             delay_override = (
@@ -1915,6 +1937,10 @@ class PlayerViewController(QObject):
         self._lod_timer.stop()
         self._cancel_lod_submission_wait()
         self._lod_blocked_by_failed_rollback = False
+        for surface in (self._image_viewer, self._video_area):
+            cancel_frame = getattr(surface, "cancel_fullscreen_viewport_frame", None)
+            if callable(cancel_frame):
+                cancel_frame()
         emit_detail_event(
             "fullscreen_lod_gate_released",
             generation=self._request_generation,

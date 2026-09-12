@@ -50,7 +50,18 @@ class ImmersiveDetailPort(Protocol):
 
     def begin_fullscreen_viewport_transition(self) -> None: ...
 
-    def complete_fullscreen_viewport_transition(self, *, reason: str) -> None: ...
+    def request_fullscreen_viewport_frame(
+        self,
+        transition_id: int,
+        ordinal: int,
+    ) -> None: ...
+
+    def complete_fullscreen_viewport_transition(
+        self,
+        *,
+        reason: str,
+        allow_automatic_lod: bool = True,
+    ) -> None: ...
 
     def cancel_fullscreen_viewport_transition(self) -> None: ...
 

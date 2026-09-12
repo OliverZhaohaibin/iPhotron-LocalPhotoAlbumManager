@@ -65,6 +65,15 @@ def test_texture_origin_y_flip_is_backend_controlled() -> None:
         ), "Crop math must use the same world-up convention as ViewTransformController"
 
 
+def test_view_transform_scale_has_one_shader_owner() -> None:
+    """CPU effective scale reaches both shaders without a second cover divisor."""
+
+    for shader in (_shader_source(), _rhi_shader_source()):
+        assert "uImgScale" not in shader
+        assert "safeImgScale" not in shader
+        assert "screenVector /= " not in shader
+
+
 def test_definition_uses_explicit_mipmap_availability() -> None:
     """RGBA video fallbacks keep LOD Definition while still surfaces use base-level taps."""
 

@@ -711,6 +711,30 @@ class PlaybackCoordinator(QObject):
         self._resume_after_transition = False
         self._player_view.video_area.play()
 
+    def begin_fullscreen_viewport_transition(self) -> None:
+        self._player_view.begin_fullscreen_viewport_transition()
+
+    def request_fullscreen_viewport_frame(
+        self,
+        transition_id: int,
+        ordinal: int,
+    ) -> None:
+        self._player_view.request_fullscreen_viewport_frame(transition_id, ordinal)
+
+    def complete_fullscreen_viewport_transition(
+        self,
+        *,
+        reason: str,
+        allow_automatic_lod: bool = True,
+    ) -> None:
+        self._player_view.complete_fullscreen_viewport_transition(
+            reason=reason,
+            allow_automatic_lod=allow_automatic_lod,
+        )
+
+    def cancel_fullscreen_viewport_transition(self) -> None:
+        self._player_view.cancel_fullscreen_viewport_transition()
+
     def prepare_fullscreen_asset(self) -> bool:
         if self._asset_model.rowCount() <= 0:
             return False

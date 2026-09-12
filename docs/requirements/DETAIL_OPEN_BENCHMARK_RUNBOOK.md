@@ -45,13 +45,22 @@ Windows Playback fullscreen 样本还必须保留同一 `transition_id` 下的
 `fullscreen_updates_resumed`。播放中的视频随后应出现
 `fullscreen_playback_resumed`；若 native state event 丢失，必须出现有界的
 `fullscreen_enter_timeout`，并收敛为完成或 `fullscreen_enter_rollback`。确认前不得
-恢复顶层 updates，确认后每个 transaction 只允许一次 viewport relayout。恢复
-updates 时不得再显式调用 `window.update()`；Qt 隐式排队的最终请求必须记录为
-`fullscreen_update_requested` 并归属于同一 transaction。这只能证明至少观察到一个
-预期的最终请求；Qt 可能合并请求，timeline 不用于断言请求总数恰好为一。
-250 ms 内未观察到该事件时记录 `fullscreen_final_update_unobserved`，但不得回滚已确认的 fullscreen。
-两条路径最终都记录 `fullscreen_transition_finished` 及原因；`fullscreen_resize`
-只用于关联 DWM/Qt 事件数量，不得当作 terminal event。
+恢复 painting，但 `showFullScreen()` 同步调用返回时必须恢复原始 updates 状态，不能跨
+Windows 异步 native transition 冻结窗口；恢复时不得再显式调用 `window.update()`。
+确认后每个 transaction 只允许一次 authoritative viewport relayout，并记录
+`fullscreen_first_frame_requested`。Windows 的 snapshot/fallback overlay 在 QRhi resize、
+clear 和资源重建期间保持可见；原始 image `frameSubmitted` 与 video
+`surfaceCompositionSubmitted` 均不是 media-frame terminal。renderer 只有在真实媒体纹理已
+draw、relayout 已消费且 token/target/content identity 匹配时，才记录
+`fullscreen_media_candidate_drawn`，随后由 matching submission 产生 ordinal 1/2 的
+`fullscreen_media_frame_submitted`。两次提交必须位于同一稳定 target；target 或 active
+surface 变化会重新建立稳定性基线。只有第二次提交和 220 ms animation 都完成后，才记录
+`fullscreen_handoff_finished`、移除 overlay、释放 LOD gate，并从此开始播放恢复延迟及一次
+16 ms automatic resize LOD。500 ms 内没有首帧时记录
+`fullscreen_first_frame_timeout`，在 overlay 下恢复播放并额外等待 1000 ms；第二帧 250 ms
+超时或最终仍无媒体帧时必须以 `automatic_lod=false` 收敛。`fullscreen_update_requested`
+只用于关联 Qt 事件，不是 media-frame terminal，也不能证明请求数量。所有成功收敛路径最终
+记录 `fullscreen_transition_finished` 及原因。
 
 启动应用前指定结构化输出文件：
 
@@ -117,8 +126,30 @@ Phase 3 追加四组互斥采样，每组、每格式、每平台至少 30 次�
   texture 的 `gpu_upload` 增量也为 0。
 
 同时保留 `surface_cache_write/corrupt`、`gpu_cache_miss/upload/evict`、
-`lod_upgrade_requested/presented` 和 `context_rebuild`。主动 zoom 用独立 generation 统计；LOD 替换前的旧层
-继续显示，但只有新纹理实际 draw 后才能记录 `lod_upgrade_presented`。`tools/detail_benchmark.py` schema 2
+`still_zoom_changed`、`lod_upgrade_requested/staging/resident/activated/presented`
+和 `context_rebuild`。主动 zoom 使用 180 ms idle evaluation，authoritative resize/fullscreen
+target 使用 16 ms settle；活跃 zoom intent 不得被 resize 抢占。LOD planner 必须先计算
+desired `DetailDecodeKey`：相同 pending key 记录 `lod_plan_reused` 且不得递增 generation，
+不高于 committed key 时只取消不再需要的 promotion，不同且更高的 key 才记录
+`lod_plan_submitted` 并进入 decode。LOD
+替换必须先以 `purpose=lod_promotion` 非激活 staging，staging frame 继续绘制旧层，
+后续 frame 才能 activate/draw，且只有 matching window submission 后才能记录
+`lod_upgrade_presented`。stale/failed promotion 不得替换 active texture 或更新 render session。
+promotion 期间的 edit-state 更新必须覆盖 pending shader snapshot，不能在 activation
+时恢复旧 adjustment；取消尚未 flush 的 RHI promotion 必须释放对应 staging ownership，
+且 allocation failure 前后 controller current surface 必须与 committed render session 一致。
+wheel 期间 queued/staging/resident promotion 必须记录 `lod_activation_held`，idle planning
+后才可 release。已 activating/draw 的 B 不再正常回滚 A：先等待 B matching submission
+并记录 `lod_superseded_after_submit`，再按最新 desired key 规划 C。250 ms 异常 timeout
+才允许 rollback，且 `lod_rollback_frame_submitted` 必须先于任何 C staging；active、committed
+与 rollback key 在 CPU/GPU residency 中均不得被驱逐或复用。rollback 失败必须继续绘制
+当前有效 texture，禁止调用 texture-lost 路径暴露 backdrop。首次裁剪 still 必须在首个
+submission 前记录 `still_first_frame_transform_committed`，之后不得再发生 framing 修正。
+Windows cold miss 与同进程 warm resident reopen 的 cover、zoom、effective scale、pan
+必须一致；对应 `gpu_upload` 不得改变 pre-draw transform，出现
+`still_first_frame_cover_drift` 即失败。使用 collector 的 `F`/`W` marker 和
+`tools/analyze_windows_crop_framing.py` 保存结构化对比结果。
+`tools/detail_benchmark.py` schema 2
 兼容旧 `image_presented` 与生产 `presented`，并输出 cache tier、decode、GPU upload/hit 计数。
 
 Phase 4 增加共享 render session 采样。每张静态照片在已完成首次 Detail 呈现后，分别执行至少 30 次：
@@ -131,6 +162,10 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
   以 `Path` 为 key 的新 GPU upload。
 - Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
   stale/failed upgrade 不得替换 current texture。
+- Fullscreen crop relayout：记录 `crop_viewport_relayout` 的 target、framing mode、
+  cover/effective scale、zoom、pan 和 center error。off-center crop 与 straighten、
+  perspective、flip、quarter-turn rotation 的组合在 normal→fullscreen→normal 后
+  center error 必须不超过 1 logical pixel，10 次往返不得累计漂移。
 
 同时保留 `render_session_created/acquired/released`、`edit_state_updated` 和 `surface_owner_*` 诊断事件。ColorStats 从 surface cache v3 header
 复用；同 source revision 跨 LOD 的统计计算次数必须为 1。packaged 日志只能证明实际运行结果，不能以
@@ -178,6 +213,14 @@ maximized、125%/150% DPI 与双显示器。屏幕录像中不得出现桌面暴
 另以正在播放的视频执行 `enter→exit→enter→exit` 快速序列，每步间隔小于 120 ms；
 过期 resume callback 必须全部被 generation 拒绝，最终只恢复一次播放且播放状态与
 首次切换前一致。
+每次 fullscreen 还必须验证 committed LOD 首帧先于高清 promotion：
+`fullscreen_lod_gate_started → media ordinal 1 → media ordinal 2|stable timeout → animation finished → fullscreen_handoff_finished → fullscreen_lod_gate_released`
+后才可出现新的 `lod_plan_submitted`/`lod_upgrade_staging`。timeout transaction 不得产生
+automatic fullscreen LOD。分别比较 click→首个 fullscreen media frame 与稳定 handoff→高清
+LOD submission；不设置未经基线确认的绝对阈值，但 candidate 的 click→first-frame P50/P95
+不得劣于 #929 前同机 baseline。每轮 collector 结果用
+`tools/analyze_windows_fullscreen_transition.py` 验证 token、target、两帧、animation、LOD 与
+playback 时序；屏幕录像仍是 DWM 视觉验收依据。
 
 任何失败组必须保留原 events/summary/validation，按 queue、surface cache、decode、GPU upload、draw 定位；修正后
 先重跑失败组，再完整重跑该平台矩阵。不得用删除失败样本、合并取消事务或降低重复次数的方式通过门槛。

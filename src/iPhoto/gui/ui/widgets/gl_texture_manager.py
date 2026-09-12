@@ -185,7 +185,7 @@ class TextureManager:
 
         if self.activate_still_texture(key):
             return self._texture_id, self._texture_width, self._texture_height
-        self._upload_new_still_texture(key, image, activate=True)
+        self._upload_new_still_texture(key, image, activate=True, purpose="foreground")
         return self._texture_id, self._texture_width, self._texture_height
 
     def _upload_new_still_texture(
@@ -194,6 +194,8 @@ class TextureManager:
         image: QImage,
         *,
         activate: bool,
+        purpose: str,
+        protected_keys: frozenset[object] = frozenset(),
     ) -> bool:
         if image.isNull():
             raise ValueError("Cannot upload a null QImage")
@@ -217,6 +219,7 @@ class TextureManager:
                     candidate
                     for candidate, entry in self._still_textures.items()
                     if candidate != self._active_still_key
+                    and candidate not in protected_keys
                     and entry[1] == width
                     and entry[2] == height
                 ),
@@ -231,31 +234,35 @@ class TextureManager:
             self._evict_before_still_allocation(
                 incoming_bytes=byte_count,
                 resident_bytes=resident_bytes,
+                protected_keys=protected_keys,
             )
             resident_bytes = sum(entry[3] for entry in self._still_textures.values())
             if (
                 len(self._still_textures) >= 3
                 or resident_bytes + byte_count > self._still_budget_bytes
             ):
-                event = (
-                    "gpu_texture_allocation_failed"
-                    if activate
-                    else "gpu_prefetch_dropped"
+                failure_reason = (
+                    "protected_residency_budget"
+                    if protected_keys
+                    else "residency_budget"
                 )
+                event = self._still_failure_event(activate=activate, purpose=purpose)
                 emit_detail_event(
                     event,
                     generation=0,
                     width=width,
                     height=height,
                     bytes=byte_count,
-                    reason="residency_budget",
+                    reason=failure_reason,
                 )
                 self._last_still_upload_result = {
                     "key": key,
                     "activate": activate,
                     "success": False,
-                    "reason": "residency_budget",
+                    "reason": failure_reason,
                 }
+                if purpose == "lod_promotion":
+                    self._last_still_upload_result["purpose"] = purpose
                 return False
             created = gl.glGenTextures(1)
             if isinstance(created, (tuple, list)):
@@ -265,6 +272,7 @@ class TextureManager:
                 self._record_still_upload_failure(
                     key,
                     activate=activate,
+                    purpose=purpose,
                     width=width,
                     height=height,
                     byte_count=byte_count,
@@ -328,6 +336,7 @@ class TextureManager:
             self._record_still_upload_failure(
                 key,
                 activate=activate,
+                purpose=purpose,
                 width=width,
                 height=height,
                 byte_count=byte_count,
@@ -350,13 +359,15 @@ class TextureManager:
                 height,
             )
             self._texture_uses_mipmaps = False
-        self._trim_still_textures()
+        self._trim_still_textures(protected_keys=protected_keys)
         self._last_still_upload_result = {
             "key": key,
             "activate": activate,
             "success": True,
             "reason": "uploaded",
         }
+        if purpose == "lod_promotion":
+            self._last_still_upload_result["purpose"] = purpose
         return True
 
     def _record_still_upload_failure(
@@ -364,12 +375,13 @@ class TextureManager:
         key: object,
         *,
         activate: bool,
+        purpose: str,
         width: int,
         height: int,
         byte_count: int,
         reason: str,
     ) -> None:
-        event = "gpu_texture_allocation_failed" if activate else "gpu_prefetch_dropped"
+        event = self._still_failure_event(activate=activate, purpose=purpose)
         emit_detail_event(
             event,
             generation=0,
@@ -384,6 +396,14 @@ class TextureManager:
             "success": False,
             "reason": reason,
         }
+        if purpose == "lod_promotion":
+            self._last_still_upload_result["purpose"] = purpose
+
+    @staticmethod
+    def _still_failure_event(*, activate: bool, purpose: str) -> str:
+        if activate or purpose == "lod_promotion":
+            return "gpu_texture_allocation_failed"
+        return "gpu_prefetch_dropped"
 
     @staticmethod
     def _clear_gl_errors() -> None:
@@ -401,6 +421,7 @@ class TextureManager:
         *,
         incoming_bytes: int,
         resident_bytes: int,
+        protected_keys: frozenset[object] = frozenset(),
     ) -> None:
         """Free non-active storage before allocating a differently-sized texture."""
 
@@ -413,6 +434,7 @@ class TextureManager:
                     candidate
                     for candidate in self._still_textures
                     if candidate != self._active_still_key
+                    and candidate not in protected_keys
                 ),
                 None,
             )
@@ -447,10 +469,41 @@ class TextureManager:
         self._still_textures[key] = entry
         return True
 
-    def warm_still_texture(self, key: object, image: QImage) -> bool:
+    def warm_still_texture(
+        self,
+        key: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
         if self.touch_still_texture(key):
             return False
-        return self._upload_new_still_texture(key, image, activate=False)
+        return self._upload_new_still_texture(
+            key,
+            image,
+            activate=False,
+            purpose="prefetch",
+            protected_keys=protected_keys,
+        )
+
+    def stage_still_texture(
+        self,
+        key: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
+        """Upload a foreground LOD without changing the active still."""
+
+        if self.touch_still_texture(key):
+            return False
+        return self._upload_new_still_texture(
+            key,
+            image,
+            activate=False,
+            purpose="lod_promotion",
+            protected_keys=protected_keys,
+        )
 
     def has_still_texture(self, key: object) -> bool:
         return key in self._still_textures
@@ -463,10 +516,22 @@ class TextureManager:
     def texture_uses_mipmaps(self) -> bool:
         return self._texture_uses_mipmaps
 
-    def _trim_still_textures(self) -> None:
+    def _trim_still_textures(
+        self,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> None:
         total = sum(entry[3] for entry in self._still_textures.values())
         while len(self._still_textures) > 3 or total > self._still_budget_bytes:
-            victim = next((candidate for candidate in self._still_textures if candidate != self._active_still_key), None)
+            victim = next(
+                (
+                    candidate
+                    for candidate in self._still_textures
+                    if candidate != self._active_still_key
+                    and candidate not in protected_keys
+                ),
+                None,
+            )
             if victim is None:
                 break
             texture_id, _width, _height, size = self._still_textures.pop(victim)
@@ -484,9 +549,13 @@ class TextureManager:
         self._texture_width = 0
         self._texture_height = 0
 
-    def trim_still_residency(self) -> None:
+    def trim_still_residency(
+        self,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> None:
         for key in tuple(self._still_textures):
-            if key == self._active_still_key:
+            if key == self._active_still_key or key in protected_keys:
                 continue
             texture_id, _width, _height, size = self._still_textures.pop(key)
             gl.glDeleteTextures(1, np.array([int(texture_id)], dtype=np.uint32))

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Callable, Optional
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
@@ -34,65 +36,22 @@ def compute_fit_to_view_scale(
 
 def compute_rotation_cover_scale(
     texture_size: tuple[int, int],
-    base_scale: float,
     straighten_degrees: float,
-    rotate_steps: int,
-    physical_texture_size: tuple[int, int] | None = None,
 ) -> float:
-    """Return the scale multiplier that keeps rotated images free of black corners.
-    
-    Args:
-        texture_size: Logical (rotation-aware) dimensions used for frame calculation
-        base_scale: Scale factor calculated from logical dimensions
-        straighten_degrees: Straighten angle in degrees
-        rotate_steps: Number of 90° rotations
-        physical_texture_size: Physical (original) dimensions for bounds checking.
-                              If None, uses texture_size (for backward compatibility).
-                              When provided, texture_size is assumed to be logical (already rotated),
-                              so only straighten_degrees is applied, not the 90° rotation steps.
-    """
+    """Return a viewport- and LOD-independent straighten cover factor."""
 
     tex_w, tex_h = texture_size
-    if tex_w <= 0 or tex_h <= 0 or base_scale <= 0.0:
+    if tex_w <= 0 or tex_h <= 0:
         return 1.0
-    
-    # When physical_texture_size is provided, texture_size (logical) already accounts
-    # for the 90° rotation, so we only apply straighten_degrees
-    if physical_texture_size is not None:
-        total_degrees = float(straighten_degrees)  # Only straighten, no 90° rotation
-    else:
-        total_degrees = float(straighten_degrees) + float(int(rotate_steps)) * -90.0
-        
-    if abs(total_degrees) <= 1e-5:
+    if abs(float(straighten_degrees)) <= 1e-5:
         return 1.0
-    theta = math.radians(total_degrees)
-    cos_t = math.cos(theta)
-    sin_t = math.sin(theta)
-    
-    # Frame corners calculated in logical space (rotation-aware dimensions)
-    half_frame_w = tex_w * base_scale * 0.5
-    half_frame_h = tex_h * base_scale * 0.5
-    corners = [
-        (-half_frame_w, -half_frame_h),
-        (half_frame_w, -half_frame_h),
-        (half_frame_w, half_frame_h),
-        (-half_frame_w, half_frame_h),
-    ]
-    
-    # Use physical dimensions for bounds checking (corners are rotated back to texture space)
-    if physical_texture_size is not None:
-        phys_w, phys_h = physical_texture_size
-    else:
-        phys_w, phys_h = tex_w, tex_h
-    
-    scale = 1.0
-    for xf, yf in corners:
-        x_prime = xf * cos_t + yf * sin_t
-        y_prime = -xf * sin_t + yf * cos_t
-        s_corner = max((2.0 * abs(x_prime)) / phys_w, (2.0 * abs(y_prime)) / phys_h)
-        if s_corner > scale:
-            scale = s_corner
-    return max(scale, 1.0)
+    theta = math.radians(float(straighten_degrees))
+    cosine = abs(math.cos(theta))
+    sine = abs(math.sin(theta))
+    aspect = float(tex_w) / float(tex_h)
+    cover_x = cosine + (sine / aspect)
+    cover_y = cosine + (sine * aspect)
+    return max(1.0, cover_x, cover_y)
 
 
 class ViewTransformController:
@@ -135,6 +94,12 @@ class ViewTransformController:
         self._wheel_action: str = "zoom"
         self._image_cover_scale: float = 1.0
         self._fill_viewport_enabled: bool = False
+        self._transform_transaction_depth = 0
+        self._transaction_update_pending = False
+        self._transaction_transform_pending = False
+        self._transaction_zoom_pending = False
+        self._transaction_emit_zoom = False
+        self._transaction_force_notify = False
 
     # ------------------------------------------------------------------
     # Helper methods for getting viewport info
@@ -155,7 +120,7 @@ class ViewTransformController:
         vw = max(1.0, float(self._viewer.width()) * dpr)
         vh = max(1.0, float(self._viewer.height()) * dpr)
         return vw, vh
-    
+
     def _get_dpr(self) -> float:
         """Get device pixel ratio."""
         dpr = float(self._viewer.devicePixelRatioF())
@@ -243,8 +208,7 @@ class ViewTransformController:
         ):
             return
         self._pan_px = QPointF(pan)
-        self._viewer.update()
-        self._emit_view_transform_changed()
+        self._publish_transform_change()
 
     def minimum_zoom(self) -> float:
         return self._min_zoom
@@ -257,9 +221,7 @@ class ViewTransformController:
         if abs(clamped - self._zoom_factor) < 1e-6:
             return
         self._zoom_factor = clamped
-        self._viewer.update()
-        self._on_zoom_changed(self._zoom_factor)
-        self._emit_view_transform_changed()
+        self._publish_transform_change(zoom_changed=True)
 
     def set_zoom_limits(self, minimum: float, maximum: float) -> None:
         """Clamp the interactive zoom range."""
@@ -319,21 +281,24 @@ class ViewTransformController:
                 )
 
         self._zoom_factor = clamped
-        self._viewer.update()
-        self._on_zoom_changed(self._zoom_factor)
-        self._emit_view_transform_changed()
+        self._publish_transform_change(zoom_changed=True)
         return True
 
     def reset_zoom(self) -> bool:
         """Restore the baseline zoom and recenter the texture."""
 
-        changed = abs(self._zoom_factor - 1.0) > 1e-6 or abs(self._pan_px.x()) > 1e-6 or abs(self._pan_px.y()) > 1e-6
+        changed = (
+            abs(self._zoom_factor - 1.0) > 1e-6
+            or abs(self._pan_px.x()) > 1e-6
+            or abs(self._pan_px.y()) > 1e-6
+        )
         self._zoom_factor = 1.0
         self._pan_px = QPointF(0.0, 0.0)
-        self._viewer.update()
-        self._on_zoom_changed(self._zoom_factor)
-        if changed:
-            self._emit_view_transform_changed()
+        self._publish_transform_change(
+            zoom_changed=True,
+            transform_changed=changed,
+            force_update=True,
+        )
         return changed
 
     # ------------------------------------------------------------------
@@ -442,9 +407,7 @@ class ViewTransformController:
         base_scale = compute_fit_to_view_scale((fit_w, fit_h), view_width, view_height)
         return max(base_scale * self._image_cover_scale * self._zoom_factor, 1e-6)
 
-    def image_center_pixels(
-        self, texture_size: tuple[int, int], scale: float
-    ) -> QPointF:
+    def image_center_pixels(self, texture_size: tuple[int, int], scale: float) -> QPointF:
         """Return the image center in pixel coordinates based on current pan/zoom."""
         tex_w, tex_h = texture_size
         centre_x = (tex_w / 2.0) - (self._pan_px.x() / scale)
@@ -537,9 +500,12 @@ class ViewTransformController:
         if fit_result is None:
             return False
 
-        target_zoom, target_scale = fit_result
+        target_zoom, _target_scale = fit_result
         self.set_zoom_factor_direct(target_zoom)
-        self.apply_image_center_pixels(rect.center(), scale=target_scale)
+        # The final renderer scale also includes the straighten cover factor.
+        # Recompute it after applying zoom so off-centre crops use the same
+        # scale for pan as the shader uses for drawing.
+        self.apply_image_center_pixels(rect.center())
         return True
 
     def compute_texture_rect_fit(self, rect: QRectF) -> tuple[float, float] | None:
@@ -573,7 +539,10 @@ class ViewTransformController:
             )
         if target_scale <= 0.0:
             return None
-        return (target_scale / base_scale, target_scale)
+        baseline_scale = base_scale * self._image_cover_scale
+        if baseline_scale <= 0.0:
+            return None
+        return (target_scale / baseline_scale, target_scale)
 
     # ------------------------------------------------------------------
     # Convenience methods that use internal viewport state
@@ -583,13 +552,13 @@ class ViewTransformController:
         vw, vh = self._get_view_dimensions_device_px()
         texture_size = self._texture_size_provider()
         return self.effective_scale(texture_size, vw, vh)
-    
+
     def get_image_center_pixels(self) -> QPointF:
         """Return the image center in pixel coordinates using current pan/zoom."""
         texture_size = self._texture_size_provider()
         scale = self.get_effective_scale()
         return self.image_center_pixels(texture_size, scale)
-    
+
     def apply_image_center_pixels(self, center: QPointF, scale: float | None = None) -> None:
         """Set the pan to center the image at the given pixel coordinate."""
         texture_size = self._texture_size_provider()
@@ -603,8 +572,66 @@ class ViewTransformController:
         if abs(clamped - self._image_cover_scale) <= 1e-4:
             return
         self._image_cover_scale = clamped
-        self._viewer.update()
-        self._emit_view_transform_changed()
+        self._publish_transform_change()
+
+    @contextmanager
+    def transform_transaction(
+        self,
+        *,
+        emit_zoom: bool = False,
+        force_notify: bool = False,
+    ) -> Iterator[None]:
+        """Coalesce automatic transform mutations into one publication."""
+
+        outermost = self._transform_transaction_depth == 0
+        if outermost:
+            self._transaction_update_pending = False
+            self._transaction_transform_pending = False
+            self._transaction_zoom_pending = False
+            self._transaction_emit_zoom = bool(emit_zoom)
+            self._transaction_force_notify = bool(force_notify)
+        self._transform_transaction_depth += 1
+        try:
+            yield
+        finally:
+            self._transform_transaction_depth -= 1
+            if not outermost:
+                return
+            update_pending = self._transaction_update_pending or self._transaction_force_notify
+            transform_pending = (
+                self._transaction_transform_pending or self._transaction_force_notify
+            )
+            zoom_pending = self._transaction_zoom_pending and self._transaction_emit_zoom
+            self._transaction_update_pending = False
+            self._transaction_transform_pending = False
+            self._transaction_zoom_pending = False
+            self._transaction_emit_zoom = False
+            self._transaction_force_notify = False
+            if update_pending:
+                self._viewer.update()
+            if zoom_pending:
+                self._on_zoom_changed(self._zoom_factor)
+            if transform_pending:
+                self._emit_view_transform_changed()
+
+    def _publish_transform_change(
+        self,
+        *,
+        zoom_changed: bool = False,
+        transform_changed: bool = True,
+        force_update: bool = False,
+    ) -> None:
+        if self._transform_transaction_depth > 0:
+            self._transaction_update_pending = True
+            self._transaction_transform_pending |= bool(transform_changed)
+            self._transaction_zoom_pending |= bool(zoom_changed)
+            return
+        if transform_changed or force_update:
+            self._viewer.update()
+        if zoom_changed:
+            self._on_zoom_changed(self._zoom_factor)
+        if transform_changed:
+            self._emit_view_transform_changed()
 
     def _emit_view_transform_changed(self) -> None:
         if self._on_view_transform_changed is not None:
@@ -614,13 +641,13 @@ class ViewTransformController:
         """Return the scale multiplier currently applied to cover rotations."""
 
         return self._image_cover_scale
-    
+
     def convert_screen_to_world(self, screen_pt: QPointF) -> QPointF:
         """Map a Qt screen coordinate to GL view's centre-origin space."""
         view_width, view_height = self._get_view_dimensions_device_px()
         point = self.viewport_logical_to_device(screen_pt)
         return QPointF(point.x() - view_width * 0.5, view_height * 0.5 - point.y())
-    
+
     def convert_world_to_screen(self, world_vec: QPointF) -> QPointF:
         """Convert a GL centre-origin vector into a Qt screen coordinate."""
         view_width, view_height = self._get_view_dimensions_device_px()
@@ -629,7 +656,7 @@ class ViewTransformController:
             view_height * 0.5 - float(world_vec.y()),
         )
         return self.viewport_device_to_logical(point)
-    
+
     def convert_image_to_viewport(self, x: float, y: float) -> QPointF:
         """Convert image pixel coordinates to viewport coordinates."""
         texture_size = self._texture_size_provider()
@@ -642,7 +669,7 @@ class ViewTransformController:
             -(tex_vector_y * scale) + self._pan_px.y(),
         )
         return self.convert_world_to_screen(world_vector)
-    
+
     def convert_viewport_to_image(self, point: QPointF) -> QPointF:
         """Convert viewport coordinates to image pixel coordinates."""
         texture_size = self._texture_size_provider()

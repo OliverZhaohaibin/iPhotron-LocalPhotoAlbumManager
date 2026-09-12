@@ -21,6 +21,8 @@ def test_windows_collector_enables_required_runtime_probes() -> None:
     ):
         assert variable in script
     assert 'Marker "problem_reproduced"' in script
+    assert 'Marker "cold_crop_visible"' in script
+    assert 'Marker "warm_crop_visible"' in script
     assert "Resolve-SourceApplicationProcess" in script
     assert "process_metrics.csv" in script
     assert "Compress-Archive" in script

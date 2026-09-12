@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import struct
 
 import pytest
 
@@ -18,6 +19,41 @@ def _image(width: int = 8, height: int = 8) -> QImage:
     image = QImage(width, height, QImage.Format.Format_RGBA8888)
     image.fill(0xFF123456)
     return image
+
+
+def test_image_ubo_offsets_match_single_scale_shader_layout() -> None:
+    renderer = RhiImageRenderer()
+    renderer._ubuf = object()
+    batch = _FakeResourceUpdateBatch()
+
+    renderer._update_uniforms(
+        batch,
+        view_width=1200.0,
+        view_height=800.0,
+        scale=2.5,
+        pan=QPointF(12.0, -8.0),
+        adjustments={
+            "Crop_CX": 0.4,
+            "Crop_CY": 0.6,
+            "Crop_W": 0.7,
+            "Crop_H": 0.8,
+            "Color_Gain_R": 0.9,
+            "Color_Gain_G": 1.0,
+            "Color_Gain_B": 1.1,
+        },
+        time_value=None,
+        img_offset=None,
+        logical_tex_size=(4000.0, 3000.0),
+        corner_radius_px=3.0,
+    )
+
+    _buffer, offset, size, data = batch.dynamic_updates[-1]
+    assert offset == 0
+    assert size == len(data) == 480
+    assert struct.unpack_from("f", data, 132)[0] == pytest.approx(2.5)
+    assert struct.unpack_from("f", data, 136)[0] == pytest.approx(3.0)
+    assert struct.unpack_from("4f", data, 140) == pytest.approx((0.4, 0.6, 0.7, 0.8))
+    assert struct.unpack_from("3f", data, 160) == pytest.approx((0.9, 1.0, 1.1))
 
 
 class _FakeBuffer:
@@ -148,6 +184,76 @@ def test_warming_a_resident_rhi_texture_refreshes_its_lru_position() -> None:
     assert tuple(renderer._still_textures) == ("stale", "current", "previous")
 
 
+def test_staging_lod_keeps_current_rhi_texture_active() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi()
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+
+    assert renderer.stage_still_texture("higher-lod", _image(12, 10)) is True
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert "higher-lod" in renderer._still_textures
+    assert renderer.take_still_upload_result() == {
+        "key": "higher-lod",
+        "activate": False,
+        "success": True,
+        "reason": "uploaded",
+        "purpose": "lod_promotion",
+    }
+
+
+def test_failed_rhi_lod_staging_preserves_active_texture() -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    renderer._rhi = _FakeTextureRhi()
+    renderer._still_budget_bytes = 256
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+
+    assert renderer.stage_still_texture("higher-lod", _image(12, 10)) is True
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert renderer._active_still_key == "current"
+    assert renderer._tex_rgba is active
+    assert renderer.take_still_upload_result() == {
+        "key": "higher-lod",
+        "activate": False,
+        "success": False,
+        "reason": "residency_budget",
+        "purpose": "lod_promotion",
+    }
+
+
+def test_cancelled_rhi_lod_upload_cannot_block_newer_promotion() -> None:
+    renderer = RhiImageRenderer()
+    renderer._rhi = _FakeTextureRhi()
+
+    assert renderer.stage_still_texture("lod-a", _image(8, 8)) is True
+    assert renderer.cancel_pending_still_upload(
+        "lod-a",
+        purpose="lod_promotion",
+    ) is True
+    assert renderer.stage_still_texture("lod-b", _image(12, 10)) is True
+
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert "lod-a" not in renderer._still_textures
+    assert "lod-b" in renderer._still_textures
+    assert renderer.take_still_upload_result() == {
+        "key": "lod-b",
+        "activate": False,
+        "success": True,
+        "reason": "uploaded",
+        "purpose": "lod_promotion",
+    }
+
+
 def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
     renderer = RhiImageRenderer()
     stale = _FakeTexture()
@@ -167,6 +273,33 @@ def test_rhi_evicts_old_texture_before_allocating_different_storage() -> None:
     assert previous.destroyed is False
     assert current.destroyed is False
     assert tuple(renderer._still_textures) == ("previous", "current")
+
+
+def test_rhi_staging_never_reuses_committed_or_active_texture() -> None:
+    renderer = RhiImageRenderer()
+    committed = _FakeTexture(QSize(8, 8))
+    prefetch = _FakeTexture(QSize(12, 10))
+    active = _FakeTexture(QSize(16, 12))
+    renderer._rhi = _FakeTextureRhi()
+    renderer._still_textures["committed-a"] = (committed, 256)
+    renderer._still_textures["prefetch"] = (prefetch, 480)
+    renderer._still_textures["active-b"] = (active, 768)
+    renderer._active_still_key = "active-b"
+    renderer._tex_rgba = active  # type: ignore[assignment]
+
+    assert renderer.stage_still_texture(
+        "desired-c",
+        _image(12, 10),
+        protected_keys=frozenset({"committed-a", "active-b"}),
+    )
+    renderer._flush_pending_still_texture(_FakeResourceUpdateBatch())
+
+    assert "committed-a" in renderer._still_textures
+    assert "active-b" in renderer._still_textures
+    assert "desired-c" in renderer._still_textures
+    assert "prefetch" not in renderer._still_textures
+    assert renderer._active_still_key == "active-b"
+    assert renderer._tex_rgba is active
 
 
 def test_rhi_tracks_mipmap_availability_per_texture_source() -> None:

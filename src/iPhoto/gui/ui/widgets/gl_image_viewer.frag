@@ -58,7 +58,6 @@ uniform vec2  uViewSize;
 uniform vec2  uTexSize;
 uniform float uScale;
 uniform vec2  uPan;
-uniform float uImgScale;
 uniform vec2  uImgOffset;
 uniform float uCornerRadius;
 uniform float uCropCX;
@@ -701,8 +700,6 @@ void main() {
         discard;
     }
 
-    float safeImgScale = max(uImgScale, 1e-6);
-
     vec2 fragPx = vec2(gl_FragCoord.x - 0.5, gl_FragCoord.y - 0.5);
     if (uTextureOriginTopLeft == 0) {
         fragPx.y = uViewSize.y - 1.0 - fragPx.y;
@@ -710,7 +707,7 @@ void main() {
     vec2 viewCentre = uViewSize * 0.5;
     vec2 worldVector = vec2(fragPx.x - viewCentre.x, viewCentre.y - fragPx.y);
     vec2 screenVector = worldVector - uPan;
-    vec2 texVector = (vec2(screenVector.x, -screenVector.y) / uScale - uImgOffset) / safeImgScale;
+    vec2 texVector = vec2(screenVector.x, -screenVector.y) / uScale - uImgOffset;
     vec2 texPx = texVector + (uTexSize * 0.5);
     vec2 uv = texPx / uTexSize;
 

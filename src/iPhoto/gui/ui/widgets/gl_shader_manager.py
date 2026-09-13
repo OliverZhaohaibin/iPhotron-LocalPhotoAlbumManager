@@ -130,7 +130,6 @@ _UNIFORM_NAMES = (
     "uTexSize",
     "uScale",
     "uPan",
-    "uImgScale",
     "uImgOffset",
     "uCornerRadius",
     "uCropCX",

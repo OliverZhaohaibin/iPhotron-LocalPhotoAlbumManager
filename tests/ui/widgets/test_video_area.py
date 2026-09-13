@@ -337,6 +337,53 @@ class TestVideoRendererWidget:
         w = VideoRendererWidget()
         assert w._has_frame is False
 
+    def test_fullscreen_barrier_rejects_clear_only_submission(self, qapp):
+        w = VideoRendererWidget()
+        submitted = QSignalSpy(w.fullscreenViewportFrameSubmitted)
+
+        w.request_fullscreen_viewport_frame(7, 1)
+        w._on_frame_submitted()
+
+        assert submitted.count() == 0
+        assert w._fullscreen_frame_request == (7, 1)
+
+    def test_fullscreen_barrier_accepts_matching_video_draw(self, qapp):
+        w = VideoRendererWidget()
+        w._has_frame = True
+        w._frame_dirty = False
+        w._frame_content_generation = 5
+        w._frame_content_serial = 9
+        submitted = QSignalSpy(w.fullscreenViewportFrameSubmitted)
+
+        w.request_fullscreen_viewport_frame(7, 2)
+        w._record_fullscreen_frame_candidate(QSize(1280, 720))
+        w._on_frame_submitted()
+
+        assert submitted.count() == 1
+        assert submitted.at(0)[0:3] == [7, 2, QSize(1280, 720)]
+        assert w._fullscreen_frame_request is None
+
+    def test_clear_render_discards_an_earlier_fullscreen_candidate(
+        self,
+        qapp,
+        mocker,
+    ):
+        w = VideoRendererWidget()
+        w._fullscreen_frame_request = (7, 1)
+        w._fullscreen_frame_candidate = (
+            7,
+            1,
+            QSize(1280, 720),
+            ("video", 5, 9),
+        )
+        w._initialized = False
+
+        w.render(mocker.Mock())
+        w._on_frame_submitted()
+
+        assert w._fullscreen_frame_candidate is None
+        assert w._fullscreen_frame_request == (7, 1)
+
     def test_clear_frame_resets_has_frame(self, qapp):
         """clear_frame should set _has_frame to False so the renderer
         draws only the letterbox colour instead of stale texture data."""
@@ -1695,6 +1742,59 @@ class TestVideoArea:
         composed.assert_not_called()
         va._edit_viewer.frameSubmitted.emit()
         composed.assert_called_once_with()
+
+    def test_only_matching_active_surface_forwards_fullscreen_media_frame(
+        self,
+        qapp,
+        mocker,
+    ) -> None:
+        va = VideoArea()
+        native_request = mocker.patch.object(
+            va._renderer,
+            "request_fullscreen_viewport_frame",
+        )
+        adjusted_request = mocker.patch.object(
+            va._edit_viewer,
+            "request_fullscreen_viewport_frame",
+        )
+        submitted = QSignalSpy(va.fullscreenViewportFrameSubmitted)
+
+        va.request_fullscreen_viewport_frame(19, 1)
+        native_request.assert_called_once_with(19, 1)
+
+        va._edit_viewer.fullscreenViewportFrameSubmitted.emit(
+            19,
+            1,
+            QSize(1280, 720),
+            ("video", 3, 7),
+        )
+        va._renderer.fullscreenViewportFrameSubmitted.emit(
+            18,
+            1,
+            QSize(1280, 720),
+            ("video", 3, 7),
+        )
+        assert submitted.count() == 0
+
+        va.set_adjusted_preview_enabled(True)
+        adjusted_request.assert_called_once_with(19, 1)
+        va._renderer.fullscreenViewportFrameSubmitted.emit(
+            19,
+            1,
+            QSize(1280, 720),
+            ("video", 3, 7),
+        )
+        assert submitted.count() == 0
+
+        va._edit_viewer.fullscreenViewportFrameSubmitted.emit(
+            19,
+            1,
+            QSize(1280, 720),
+            ("video", 3, 8),
+        )
+        assert submitted.count() == 1
+        assert submitted.at(0)[0:3] == [19, 1, QSize(1280, 720)]
+        assert va._fullscreen_frame_request is None
 
     def test_hidden_surface_resource_loss_does_not_invalidate_visible_surface(
         self,
@@ -3056,6 +3156,45 @@ def test_gl_image_viewer_center_crop_uses_partial_fit_zoom(qapp, mocker):
     mock_zoom.assert_called_once_with(2.0)
     mock_apply_center.assert_called_once_with(crop_rect.center())
     assert viewer._auto_crop_center_locked is True
+
+
+def test_adjusted_video_edit_crop_stays_centered_after_fullscreen_relayout(
+    qapp,
+    mocker,
+):
+    area = VideoArea()
+    viewer = area.edit_viewer
+    viewer.resize(600, 400)
+    viewer._image = QImage(400, 300, QImage.Format.Format_RGBA8888)
+    renderer = mocker.Mock()
+    renderer.has_texture.return_value = True
+    renderer.texture_size.return_value = (400, 300)
+    viewer._renderer = renderer
+    viewer._adjustments = {
+        "Crop_CX": 0.70,
+        "Crop_CY": 0.62,
+        "Crop_W": 0.55,
+        "Crop_H": 0.58,
+        "Crop_Straighten": 5.0,
+        "Perspective_Vertical": 0.2,
+    }
+    viewer.set_crop_framing_enabled(True)
+    viewer._last_render_target_size = QSize(1200, 800)
+    viewer._last_layout_target_size = QSize(1200, 800)
+    viewer._update_crop_perspective_state()
+    viewer.reset_zoom()
+
+    viewer._last_render_target_size = QSize(1920, 1080)
+    viewer._sync_view_transform_for_render_target(QSize(1920, 1080))
+
+    crop_rect = viewer._compute_crop_rect_pixels()
+    assert crop_rect is not None
+    viewport_center = viewer._transform_controller.convert_image_to_viewport(
+        crop_rect.center().x(),
+        crop_rect.center().y(),
+    )
+    assert viewport_center.x() == pytest.approx(viewer.width() * 0.5, abs=1.0)
+    assert viewport_center.y() == pytest.approx(viewer.height() * 0.5, abs=1.0)
 
 
 def test_view_transform_compute_texture_rect_fit_uses_cover_when_fill_enabled(qapp):

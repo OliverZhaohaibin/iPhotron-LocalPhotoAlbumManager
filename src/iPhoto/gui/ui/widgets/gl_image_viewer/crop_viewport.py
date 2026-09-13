@@ -10,12 +10,8 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 
-from . import crop_logic
-from . import geometry
-from ..view_transform_controller import (
-    compute_fit_to_view_scale,
-    compute_rotation_cover_scale,
-)
+from ..view_transform_controller import compute_rotation_cover_scale
+from . import crop_logic, geometry
 
 if TYPE_CHECKING:
     from .widget import GLImageViewer
@@ -24,11 +20,21 @@ if TYPE_CHECKING:
 # ── Texture dimension helpers ──────────────────────────────────────────
 
 def texture_dimensions(viewer: GLImageViewer) -> tuple[int, int]:
-    """Return the current texture size or ``(0, 0)`` when unavailable."""
+    """Return the viewer-owned presentation size or ``(0, 0)``.
+
+    Still geometry follows ``_image`` rather than renderer residency. A new
+    surface owns framing before its upload, while an LOD promotion does not
+    replace ``_image`` until resident activation succeeds. Video resets are
+    deliberately deferred until their renderer upload, so they retain the GPU
+    size fallback.
+    """
+    image = viewer._image
+    if not viewer._using_video_frame_source:
+        if image is not None and not image.isNull():
+            return (image.width(), image.height())
+        return (0, 0)
     if viewer._renderer is not None and viewer._renderer.has_texture():
         return viewer._renderer.texture_size()
-    if viewer._image is not None and not viewer._image.isNull():
-        return (viewer._image.width(), viewer._image.height())
     return (0, 0)
 
 
@@ -53,36 +59,19 @@ def rotation_parameters(viewer: GLImageViewer) -> tuple[float, int, bool]:
     return straighten, rotate_steps, flip
 
 
-def update_cover_scale(
-    viewer: GLImageViewer, straighten_deg: float, rotate_steps: int
-) -> None:
+def update_cover_scale(viewer: GLImageViewer, straighten_deg: float) -> None:
     """Compute the rotation cover scale and forward it to the transform controller."""
-    if not viewer._renderer or not viewer._renderer.has_texture():
-        viewer._transform_controller.set_image_cover_scale(1.0)
-        return
-
     if abs(straighten_deg) <= 1e-5:
         viewer._transform_controller.set_image_cover_scale(1.0)
         return
 
-    tex_w, tex_h = texture_dimensions(viewer)
-    if tex_w <= 0 or tex_h <= 0:
+    display_w, display_h = display_texture_dimensions(viewer)
+    if display_w <= 0 or display_h <= 0:
         viewer._transform_controller.set_image_cover_scale(1.0)
         return
-
-    display_w, display_h = display_texture_dimensions(viewer)
-    view_width, view_height = viewer._zoom_ctrl.view_dimensions_device_px()
-
-    base_scale = compute_fit_to_view_scale(
-        (display_w, display_h), float(view_width), float(view_height)
-    )
-
     rotation_cover_scale = compute_rotation_cover_scale(
         (display_w, display_h),
-        base_scale,
         straighten_deg,
-        rotate_steps,
-        physical_texture_size=(tex_w, tex_h),
     )
 
     viewer._transform_controller.set_image_cover_scale(rotation_cover_scale)
@@ -106,7 +95,7 @@ def update_crop_perspective_state(viewer: GLImageViewer) -> None:
         flip,
         new_crop_values=logical_values,
     )
-    update_cover_scale(viewer, straighten, rotate_steps)
+    update_cover_scale(viewer, straighten)
 
 
 # ── Crop framing helpers ───────────────────────────────────────────────

@@ -550,9 +550,54 @@ sequenceDiagram
 it intentionally excludes `.ipo` revision. Initial quality is selected from
 physical viewport demand rather than full sensor dimensions. Zoom, crop,
 rotation, or perspective may request a higher LOD, but the prior texture stays
-visible until the replacement is drawn. Current/previous/next GPU residency is
+visible while the replacement is staged as a non-active foreground resident.
+Only a later render may activate and draw that LOD, and the render session does
+not adopt it until the matching window submission. Live edit-state changes update
+the pending promotion's shader snapshot without decoding again; cancellation
+removes matching unflushed RHI work and cannot commit a delayed submission.
+Wheel input holds queued/staging/resident activation until idle planning. Once
+a same-asset LOD has already drawn, it is treated as forward-only: its matching
+submission commits before the latest desired key is evaluated, avoiding a
+visible B-to-A rollback. A bounded missing-submission path restores the last
+composed key before any newer staging. Active, committed, and rollback keys are
+protected from CPU/GPU eviction and storage reuse. Current/previous/next GPU residency is
 bounded by both three textures and 192MB. Source changes invalidate neutral
 surfaces and textures; sidecar changes replace render state only.
+
+LOD evaluation is intent-specific: wheel input uses a 180 ms idle window while
+authoritative resize/fullscreen metrics settle for 16 ms. Planning computes the
+desired decode key before mutating promotion ownership. A key already pending is
+reused without a new generation; a key no higher than the committed surface only
+cancels obsolete work; only a distinct higher key may supersede and decode.
+During Windows fullscreen entry a first-frame gate keeps all new LOD work out of
+the critical path. An independent opaque, input-transparent top-level hold
+covers the target screen and paints the last screen-composited player snapshot.
+The hold must paint and settle before the translucent main window requests its
+native fullscreen transition, so main-window QRhi resize and resource-rebuild
+clears remain hidden. Raw QRhi `frameSubmitted` signals are not presentation
+proof: still and video renderers qualify a real media draw against a
+transaction/ordinal/target token, and two consecutive qualified submissions at
+the same target complete the handoff. The first timeout resumes video under the
+hold to solicit content; a final no-media timeout restores the windowed state
+under the hold instead of revealing an empty fullscreen surface.
+
+Automatic crop framing derives pan from the final effective render scale after
+base fit, straighten cover, and zoom agree. Render-target relayout does not
+reproject the logical crop mask through the perspective matrix: both GL and
+QRhi shaders apply that mask in logical display UV before perspective sampling.
+The straighten cover factor is dimensionless and depends only on the displayed
+aspect ratio and angle, so it is identical across equivalent LODs, viewports and
+DPRs. `ViewTransformController` owns the single final
+`base-fit × straighten-cover × user-zoom` scale used by pan, CPU mapping, raw GL
+and QRhi; shaders do not apply a second cover multiplier. Automatic target
+relayout publishes one transform transaction and never masquerades as user zoom.
+For stills, the viewer-owned presentation image is the geometry authority even
+before GPU upload; renderer residency never supplies stale dimensions for a new
+surface. Initial crop framing is therefore committed against the real render
+target before the first draw, with no post-submission correction frame. The
+straighten cover is computed whenever viewer geometry exists, regardless of
+whether the texture is a cold GPU miss or resident hit; still upload changes
+residency only and cannot mutate the committed transform.
 
 Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
 with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,

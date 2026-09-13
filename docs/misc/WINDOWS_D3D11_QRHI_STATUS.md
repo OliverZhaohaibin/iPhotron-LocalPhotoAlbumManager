@@ -57,14 +57,13 @@ complete application graphics contract.
 
 ### Playback fullscreen compositor hotfix
 
-The production OpenGL path keeps top-level updates disabled while Windows
-applies the native fullscreen state. Chrome visibility, splitter geometry, and
-the immersive backdrop are changed within that transaction; updates resume
-only after a confirmed `WindowStateChange`, followed by one viewport relayout
-and an expected final `UpdateRequest` produced by re-enabling QWidget updates. No
-additional `window.update()` is issued. A one-second deadline either completes
-an already-landed fullscreen state or rolls the UI back to its saved windowed
-state, so a missing native event cannot leave painting disabled. Exceptions
+The production OpenGL path disables top-level updates only while it synchronously
+changes chrome visibility, splitter geometry, the immersive backdrop, and calls
+`showFullScreen()`. A `finally` restores the original updates state before
+Windows finishes the asynchronous native transition; no additional
+`window.update()` is issued. A one-second native deadline either adopts an
+already-landed fullscreen state or rolls the UI back to its saved windowed
+state, so a missing native event cannot leave the transition pending. Exceptions
 in the preparation, native request, or diagnostics paths also converge through
 a best-effort rollback whose final step restores the original updates state.
 Failures before the window transaction exists resume any suspended playback and
@@ -74,10 +73,13 @@ When Detail profiling is enabled, the `fullscreen_*` timeline records the
 transaction id, window state and geometry, update state, selected backend, and
 known render-target sizes. A packaged Windows run must compare `opengl` and
 `d3d11` on the same host and retain both the timeline and a screen recording.
-The transition remains attributable until the implicit final update is
-observed, or until a 250 ms diagnostic-only observation deadline records
-`fullscreen_final_update_unobserved`. Playback resume callbacks use a separate
-generation and preserve the original resume intent across rapid toggles.
+After native confirmation the current committed media is relaid out and remains
+paintable while the manager waits for an active image/video frame submission.
+That submission releases the fullscreen LOD gate; a 500 ms timeout releases it
+fail-open without claiming a submitted frame. `UpdateRequest` remains a
+diagnostic event, not the transaction terminal. Playback resume callbacks use a
+separate generation and preserve the original resume intent across rapid
+toggles.
 The A/B result is diagnostic only: D3D11 remains experimental and cannot become
 the production default until the application-wide graphics and Maps contract
 below is complete.

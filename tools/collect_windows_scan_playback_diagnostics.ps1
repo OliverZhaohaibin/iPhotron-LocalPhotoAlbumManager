@@ -435,7 +435,8 @@ try {
     Write-Host "iPhoto diagnostic collection started (PID $($process.Id))." -ForegroundColor Cyan
     Write-Host "1. Reproduce scanning until still photos become blank / Edit stops responding."
     Write-Host "2. When the problem is visible, return here and press R once."
-    Write-Host "3. Then close iPhoto normally. If it cannot close, press Q here to stop it."
+    Write-Host "3. For crop framing, press F after the cold first open, then W after reopening it."
+    Write-Host "4. Then close iPhoto normally. If it cannot close, press Q here to stop it."
     Write-Host "Collection automatically stops after $MaxMinutes minutes."
     Write-Host ""
 
@@ -454,6 +455,16 @@ try {
                     Add-ReproductionMarker -MarkerPath $markerPath `
                         -Marker "problem_reproduced" -ProcessId $process.Id
                     Write-Host "Reproduction marker recorded." -ForegroundColor Yellow
+                }
+                elseif ($key -eq [ConsoleKey]::F) {
+                    Add-ReproductionMarker -MarkerPath $markerPath `
+                        -Marker "cold_crop_visible" -ProcessId $process.Id
+                    Write-Host "Cold crop-open marker recorded." -ForegroundColor Yellow
+                }
+                elseif ($key -eq [ConsoleKey]::W) {
+                    Add-ReproductionMarker -MarkerPath $markerPath `
+                        -Marker "warm_crop_visible" -ProcessId $process.Id
+                    Write-Host "Warm crop-open marker recorded." -ForegroundColor Yellow
                 }
                 elseif ($key -eq [ConsoleKey]::Q) {
                     Add-ReproductionMarker -MarkerPath $markerPath `

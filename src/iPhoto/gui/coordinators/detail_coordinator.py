@@ -68,6 +68,30 @@ class DetailCoordinator(QObject):
     def show_placeholder_in_viewer(self) -> None:
         self._playback.show_placeholder_in_viewer()
 
+    def begin_fullscreen_viewport_transition(self) -> None:
+        self._playback.begin_fullscreen_viewport_transition()
+
+    def request_fullscreen_viewport_frame(
+        self,
+        transition_id: int,
+        ordinal: int,
+    ) -> None:
+        self._playback.request_fullscreen_viewport_frame(transition_id, ordinal)
+
+    def complete_fullscreen_viewport_transition(
+        self,
+        *,
+        reason: str,
+        allow_automatic_lod: bool = True,
+    ) -> None:
+        self._playback.complete_fullscreen_viewport_transition(
+            reason=reason,
+            allow_automatic_lod=allow_automatic_lod,
+        )
+
+    def cancel_fullscreen_viewport_transition(self) -> None:
+        self._playback.cancel_fullscreen_viewport_transition()
+
     def resume_playback_after_transition(self) -> None:
         self._playback.resume_playback_after_transition()
 

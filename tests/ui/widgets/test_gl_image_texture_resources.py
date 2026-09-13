@@ -10,6 +10,7 @@ pytest.importorskip("PySide6.QtGui", reason="Qt GUI not available", exc_type=Imp
 from PySide6.QtGui import QImage
 
 from iPhoto.gui.ui.widgets.gl_image_viewer.resources import TextureResourceManager
+from iPhoto.gui.ui.widgets.gl_renderer import GLRenderer
 
 
 class _RendererStub:
@@ -50,13 +51,32 @@ class _RendererStub:
         self._has_texture = True
         return True
 
+    def stage_still_texture(
+        self,
+        key: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
+        del protected_keys
+        assert not image.isNull()
+        self.resident.add(key)
+        return True
+
     def clear_still_residency(self) -> None:
         self.resident.clear()
         self.active = None
         self._has_texture = False
 
-    def trim_still_residency(self) -> None:
-        self.resident = {self.active} if self.active is not None else set()
+    def trim_still_residency(
+        self,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> None:
+        retained = set(protected_keys)
+        if self.active is not None:
+            retained.add(self.active)
+        self.resident.intersection_update(retained)
 
 
 def _manager(renderer: _RendererStub) -> TextureResourceManager:
@@ -114,6 +134,21 @@ def test_stable_still_key_uploads_once_and_then_activates_resident_texture() -> 
     assert renderer.still_uploads == ["still-a"]
 
 
+def test_staging_surface_does_not_change_resource_manager_current_source() -> None:
+    renderer = _RendererStub()
+    manager = _manager(renderer)
+    image = QImage(32, 24, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF556677)
+    manager.set_image(image, "current")
+    manager.upload_texture_if_needed(image)
+
+    assert manager.stage_still_texture("higher-lod", image) is True
+
+    assert manager.get_current_image_source() == "current"
+    assert renderer.active == "current"
+    assert "higher-lod" in renderer.resident
+
+
 def test_residency_deletion_runs_with_the_render_context_current() -> None:
     events: list[str] = []
 
@@ -122,9 +157,13 @@ def test_residency_deletion_runs_with_the_render_context_current() -> None:
             events.append("clear")
             super().clear_still_residency()
 
-        def trim_still_residency(self) -> None:
+        def trim_still_residency(
+            self,
+            *,
+            protected_keys: frozenset[object] = frozenset(),
+        ) -> None:
             events.append("trim")
-            super().trim_still_residency()
+            super().trim_still_residency(protected_keys=protected_keys)
 
     renderer = _ContextRenderer()
     manager = TextureResourceManager(
@@ -145,3 +184,27 @@ def test_residency_deletion_runs_with_the_render_context_current() -> None:
         "trim",
         "done-current",
     ]
+
+
+def test_gl_renderer_forwards_protected_residency_contract(mocker) -> None:
+    renderer = GLRenderer.__new__(GLRenderer)
+    renderer._tex_mgr = mocker.Mock()
+    renderer._tex_mgr.stage_still_texture.return_value = True
+    protected = frozenset({"committed", "active"})
+    image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+
+    assert renderer.stage_still_texture(
+        "desired",
+        image,
+        protected_keys=protected,
+    )
+    renderer.trim_still_residency(protected_keys=protected)
+
+    renderer._tex_mgr.stage_still_texture.assert_called_once_with(
+        "desired",
+        image,
+        protected_keys=protected,
+    )
+    renderer._tex_mgr.trim_still_residency.assert_called_once_with(
+        protected_keys=protected
+    )

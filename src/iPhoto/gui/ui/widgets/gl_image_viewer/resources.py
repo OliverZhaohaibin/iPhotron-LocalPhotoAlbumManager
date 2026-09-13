@@ -100,16 +100,47 @@ class TextureResourceManager:
         touch = getattr(renderer, "touch_still_texture", None)
         return bool(callable(touch) and touch(source))
 
-    def warm_still_texture(self, source: object, image: QImage) -> bool:
+    def warm_still_texture(
+        self,
+        source: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
         renderer = self._renderer_provider()
         warmer = getattr(renderer, "warm_still_texture", None)
         if callable(warmer):
-            return bool(warmer(source, image))
+            return bool(warmer(source, image, protected_keys=protected_keys))
         uploader = getattr(renderer, "upload_still_texture", None)
         if callable(uploader):
             uploader(source, image)
             return True
         return False
+
+    def stage_still_texture(
+        self,
+        source: object,
+        image: QImage,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> bool:
+        """Upload a foreground LOD without replacing the active texture."""
+
+        renderer = self._renderer_provider()
+        stage = getattr(renderer, "stage_still_texture", None)
+        if callable(stage):
+            return bool(stage(source, image, protected_keys=protected_keys))
+        return False
+
+    def cancel_pending_still_upload(
+        self,
+        source: object,
+        *,
+        purpose: str,
+    ) -> bool:
+        renderer = self._renderer_provider()
+        cancel = getattr(renderer, "cancel_pending_still_upload", None)
+        return bool(callable(cancel) and cancel(source, purpose=purpose))
 
     def clear_still_residency(self) -> None:
         renderer = self._renderer_provider()
@@ -130,7 +161,11 @@ class TextureResourceManager:
         self._force_upload = False
         self._texture_dirty = False
 
-    def trim_still_residency(self) -> None:
+    def trim_still_residency(
+        self,
+        *,
+        protected_keys: frozenset[object] = frozenset(),
+    ) -> None:
         renderer = self._renderer_provider()
         trim = getattr(renderer, "trim_still_residency", None)
         if callable(trim):
@@ -138,11 +173,11 @@ class TextureResourceManager:
             if context is not None:
                 self._make_current()
                 try:
-                    trim()
+                    trim(protected_keys=protected_keys)
                 finally:
                     self._done_current()
             else:
-                trim()
+                trim(protected_keys=protected_keys)
     
     def set_image(
         self,

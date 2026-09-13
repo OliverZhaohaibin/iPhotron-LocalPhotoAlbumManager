@@ -107,6 +107,67 @@ def test_warming_a_resident_neighbor_refreshes_its_lru_position(mocker) -> None:
     assert not manager.has_still_texture("stale")
 
 
+def test_staging_lod_keeps_current_gl_texture_active(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    manager.upload_still_texture("current", _image(8, 8))
+    active_texture = manager._texture_id
+
+    assert manager.stage_still_texture("higher-lod", _image(12, 10)) is True
+
+    assert manager._active_still_key == "current"
+    assert manager._texture_id == active_texture
+    assert manager.has_still_texture("higher-lod")
+    assert manager.take_still_upload_result() == {
+        "key": "higher-lod",
+        "activate": False,
+        "success": True,
+        "reason": "uploaded",
+        "purpose": "lod_promotion",
+    }
+
+
+def test_gl_staging_never_reuses_committed_or_active_texture(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    manager.upload_still_texture("committed-a", _image(8, 8))
+    manager.upload_still_texture("prefetch", _image(12, 10))
+    manager.upload_still_texture("active-b", _image(16, 12))
+
+    assert manager.stage_still_texture(
+        "desired-c",
+        _image(12, 10),
+        protected_keys=frozenset({"committed-a", "active-b"}),
+    )
+
+    assert manager.has_still_texture("committed-a")
+    assert manager.has_still_texture("active-b")
+    assert manager.has_still_texture("desired-c")
+    assert not manager.has_still_texture("prefetch")
+    assert manager._active_still_key == "active-b"
+
+
+def test_failed_gl_lod_staging_preserves_active_texture(mocker) -> None:
+    _mock_gl_uploads(mocker)
+    manager = TextureManager()
+    current = _image(8, 8)
+    manager.upload_still_texture("current", current)
+    active_texture = manager._texture_id
+    manager._still_budget_bytes = current.sizeInBytes()
+
+    assert manager.stage_still_texture("higher-lod", _image(12, 10)) is False
+
+    assert manager._active_still_key == "current"
+    assert manager._texture_id == active_texture
+    assert manager.take_still_upload_result() == {
+        "key": "higher-lod",
+        "activate": False,
+        "success": False,
+        "reason": "residency_budget",
+        "purpose": "lod_promotion",
+    }
+
+
 def test_rgba_video_uploads_keep_mipmaps_while_still_surfaces_do_not(mocker) -> None:
     _mock_gl_uploads(mocker)
     manager = TextureManager()

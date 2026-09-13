@@ -47,18 +47,25 @@ Windows Playback fullscreen 样本还必须保留同一 `transition_id` 下的
 `fullscreen_enter_timeout`，并收敛为完成或 `fullscreen_enter_rollback`。确认前不得
 恢复 painting，但 `showFullScreen()` 同步调用返回时必须恢复原始 updates 状态，不能跨
 Windows 异步 native transition 冻结窗口；恢复时不得再显式调用 `window.update()`。
+Windows 必须先记录 `fullscreen_snapshot_captured|fallback → fullscreen_hold_window_shown →
+fullscreen_hold_window_presented → fullscreen_animation_started →
+fullscreen_native_state_requested`。hold 是覆盖目标屏幕的独立 opaque 顶层窗口；在首次 paint
+和 32 ms settle 完成前不得隐藏 chrome、禁用主窗口 updates 或请求 native fullscreen。
 确认后每个 transaction 只允许一次 authoritative viewport relayout，并记录
-`fullscreen_first_frame_requested`。Windows 的 snapshot/fallback overlay 在 QRhi resize、
-clear 和资源重建期间保持可见；原始 image `frameSubmitted` 与 video
+`fullscreen_first_frame_requested`。hold 在 QRhi resize、clear 和资源重建期间保持可见；原始
+image `frameSubmitted` 与 video
 `surfaceCompositionSubmitted` 均不是 media-frame terminal。renderer 只有在真实媒体纹理已
 draw、relayout 已消费且 token/target/content identity 匹配时，才记录
 `fullscreen_media_candidate_drawn`，随后由 matching submission 产生 ordinal 1/2 的
 `fullscreen_media_frame_submitted`。两次提交必须位于同一稳定 target；target 或 active
 surface 变化会重新建立稳定性基线。只有第二次提交和 220 ms animation 都完成后，才记录
-`fullscreen_handoff_finished`、移除 overlay、释放 LOD gate，并从此开始播放恢复延迟及一次
+`fullscreen_handoff_finished`、移除 hold、释放 LOD gate，并从此开始播放恢复延迟及一次
 16 ms automatic resize LOD。500 ms 内没有首帧时记录
-`fullscreen_first_frame_timeout`，在 overlay 下恢复播放并额外等待 1000 ms；第二帧 250 ms
-超时或最终仍无媒体帧时必须以 `automatic_lod=false` 收敛。`fullscreen_update_requested`
+`fullscreen_first_frame_timeout`，在 hold 下恢复播放并额外等待 1000 ms；第二帧 250 ms
+超时时可以 `automatic_lod=false` 交接已有真实帧；最终仍无媒体帧时必须在 hold 下恢复
+windowed state，并等待 `fullscreen_rollback_frame_requested/submitted` 后再移除 hold；500 ms
+回滚帧 deadline 仅用于防止工具窗口永久遮挡。不得暴露空 fullscreen。
+`fullscreen_update_requested`
 只用于关联 Qt 事件，不是 media-frame terminal，也不能证明请求数量。所有成功收敛路径最终
 记录 `fullscreen_transition_finished` 及原因。
 
@@ -214,7 +221,7 @@ maximized、125%/150% DPI 与双显示器。屏幕录像中不得出现桌面暴
 过期 resume callback 必须全部被 generation 拒绝，最终只恢复一次播放且播放状态与
 首次切换前一致。
 每次 fullscreen 还必须验证 committed LOD 首帧先于高清 promotion：
-`fullscreen_lod_gate_started → media ordinal 1 → media ordinal 2|stable timeout → animation finished → fullscreen_handoff_finished → fullscreen_lod_gate_released`
+`fullscreen_lod_gate_started → hold presented → animation/native request → media ordinal 1 → media ordinal 2|stable timeout → animation finished → fullscreen_handoff_finished → fullscreen_lod_gate_released`
 后才可出现新的 `lod_plan_submitted`/`lod_upgrade_staging`。timeout transaction 不得产生
 automatic fullscreen LOD。分别比较 click→首个 fullscreen media frame 与稳定 handoff→高清
 LOD submission；不设置未经基线确认的绝对阈值，但 candidate 的 click→first-frame P50/P95

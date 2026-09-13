@@ -12,11 +12,9 @@ from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import (
     QCoreApplication,
-    QEasingCurve,
     QEvent,
     QObject,
     QPoint,
-    QPropertyAnimation,
     QRect,
     QSize,
     Qt,
@@ -29,8 +27,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QGraphicsOpacityEffect,
-    QLabel,
     QMainWindow,
     QMenu,
     QMenuBar,
@@ -42,6 +38,7 @@ from ..detail_profile import detail_profile_enabled, emit_detail_event
 from ..i18n.font_policy import sync_widget_language_font
 from ..render_backend import selected_rhi_backend_name
 from .icon import load_icon
+from .fullscreen_presentation import _WindowsFullscreenPresentationHold
 from .styles import modern_scrollbar_style
 from .widgets.custom_tooltip import FloatingToolTip, ToolTipEventFilter
 from .window_shell import RoundedWindowShell
@@ -63,12 +60,16 @@ if TYPE_CHECKING:  # pragma: no cover - used only for type checking
 # changes.
 PLAYBACK_RESUME_DELAY_MS = 120
 FULLSCREEN_ENTER_TIMEOUT_MS = 1000
+FULLSCREEN_HOLD_PRESENTATION_TIMEOUT_MS = 250
+FULLSCREEN_HOLD_SETTLE_MS = 32
 FULLSCREEN_MEDIA_FRAME_TIMEOUT_MS = 500
 FULLSCREEN_STABLE_FRAME_TIMEOUT_MS = 250
 FULLSCREEN_LATE_FRAME_TIMEOUT_MS = 1000
 FULLSCREEN_MAGIC_ZOOM_DURATION_MS = 220
 FULLSCREEN_MAGIC_FADE_DURATION_MS = 60
 FULLSCREEN_MAGIC_ANIMATION_TIMEOUT_MS = 350
+FULLSCREEN_HANDOFF_TIMEOUT_MS = 200
+FULLSCREEN_ROLLBACK_HOLD_TIMEOUT_MS = 500
 _MIN_WINDOW_WIDTH = 900
 _MIN_WINDOW_HEIGHT = 640
 _SCREEN_CLAMP_MARGIN = 40
@@ -76,6 +77,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class _FullscreenTransitionPhase(Enum):
+    AWAITING_HOLD_PRESENTED = auto()
     PREPARING_SYNC = auto()
     AWAITING_NATIVE = auto()
     AWAITING_MEDIA_FRAME = auto()
@@ -104,6 +106,10 @@ class _WindowsFullscreenTransition:
     media_identity: object | None = None
     handoff_started: bool = False
     handoff_reason: str = ""
+    lod_gate_started: bool = False
+    ui_mutation_started: bool = False
+    native_requested: bool = False
+    rollback_waiting_for_windowed: bool = False
 
 
 def _is_wayland() -> bool:
@@ -165,10 +171,7 @@ class FramelessWindowManager(QObject):
         self._shadow_restore_generation = 0
         self._fullscreen_transition_generation = 0
         self._fullscreen_transition: _WindowsFullscreenTransition | None = None
-        self._fullscreen_hold_overlay: QLabel | None = None
-        self._fullscreen_hold_animation: QPropertyAnimation | None = None
-        self._fullscreen_hold_fade: QPropertyAnimation | None = None
-        self._fullscreen_hold_transition_id: int | None = None
+        self._fullscreen_hold: _WindowsFullscreenPresentationHold | None = None
         self._playback_transition_generation = 0
         self._playback_resume_pending = False
 
@@ -180,6 +183,9 @@ class FramelessWindowManager(QObject):
         self._configure_window_controls()
         self._configure_drag_sources()
         self._window.installEventFilter(self)
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_application_state_changed)
         self._apply_menu_styles()
         self.position_live_badge()
         self.position_resize_widgets()
@@ -231,9 +237,13 @@ class FramelessWindowManager(QObject):
                 app.removeEventFilter(self._tooltip_filter)
                 if app.property("floatingToolTipFilter") == self._tooltip_filter:
                     app.setProperty("floatingToolTipFilter", None)
+            try:
+                app.applicationStateChanged.disconnect(self._on_application_state_changed)
+            except (RuntimeError, TypeError):
+                pass
         self._tooltip_filter = None
         self._cancel_fullscreen_transition_deadline(self._fullscreen_transition)
-        self._cancel_fullscreen_magic_zoom()
+        self._cancel_fullscreen_presentation_hold(reason="cleanup")
         if self._fullscreen_transition is not None and self._detail_coordinator is not None:
             self._best_effort_fullscreen_restore(
                 "LOD gate",
@@ -242,6 +252,35 @@ class FramelessWindowManager(QObject):
         self._fullscreen_transition = None
         self._window_tooltip.hide_tooltip()
         self._snap_helper.cleanup()
+
+    def _on_application_state_changed(self, state: Qt.ApplicationState) -> None:
+        """Never leave the parentless topmost hold above another application."""
+
+        if state == Qt.ApplicationState.ApplicationActive:
+            return
+        transition = getattr(self, "_fullscreen_transition", None)
+        if transition is None:
+            return
+        QTimer.singleShot(
+            0,
+            lambda owner=transition.transition_id: self._cancel_fullscreen_for_deactivation(owner),
+        )
+
+    def _cancel_fullscreen_for_deactivation(self, transition_id: int) -> None:
+        transition = getattr(self, "_fullscreen_transition", None)
+        if transition is None or transition.transition_id != int(transition_id):
+            return
+        self._rollback_windows_fullscreen_enter(
+            transition,
+            request_window_change=transition.native_requested,
+            preserve_hold_until_windowed=False,
+        )
+        self._schedule_playback_resume(
+            expect_immersive=False,
+            resume=(transition.resume_playback and self._playback_resume_pending),
+            playback_generation=transition.playback_generation,
+            transition_id=transition.transition_id,
+        )
 
     # ------------------------------------------------------------------
     # Menu helpers
@@ -370,6 +409,12 @@ class FramelessWindowManager(QObject):
             edit_controller.enter_fullscreen_preview()
             return
 
+        pending_transition = getattr(self, "_fullscreen_transition", None)
+        if pending_transition is not None and not self._immersive_active:
+            self._finish_immersive_exit(
+                request_window_change=pending_transition.native_requested,
+            )
+            return
         if self._immersive_active:
             return
         if self._detail_coordinator is None:
@@ -429,26 +474,63 @@ class FramelessWindowManager(QObject):
         *,
         playback_generation: int,
     ) -> None:
-        """Request one atomic Windows fullscreen presentation transaction."""
+        """Present an independent hold before mutating the main window."""
 
         self._fullscreen_transition_generation += 1
         transition = _WindowsFullscreenTransition(
             transition_id=self._fullscreen_transition_generation,
-            phase=_FullscreenTransitionPhase.PREPARING_SYNC,
+            phase=_FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
             updates_enabled_before=self._window.updatesEnabled(),
             playback_generation=int(playback_generation),
             resume_playback=bool(resume_after_transition),
         )
         self._fullscreen_transition = transition
-        splitter_signals_blocked: bool | None = None
-        failure: Exception | None = None
         try:
             self._emit_fullscreen_transition_event(
                 "fullscreen_enter_requested", transition.transition_id
             )
-            self._prepare_fullscreen_magic_zoom(transition)
-            self._window.setUpdatesEnabled(False)
             self._detail_coordinator.begin_fullscreen_viewport_transition()
+            transition.lod_gate_started = True
+            hold_created = self._prepare_fullscreen_presentation_hold(transition)
+            if not hold_created:
+                transition.animation_finished = True
+                self._commit_windows_fullscreen_enter(transition)
+                return
+            self._start_fullscreen_transition_deadline(
+                transition,
+                timeout_ms=FULLSCREEN_HOLD_PRESENTATION_TIMEOUT_MS,
+                callback=self._handle_fullscreen_hold_timeout,
+            )
+        except Exception:
+            self._rollback_windows_fullscreen_enter(
+                transition,
+                request_window_change=transition.native_requested,
+                preserve_hold_until_windowed=transition.native_requested,
+            )
+            self._schedule_playback_resume(
+                expect_immersive=False,
+                resume=(
+                    transition.resume_playback and self._playback_resume_pending
+                ),
+                playback_generation=transition.playback_generation,
+                transition_id=transition.transition_id,
+            )
+            raise
+
+    def _commit_windows_fullscreen_enter(
+        self,
+        transition: _WindowsFullscreenTransition,
+    ) -> None:
+        """Apply synchronous chrome mutations beneath an already visible hold."""
+
+        if getattr(self, "_fullscreen_transition", None) is not transition:
+            return
+        splitter_signals_blocked: bool | None = None
+        failure: Exception | None = None
+        try:
+            transition.phase = _FullscreenTransitionPhase.PREPARING_SYNC
+            transition.ui_mutation_started = True
+            self._window.setUpdatesEnabled(False)
             self._start_fullscreen_transition_deadline(
                 transition,
                 timeout_ms=FULLSCREEN_ENTER_TIMEOUT_MS,
@@ -475,10 +557,11 @@ class FramelessWindowManager(QObject):
             )
             self._immersive_active = True
             transition.phase = _FullscreenTransitionPhase.AWAITING_NATIVE
-            self._window.showFullScreen()
+            transition.native_requested = True
             self._emit_fullscreen_transition_event(
                 "fullscreen_native_state_requested", transition.transition_id
             )
+            self._window.showFullScreen()
         except Exception as exc:
             failure = exc
         finally:
@@ -508,68 +591,62 @@ class FramelessWindowManager(QObject):
             self._rollback_windows_fullscreen_enter(
                 transition,
                 request_window_change=True,
-            )
-            self._schedule_playback_resume(
-                expect_immersive=False,
-                resume=transition.resume_playback,
-                playback_generation=transition.playback_generation,
-                transition_id=transition.transition_id,
+                preserve_hold_until_windowed=transition.native_requested,
             )
             raise failure.with_traceback(failure.__traceback__)
 
-    def _prepare_fullscreen_magic_zoom(
+    def _prepare_fullscreen_presentation_hold(
         self,
         transition: _WindowsFullscreenTransition,
-    ) -> None:
-        """Hold the last composed player pixels over Windows QRhi resize clears."""
+    ) -> bool:
+        """Show an opaque top-level hold over the target screen."""
 
-        self._cancel_fullscreen_magic_zoom()
+        self._cancel_fullscreen_presentation_hold(reason="superseded")
         window = self._window
         container = getattr(self._ui, "player_container", None)
         if not isinstance(window, QWidget) or not isinstance(container, QWidget):
-            transition.animation_finished = True
-            return
-        source_origin = container.mapTo(window, QPoint(0, 0))
-        source_rect = QRect(source_origin, container.size())
+            return False
+        global_origin = container.mapToGlobal(QPoint(0, 0))
+        source_rect = QRect(global_origin, container.size())
+        app = QApplication.instance()
+        screen = app.screenAt(source_rect.center()) if app is not None else container.screen()
+        if screen is None:
+            screen = container.screen()
+        if screen is None:
+            raise RuntimeError("No screen is available for the fullscreen presentation hold")
+        screen_geometry = screen.geometry()
+        source_rect = source_rect.intersected(screen_geometry)
         if source_rect.isEmpty():
-            transition.animation_finished = True
-            return
-        overlay = QLabel(window)
-        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        overlay.setAutoFillBackground(True)
-        overlay.setScaledContents(True)
-        overlay.setStyleSheet(
-            f"background-color: {container.palette().color(QPalette.ColorRole.Window).name()};"
-        )
+            raise RuntimeError("The fullscreen presentation source is outside its target screen")
         snapshot = None
         try:
-            screen = container.screen()
-            global_origin = container.mapToGlobal(QPoint(0, 0))
-            if screen is not None:
-                # Windows and X11 interpret a desktop grab offset relative to
-                # the selected screen, not the virtual desktop.  Normalising
-                # here keeps snapshot capture aligned on secondary monitors,
-                # including screens with a negative virtual origin.
-                capture_origin = global_origin - screen.geometry().topLeft()
-                snapshot = screen.grabWindow(
-                    0,
-                    capture_origin.x(),
-                    capture_origin.y(),
-                    container.width(),
-                    container.height(),
-                )
+            capture_origin = source_rect.topLeft() - screen_geometry.topLeft()
+            snapshot = screen.grabWindow(
+                0,
+                capture_origin.x(),
+                capture_origin.y(),
+                source_rect.width(),
+                source_rect.height(),
+            )
         except Exception:
             _LOGGER.debug("Failed to capture fullscreen presentation hold", exc_info=True)
             snapshot = None
         captured = snapshot is not None and not snapshot.isNull()
-        if captured:
-            overlay.setPixmap(snapshot)
-        overlay.setGeometry(source_rect)
-        overlay.show()
-        overlay.raise_()
-        self._fullscreen_hold_overlay = overlay
-        self._fullscreen_hold_transition_id = transition.transition_id
+        hold = _WindowsFullscreenPresentationHold(
+            transition_id=transition.transition_id,
+            settle_ms=FULLSCREEN_HOLD_SETTLE_MS,
+        )
+        hold.presented.connect(self._on_fullscreen_hold_presented)
+        hold.zoomFinished.connect(self._on_fullscreen_hold_animation_finished)
+        hold.handoffFinished.connect(self._finalize_fullscreen_handoff)
+        self._fullscreen_hold = hold
         transition.animation_finished = False
+        hold.present(
+            screen_geometry=screen_geometry,
+            source_rect_global=source_rect,
+            snapshot=snapshot if captured else None,
+            fallback_color=container.palette().color(QPalette.ColorRole.Window),
+        )
         self._emit_fullscreen_transition_event(
             "fullscreen_snapshot_captured" if captured else "fullscreen_snapshot_fallback",
             transition.transition_id,
@@ -580,31 +657,34 @@ class FramelessWindowManager(QObject):
                 source_rect.height(),
             ),
         )
+        self._emit_fullscreen_transition_event(
+            "fullscreen_hold_window_shown",
+            transition.transition_id,
+            screen_geometry=(
+                screen_geometry.x(),
+                screen_geometry.y(),
+                screen_geometry.width(),
+                screen_geometry.height(),
+            ),
+        )
+        return True
 
-    def _start_fullscreen_magic_zoom(self, transition_id: int) -> None:
+    def _on_fullscreen_hold_presented(self, transition_id: int) -> None:
         transition = getattr(self, "_fullscreen_transition", None)
         if transition is None or transition.transition_id != int(transition_id):
             return
-        overlay = getattr(self, "_fullscreen_hold_overlay", None)
-        container = getattr(self._ui, "player_container", None)
-        if overlay is None or not isinstance(container, QWidget):
-            transition.animation_finished = True
-            self._maybe_finish_fullscreen_handoff(
-                transition,
-                reason=transition.handoff_reason or "animation_unavailable",
-            )
+        if transition.phase is not _FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED:
             return
-        target_origin = container.mapTo(self._window, QPoint(0, 0))
-        target_rect = QRect(target_origin, container.size())
-        animation = QPropertyAnimation(overlay, b"geometry", self)
-        animation.setDuration(FULLSCREEN_MAGIC_ZOOM_DURATION_MS)
-        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        animation.setStartValue(overlay.geometry())
-        animation.setEndValue(target_rect)
-        animation.finished.connect(
-            lambda owner=transition.transition_id: self._finish_fullscreen_magic_animation(owner)
+        self._cancel_fullscreen_transition_deadline(transition)
+        self._emit_fullscreen_transition_event(
+            "fullscreen_hold_window_presented",
+            transition.transition_id,
         )
-        self._fullscreen_hold_animation = animation
+        hold = self._fullscreen_hold
+        if hold is None or hold.transition_id != transition.transition_id:
+            self._handle_fullscreen_hold_timeout(transition.transition_id)
+            return
+        target_rect = hold.geometry()
         self._emit_fullscreen_transition_event(
             "fullscreen_animation_started",
             transition.transition_id,
@@ -615,36 +695,31 @@ class FramelessWindowManager(QObject):
                 target_rect.height(),
             ),
         )
-        animation.start()
+        hold.animate_to(target_rect, duration_ms=FULLSCREEN_MAGIC_ZOOM_DURATION_MS)
         QTimer.singleShot(
             FULLSCREEN_MAGIC_ANIMATION_TIMEOUT_MS,
-            lambda owner=transition.transition_id: self._finish_fullscreen_magic_animation(owner),
+            lambda owner=transition.transition_id: self._on_fullscreen_hold_animation_finished(
+                owner
+            ),
         )
+        try:
+            self._commit_windows_fullscreen_enter(transition)
+        except Exception:
+            self._schedule_playback_resume(
+                expect_immersive=False,
+                resume=transition.resume_playback,
+                playback_generation=transition.playback_generation,
+                transition_id=transition.transition_id,
+            )
+            _LOGGER.exception("Windows fullscreen request failed after hold presentation")
 
-    def _finish_fullscreen_magic_animation(self, transition_id: int) -> None:
+    def _on_fullscreen_hold_animation_finished(self, transition_id: int) -> None:
         transition = getattr(self, "_fullscreen_transition", None)
         if transition is None or transition.transition_id != int(transition_id):
             return
         if transition.animation_finished:
             return
         transition.animation_finished = True
-        animation = getattr(self, "_fullscreen_hold_animation", None)
-        self._fullscreen_hold_animation = None
-        if animation is not None:
-            try:
-                animation.stop()
-                animation.deleteLater()
-            except RuntimeError:
-                _LOGGER.debug("Fullscreen geometry animation was already deleted")
-        container = getattr(self._ui, "player_container", None)
-        overlay = getattr(self, "_fullscreen_hold_overlay", None)
-        if overlay is not None and isinstance(container, QWidget):
-            try:
-                overlay.setGeometry(
-                    QRect(container.mapTo(self._window, QPoint(0, 0)), container.size())
-                )
-            except RuntimeError:
-                _LOGGER.debug("Fullscreen presentation hold was already deleted")
         self._emit_fullscreen_transition_event(
             "fullscreen_animation_finished",
             transition.transition_id,
@@ -654,29 +729,22 @@ class FramelessWindowManager(QObject):
             reason=transition.handoff_reason or "animation_finished",
         )
 
-    def _cancel_fullscreen_magic_zoom(self) -> None:
-        animations = (
-            getattr(self, "_fullscreen_hold_animation", None),
-            getattr(self, "_fullscreen_hold_fade", None),
+    def _cancel_fullscreen_presentation_hold(self, *, reason: str) -> None:
+        hold = getattr(self, "_fullscreen_hold", None)
+        self._fullscreen_hold = None
+        if hold is None:
+            return
+        transition_id = hold.transition_id
+        try:
+            hold.cancel()
+            hold.deleteLater()
+        except RuntimeError:
+            _LOGGER.debug("Fullscreen presentation hold was already deleted")
+        self._emit_fullscreen_transition_event(
+            "fullscreen_hold_window_cancelled",
+            transition_id,
+            reason=reason,
         )
-        overlay = getattr(self, "_fullscreen_hold_overlay", None)
-        self._fullscreen_hold_animation = None
-        self._fullscreen_hold_fade = None
-        self._fullscreen_hold_overlay = None
-        self._fullscreen_hold_transition_id = None
-        for animation in animations:
-            if animation is not None:
-                try:
-                    animation.stop()
-                    animation.deleteLater()
-                except RuntimeError:
-                    _LOGGER.debug("Fullscreen animation was already deleted")
-        if overlay is not None:
-            try:
-                overlay.hide()
-                overlay.deleteLater()
-            except RuntimeError:
-                _LOGGER.debug("Fullscreen presentation hold was already deleted")
 
     def exit_fullscreen(self) -> None:
         """Restore the normal window chrome and previously visible widgets."""
@@ -705,9 +773,12 @@ class FramelessWindowManager(QObject):
             return
         if self._detail_coordinator is None:
             return
+        if transition is not None and transition.phase is _FullscreenTransitionPhase.ROLLBACK:
+            return
 
         playback_generation, resume_after_transition = self._begin_playback_transition()
         if transition is not None and transition.phase in {
+            _FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
             _FullscreenTransitionPhase.PREPARING_SYNC,
             _FullscreenTransitionPhase.AWAITING_NATIVE,
             _FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
@@ -717,6 +788,9 @@ class FramelessWindowManager(QObject):
             self._rollback_windows_fullscreen_enter(
                 transition,
                 request_window_change=request_window_change,
+                preserve_hold_until_windowed=(
+                    request_window_change and transition.native_requested
+                ),
             )
             self._schedule_playback_resume(
                 expect_immersive=False,
@@ -726,7 +800,7 @@ class FramelessWindowManager(QObject):
             )
             return
         if transition is not None:
-            self._cancel_fullscreen_magic_zoom()
+            self._cancel_fullscreen_presentation_hold(reason="fullscreen_exit")
             self._finish_fullscreen_transition_observation(
                 transition,
                 reason="fullscreen_exit",
@@ -780,6 +854,12 @@ class FramelessWindowManager(QObject):
         transition = getattr(self, "_fullscreen_transition", None)
         if (
             transition is not None
+            and transition.phase is _FullscreenTransitionPhase.ROLLBACK
+            and transition.rollback_waiting_for_windowed
+        ):
+            return
+        if (
+            transition is not None
             and transition.phase is _FullscreenTransitionPhase.AWAITING_NATIVE
         ):
             if self._window.isFullScreen():
@@ -813,10 +893,15 @@ class FramelessWindowManager(QObject):
                 transition_id,
                 1,
             )
-            QTimer.singleShot(
-                0,
-                lambda owner=transition_id: self._start_fullscreen_magic_zoom(owner),
-            )
+            hold = getattr(self, "_fullscreen_hold", None)
+            container = getattr(self._ui, "player_container", None)
+            if (
+                hold is not None
+                and hold.transition_id == transition_id
+                and isinstance(container, QWidget)
+            ):
+                target_origin = container.mapToGlobal(QPoint(0, 0))
+                hold.retarget(QRect(target_origin, container.size()))
             self._emit_fullscreen_transition_event(
                 "fullscreen_viewport_relayout_requested", transition_id
             )
@@ -829,6 +914,7 @@ class FramelessWindowManager(QObject):
             self._rollback_windows_fullscreen_enter(
                 transition,
                 request_window_change=True,
+                preserve_hold_until_windowed=True,
             )
             self._schedule_playback_resume(
                 expect_immersive=False,
@@ -866,6 +952,27 @@ class FramelessWindowManager(QObject):
         timer.stop()
         timer.deleteLater()
 
+    def _handle_fullscreen_hold_timeout(self, transition_id: int) -> None:
+        transition = getattr(self, "_fullscreen_transition", None)
+        if transition is None or transition.transition_id != int(transition_id):
+            return
+        if transition.phase is not _FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED:
+            return
+        self._emit_fullscreen_transition_event(
+            "fullscreen_hold_window_timeout",
+            transition.transition_id,
+        )
+        self._rollback_windows_fullscreen_enter(
+            transition,
+            request_window_change=False,
+        )
+        self._schedule_playback_resume(
+            expect_immersive=False,
+            resume=transition.resume_playback,
+            playback_generation=transition.playback_generation,
+            transition_id=transition.transition_id,
+        )
+
     def _handle_fullscreen_enter_timeout(self, transition_id: int) -> None:
         transition = getattr(self, "_fullscreen_transition", None)
         if transition is None or transition.transition_id != transition_id:
@@ -879,7 +986,11 @@ class FramelessWindowManager(QObject):
         if self._window.isFullScreen():
             self._complete_windows_fullscreen_enter(transition_id)
             return
-        self._rollback_windows_fullscreen_enter(transition, request_window_change=True)
+        self._rollback_windows_fullscreen_enter(
+            transition,
+            request_window_change=True,
+            preserve_hold_until_windowed=True,
+        )
         self._schedule_playback_resume(
             expect_immersive=False,
             resume=transition.resume_playback,
@@ -914,11 +1025,18 @@ class FramelessWindowManager(QObject):
                 "fullscreen_late_frame_timeout",
                 transition_id,
             )
-            transition.phase = _FullscreenTransitionPhase.AWAITING_HANDOFF
-            transition.media_stable = True
-            self._maybe_finish_fullscreen_handoff(
+            self._rollback_windows_fullscreen_enter(
                 transition,
-                reason="late_frame_timeout",
+                request_window_change=True,
+                preserve_hold_until_windowed=True,
+            )
+            self._schedule_playback_resume(
+                expect_immersive=False,
+                resume=(
+                    transition.resume_playback and self._playback_resume_pending
+                ),
+                playback_generation=transition.playback_generation,
+                transition_id=transition.transition_id,
             )
             return
         if transition.phase is _FullscreenTransitionPhase.AWAITING_STABLE_MEDIA_FRAME:
@@ -991,6 +1109,28 @@ class FramelessWindowManager(QObject):
     ) -> None:
         transition = getattr(self, "_fullscreen_transition", None)
         if transition is None or transition.transition_id != int(transition_id):
+            return
+        if (
+            transition.phase is _FullscreenTransitionPhase.ROLLBACK
+            and transition.rollback_waiting_for_windowed
+        ):
+            target = (int(target_size.width()), int(target_size.height()))
+            active_target = self._render_target_size(
+                self._ui.image_viewer if surface == "image" else self._active_video_surface()
+            )
+            if (
+                int(ordinal) == 1
+                and not self._window.isFullScreen()
+                and active_target == target
+                and self._fullscreen_media_identity_valid(identity, surface)
+            ):
+                self._emit_fullscreen_transition_event(
+                    "fullscreen_rollback_frame_submitted",
+                    transition.transition_id,
+                    target=target,
+                    surface=surface,
+                )
+                self._finish_fullscreen_rollback_hold(transition.transition_id)
             return
         expected_ordinal = (
             1
@@ -1166,21 +1306,14 @@ class FramelessWindowManager(QObject):
         ):
             return
         transition.handoff_started = True
-        overlay = getattr(self, "_fullscreen_hold_overlay", None)
-        if overlay is not None:
+        hold = getattr(self, "_fullscreen_hold", None)
+        if hold is not None and hold.transition_id == transition.transition_id:
             try:
-                effect = QGraphicsOpacityEffect(overlay)
-                effect.setOpacity(1.0)
-                overlay.setGraphicsEffect(effect)
-                fade = QPropertyAnimation(effect, b"opacity", self)
-                fade.setDuration(FULLSCREEN_MAGIC_FADE_DURATION_MS)
-                fade.setStartValue(1.0)
-                fade.setEndValue(0.0)
-                fade.finished.connect(
-                    lambda owner=transition.transition_id: self._finalize_fullscreen_handoff(owner)
+                hold.finish_handoff(duration_ms=FULLSCREEN_MAGIC_FADE_DURATION_MS)
+                QTimer.singleShot(
+                    FULLSCREEN_HANDOFF_TIMEOUT_MS,
+                    lambda owner=transition.transition_id: self._finalize_fullscreen_handoff(owner),
                 )
-                self._fullscreen_hold_fade = fade
-                fade.start()
                 return
             except RuntimeError:
                 _LOGGER.debug(
@@ -1194,7 +1327,7 @@ class FramelessWindowManager(QObject):
         if transition is None or transition.transition_id != int(transition_id):
             return
         reason = transition.handoff_reason or "fullscreen_handoff"
-        self._cancel_fullscreen_magic_zoom()
+        self._cancel_fullscreen_presentation_hold(reason="handoff_finished")
         self._emit_fullscreen_transition_event(
             "fullscreen_handoff_finished",
             transition.transition_id,
@@ -1243,6 +1376,7 @@ class FramelessWindowManager(QObject):
         transition: _WindowsFullscreenTransition,
         *,
         request_window_change: bool,
+        preserve_hold_until_windowed: bool = False,
     ) -> None:
         """Best-effort rollback that always attempts to restore window updates."""
 
@@ -1254,20 +1388,23 @@ class FramelessWindowManager(QObject):
         )
         self._immersive_active = False
         try:
-            self._best_effort_fullscreen_restore(
-                "magic zoom",
-                self._cancel_fullscreen_magic_zoom,
-            )
-            self._best_effort_fullscreen_restore(
-                "LOD gate",
-                self._detail_coordinator.cancel_fullscreen_viewport_transition,
-            )
+            if not preserve_hold_until_windowed:
+                self._best_effort_fullscreen_restore(
+                    "presentation hold",
+                    lambda: self._cancel_fullscreen_presentation_hold(reason="rollback"),
+                )
+            if transition.lod_gate_started:
+                self._best_effort_fullscreen_restore(
+                    "LOD gate",
+                    self._detail_coordinator.cancel_fullscreen_viewport_transition,
+                )
             self._best_effort_fullscreen_restore(
                 "transition deadline",
                 lambda: self._cancel_fullscreen_transition_deadline(transition),
             )
-            self._best_effort_fullscreen_restore("backdrop", self._restore_default_backdrop)
-            if request_window_change:
+            if transition.ui_mutation_started:
+                self._best_effort_fullscreen_restore("backdrop", self._restore_default_backdrop)
+            if request_window_change and transition.native_requested:
                 self._best_effort_fullscreen_restore("normal window state", self._window.showNormal)
                 if self._previous_geometry is not None:
                     self._best_effort_fullscreen_restore(
@@ -1279,46 +1416,105 @@ class FramelessWindowManager(QObject):
                         "window state",
                         lambda: self._window.setWindowState(self._previous_window_state),
                     )
-            if self._splitter_sizes:
+            if transition.ui_mutation_started and self._splitter_sizes:
                 self._best_effort_fullscreen_restore(
                     "splitter sizes",
                     lambda: self._ui.splitter.setSizes(self._splitter_sizes),
                 )
-            for widget, was_visible in self._hidden_widget_states:
-                self._best_effort_fullscreen_restore(
-                    "widget visibility",
-                    lambda target=widget, visible=was_visible: target.setVisible(visible),
-                )
+            if transition.ui_mutation_started:
+                for widget, was_visible in self._hidden_widget_states:
+                    self._best_effort_fullscreen_restore(
+                        "widget visibility",
+                        lambda target=widget, visible=was_visible: target.setVisible(visible),
+                    )
             self._hidden_widget_states = []
-            self._best_effort_fullscreen_restore(
-                "video controls enabled",
-                lambda: self._ui.video_area.set_controls_enabled(
-                    self._video_controls_enabled_before
-                ),
-            )
-            if self._video_controls_enabled_before and self._ui.video_area.isVisible():
+            if transition.ui_mutation_started:
                 self._best_effort_fullscreen_restore(
-                    "video controls visibility",
-                    lambda: self._ui.video_area.show_controls(animate=False),
+                    "video controls enabled",
+                    lambda: self._ui.video_area.set_controls_enabled(
+                        self._video_controls_enabled_before
+                    ),
                 )
-            self._best_effort_fullscreen_restore(
-                "fullscreen button", self._update_fullscreen_button_icon
-            )
-            self._best_effort_fullscreen_restore(
-                "media viewport",
-                lambda: self._request_media_viewport_relayout(reset_view=True),
-            )
-            self._best_effort_fullscreen_restore(
-                "header shadow",
-                self._schedule_playback_header_shadow_restore,
-            )
+                if self._video_controls_enabled_before and self._ui.video_area.isVisible():
+                    self._best_effort_fullscreen_restore(
+                        "video controls visibility",
+                        lambda: self._ui.video_area.show_controls(animate=False),
+                    )
+                self._best_effort_fullscreen_restore(
+                    "fullscreen button", self._update_fullscreen_button_icon
+                )
+                self._best_effort_fullscreen_restore(
+                    "media viewport",
+                    lambda: self._request_media_viewport_relayout(reset_view=True),
+                )
+                self._best_effort_fullscreen_restore(
+                    "header shadow",
+                    self._schedule_playback_header_shadow_restore,
+                )
         finally:
-            self._best_effort_fullscreen_restore(
-                "window updates",
-                lambda: self._restore_windows_fullscreen_updates(transition),
+            if transition.ui_mutation_started:
+                self._best_effort_fullscreen_restore(
+                    "window updates",
+                    lambda: self._restore_windows_fullscreen_updates(transition),
+                )
+            keep_hold = (
+                preserve_hold_until_windowed
+                and getattr(self, "_fullscreen_hold", None) is not None
+                and self._fullscreen_hold.transition_id == transition.transition_id
             )
-            if getattr(self, "_fullscreen_transition", None) is transition:
+            if keep_hold:
+                transition.rollback_waiting_for_windowed = True
+                self._start_fullscreen_transition_deadline(
+                    transition,
+                    timeout_ms=FULLSCREEN_ROLLBACK_HOLD_TIMEOUT_MS,
+                    callback=self._handle_fullscreen_rollback_hold_timeout,
+                )
+                self._emit_fullscreen_transition_event(
+                    "fullscreen_rollback_frame_requested",
+                    transition.transition_id,
+                )
+                self._best_effort_fullscreen_restore(
+                    "windowed media frame",
+                    lambda: self._detail_coordinator.request_fullscreen_viewport_frame(
+                        transition.transition_id,
+                        1,
+                    ),
+                )
+            elif getattr(self, "_fullscreen_transition", None) is transition:
                 self._fullscreen_transition = None
+
+    def _handle_fullscreen_rollback_hold_timeout(self, transition_id: int) -> None:
+        transition = getattr(self, "_fullscreen_transition", None)
+        if (
+            transition is None
+            or transition.transition_id != int(transition_id)
+            or not transition.rollback_waiting_for_windowed
+        ):
+            return
+        if self._window.isFullScreen():
+            self._best_effort_fullscreen_restore(
+                "normal window state",
+                self._window.showNormal,
+            )
+        self._emit_fullscreen_transition_event(
+            "fullscreen_rollback_frame_timeout",
+            transition.transition_id,
+        )
+        self._finish_fullscreen_rollback_hold(transition_id)
+
+    def _finish_fullscreen_rollback_hold(self, transition_id: int) -> None:
+        transition = getattr(self, "_fullscreen_transition", None)
+        if (
+            transition is None
+            or transition.transition_id != int(transition_id)
+            or not transition.rollback_waiting_for_windowed
+        ):
+            return
+        transition.rollback_waiting_for_windowed = False
+        self._cancel_fullscreen_transition_deadline(transition)
+        self._cancel_fullscreen_presentation_hold(reason="rollback_windowed")
+        if getattr(self, "_fullscreen_transition", None) is transition:
+            self._fullscreen_transition = None
 
     @staticmethod
     def _best_effort_fullscreen_restore(label: str, callback) -> None:

@@ -265,18 +265,20 @@ jobs:
           tests/gui/test_detail_render_session.py
           tests/ui/controllers/test_player_view_controller_adjustments.py
           tests/ui/controllers/test_player_view_init_cover.py
+          tests/ui/test_fullscreen_presentation.py
           tests/ui/test_window_manager_fullscreen.py
           tests/ui/widgets/test_gl_image_viewer_post_load_signal.py
           tests/ui/widgets/test_still_texture_residency.py
           tests/ui/widgets/test_video_area.py
           tests/test_detail_benchmark.py
           tests/test_detail_surface_cache_benchmark.py
+          tests/test_analyze_windows_fullscreen_transition.py
 
       - name: Run static gates
         run: |
           python tools/check_architecture.py
           python -m compileall -q src tools
-          python -m ruff check --select F,E9 src/iPhoto/gui/detail_pipeline.py src/iPhoto/gui/detail_render_coordinator.py src/iPhoto/gui/detail_decode_backend.py src/iPhoto/gui/detail_decode_macos.py src/iPhoto/gui/detail_decode_windows.py src/iPhoto/gui/detail_benchmark_harness.py src/iPhoto/gui/detail_surface_cache.py src/iPhoto/gui/detail_surface_cache_index.py src/iPhoto/gui/detail_surface_residency.py tools/detail_benchmark.py tools/detail_surface_cache_benchmark.py tools/run_detail_packaged_benchmark.py
+          python -m ruff check --select F,E9 src/iPhoto/gui/detail_pipeline.py src/iPhoto/gui/detail_render_coordinator.py src/iPhoto/gui/detail_decode_backend.py src/iPhoto/gui/detail_decode_macos.py src/iPhoto/gui/detail_decode_windows.py src/iPhoto/gui/detail_benchmark_harness.py src/iPhoto/gui/detail_surface_cache.py src/iPhoto/gui/detail_surface_cache_index.py src/iPhoto/gui/detail_surface_residency.py src/iPhoto/gui/ui/fullscreen_presentation.py src/iPhoto/gui/ui/window_manager.py tools/analyze_windows_fullscreen_transition.py tools/detail_benchmark.py tools/detail_surface_cache_benchmark.py tools/run_detail_packaged_benchmark.py
           git diff --check
 
   detail-surface-cache-contract:

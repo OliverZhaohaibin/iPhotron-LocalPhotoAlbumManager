@@ -10,11 +10,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRect, QSize, Qt
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
+from iPhoto.gui.ui.fullscreen_presentation import _WindowsFullscreenPresentationHold
 from iPhoto.gui.ui.window_manager import (
     FULLSCREEN_ENTER_TIMEOUT_MS,
+    FULLSCREEN_HANDOFF_TIMEOUT_MS,
+    FULLSCREEN_HOLD_PRESENTATION_TIMEOUT_MS,
+    FULLSCREEN_MAGIC_ZOOM_DURATION_MS,
     FULLSCREEN_MEDIA_FRAME_TIMEOUT_MS,
     PLAYBACK_RESUME_DELAY_MS,
     FramelessWindowManager,
@@ -31,13 +36,24 @@ def _transition(
     playback_generation: int = 1,
     resume_playback: bool = True,
 ) -> _WindowsFullscreenTransition:
-    return _WindowsFullscreenTransition(
+    transition = _WindowsFullscreenTransition(
         transition_id=transition_id,
         phase=phase,
         updates_enabled_before=updates_enabled_before,
         playback_generation=playback_generation,
         resume_playback=resume_playback,
     )
+    if phase is not _FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED:
+        transition.lod_gate_started = True
+    if phase in {
+        _FullscreenTransitionPhase.AWAITING_NATIVE,
+        _FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
+        _FullscreenTransitionPhase.AWAITING_STABLE_MEDIA_FRAME,
+        _FullscreenTransitionPhase.AWAITING_HANDOFF,
+    }:
+        transition.ui_mutation_started = True
+        transition.native_requested = True
+    return transition
 
 
 def _make_windows_enter_manager() -> FramelessWindowManager:
@@ -63,6 +79,7 @@ def _make_windows_enter_manager() -> FramelessWindowManager:
     manager._immersive_background_applied = False
     manager._fullscreen_transition_generation = 0
     manager._fullscreen_transition = None
+    manager._fullscreen_hold = None
     manager._playback_transition_generation = 0
     manager._playback_resume_pending = False
     manager._shadow_restore_generation = 0
@@ -115,6 +132,70 @@ def test_reconcile_does_not_adopt_non_playback_fullscreen() -> None:
     manager._reconcile_playback_fullscreen_state()
 
     manager._finish_immersive_exit.assert_not_called()
+
+
+def test_repeated_enter_while_hold_is_pending_cancels_existing_transition() -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        3,
+        phase=_FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
+    )
+    manager._fullscreen_transition = transition
+    manager._immersive_active = False
+    manager._finish_immersive_exit = MagicMock()
+
+    manager.enter_fullscreen()
+
+    manager._finish_immersive_exit.assert_called_once_with(
+        request_window_change=False,
+    )
+    manager._detail_coordinator.prepare_fullscreen_asset.assert_not_called()
+
+
+def test_application_deactivate_cancels_parentless_hold_and_stale_callback() -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        4,
+        phase=_FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
+        playback_generation=2,
+    )
+    transition.lod_gate_started = True
+    manager._fullscreen_transition = transition
+    manager._playback_resume_pending = True
+    hold = MagicMock()
+    hold.transition_id = 4
+    manager._fullscreen_hold = hold
+    manager._schedule_playback_resume = MagicMock()
+    callbacks: list[Callable[[], None]] = []
+
+    with patch(
+        "iPhoto.gui.ui.window_manager.QTimer.singleShot",
+        side_effect=lambda _delay, callback: callbacks.append(callback),
+    ):
+        manager._on_application_state_changed(
+            Qt.ApplicationState.ApplicationInactive,
+        )
+
+    assert len(callbacks) == 1
+    callbacks[0]()
+
+    assert manager._fullscreen_transition is None
+    assert manager._fullscreen_hold is None
+    hold.cancel.assert_called_once_with()
+    manager._window.showFullScreen.assert_not_called()
+    manager._schedule_playback_resume.assert_called_once_with(
+        expect_immersive=False,
+        resume=True,
+        playback_generation=2,
+        transition_id=4,
+    )
+
+    manager._fullscreen_transition = _transition(
+        5,
+        phase=_FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
+    )
+    callbacks[0]()
+    assert manager._fullscreen_transition.transition_id == 5
 
 
 def test_native_exit_restores_playback_without_calling_show_normal() -> None:
@@ -235,8 +316,8 @@ def test_windows_enter_suppresses_updates_before_visible_mutations() -> None:
     manager._begin_windows_fullscreen_enter(True, playback_generation=4)
 
     assert events == [
-        "updates:False",
         "lod-gate",
+        "updates:False",
         "deadline",
         "shadow",
         "visibility",
@@ -260,6 +341,81 @@ def test_windows_enter_suppresses_updates_before_visible_mutations() -> None:
         callback=manager._handle_fullscreen_enter_timeout,
     )
     assert manager._ui.splitter.blockSignals.call_args_list == [call(True), call(False)]
+
+
+def test_windows_enter_waits_for_independent_hold_before_mutation() -> None:
+    manager = _make_windows_enter_manager()
+    manager._prepare_fullscreen_presentation_hold = MagicMock(return_value=True)
+
+    manager._begin_windows_fullscreen_enter(True, playback_generation=4)
+
+    transition = manager._fullscreen_transition
+    assert transition is not None
+    assert transition.phase is _FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED
+    assert transition.lod_gate_started is True
+    manager._window.setUpdatesEnabled.assert_not_called()
+    manager._window.showFullScreen.assert_not_called()
+    manager._start_fullscreen_transition_deadline.assert_called_once_with(
+        transition,
+        timeout_ms=FULLSCREEN_HOLD_PRESENTATION_TIMEOUT_MS,
+        callback=manager._handle_fullscreen_hold_timeout,
+    )
+
+
+def test_hold_timeout_aborts_before_native_mutation_and_restores_playback() -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        23,
+        phase=_FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
+        playback_generation=5,
+    )
+    transition.lod_gate_started = True
+    manager._fullscreen_transition = transition
+    hold = MagicMock()
+    hold.transition_id = 23
+    manager._fullscreen_hold = hold
+    manager._schedule_playback_resume = MagicMock()
+
+    manager._handle_fullscreen_hold_timeout(23)
+
+    assert manager._fullscreen_transition is None
+    manager._window.setUpdatesEnabled.assert_not_called()
+    manager._window.showFullScreen.assert_not_called()
+    manager._window.showNormal.assert_not_called()
+    manager._detail_coordinator.cancel_fullscreen_viewport_transition.assert_called_once_with()
+    hold.cancel.assert_called_once_with()
+    manager._schedule_playback_resume.assert_called_once_with(
+        expect_immersive=False,
+        resume=True,
+        playback_generation=5,
+        transition_id=23,
+    )
+
+
+def test_hold_presentation_starts_animation_before_native_request() -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        24,
+        phase=_FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
+    )
+    transition.lod_gate_started = True
+    manager._fullscreen_transition = transition
+    events: list[str] = []
+    hold = MagicMock()
+    hold.transition_id = 24
+    hold.geometry.return_value = QRect(0, 0, 1920, 1080)
+    hold.animate_to.side_effect = lambda *_args, **_kwargs: events.append("animation")
+    manager._fullscreen_hold = hold
+    manager._window.showFullScreen.side_effect = lambda: events.append("native")
+
+    manager._on_fullscreen_hold_presented(24)
+
+    assert events == ["animation", "native"]
+    assert transition.phase is _FullscreenTransitionPhase.AWAITING_NATIVE
+    hold.animate_to.assert_called_once_with(
+        QRect(0, 0, 1920, 1080),
+        duration_ms=FULLSCREEN_MAGIC_ZOOM_DURATION_MS,
+    )
 
 
 @pytest.mark.parametrize(
@@ -310,7 +466,10 @@ def test_windows_enter_restores_updates_when_mutation_raises(failure_stage: str)
     assert manager._fullscreen_transition is None
     assert manager._immersive_active is False
     assert manager._window.setUpdatesEnabled.call_args_list[-1] == call(True)
-    manager._window.showNormal.assert_called_once_with()
+    if failure_stage in {"updates_restore", "native"}:
+        manager._window.showNormal.assert_called_once_with()
+    else:
+        manager._window.showNormal.assert_not_called()
 
 
 def test_windows_completion_restores_updates_when_relayout_raises() -> None:
@@ -470,6 +629,49 @@ def test_first_media_frame_timeout_keeps_gate_and_starts_degraded_wait() -> None
         resume=True,
         playback_generation=1,
         transition_id=8,
+    )
+
+
+def test_final_media_timeout_restores_window_before_removing_hold() -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        25,
+        phase=_FullscreenTransitionPhase.AWAITING_MEDIA_FRAME,
+        playback_generation=6,
+    )
+    transition.first_frame_timeout_seen = True
+    manager._fullscreen_transition = transition
+    manager._immersive_active = True
+    manager._playback_resume_pending = True
+    manager._window.isFullScreen.return_value = False
+    hold = MagicMock()
+    hold.transition_id = 25
+    manager._fullscreen_hold = hold
+    manager._schedule_playback_resume = MagicMock()
+    manager._ui.player_stack.currentWidget.return_value = manager._ui.image_viewer
+
+    manager._handle_fullscreen_media_frame_timeout(25)
+
+    assert manager._fullscreen_transition is transition
+    assert transition.phase is _FullscreenTransitionPhase.ROLLBACK
+    assert transition.rollback_waiting_for_windowed is True
+    manager._window.showNormal.assert_called_once_with()
+    hold.cancel.assert_not_called()
+
+    manager._on_fullscreen_image_frame_submitted(
+        25,
+        1,
+        QSize(1200, 800),
+        ("still", "content", 1),
+    )
+
+    assert manager._fullscreen_transition is None
+    hold.cancel.assert_called_once_with()
+    manager._schedule_playback_resume.assert_called_once_with(
+        expect_immersive=False,
+        resume=True,
+        playback_generation=6,
+        transition_id=25,
     )
 
 
@@ -733,7 +935,36 @@ def test_handoff_waits_for_both_media_and_animation() -> None:
     )
 
 
-def test_magic_zoom_overlay_tracks_target_and_cleans_up(qapp) -> None:
+def test_handoff_watchdog_removes_hold_when_opacity_animation_stalls() -> None:
+    manager = _make_windows_enter_manager()
+    transition = _transition(
+        26,
+        phase=_FullscreenTransitionPhase.AWAITING_HANDOFF,
+    )
+    transition.media_stable = True
+    transition.animation_finished = True
+    manager._fullscreen_transition = transition
+    hold = MagicMock()
+    hold.transition_id = 26
+    manager._fullscreen_hold = hold
+    manager._schedule_playback_resume = MagicMock()
+    callbacks: list[tuple[int, Callable[[], None]]] = []
+
+    with patch(
+        "iPhoto.gui.ui.window_manager.QTimer.singleShot",
+        side_effect=lambda delay, callback: callbacks.append((delay, callback)),
+    ):
+        manager._maybe_finish_fullscreen_handoff(transition, reason="media_ready")
+
+    assert callbacks[0][0] == FULLSCREEN_HANDOFF_TIMEOUT_MS
+    assert manager._fullscreen_transition is transition
+    callbacks[0][1]()
+
+    assert manager._fullscreen_transition is None
+    hold.cancel.assert_called_once_with()
+
+
+def test_presentation_hold_is_independent_and_cleans_up(qapp) -> None:
     window = QMainWindow()
     host = QWidget(window)
     window.setCentralWidget(host)
@@ -746,27 +977,26 @@ def test_magic_zoom_overlay_tracks_target_and_cleans_up(qapp) -> None:
     QObject.__init__(manager, window)
     manager._window = window
     manager._ui = SimpleNamespace(player_container=container)
-    manager._fullscreen_hold_overlay = None
-    manager._fullscreen_hold_animation = None
-    manager._fullscreen_hold_fade = None
-    manager._fullscreen_hold_transition_id = None
+    manager._fullscreen_hold = None
     manager._emit_fullscreen_transition_event = MagicMock()
-    transition = _transition(17)
+    transition = _transition(
+        17,
+        phase=_FullscreenTransitionPhase.AWAITING_HOLD_PRESENTED,
+    )
     manager._fullscreen_transition = transition
 
-    manager._prepare_fullscreen_magic_zoom(transition)
+    assert manager._prepare_fullscreen_presentation_hold(transition) is True
 
-    assert manager._fullscreen_hold_overlay is not None
+    hold = manager._fullscreen_hold
+    assert hold is not None
+    assert hold.isWindow()
+    assert hold.parentWidget() is None
     assert transition.animation_finished is False
-    container.setGeometry(0, 0, 640, 400)
-    manager._start_fullscreen_magic_zoom(17)
-    manager._finish_fullscreen_magic_animation(17)
+    assert hold.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert not hold.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-    assert transition.animation_finished is True
-    assert manager._fullscreen_hold_overlay.geometry() == container.geometry()
-
-    manager._cancel_fullscreen_magic_zoom()
-    assert manager._fullscreen_hold_overlay is None
+    manager._cancel_fullscreen_presentation_hold(reason="test")
+    assert manager._fullscreen_hold is None
     window.close()
 
 
@@ -796,37 +1026,38 @@ def test_visible_translucent_window_magic_zoom_never_exposes_backdrop(qapp) -> N
     window.raise_()
     qapp.processEvents()
 
-    manager = FramelessWindowManager.__new__(FramelessWindowManager)
-    QObject.__init__(manager, window)
-    manager._window = window
-    manager._ui = SimpleNamespace(player_container=container)
-    manager._detail_coordinator = MagicMock()
-    manager._fullscreen_hold_overlay = None
-    manager._fullscreen_hold_animation = None
-    manager._fullscreen_hold_fade = None
-    manager._fullscreen_hold_transition_id = None
-    manager._emit_fullscreen_transition_event = MagicMock()
-    manager._schedule_playback_resume = MagicMock()
-    transition = _transition(
-        41,
-        phase=_FullscreenTransitionPhase.AWAITING_HANDOFF,
-    )
-    transition.media_stable = True
-    manager._fullscreen_transition = transition
-
-    manager._prepare_fullscreen_magic_zoom(transition)
-    container.setStyleSheet("background-color: #2050d0;")
-    container.setGeometry(host.rect())
-    manager._start_fullscreen_magic_zoom(41)
-
     screen = window.screen()
     assert screen is not None
+    source_rect = QRect(container.mapToGlobal(QPoint(0, 0)), container.size())
+    snapshot = QPixmap(container.size())
+    snapshot.fill(QColor("#d02020"))
+    hold = _WindowsFullscreenPresentationHold(
+        transition_id=41,
+        settle_ms=0,
+    )
+    hold.present(
+        screen_geometry=screen.geometry(),
+        source_rect_global=source_rect,
+        snapshot=snapshot,
+        fallback_color=QColor("#000000"),
+    )
+    qapp.processEvents()
+    hold.animate_to(screen.geometry(), duration_ms=220)
+    window.showFullScreen()
+    qapp.processEvents()
+    container.setStyleSheet("background-color: #2050d0;")
+    container.setGeometry(host.rect())
+
     sampled = []
     deadline = time.monotonic() + 2.0
-    while manager._fullscreen_transition is not None and time.monotonic() < deadline:
+    handoff_started = False
+    while hold.isVisible() and time.monotonic() < deadline:
         qapp.processEvents()
-        global_center = window.mapToGlobal(window.rect().center())
-        capture_point = global_center - screen.geometry().topLeft()
+        if not handoff_started and hold.zoom_finished:
+            handoff_started = True
+            hold.finish_handoff(duration_ms=60)
+        snapshot_center = hold.snapshot_rect().center()
+        capture_point = snapshot_center
         image = screen.grabWindow(
             0,
             capture_point.x(),
@@ -840,14 +1071,18 @@ def test_visible_translucent_window_magic_zoom_never_exposes_backdrop(qapp) -> N
             assert pixel.alpha() == 255
             assert max(pixel.red(), pixel.green(), pixel.blue()) >= 32
             assert not (pixel.green() > pixel.red() * 1.5 and pixel.green() > pixel.blue() * 1.5)
+        outer = screen.grabWindow(0, 5, 5, 1, 1).toImage()
+        if not outer.isNull():
+            outer_pixel = outer.pixelColor(0, 0)
+            assert not (
+                outer_pixel.green() > outer_pixel.red() * 1.5
+                and outer_pixel.green() > outer_pixel.blue() * 1.5
+            )
         time.sleep(0.005)
 
     assert sampled
-    assert manager._fullscreen_transition is None
-    manager._detail_coordinator.complete_fullscreen_viewport_transition.assert_called_once_with(
-        reason="animation_finished",
-        allow_automatic_lod=True,
-    )
+    assert not hold.isVisible()
+    hold.cancel()
     window.close()
     desktop_sentinel.close()
 

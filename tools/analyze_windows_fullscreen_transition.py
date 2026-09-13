@@ -95,9 +95,47 @@ def _analyze_transition(
     if rollback:
         if terminal is not None:
             failures.append("rollback_has_success_terminal")
+        if "fullscreen_native_state_confirmed" in stages:
+            rollback_frame = _first(events, "fullscreen_rollback_frame_submitted")
+            rollback_timeout = _first(events, "fullscreen_rollback_frame_timeout")
+            rollback_terminal = rollback_frame or rollback_timeout
+            rollback_times = {
+                "fullscreen_enter_rollback": _time_of(events, "fullscreen_enter_rollback"),
+                "fullscreen_rollback_frame_requested": _time_of(
+                    events, "fullscreen_rollback_frame_requested"
+                ),
+                "rollback_terminal": (
+                    _event_time(rollback_terminal) if rollback_terminal is not None else None
+                ),
+                "fullscreen_hold_window_cancelled": _time_of(
+                    events, "fullscreen_hold_window_cancelled"
+                ),
+            }
+            _require_order(
+                failures,
+                rollback_times,
+                "fullscreen_enter_rollback",
+                "fullscreen_rollback_frame_requested",
+            )
+            _require_order(
+                failures,
+                rollback_times,
+                "fullscreen_rollback_frame_requested",
+                "rollback_terminal",
+            )
+            _require_order(
+                failures,
+                rollback_times,
+                "rollback_terminal",
+                "fullscreen_hold_window_cancelled",
+            )
         return {
             "transition_id": transition_id,
-            "outcome": "rollback",
+            "outcome": (
+                "rollback_after_native"
+                if "fullscreen_native_state_confirmed" in stages
+                else "rollback_before_native"
+            ),
             "passed": not failures,
             "failures": failures,
             "stages": stages,
@@ -121,6 +159,10 @@ def _analyze_transition(
     times = {
         "fullscreen_enter_requested": _time_of(events, "fullscreen_enter_requested"),
         "snapshot": _event_time(snapshot) if snapshot is not None else None,
+        "fullscreen_hold_window_shown": _time_of(events, "fullscreen_hold_window_shown"),
+        "fullscreen_hold_window_presented": _time_of(events, "fullscreen_hold_window_presented"),
+        "fullscreen_animation_started": _time_of(events, "fullscreen_animation_started"),
+        "fullscreen_native_state_requested": _time_of(events, "fullscreen_native_state_requested"),
         "fullscreen_native_state_confirmed": _time_of(events, "fullscreen_native_state_confirmed"),
         "fullscreen_first_frame_requested": _time_of(events, "fullscreen_first_frame_requested"),
         "frame_1": next(
@@ -155,6 +197,30 @@ def _analyze_transition(
         failures,
         times,
         "snapshot",
+        "fullscreen_hold_window_shown",
+    )
+    _require_order(
+        failures,
+        times,
+        "fullscreen_hold_window_shown",
+        "fullscreen_hold_window_presented",
+    )
+    _require_order(
+        failures,
+        times,
+        "fullscreen_hold_window_presented",
+        "fullscreen_animation_started",
+    )
+    _require_order(
+        failures,
+        times,
+        "fullscreen_animation_started",
+        "fullscreen_native_state_requested",
+    )
+    _require_order(
+        failures,
+        times,
+        "fullscreen_native_state_requested",
         "fullscreen_native_state_confirmed",
     )
     _require_order(
@@ -227,6 +293,14 @@ def _analyze_transition(
             "fullscreen_media_frame_rejected",
         }
     ]
+
+    def _duration(start: str, end: str) -> float | None:
+        start_time = times.get(start)
+        end_time = times.get(end)
+        if start_time is None or end_time is None:
+            return None
+        return round(end_time - start_time, 3)
+
     return {
         "transition_id": transition_id,
         "outcome": "degraded" if degraded else "stable",
@@ -237,6 +311,24 @@ def _analyze_transition(
         "media_targets": targets,
         "rejected_candidates": len(rejected),
         "premature_lod_events": len(premature_lod),
+        "durations_ms": {
+            "click_to_hold": _duration(
+                "fullscreen_enter_requested",
+                "fullscreen_hold_window_presented",
+            ),
+            "hold_to_native": _duration(
+                "fullscreen_hold_window_presented",
+                "fullscreen_native_state_requested",
+            ),
+            "native_to_media": _duration(
+                "fullscreen_native_state_confirmed",
+                "frame_1",
+            ),
+            "media_to_handoff": _duration(
+                "frame_2" if times.get("frame_2") is not None else "frame_1",
+                "fullscreen_handoff_finished",
+            ),
+        },
         "stages": stages,
     }
 

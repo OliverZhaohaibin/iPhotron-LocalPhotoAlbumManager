@@ -570,14 +570,16 @@ desired decode key before mutating promotion ownership. A key already pending is
 reused without a new generation; a key no higher than the committed surface only
 cancels obsolete work; only a distinct higher key may supersede and decode.
 During Windows fullscreen entry a first-frame gate keeps all new LOD work out of
-the critical path. A transient, input-transparent snapshot overlay covers QRhi
-resize and resource-rebuild clears while the player surface moves to the native
-fullscreen target. Raw QRhi `frameSubmitted` signals are not presentation
+the critical path. An independent opaque, input-transparent top-level hold
+covers the target screen and paints the last screen-composited player snapshot.
+The hold must paint and settle before the translucent main window requests its
+native fullscreen transition, so main-window QRhi resize and resource-rebuild
+clears remain hidden. Raw QRhi `frameSubmitted` signals are not presentation
 proof: still and video renderers qualify a real media draw against a
 transaction/ordinal/target token, and two consecutive qualified submissions at
 the same target complete the handoff. The first timeout resumes video under the
-overlay to solicit content; every timeout path disables automatic fullscreen
-LOD work and converges without leaving painting or the overlay stuck.
+hold to solicit content; a final no-media timeout restores the windowed state
+under the hold instead of revealing an empty fullscreen surface.
 
 Automatic crop framing derives pan from the final effective render scale after
 base fit, straighten cover, and zoom agree. Render-target relayout does not

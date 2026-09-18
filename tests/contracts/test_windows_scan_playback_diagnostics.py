@@ -61,3 +61,15 @@ def test_fullscreen_scenario_pins_opengl_and_documents_pixel_probe() -> None:
     assert "-Scenario Fullscreen" in documentation
     assert "windows_fullscreen_probe.py --cycles 20" in documentation
     assert "does **not** replace" in documentation
+
+
+def test_source_process_resolution_uses_runtime_identity_and_launcher_ancestry() -> None:
+    script = COLLECTOR.read_text(encoding="utf-8")
+    resolver = script.split("function Resolve-SourceApplicationProcess", 1)[1].split(
+        "function Write-SystemSnapshot", 1
+    )[0]
+    assert '"runtime_diagnostics_started"' in resolver
+    assert "$descendantIds.Contains([int]$header.pid)" in resolver
+    assert "$candidate.MainWindowHandle -ne [IntPtr]::Zero" in resolver
+    assert 'throw "Could not identify the GUI process' in resolver
+    assert "-StackPath $stackPath" in script

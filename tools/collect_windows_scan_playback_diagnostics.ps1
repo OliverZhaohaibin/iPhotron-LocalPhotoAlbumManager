@@ -111,39 +111,52 @@ function Add-ReproductionMarker {
 function Resolve-SourceApplicationProcess {
     param(
         [Parameter(Mandatory = $true)]$LauncherProcess,
-        [int]$TimeoutMilliseconds = 5000
+        [Parameter(Mandatory = $true)][string]$StackPath,
+        [int]$TimeoutMilliseconds = 15000
     )
 
+    # A Windows venv may start more than one Python launcher. Never select the
+    # first live child: it can stay alive with zero CPU and no application HWND.
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     do {
         try {
-            $children = @(Get-CimInstance Win32_Process -Filter (
-                "ParentProcessId = {0}" -f $LauncherProcess.Id
-            ) -ErrorAction Stop | Sort-Object CreationDate -Descending)
-            foreach ($child in $children) {
-                $candidate = Get-Process -Id ([int]$child.ProcessId) `
-                    -ErrorAction SilentlyContinue
-                if ($candidate -and -not $candidate.HasExited) {
+            $descendantIds = New-Object 'System.Collections.Generic.HashSet[int]'
+            $pendingIds = New-Object 'System.Collections.Generic.Queue[int]'
+            $pendingIds.Enqueue([int]$LauncherProcess.Id)
+            while ($pendingIds.Count -gt 0) {
+                $parentId = $pendingIds.Dequeue()
+                if (-not $descendantIds.Add($parentId)) { continue }
+                $children = @(Get-CimInstance Win32_Process -Filter (
+                    "ParentProcessId = {0}" -f $parentId
+                ) -ErrorAction Stop)
+                foreach ($child in $children) {
+                    $pendingIds.Enqueue([int]$child.ProcessId)
+                }
+            }
+
+            # This header is emitted inside the GUI process before first paint.
+            # Require ancestry as well, so a stale/unrelated PID cannot be selected.
+            if (Test-Path -LiteralPath $StackPath -PathType Leaf) {
+                $header = Get-Content -LiteralPath $StackPath -TotalCount 1 |
+                    ConvertFrom-Json -ErrorAction Stop
+                if ($header.event -eq "runtime_diagnostics_started" -and
+                    $descendantIds.Contains([int]$header.pid)) {
+                    $candidate = Get-Process -Id ([int]$header.pid) -ErrorAction SilentlyContinue
+                    if ($candidate -and -not $candidate.HasExited) { return $candidate }
+                }
+            }
+            foreach ($candidateId in $descendantIds) {
+                $candidate = Get-Process -Id $candidateId -ErrorAction SilentlyContinue
+                if ($candidate -and -not $candidate.HasExited -and
+                    $candidate.MainWindowHandle -ne [IntPtr]::Zero) {
                     return $candidate
                 }
             }
         }
         catch {}
-        try {
-            $LauncherProcess.Refresh()
-            if ($LauncherProcess.HasExited) {
-                break
-            }
-            if ($LauncherProcess.MainWindowHandle -ne [IntPtr]::Zero) {
-                return $LauncherProcess
-            }
-        }
-        catch {
-            break
-        }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    return $LauncherProcess
+    throw "Could not identify the GUI process; refusing to collect launcher-only metrics."
 }
 
 function Write-SystemSnapshot {
@@ -194,7 +207,7 @@ function Write-SystemSnapshot {
     $snapshot = [ordered]@{
         session_id = $SessionId
         collected_utc = [DateTime]::UtcNow.ToString("o")
-        collector_version = 2
+        collector_version = 3
         launch_mode = $Launch.Mode
         application_name = $appFile.Name
         application_size_bytes = $appFile.Length
@@ -433,7 +446,7 @@ try {
     }
     $process = Start-Process @startParameters
     if ($launch.Mode -eq "source") {
-        $process = Resolve-SourceApplicationProcess -LauncherProcess $process
+        $process = Resolve-SourceApplicationProcess -LauncherProcess $process -StackPath $stackPath
     }
     Add-ReproductionMarker -MarkerPath $markerPath -Marker "application_started" `
         -ProcessId $process.Id

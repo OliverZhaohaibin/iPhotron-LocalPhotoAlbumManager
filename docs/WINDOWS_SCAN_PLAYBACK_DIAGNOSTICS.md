@@ -121,6 +121,28 @@ Windows paths. Acceptance requires no accumulated crop offset, LOD-induced
 scale jumps, alternating blank/content frames or desktop leakage, and no
 unbounded idle redraw loop after the transitions settle.
 
+For a fullscreen flicker that persists with stable texture/geometry and no GL
+errors, run these three **separate** probe processes. Keep the same screen and
+DPI (including 250% on the reported device), and keep each window unobscured:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 3 --output .\probe-baseline
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 3 --opaque-window --output .\probe-opaque
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 3 --swap-interval 0 --output .\probe-no-vsync
+```
+
+The baseline uses the application's default GL version/profile request. The
+opaque comparison only disables the host's translucent attribute; the no-vsync
+comparison only changes requested swap interval (which the driver may ignore).
+Neither changes production defaults. Share `result.json` and `detail_events.jsonl`
+from each directory, plus any failed synthetic captures. Report visible flicker
+even if sampled pixel checks pass. The three-cycle runs triage the cause; repeat
+the existing 20-cycle acceptance matrix after a candidate fix.
+
+Source-process collection now resolves nested Windows Python launchers using the
+runtime diagnostic PID or a descendant with a main HWND. If the GUI cannot be
+identified, collection fails instead of silently reporting launcher-only metrics.
+
 ## First-media QRhi submission A/B
 
 For the Windows-only first-open leak, run from a fresh process so no Detail

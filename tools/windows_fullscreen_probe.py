@@ -16,11 +16,37 @@ import time
 from pathlib import Path
 
 
+def probe_surface_format(swap_interval: int):
+    """Match the application's compatibility-profile request for WGL A/B runs."""
+    from PySide6.QtGui import QSurfaceFormat
+
+    fmt = QSurfaceFormat()
+    fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+    fmt.setAlphaBufferSize(8)
+    fmt.setDepthBufferSize(24)
+    fmt.setStencilBufferSize(8)
+    fmt.setSamples(0)
+    fmt.setSwapInterval(swap_interval)
+    return fmt
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cycles", type=int, default=20)
     parser.add_argument("--output", type=Path, default=Path("fullscreen-probe"))
     parser.add_argument("--poison-gl-state", action="store_true")
+    parser.add_argument(
+        "--opaque-window",
+        action="store_true",
+        help="Disable top-level translucency for a separate compositor A/B run",
+    )
+    parser.add_argument(
+        "--swap-interval",
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help="Requested WGL vsync interval; drivers may ignore it",
+    )
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("requires an interactive Windows desktop")
@@ -44,18 +70,11 @@ def main() -> int:
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL)
-    fmt = QSurfaceFormat()
-    fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
-    fmt.setVersion(3, 3)
-    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
-    fmt.setAlphaBufferSize(8)
-    fmt.setDepthBufferSize(24)
-    fmt.setStencilBufferSize(8)
-    QSurfaceFormat.setDefaultFormat(fmt)
+    QSurfaceFormat.setDefaultFormat(probe_surface_format(args.swap_interval))
     _app = QApplication([])
     host = QMainWindow()
     host.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
-    host.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    host.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not args.opaque_window)
     shell = QWidget(host)
     shell.setStyleSheet("background: black")
     layout = QVBoxLayout(shell)
@@ -209,6 +228,8 @@ def main() -> int:
                     "passed": not failures,
                     "cycles": args.cycles,
                     "poison_gl_state": args.poison_gl_state,
+                    "opaque_window": args.opaque_window,
+                    "requested_swap_interval": args.swap_interval,
                     "failures": failures,
                     "samples": samples,
                 },

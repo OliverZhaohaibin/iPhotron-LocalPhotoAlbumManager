@@ -131,10 +131,7 @@ class EditFullscreenManager(QObject):
         self._fullscreen_active = True
 
         viewport = self._active_viewport()
-        reset_zoom = getattr(viewport, "reset_zoom", None)
-        if callable(reset_zoom):
-            reset_zoom()
-        self._request_viewport_relayout(viewport)
+        self._request_viewport_relayout(viewport, reset_view=True)
 
         return True
 

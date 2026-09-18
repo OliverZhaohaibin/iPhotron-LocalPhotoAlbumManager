@@ -3,11 +3,39 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QEvent
 
 from iPhoto.gui.ui.window_manager import FramelessWindowManager
+
+
+def test_fullscreen_entry_explicitly_requests_fit_after_window_change() -> None:
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._immersive_active = False
+    manager._edit_controller = MagicMock(return_value=None)
+    manager._detail_coordinator = MagicMock()
+    manager._window = MagicMock()
+    manager._ui = MagicMock()
+    manager._ui.splitter.sizes.return_value = [200, 800]
+    manager._immersive_visibility_targets = []
+    manager._suppress_playback_header_shadow = MagicMock()
+    manager._suspend_layout_updates = nullcontext
+    manager._override_visibility = MagicMock(return_value=[])
+    manager._apply_immersive_backdrop = MagicMock()
+    manager._update_fullscreen_button_icon = MagicMock()
+    manager._schedule_playback_resume = MagicMock()
+    calls = []
+    manager._window.showFullScreen.side_effect = lambda: calls.append("window")
+    manager._ui.image_viewer.request_viewport_relayout.side_effect = (
+        lambda **kw: calls.append(kw)
+    )
+
+    manager.enter_fullscreen()
+
+    assert calls == ["window", {"reset_view": True}]
+    manager._ui.video_area.request_viewport_relayout.assert_called_once_with(reset_view=True)
 
 
 def test_reconcile_native_exit_finishes_playback_without_requesting_window_change() -> None:

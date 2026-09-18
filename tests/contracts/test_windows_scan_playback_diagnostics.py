@@ -50,3 +50,14 @@ def test_d3d11_ab_protocol_excludes_unsupported_gpu_maps() -> None:
     assert "exercise opening/closing Maps" in documentation
     assert "D3D11 run is Detail-only" in documentation
     assert "must not enter Location or create a GPU map widget" in documentation
+
+
+def test_fullscreen_scenario_pins_opengl_and_documents_pixel_probe() -> None:
+    script = COLLECTOR.read_text(encoding="utf-8")
+    assert '[ValidateSet("ScanPlayback", "Fullscreen")]' in script
+    assert '$diagnosticEnvironment["IPHOTO_RHI_BACKEND"] = "opengl"' in script
+    assert '$diagnosticEnvironment["IPHOTO_FULLSCREEN_DIAG"] = "1"' in script
+    documentation = DOCUMENTATION.read_text(encoding="utf-8")
+    assert "-Scenario Fullscreen" in documentation
+    assert "windows_fullscreen_probe.py --cycles 20" in documentation
+    assert "does **not** replace" in documentation

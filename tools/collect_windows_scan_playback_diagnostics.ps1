@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    [ValidateSet("ScanPlayback", "Fullscreen")]
+    [string]$Scenario = "ScanPlayback",
     [string]$AppPath = "",
     [string]$PythonExe = "",
     [string]$OutputRoot = "",
@@ -388,6 +390,11 @@ $diagnosticEnvironment = [ordered]@{
     PYTHONFAULTHANDLER = "1"
     QT_LOGGING_RULES = "qt.qpa.gl=true;qt.rhi.*=true;qt.multimedia.*=true"
 }
+if ($Scenario -eq "Fullscreen") {
+    $diagnosticEnvironment["IPHOTO_RHI_BACKEND"] = "opengl"
+    $diagnosticEnvironment["IPHOTO_FULLSCREEN_DIAG"] = "1"
+    $diagnosticEnvironment["QT_QPA_PLATFORM"] = "windows"
+}
 if ($launch.Mode -eq "source") {
     $sourceRoot = Join-Path $repositoryRoot "src"
     $inheritedPythonPath = [Environment]::GetEnvironmentVariable(
@@ -433,7 +440,17 @@ try {
 
     Write-Host ""
     Write-Host "iPhoto diagnostic collection started (PID $($process.Id))." -ForegroundColor Cyan
-    Write-Host "1. Reproduce scanning until still photos become blank / Edit stops responding."
+    Add-ReproductionMarker -MarkerPath $markerPath -Marker "scenario_$Scenario" `
+        -ProcessId $process.Id
+    if ($Scenario -eq "Fullscreen") {
+        Write-Host "1. Test unedited, cropped, then cropped + straightened stills."
+        Write-Host "   For each: windowed idle, fullscreen idle, wheel zoom, double-click exit."
+        Write-Host "   Repeat 20 times; also test Esc, Edit, video and Live Photo."
+        Write-Host "   Press R for each observed offset or flicker. No media pixels are collected."
+    }
+    else {
+        Write-Host "1. Reproduce scanning until still photos become blank / Edit stops responding."
+    }
     Write-Host "2. When the problem is visible, return here and press R once."
     Write-Host "3. Then close iPhoto normally. If it cannot close, press Q here to stop it."
     Write-Host "Collection automatically stops after $MaxMinutes minutes."

@@ -310,6 +310,7 @@ class FramelessWindowManager(QObject):
 
         self._immersive_active = True
         self._window.showFullScreen()
+        self._request_media_viewport_relayout(reset_view=True)
         self._update_fullscreen_button_icon()
         self._schedule_playback_resume(expect_immersive=True, resume=resume_after_transition)
 

@@ -114,6 +114,12 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
   `MediaRestoreRequest` 重放静态 Detail；同 source texture key 保持不变。
 - Edit fullscreen enter/exit：只允许 viewport/LOD 事件；不得出现同步 source load、CPU preview session 或
   以 `Path` 为 key 的新 GPU upload。
+- Windows 裁剪＋拉直全屏检查：使用采集器 `-Scenario Fullscreen`（固定 OpenGL），保留
+  `fullscreen_environment/fullscreen_trace`。同图不同 LOD 的 cover 应仅受比例/拉直角度影响；
+  进入和退出全屏均适配裁剪结果，LOD 替换不得改变手动视角。诊断事件使用 generation 0，
+  不计作新的媒体事务或 SLO 完成；用既有 GPU/LOD 事件关联内容代次。
+  该模式的限量 GL 查询有额外开销，不与未开启诊断的性能基线混用。实机操作和独立合成图
+  像素探针见 `docs/WINDOWS_SCAN_PLAYBACK_DIAGNOSTICS.md`。
 - Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
   stale/failed upgrade 不得替换 current texture。
 

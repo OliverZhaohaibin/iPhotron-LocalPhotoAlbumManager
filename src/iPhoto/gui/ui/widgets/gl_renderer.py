@@ -248,6 +248,19 @@ class GLRenderer:
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
+    def prepare_draw_state(self, width: int, height: int) -> None:
+        """Own every fixed-function state used by the media pass.
+
+        QRhi's compositor and other widgets use this same context. Initialization
+        state is not a frame contract; never bind a different framebuffer here.
+        """
+        gf = self._gl_funcs
+        gf.glViewport(0, 0, max(1, int(width)), max(1, int(height)))
+        gf.glColorMask(True, True, True, True)
+        for capability in (gl.GL_BLEND, gl.GL_DEPTH_TEST, gl.GL_STENCIL_TEST,
+                           gl.GL_CULL_FACE, gl.GL_SCISSOR_TEST):
+            gf.glDisable(capability)
+
     def render(
         self,
         *,
@@ -271,6 +284,7 @@ class GLRenderer:
         if scale <= 0.0:
             return
 
+        self.prepare_draw_state(int(view_width), int(view_height))
         gf = self._gl_funcs
         diagnose_errors = sys.platform.startswith("linux")
 
@@ -294,8 +308,7 @@ class GLRenderer:
 
         _drain_gl_errors("at render entry")
         if not self._program.bind():
-            _LOGGER.error("Failed to bind shader program: %s", self._program.log())
-            return
+            raise RuntimeError(f"Failed to bind shader program: {self._program.log()}")
 
         dummy_vao_bound = False
         try:

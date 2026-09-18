@@ -50,6 +50,77 @@ powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_d
    collector window to stop it.
 5. Send back the single ZIP path printed in green. By default it is created on the Desktop.
 
+## Fullscreen crop/straighten offset and flicker (OpenGL only)
+
+This scenario keeps Windows on QRhi/OpenGL. It does not run the experimental
+D3D11 comparison described in the separate section below.
+
+From the repository root, using the updated source checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen
+```
+
+For an updated packaged application, add `-AppPath "C:\path\to\entrypoint.exe"`.
+The scenario sets OpenGL, the Windows Qt platform and `IPHOTO_FULLSCREEN_DIAG=1`
+for the launched process, then restores the inherited environment. No original
+media, sidecars or screenshots are copied into this bundle.
+
+Use three stills: no adjustments, asymmetric crop only, and asymmetric crop plus
+straightening. For each, leave the window idle, enter fullscreen, leave it idle
+again, zoom using several wheel steps, then double-click to exit. Repeat at least
+20 fullscreen round trips; also exercise Esc/native exit, Edit, ordinary video
+and Live Photo. Repeat on available 100%, 125%, 150% and 200% display scales,
+including moving between monitors with different scales. Record each observed
+offset/flicker with `R`, then close the application normally.
+
+`detail_events.jsonl` adds:
+
+- `fullscreen_environment`: Qt/PySide version, backend, screen sizes, DPR and
+  refresh rates; GPU/driver and application revision remain in `system.json`.
+- `fullscreen_trace`: event, viewer identity, sequence/submission counts, window
+  fullscreen state, logical widget and physical render-target dimensions,
+  texture dimensions, crop, cover, zoom, pan, pending reset/upload and content
+  revision. The existing GPU/LOD events provide decode and asset generations.
+- `gl_entry`/`draw` samples: GL viewport, framebuffer/program binding, color
+  mask, blend/depth/stencil/cull/scissor enables and bounded error codes. Sampling
+  covers 120 submitted frames after interaction and then at most one sample per
+  event per second. These GL queries are disabled in normal operation.
+
+Compare the same media and actions before/after the fix. A historical executable
+without the new instrumentation still provides the collector's system/runtime
+logs, but cannot provide the new geometry events. Preserve that limitation when
+interpreting baseline results. Stable geometry plus visible flashing requires
+further compositor investigation; `frameSubmitted` is not proof of DWM scan-out.
+
+### Synthetic visible-window pixel probe
+
+Run this separately with the source environment on an unlocked, interactive
+Windows desktop; keep its window unobscured and disable display sleep:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 20 --output .\fullscreen-probe
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 20 --poison-gl-state --output .\fullscreen-probe-gl-state
+```
+
+The probe uses the production viewer in a translucent frameless Qt window and
+generated green images. It cycles plain/cropped/straightened images through
+fullscreen, windowed, idle and wheel zoom states. It reads compositor pixels
+with `QScreen.grabWindow`, never `grabFramebuffer` (which forces a fresh draw),
+and compares visible bounds with the CPU transform. The second run deliberately
+pollutes GL state before the renderer establishes its own state. Results go to
+`result.json` and `detail_events.jsonl`; only failing synthetic-window captures
+are saved. Keep other windows away from the probe to avoid false failures or
+unrelated content in failure captures. Exit code 0 means all sampled checks
+passed; this sampling does not rule out every transient between captures.
+
+This probe isolates the rendering/compositor contract. It does **not** replace
+the real application's fullscreen window-manager, Edit, video, multi-monitor or
+packaged acceptance checks above. Local/offscreen tests cannot validate those
+Windows paths. Acceptance requires no accumulated crop offset, LOD-induced
+scale jumps, alternating blank/content frames or desktop leakage, and no
+unbounded idle redraw loop after the transitions settle.
+
 ## First-media QRhi submission A/B
 
 For the Windows-only first-open leak, run from a fresh process so no Detail

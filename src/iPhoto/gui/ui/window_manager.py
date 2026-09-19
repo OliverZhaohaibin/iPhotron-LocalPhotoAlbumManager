@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n.font_policy import sync_widget_language_font
+from ..windows_fullscreen_composition import install_fullscreen_composition_guard
 from .icon import load_icon
 from .styles import modern_scrollbar_style
 from .widgets.custom_tooltip import FloatingToolTip, ToolTipEventFilter
@@ -82,6 +83,7 @@ class FramelessWindowManager(QObject):
         self._window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self._window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._window.setAutoFillBackground(False)
+        self._fullscreen_composition_guard = install_fullscreen_composition_guard(self._window)
 
         self._window_corner_radius = 12
         self._rounded_shell = self._create_shell()

@@ -36,6 +36,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("fullscreen-probe"))
     parser.add_argument("--poison-gl-state", action="store_true")
     parser.add_argument(
+        "--fullscreen-border",
+        action="store_true",
+        help="Try Qt's Windows OpenGL WS_BORDER composition workaround",
+    )
+    parser.add_argument(
         "--opaque-window",
         action="store_true",
         help="Disable top-level translucency for a separate compositor A/B run",
@@ -56,6 +61,7 @@ def main() -> int:
     os.environ["QT_QPA_PLATFORM"] = "windows"
     os.environ["IPHOTO_RHI_BACKEND"] = "opengl"
     os.environ["IPHOTO_FULLSCREEN_DIAG"] = "1"
+    os.environ["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "1" if args.fullscreen_border else "0"
     os.environ["IPHOTO_DETAIL_PROFILE"] = "1"
     os.environ["IPHOTO_DETAIL_PROFILE_PATH"] = str(args.output / "detail_events.jsonl")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -67,6 +73,7 @@ def main() -> int:
 
     from iPhoto.gui.detail_profile import shutdown_detail_profile
     from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
+    from iPhoto.gui.windows_fullscreen_composition import install_fullscreen_composition_guard
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL)
@@ -75,6 +82,7 @@ def main() -> int:
     host = QMainWindow()
     host.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
     host.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not args.opaque_window)
+    composition_guard = install_fullscreen_composition_guard(host)
     shell = QWidget(host)
     shell.setStyleSheet("background: black")
     layout = QVBoxLayout(shell)
@@ -193,6 +201,8 @@ def main() -> int:
                     before = submissions[0]
                     header.setVisible(not fullscreen)
                     host.showFullScreen() if fullscreen else host.showNormal()
+                    if composition_guard is not None:
+                        composition_guard.apply_if_fullscreen()
                     viewer.request_viewport_relayout(reset_view=True)
                     wait_for_frame(before)
                     stage = f"{name}/{cycle}/{'full' if fullscreen else 'window'}"
@@ -219,6 +229,10 @@ def main() -> int:
     except Exception as error:
         failures.append({"error": str(error)})
     finally:
+        if args.fullscreen_border and (
+            composition_guard is None or composition_guard.verification_count == 0
+        ):
+            failures.append({"error": "Fullscreen border was requested but never verified on HWND"})
         host.close()
         # The probe owns the only application instance and the diagnostic writer.
         shutdown_detail_profile()
@@ -230,6 +244,10 @@ def main() -> int:
                     "poison_gl_state": args.poison_gl_state,
                     "opaque_window": args.opaque_window,
                     "requested_swap_interval": args.swap_interval,
+                    "fullscreen_border": args.fullscreen_border,
+                    "fullscreen_border_verifications": (
+                        composition_guard.verification_count if composition_guard is not None else 0
+                    ),
                     "failures": failures,
                     "samples": samples,
                 },

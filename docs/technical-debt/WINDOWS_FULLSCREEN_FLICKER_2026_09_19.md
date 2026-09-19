@@ -83,3 +83,36 @@ application reproduction; it uses a smaller widget hierarchy and synthetic media
 
 No DX backend, driver replacement, or unconditional vsync/transparency change is
 introduced by this diagnostic follow-up.
+
+## Follow-up: three probes and external camera recording
+
+All three returned runs (baseline, opaque, requested interval 0) completed
+126 pixel samples and failed 9. Every failure is a fullscreen wheel sample;
+windowed and pre-wheel idle samples passed. The logs contain no sampled GL
+errors. Transparency removal and requested vsync-off were not sufficient fixes.
+The old probe only records requested interval, not the driver's effective setting,
+so do not conclude vsync was definitively disabled.
+
+The first failed PNG from each run is 3840×2400 with green bounds
+`[466,3375) × [110,2291)`. The logged current zoom is 1.0 (expected full-fit
+green bounds `[320,3520) × [0,2400)`). Those observed bounds match the preceding
+zoom 1/1.1 within approximately one pixel. Thus the screenshot sees stale
+presentation despite a newer draw/submission, rather than only a crop-math
+error. Failed PNGs contain green content; they are not direct captures of the
+black display intervals.
+
+The external-camera recording `IMG_3259.MOV` is 11.67 seconds at 30 fps.
+Inspection confirms extended dark-screen intervals interrupted by brief green
+content and a windowed desktop near the end. The screen is dark for most of
+approximately 0.2–3.8 seconds, with additional dark intervals later. This confirms
+the user's visible black flicker independently of screen-grab sampling. It does
+not identify the native API blocking point or prove a monitor power/signal fault.
+
+A scoped candidate now implements Qt's documented fullscreen OpenGL `WS_BORDER`
+workaround. It is **off by default**, enabled using
+`IPHOTO_WINDOWS_FULLSCREEN_BORDER=1`, `-FullscreenBorder` in the collector, or
+`--fullscreen-border` in the probe. It modifies only the existing fullscreen
+OpenGL HWND's style, reads it back to verify the bit, and lets Qt restore its
+saved normal style on exit. It never creates/reparents a surface or changes the
+render backend, swap interval or translucency. Verify this candidate on the
+reported Windows desktop before promoting it to a production default.

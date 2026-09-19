@@ -143,6 +143,38 @@ Source-process collection now resolves nested Windows Python launchers using the
 runtime diagnostic PID or a descendant with a main HWND. If the GUI cannot be
 identified, collection fails instead of silently reporting launcher-only metrics.
 
+### Candidate fullscreen composition workaround
+
+The reported three-way comparison reproduced fullscreen wheel failures in all
+configurations. For that machine, run this single follow-up with the updated code:
+
+```powershell
+python .\tools\windows_fullscreen_probe.py --cycles 3 --fullscreen-border --output .\probe-border
+```
+
+This opt-in candidate uses Qt's documented native `WS_BORDER` workaround for
+Windows fullscreen OpenGL composition. A one-pixel native border may be visible.
+It preserves the existing HWND, QRhi session, translucency and swap interval;
+Qt restores its saved normal style on exit. The probe must record a nonzero
+`fullscreen_border_verifications` in `result.json`; an unapplied workaround
+cannot count as a passing comparison. Share the whole `probe-border` directory
+and the visual result. The previous three groups need not be repeated.
+
+If that probe is stable, verify the **real application** with the same candidate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen -FullscreenBorder
+```
+
+Check plain/cropped/straightened stills, wheel zoom, repeated fullscreen entry,
+double-click/Esc exit, Edit preview, minimize/restore and multiple DPI scales.
+`fullscreen_composition_border` must show `applied=true`; failures report false
+and leave normal Qt window handling active. The candidate remains disabled in
+ordinary launches. These tools do not automatically change production defaults.
+New traces record actual top-level translucency and `fullscreen_gl_context`
+(GL version/profile, renderer and Qt context-reported swap interval). The latter
+does not override or prove a driver's effective vsync policy.
+
 ## First-media QRhi submission A/B
 
 For the Windows-only first-open leak, run from a fresh process so no Detail

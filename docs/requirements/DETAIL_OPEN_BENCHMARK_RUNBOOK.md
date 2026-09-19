@@ -120,6 +120,9 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
   不计作新的媒体事务或 SLO 完成；用既有 GPU/LOD 事件关联内容代次。
   该模式的限量 GL 查询有额外开销，不与未开启诊断的性能基线混用。实机操作和独立合成图
   像素探针见 `docs/WINDOWS_SCAN_PLAYBACK_DIAGNOSTICS.md`。
+  后续 `--fullscreen-border`/`-FullscreenBorder` 是默认关闭的 Windows OpenGL 合成候选：
+  `fullscreen_composition_border(applied=true)` 只证明既有 HWND 的样式位已生效，
+  不代表真实屏幕已正确呈现。`fullscreen_gl_context` 记录上下文配置，不计作媒体事务。
 - Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
   stale/failed upgrade 不得替换 current texture。
 

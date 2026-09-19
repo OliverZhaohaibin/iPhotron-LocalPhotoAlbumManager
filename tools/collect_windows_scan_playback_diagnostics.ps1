@@ -2,6 +2,7 @@
 param(
     [ValidateSet("ScanPlayback", "Fullscreen")]
     [string]$Scenario = "ScanPlayback",
+    [switch]$FullscreenBorder,
     [string]$AppPath = "",
     [string]$PythonExe = "",
     [string]$OutputRoot = "",
@@ -407,6 +408,10 @@ if ($Scenario -eq "Fullscreen") {
     $diagnosticEnvironment["IPHOTO_RHI_BACKEND"] = "opengl"
     $diagnosticEnvironment["IPHOTO_FULLSCREEN_DIAG"] = "1"
     $diagnosticEnvironment["QT_QPA_PLATFORM"] = "windows"
+}
+if ($FullscreenBorder) {
+    if ($Scenario -ne "Fullscreen") { throw "-FullscreenBorder requires -Scenario Fullscreen" }
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "1"
 }
 if ($launch.Mode -eq "source") {
     $sourceRoot = Join-Path $repositoryRoot "src"

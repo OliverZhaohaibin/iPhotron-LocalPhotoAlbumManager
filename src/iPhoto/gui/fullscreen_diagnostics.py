@@ -80,9 +80,29 @@ def _trace_viewer(viewer, event: str, *, gl_state: bool) -> None:
         pending_upload=viewer._texture_manager.needs_texture_upload(),
         reset_pending=viewer._viewport_reset_pending,
     )
+    from PySide6.QtCore import Qt
+
+    details["window_translucent"] = viewer.window().testAttribute(
+        Qt.WidgetAttribute.WA_TranslucentBackground
+    )
     if gl_state:
         try:
             from OpenGL import GL
+            from PySide6.QtGui import QOpenGLContext
+
+            context = QOpenGLContext.currentContext()
+            if context is not None and not state.get("context_logged"):
+                fmt = context.format()
+                renderer = GL.glGetString(GL.GL_RENDERER)
+                emit_detail_event(
+                    "fullscreen_gl_context",
+                    generation=0,
+                    version=list(fmt.version()),
+                    profile=fmt.profile().name,
+                    context_reported_swap_interval=fmt.swapInterval(),
+                    renderer=renderer.decode("utf-8", errors="replace") if renderer else "unknown",
+                )
+                state["context_logged"] = True
 
             details["gl"] = {
                 name: bool(GL.glIsEnabled(getattr(GL, "GL_" + name)))

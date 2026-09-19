@@ -4,6 +4,7 @@ param(
     [string]$Scenario = "ScanPlayback",
     [switch]$FullscreenBorder,
     [switch]$FullscreenOverscan,
+    [switch]$NativeFullscreen,
     [string]$AppPath = "",
     [string]$PythonExe = "",
     [string]$OutputRoot = "",
@@ -15,6 +16,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
+
+if (($FullscreenBorder -and $FullscreenOverscan) -or
+    ($NativeFullscreen -and ($FullscreenBorder -or $FullscreenOverscan))) {
+    throw "Choose only one fullscreen override: -FullscreenBorder, -FullscreenOverscan, or -NativeFullscreen"
+}
+if (($FullscreenBorder -or $FullscreenOverscan -or $NativeFullscreen) -and
+    $Scenario -ne "Fullscreen") {
+    throw "Fullscreen overrides require -Scenario Fullscreen"
+}
 
 function Resolve-Executable {
     param([Parameter(Mandatory = $true)][string]$Candidate)
@@ -209,7 +219,7 @@ function Write-SystemSnapshot {
     $snapshot = [ordered]@{
         session_id = $SessionId
         collected_utc = [DateTime]::UtcNow.ToString("o")
-        collector_version = 3
+        collector_version = 4
         launch_mode = $Launch.Mode
         application_name = $appFile.Name
         application_size_bytes = $appFile.Length
@@ -410,11 +420,12 @@ if ($Scenario -eq "Fullscreen") {
     $diagnosticEnvironment["IPHOTO_FULLSCREEN_DIAG"] = "1"
     $diagnosticEnvironment["QT_QPA_PLATFORM"] = "windows"
     $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "0"
-    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "0"
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "auto"
 }
 if ($FullscreenBorder) {
     if ($Scenario -ne "Fullscreen") { throw "-FullscreenBorder requires -Scenario Fullscreen" }
     $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "1"
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "0"
 }
 if ($FullscreenOverscan) {
     if ($Scenario -ne "Fullscreen" -or $FullscreenBorder) {
@@ -422,6 +433,9 @@ if ($FullscreenOverscan) {
     }
     $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "1"
     $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "0"
+}
+if ($NativeFullscreen) {
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "0"
 }
 if ($launch.Mode -eq "source") {
     $sourceRoot = Join-Path $repositoryRoot "src"

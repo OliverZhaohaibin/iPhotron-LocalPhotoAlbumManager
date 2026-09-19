@@ -73,3 +73,16 @@ def test_source_process_resolution_uses_runtime_identity_and_launcher_ancestry()
     assert "$candidate.MainWindowHandle -ne [IntPtr]::Zero" in resolver
     assert 'throw "Could not identify the GUI process' in resolver
     assert "-StackPath $stackPath" in script
+
+
+def test_fullscreen_collector_uses_app_default_and_explicit_native_control() -> None:
+    script = COLLECTOR.read_text(encoding="utf-8")
+    assert "[switch]$NativeFullscreen" in script
+    assert '$diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "auto"' in script
+    native = script.split("if ($NativeFullscreen) {", 1)[1].split("}", 1)[0]
+    assert '$diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "0"' in native
+    border = script.split("if ($FullscreenBorder) {", 1)[1].split("if ($FullscreenOverscan)", 1)[0]
+    assert '$diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "0"' in border
+    documentation = DOCUMENTATION.read_text(encoding="utf-8")
+    assert "PyCharm" in documentation and "Environment variables" in documentation
+    assert "Media fullscreen strategy=windowed_overscan" in documentation

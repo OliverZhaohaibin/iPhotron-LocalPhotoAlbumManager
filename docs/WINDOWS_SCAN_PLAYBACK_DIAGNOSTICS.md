@@ -143,37 +143,80 @@ Source-process collection now resolves nested Windows Python launchers using the
 runtime diagnostic PID or a descendant with a main HWND. If the GUI cannot be
 identified, collection fails instead of silently reporting launcher-only metrics.
 
-### Candidate fullscreen composition workaround
+### Current Windows OpenGL fullscreen policy and PyCharm
 
-**Latest result:** the border bit was verified but did not fix the reported
-machine. Use the windowed-fullscreen candidate below for the next run; the
-border commands are retained only as history/reproduction controls.
+Windows OpenGL now defaults to windowed fullscreen in ordinary IDE, terminal and
+packaged launches. The existing window covers the screen plus one logical pixel
+of height; backend, render session and window handle remain unchanged.
+
+Before this default-policy change (including revision `14dcd388`), the strategy
+was opt-in: the collector's `-FullscreenOverscan` set
+`IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1` for its child, but PyCharm Run did not
+necessarily have that variable. Sharing an interpreter and source revision does
+not make those two process configurations identical. The collector restores its
+own environment after completion; it does not persist configuration into an
+already-running IDE.
+
+For those older revisions, add this entry under PyCharm **Run → Edit
+Configurations → the application's Python configuration → Environment variables**:
+
+```text
+IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1
+```
+
+Restart the app from that configuration. Keep the existing variables. Setting it
+in PyCharm's Terminal alone does not configure the separate Run process. See
+[JetBrains' Python run configuration documentation](https://www.jetbrains.com/help/pycharm/run-debug-configuration-python.html).
+`IPHOTO_RHI_BACKEND=opengl` may also be set to match the collector if a graphics
+backend override was already present; it is not needed for the Windows default.
+No diagnostic logging flags are necessary to activate the fix.
+
+Current policy:
+
+| Configuration | Windows OpenGL behavior |
+|---|---|
+| Variable absent, empty or `auto` | Windowed fullscreen (default) |
+| `IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1` | Windowed fullscreen |
+| `IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=0` | Native fullscreen comparison/rollback |
+| Other OS or non-OpenGL surface | Existing native behavior |
+
+Normal application logs now contain `Media fullscreen strategy=windowed_overscan`
+(or `native`) at entry, including the platform, actual surface type and override.
+This log is emitted without enabling the collector or detail profiler. When
+profiling is enabled, `fullscreen_strategy_selected` records the same choice;
+`fullscreen_composition_overscan(applied=true)` verifies geometry, and
+`fullscreen=true, qt_fullscreen=false` distinguishes logical and native state.
+
+The current collector's `-Scenario Fullscreen` follows the default policy.
+`-FullscreenOverscan` remains a supported explicit alias; use `-NativeFullscreen`
+for the old native path. `-FullscreenBorder` remains an ineffective historical
+control and forces native mode. These switches are mutually exclusive, and all
+require `-Scenario Fullscreen`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen -NativeFullscreen
+```
+
+The synthetic probe deliberately retains native fullscreen as its baseline;
+pass `--fullscreen-overscan` to exercise the current application strategy:
 
 ```powershell
 python .\tools\windows_fullscreen_probe.py --cycles 3 --fullscreen-overscan --output .\probe-overscan
 ```
 
-The candidate retains the current frameless window, OpenGL renderer and render
-session. It covers the monitor with an ordinary window that is one logical
-pixel taller than the screen, avoiding an exact monitor-sized native fullscreen
-surface. `result.json` must show nonzero `fullscreen_composition_verifications`;
-`fullscreen_composition_overscan` must show `applied=true`, and trace fields must
-show logical `fullscreen=true` with `qt_fullscreen=false`. The extra off-screen
-strip is excluded from pixel comparisons, not counted as a black-frame failure.
-Border and overscan flags are mutually exclusive.
+For direct PyCharm verification, first check the strategy log. If it says
+`native`, inspect explicit overrides and the actual surface type. If it says
+`windowed_overscan` but still flickers, record the PyCharm console and temporarily
+add `IPHOTO_DETAIL_PROFILE=1`, `IPHOTO_FULLSCREEN_DIAG=1`, and a writable
+`IPHOTO_DETAIL_PROFILE_PATH` to **that same Run configuration**. A separate
+collector launch does not capture the IDE process. This follow-up is only needed
+if the strategy matches but the behavior still differs.
 
-To test the actual app with this candidate:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen -FullscreenOverscan
-```
-
-Verify visible flicker, taskbar coverage, Alt-Tab, minimized restore,
-double-click/Esc exit, original maximized/normal window restoration, Edit, and
-multiple displays/DPI. It remains opt-in pending that validation. Share the
-`probe-overscan` directory and the app collector ZIP. No DX API or driver changes
-are involved. The collector explicitly clears inherited candidate flags unless
-the corresponding switch is provided.
+The user has confirmed no visible flicker/offset in the collector-enabled
+overscan run on the reported machine. This is not blanket validation across
+Windows drivers, taskbar/Alt-Tab, multiple screens, or DPI configurations. The
+independent filmstrip access violation remains tracked in its own bug report.
 
 Earlier border control (verified ineffective on the reported machine), retained
 for reproducing the comparison:

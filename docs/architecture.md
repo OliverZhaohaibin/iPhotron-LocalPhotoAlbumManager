@@ -561,6 +561,12 @@ thread/render boundaries. Static Edit no longer creates a second full-image
 loader or CPU preview session; Done/Cancel and fullscreen retain the same render
 session. Export remains an independent full-resolution path.
 
+Windows OpenGL defaults to windowed fullscreen on the existing native window,
+covering the screen plus one logical pixel of height. This strategy is shared
+by ordinary IDE/terminal/packaged entry points and retains the QRhi session;
+`IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=0` selects native fullscreen for comparisons.
+Other platforms and non-OpenGL surfaces retain their native fullscreen policy.
+
 ### Scan And Index
 
 ```mermaid

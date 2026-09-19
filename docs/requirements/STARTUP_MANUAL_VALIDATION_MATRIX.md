@@ -61,9 +61,10 @@ Silicon 本轮由工程任务执行；Intel 保持 `pending_manual_validation`�
 - 可选 `IPHOTO_WINDOWS_FULLSCREEN_BORDER=1` 合成候选：仅进入 OpenGL 全屏后修改既有
   HWND 样式，不得提前创建或重建 native surface；验证退出/最小化/恢复及 Edit 全屏。
   该选项默认关闭，日志中样式位已生效不能代替真实屏幕无黑屏验收。
-- 新增默认关闭的 `IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1` 窗口式全屏候选：保留原生
+- Windows OpenGL 默认使用窗口式全屏，`IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=0` 可回退对照；保留原生
   句柄和 QRhi 层级，Qt 原生 fullscreen 为 false，但应用 fullscreen 为 true；验证
   任务栏遮挡、Alt-Tab、双击/Esc、最大化状态恢复、跨屏 DPI 与退出后的窗口几何。
+  需同时验证 PyCharm Run、普通终端和打包启动；不能只用带诊断参数的启动代替普通入口验收。
 
 收集 Windows 版本、CPU/架构、Qt backend、构建参数、Defender 状态、盘类型和事件阈值。当前状态：`pending_manual_validation`。
 

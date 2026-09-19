@@ -2,11 +2,13 @@
 
 Keep the resident HWND/QRhi hierarchy, but avoid native fullscreen and an exact
 monitor-sized surface. The extra logical pixel is outside the selected screen.
-This remains opt-in until verified on the affected Windows compositor.
+Windows OpenGL uses this by default; an explicit zero restores native fullscreen
+for comparisons. Other platforms and graphics APIs retain their native behavior.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -16,6 +18,8 @@ from PySide6.QtGui import QSurface
 from .detail_profile import emit_detail_event
 
 _ACTIVE = "_iphoto_windowed_fullscreen_active"
+_OVERRIDE = "IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"
+_LOGGER = logging.getLogger(__name__)
 
 
 def is_media_fullscreen(window) -> bool:
@@ -114,8 +118,15 @@ class WindowedFullscreenController(QObject):
 
 
 def _use_windowed_fullscreen(window) -> bool:
-    if sys.platform != "win32" or os.environ.get("IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN", "") != "1":
+    if sys.platform != "win32":
         return False
+    override = os.environ.get(_OVERRIDE, "auto").strip().lower()
+    if override in {"0", "false", "no", "off"}:
+        return False
+    if override not in {"", "auto", "1", "true", "yes", "on"}:
+        _LOGGER.warning(
+            "Ignoring unsupported %s=%r; using Windows OpenGL default", _OVERRIDE, override
+        )
     handle = window.windowHandle()
     return handle is not None and handle.surfaceType() in {
         QSurface.SurfaceType.OpenGLSurface,
@@ -124,7 +135,29 @@ def _use_windowed_fullscreen(window) -> bool:
 
 
 def enter_media_fullscreen(window) -> None:
-    if not _use_windowed_fullscreen(window):
+    use_windowed = _use_windowed_fullscreen(window)
+    strategy = "windowed_overscan" if use_windowed else "native"
+    handle = window.windowHandle()
+    surface = handle.surfaceType().name if handle is not None else "unavailable"
+    override = os.environ.get(_OVERRIDE, "auto")
+    # Ordinary IDE/packaged launches need this evidence too; profiling need not
+    # be enabled to tell which policy was actually selected.
+    _LOGGER.info(
+        "Media fullscreen strategy=%s platform=%s surface=%s override=%r",
+        strategy,
+        sys.platform,
+        surface,
+        override,
+    )
+    emit_detail_event(
+        "fullscreen_strategy_selected",
+        generation=0,
+        strategy=strategy,
+        platform=sys.platform,
+        surface=surface,
+        override=override,
+    )
+    if not use_windowed:
         window.showFullScreen()
         return
     controller = getattr(window, "_iphoto_fullscreen_controller", None)

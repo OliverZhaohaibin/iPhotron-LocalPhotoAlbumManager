@@ -1,7 +1,9 @@
 # Windows fullscreen black flicker: 2026-09-19 diagnostic findings
 
-Status: unresolved on the reported Windows compositor. This report narrows the
-failure boundary; it does not claim a verified driver defect or a completed fix.
+Status: user-confirmed visual recovery on the reported machine when windowed
+fullscreen is enabled. The 2026-09-20 launcher clarification below identifies why
+older ordinary PyCharm launches did not enable it. A general driver root cause
+and cross-device validation remain unresolved. Earlier sections are chronology.
 
 ## Evidence
 
@@ -152,3 +154,31 @@ and only evaluates screenshot pixels visible on the selected monitor. Native
 fullscreen is expected to be false while logical fullscreen is true. Local Qt
 tests confirm repeated geometry/state restoration and native-handle retention;
 Windows pixel and taskbar/Alt-Tab validation remains required.
+
+## 2026-09-20 clarification: collector launch vs PyCharm Run
+
+The user clarified that the successful run was specifically launched with
+`-Scenario Fullscreen -FullscreenOverscan`. Direct PyCharm Run of the same
+interpreter and revision still flickered. In revision `14dcd388`, that switch
+sets `IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1` in the collector's child environment;
+`_use_windowed_fullscreen()` otherwise returns false. An unset PyCharm override
+therefore selects a different full-screen implementation even with identical
+Python packages and source code. The IDE's actual environment has not been read;
+this is a concrete code-level explanation to verify with its strategy log,
+not evidence that PyCharm itself breaks rendering.
+
+The production default is now windowed fullscreen for Windows OpenGL.
+Unset/empty/`auto` select it; explicit `0` retains native mode for rollback and
+comparisons. Other OS/backends are unaffected. The collector's default Fullscreen
+scenario follows this policy, and `-NativeFullscreen` selects the prior native
+control. Ordinary logs expose the selected strategy without requiring profiler
+flags. The independent pixel probe still has an explicit native baseline.
+
+On older revisions, setting `IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1` in the actual
+PyCharm Run configuration is sufficient to select the same fullscreen path as
+the successful collector run. Confirmation should use that Run process rather
+than another collector launch. If the logged strategy matches and symptoms
+remain different, inspect the remaining IDE process configuration then.
+
+This update does not diagnose or fix the separately documented filmstrip
+access-violation incident.

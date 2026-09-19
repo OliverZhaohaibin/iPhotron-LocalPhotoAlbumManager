@@ -7,6 +7,7 @@ import os
 import time
 
 from .detail_profile import emit_detail_event
+from .windowed_fullscreen import is_media_fullscreen
 
 
 def trace_viewer(viewer, event: str, *, gl_state: bool = False) -> None:
@@ -65,7 +66,8 @@ def _trace_viewer(viewer, event: str, *, gl_state: bool) -> None:
         sequence=state["count"],
         submissions=state["submitted"],
         viewer_id=id(viewer),
-        fullscreen=viewer.window().isFullScreen(),
+        fullscreen=is_media_fullscreen(viewer.window()),
+        qt_fullscreen=viewer.window().isFullScreen(),
         widget_size=[viewer.width(), viewer.height()],
         dpr=viewer.devicePixelRatioF(),
         target_size=[target.width(), target.height()],

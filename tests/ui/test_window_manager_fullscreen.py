@@ -74,6 +74,18 @@ def test_reconcile_does_not_adopt_non_playback_fullscreen() -> None:
     manager._finish_immersive_exit.assert_not_called()
 
 
+def test_windowed_fullscreen_is_not_reconciled_as_native_exit() -> None:
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._immersive_active = True
+    manager._window = MagicMock()
+    manager._window.isFullScreen.return_value = False
+    manager._window.property.return_value = True
+    manager._finish_immersive_exit = MagicMock()
+    manager._reconcile_playback_fullscreen_state()
+    manager._finish_immersive_exit.assert_not_called()
+    assert manager._is_fullscreen_or_maximized() is True
+
+
 def test_native_exit_restores_playback_without_calling_show_normal() -> None:
     manager = FramelessWindowManager.__new__(FramelessWindowManager)
     manager._immersive_active = True

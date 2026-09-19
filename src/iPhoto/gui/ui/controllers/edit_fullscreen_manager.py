@@ -8,6 +8,8 @@ from typing import Optional
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget
 
+from ...windowed_fullscreen import enter_media_fullscreen, exit_media_fullscreen
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -126,7 +128,7 @@ class EditFullscreenManager(QObject):
             total = max(1, splitter.width())
         splitter.setSizes([0, total])
 
-        self._window.showFullScreen()
+        enter_media_fullscreen(self._window)
 
         self._fullscreen_active = True
 
@@ -143,7 +145,7 @@ class EditFullscreenManager(QObject):
         if not isinstance(self._window, QWidget):
             return False
 
-        self._window.showNormal()
+        exit_media_fullscreen(self._window)
 
         for widget, was_visible in self._fullscreen_hidden_widgets:
             widget.setVisible(was_visible)

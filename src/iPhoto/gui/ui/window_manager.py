@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n.font_policy import sync_widget_language_font
+from ..windowed_fullscreen import enter_media_fullscreen, exit_media_fullscreen, is_media_fullscreen
 from ..windows_fullscreen_composition import install_fullscreen_composition_guard
 from .icon import load_icon
 from .styles import modern_scrollbar_style
@@ -311,7 +312,7 @@ class FramelessWindowManager(QObject):
         self._apply_immersive_backdrop()
 
         self._immersive_active = True
-        self._window.showFullScreen()
+        enter_media_fullscreen(self._window)
         self._request_media_viewport_relayout(reset_view=True)
         self._update_fullscreen_button_icon()
         self._schedule_playback_resume(expect_immersive=True, resume=resume_after_transition)
@@ -347,7 +348,7 @@ class FramelessWindowManager(QObject):
         self._immersive_active = False
         self._restore_default_backdrop()
         if request_window_change:
-            self._window.showNormal()
+            exit_media_fullscreen(self._window)
 
         with self._suspend_layout_updates():
             # Native fullscreen exit has already restored the platform-owned
@@ -385,7 +386,7 @@ class FramelessWindowManager(QObject):
     def _reconcile_playback_fullscreen_state(self) -> None:
         """Restore stale Playback immersive state after a native fullscreen exit."""
 
-        if self._immersive_active and not self._window.isFullScreen():
+        if self._immersive_active and not is_media_fullscreen(self._window):
             self._finish_immersive_exit(request_window_change=False)
 
     def _request_media_viewport_relayout(self, *, reset_view: bool = False) -> None:
@@ -510,7 +511,7 @@ class FramelessWindowManager(QObject):
         # clamp margin is only meaningful for normal windowed mode and would
         # otherwise shrink a fullscreen/maximized window, exposing desktop or
         # app content along the right/bottom edges.
-        return self._window.isFullScreen() or self._window.isMaximized()
+        return is_media_fullscreen(self._window) or self._window.isMaximized()
 
     def _apply_screen_change_fix(self, old_dpr: float, new_screen: object) -> None:
         if self._geometry_fix_in_progress:
@@ -749,7 +750,7 @@ class FramelessWindowManager(QObject):
         def _restore() -> None:
             if generation != self._shadow_restore_generation:
                 return
-            if self._immersive_active or self._window.isFullScreen():
+            if self._immersive_active or is_media_fullscreen(self._window):
                 return
             self._set_playback_header_shadow_suppressed(False)
 

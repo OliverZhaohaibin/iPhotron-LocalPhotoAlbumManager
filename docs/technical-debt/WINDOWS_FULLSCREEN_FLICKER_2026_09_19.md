@@ -116,3 +116,39 @@ OpenGL HWND's style, reads it back to verify the bit, and lets Qt restore its
 saved normal style on exit. It never creates/reparents a surface or changes the
 render backend, swap interval or translucency. Verify this candidate on the
 reported Windows desktop before promoting it to a production default.
+
+## Follow-up: verified border still fails
+
+The returned `probe-border` run verifies the native bit 18 times and records nine
+`fullscreen_composition_border(applied=true)` events. It still fails 9/126
+samples, all during fullscreen wheel zoom, with the same stale-size bounds as
+the other runs. Therefore the style-only border candidate is ineffective on
+this configuration and must not be promoted as the fix.
+
+Internet research found a closely related original Qt report: a frameless
+OpenGL window flickered at exactly fullscreen dimensions but not when its
+geometry differed by one pixel. The reply describes a pseudo-fullscreen
+workaround. This is an old Qt 5 report, not confirmation of a Qt 6.10/Intel bug:
+[original Qt forum report](https://forum.qt.io/topic/68132/flicker-with-qopenglwidget-when-fullscreen-and-frameless-window).
+The linked QTBUG-51093 tracker was unavailable during this investigation; its
+resolution/version status has not been verified. Intel's generic flicker
+troubleshooting guidance is not evidence of this specific root cause.
+
+The new candidate is **windowed fullscreen**, opt-in via
+`IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1`. It keeps the original frameless
+QWidget/HWND/QRhi hierarchy and uses ordinary window geometry covering the
+screen plus one logical pixel of height. It never enters Qt's native fullscreen
+state in this mode. Application fullscreen semantics are represented explicitly
+so double-click, Escape routing, Playback reconciliation and Edit still work.
+Saved normal/maximized state is restored on exit; minimized windows are not
+repositioned, and rejected resize attempts are bounded. At DPR 2.5, one logical
+pixel becomes approximately 2–3 device pixels. The off-screen strip may extend
+onto an adjoining display, which is part of multi-monitor acceptance testing.
+
+This addresses exact-monitor-sized presentation as the next specific hypothesis,
+without changing shaders, decoding, GPU API, transparency or swap interval.
+The synthetic probe uses the same enter/exit functions as Playback and Edit,
+and only evaluates screenshot pixels visible on the selected monitor. Native
+fullscreen is expected to be false while logical fullscreen is true. Local Qt
+tests confirm repeated geometry/state restoration and native-handle retention;
+Windows pixel and taskbar/Alt-Tab validation remains required.

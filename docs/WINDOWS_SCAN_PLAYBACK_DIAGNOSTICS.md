@@ -145,8 +145,38 @@ identified, collection fails instead of silently reporting launcher-only metrics
 
 ### Candidate fullscreen composition workaround
 
-The reported three-way comparison reproduced fullscreen wheel failures in all
-configurations. For that machine, run this single follow-up with the updated code:
+**Latest result:** the border bit was verified but did not fix the reported
+machine. Use the windowed-fullscreen candidate below for the next run; the
+border commands are retained only as history/reproduction controls.
+
+```powershell
+python .\tools\windows_fullscreen_probe.py --cycles 3 --fullscreen-overscan --output .\probe-overscan
+```
+
+The candidate retains the current frameless window, OpenGL renderer and render
+session. It covers the monitor with an ordinary window that is one logical
+pixel taller than the screen, avoiding an exact monitor-sized native fullscreen
+surface. `result.json` must show nonzero `fullscreen_composition_verifications`;
+`fullscreen_composition_overscan` must show `applied=true`, and trace fields must
+show logical `fullscreen=true` with `qt_fullscreen=false`. The extra off-screen
+strip is excluded from pixel comparisons, not counted as a black-frame failure.
+Border and overscan flags are mutually exclusive.
+
+To test the actual app with this candidate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen -FullscreenOverscan
+```
+
+Verify visible flicker, taskbar coverage, Alt-Tab, minimized restore,
+double-click/Esc exit, original maximized/normal window restoration, Edit, and
+multiple displays/DPI. It remains opt-in pending that validation. Share the
+`probe-overscan` directory and the app collector ZIP. No DX API or driver changes
+are involved. The collector explicitly clears inherited candidate flags unless
+the corresponding switch is provided.
+
+Earlier border control (verified ineffective on the reported machine), retained
+for reproducing the comparison:
 
 ```powershell
 python .\tools\windows_fullscreen_probe.py --cycles 3 --fullscreen-border --output .\probe-border
@@ -160,7 +190,7 @@ Qt restores its saved normal style on exit. The probe must record a nonzero
 cannot count as a passing comparison. Share the whole `probe-border` directory
 and the visual result. The previous three groups need not be repeated.
 
-If that probe is stable, verify the **real application** with the same candidate:
+The corresponding historical application control is:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen -FullscreenBorder

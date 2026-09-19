@@ -35,10 +35,16 @@ def main() -> int:
     parser.add_argument("--cycles", type=int, default=20)
     parser.add_argument("--output", type=Path, default=Path("fullscreen-probe"))
     parser.add_argument("--poison-gl-state", action="store_true")
-    parser.add_argument(
+    composition_options = parser.add_mutually_exclusive_group()
+    composition_options.add_argument(
         "--fullscreen-border",
         action="store_true",
         help="Try Qt's Windows OpenGL WS_BORDER composition workaround",
+    )
+    composition_options.add_argument(
+        "--fullscreen-overscan",
+        action="store_true",
+        help="Extend fullscreen height by one logical pixel while retaining the Qt window",
     )
     parser.add_argument(
         "--opaque-window",
@@ -62,6 +68,7 @@ def main() -> int:
     os.environ["IPHOTO_RHI_BACKEND"] = "opengl"
     os.environ["IPHOTO_FULLSCREEN_DIAG"] = "1"
     os.environ["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "1" if args.fullscreen_border else "0"
+    os.environ["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "1" if args.fullscreen_overscan else "0"
     os.environ["IPHOTO_DETAIL_PROFILE"] = "1"
     os.environ["IPHOTO_DETAIL_PROFILE_PATH"] = str(args.output / "detail_events.jsonl")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -72,6 +79,7 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 
     from iPhoto.gui.detail_profile import shutdown_detail_profile
+    from iPhoto.gui.windowed_fullscreen import enter_media_fullscreen, exit_media_fullscreen
     from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
     from iPhoto.gui.windows_fullscreen_composition import install_fullscreen_composition_guard
 
@@ -114,6 +122,14 @@ def main() -> int:
             raise RuntimeError("Windows window capture returned no pixels")
         sx, sy = image.width() / host.width(), image.height() / host.height()
         origin = viewer.mapTo(host, QPoint(0, 0))
+        global_origin = host.mapToGlobal(QPoint(0, 0))
+        screen_rect = screen.geometry()
+        visible = [
+            max(0, round((screen_rect.left() - global_origin.x()) * sx)),
+            min(image.width(), round((screen_rect.right() + 1 - global_origin.x()) * sx)),
+            max(0, round((screen_rect.top() - global_origin.y()) * sy)),
+            min(image.height(), round((screen_rect.bottom() + 1 - global_origin.y()) * sy)),
+        ]
         cx = round((origin.x() + viewer.width() / 2) * sx)
         cy = round((origin.y() + viewer.height() / 2) * sy)
 
@@ -124,8 +140,8 @@ def main() -> int:
         ok = green(cx, cy)
         error = None
         if check_bounds and ok:
-            xs = [x for x in range(image.width()) if green(x, cy)]
-            ys = [y for y in range(image.height()) if green(cx, y)]
+            xs = [x for x in range(visible[0], visible[1]) if green(x, cy)]
+            ys = [y for y in range(visible[2], visible[3]) if green(cx, y)]
             crop = viewer._compute_crop_rect_pixels()
             if crop is None:
                 from PySide6.QtCore import QRectF
@@ -140,6 +156,14 @@ def main() -> int:
                 (origin.x() + right.x()) * sx,
                 (origin.y() + left.y()) * sy,
                 (origin.y() + right.y()) * sy,
+            ]
+            # Overscan lies outside the selected monitor. Compare only pixels
+            # physically visible there, not undefined off-monitor grab pixels.
+            expected = [
+                max(expected[0], visible[0]),
+                min(expected[1], visible[1]),
+                max(expected[2], visible[2]),
+                min(expected[3], visible[3]),
             ]
             actual = [min(xs), max(xs) + 1, min(ys), max(ys) + 1]
             error = max(abs(a - b) for a, b in zip(actual, expected, strict=True))
@@ -200,7 +224,7 @@ def main() -> int:
                 for fullscreen in (True, False):
                     before = submissions[0]
                     header.setVisible(not fullscreen)
-                    host.showFullScreen() if fullscreen else host.showNormal()
+                    enter_media_fullscreen(host) if fullscreen else exit_media_fullscreen(host)
                     if composition_guard is not None:
                         composition_guard.apply_if_fullscreen()
                     viewer.request_viewport_relayout(reset_view=True)
@@ -229,10 +253,15 @@ def main() -> int:
     except Exception as error:
         failures.append({"error": str(error)})
     finally:
-        if args.fullscreen_border and (
-            composition_guard is None or composition_guard.verification_count == 0
+        verified_controller = (
+            getattr(host, "_iphoto_fullscreen_controller", None)
+            if args.fullscreen_overscan
+            else composition_guard
+        )
+        if (args.fullscreen_border or args.fullscreen_overscan) and (
+            verified_controller is None or verified_controller.verification_count == 0
         ):
-            failures.append({"error": "Fullscreen border was requested but never verified on HWND"})
+            failures.append({"error": "Fullscreen composition candidate was never verified"})
         host.close()
         # The probe owns the only application instance and the diagnostic writer.
         shutdown_detail_profile()
@@ -245,6 +274,12 @@ def main() -> int:
                     "opaque_window": args.opaque_window,
                     "requested_swap_interval": args.swap_interval,
                     "fullscreen_border": args.fullscreen_border,
+                    "fullscreen_overscan": args.fullscreen_overscan,
+                    "fullscreen_composition_verifications": (
+                        verified_controller.verification_count
+                        if verified_controller is not None
+                        else 0
+                    ),
                     "fullscreen_border_verifications": (
                         composition_guard.verification_count if composition_guard is not None else 0
                     ),

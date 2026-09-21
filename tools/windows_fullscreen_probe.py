@@ -10,10 +10,141 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
 from pathlib import Path
+
+
+def capture_visible_regions(viewer_rect, screens):
+    """Capture each visible desktop region in that screen's own coordinate space.
+
+    Windows screen.grabWindow(0, ...) uses screen-local logical coordinates.
+    Capturing a translucent HWND is unsupported. Never sample outside a screen
+    or infer capture scale from the size of a window spanning multiple screens.
+    """
+    captures = []
+    for index, screen in enumerate(screens):
+        screen_rect = screen.geometry()
+        visible = viewer_rect.intersected(screen_rect)
+        if visible.isEmpty():
+            continue
+        local = visible.translated(-screen_rect.topLeft())
+        record = {
+            "capture_method": "desktop_region",
+            "screen_index": index,
+            "screen_rect_logical": list(screen_rect.getRect()),
+            "capture_rect_global": list(visible.getRect()),
+            "capture_rect_screen_local": list(local.getRect()),
+            "ok": False,
+            "status": "capture_failed",
+        }
+        image = None
+        try:
+            pixmap = screen.grabWindow(0, local.x(), local.y(), local.width(), local.height())
+            if pixmap.isNull():
+                record["reason"] = "empty_capture"
+            else:
+                dpr = float(pixmap.devicePixelRatio())
+                image = pixmap.toImage()
+                record.update(
+                    dpr=dpr if math.isfinite(dpr) else None,
+                    pixel_size=[image.width(), image.height()],
+                )
+                if not math.isfinite(dpr) or dpr <= 0:
+                    record["reason"] = "invalid_capture_dpr"
+                elif (
+                    image.isNull()
+                    or abs(image.width() - visible.width() * dpr) > 1
+                    or abs(image.height() - visible.height() * dpr) > 1
+                ):
+                    record["reason"] = "capture_size_mismatch"
+                else:
+                    record["status"] = "captured"
+        except Exception as error:
+            record["reason"] = type(error).__name__
+        captures.append((record, image))
+    if not captures:
+        captures.append(
+            (
+                {
+                    "capture_method": "desktop_region",
+                    "ok": False,
+                    "status": "no_visible_intersection",
+                },
+                None,
+            )
+        )
+    return captures
+
+
+def evaluate_capture(record, image, expected_global_rect):
+    """Check the synthetic green rectangle using capture pixels, not window DPR."""
+    from PySide6.QtCore import QRectF
+
+    result = dict(record)
+    if record["status"] != "captured":
+        return result
+    if expected_global_rect.isEmpty():
+        result.update(status="invalid_expected_geometry", ok=False)
+        return result
+    x, y, width, height = record["capture_rect_global"]
+    dpr = record["dpr"]
+    visible = expected_global_rect.intersected(QRectF(x, y, width, height))
+    expected = QRectF(
+        (visible.x() - x) * dpr,
+        (visible.y() - y) * dpr,
+        visible.width() * dpr,
+        visible.height() * dpr,
+    )
+    expected = expected.intersected(QRectF(0, 0, image.width(), image.height()))
+    result["expected_bounds_px"] = list(expected.getRect())
+
+    def green(px, py):
+        color = image.pixelColor(px, py)
+        return (
+            color.green() > 100
+            and color.green() > color.red() * 1.5
+            and color.green() > color.blue() * 1.5
+        )
+
+    result["status"] = "pixel_mismatch"
+    if visible.isEmpty():
+        # A clipped region can contain only the viewer's opaque black backdrop.
+        points = [
+            (
+                min(image.width() - 1, int(image.width() * fx)),
+                min(image.height() - 1, int(image.height() * fy)),
+            )
+            for fx in (0.1, 0.5, 0.9)
+            for fy in (0.1, 0.5, 0.9)
+        ]
+        result["ok"] = all(max(image.pixelColor(px, py).getRgb()[:3]) <= 24 for px, py in points)
+        result["reason"] = "background_only"
+    else:
+        cx = max(0, min(image.width() - 1, int(expected.center().x())))
+        cy = max(0, min(image.height() - 1, int(expected.center().y())))
+        xs = [px for px in range(image.width()) if green(px, cy)]
+        ys = [py for py in range(image.height()) if green(cx, py)]
+        if not xs or not ys:
+            result["reason"] = "missing_green_content"
+        else:
+            observed = QRectF(min(xs), min(ys), max(xs) + 1 - min(xs), max(ys) + 1 - min(ys))
+            error = max(
+                abs(a - b)
+                for a, b in zip(
+                    (observed.left(), observed.top(), observed.right(), observed.bottom()),
+                    (expected.left(), expected.top(), expected.right(), expected.bottom()),
+                    strict=True,
+                )
+            )
+            result.update(
+                observed_bounds_px=list(observed.getRect()), bounds_error_px=error, ok=error <= 3
+            )
+    if result["ok"]:
+        result["status"] = "passed"
+    return result
 
 
 def probe_surface_format(swap_interval: int):
@@ -79,7 +210,11 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 
     from iPhoto.gui.detail_profile import shutdown_detail_profile
-    from iPhoto.gui.windowed_fullscreen import enter_media_fullscreen, exit_media_fullscreen
+    from iPhoto.gui.windowed_fullscreen import (
+        FullscreenPhase,
+        enter_media_fullscreen,
+        exit_media_fullscreen,
+    )
     from iPhoto.gui.ui.widgets.gl_image_viewer import GLImageViewer
     from iPhoto.gui.windows_fullscreen_composition import install_fullscreen_composition_guard
 
@@ -115,66 +250,46 @@ def main() -> int:
             raise RuntimeError("No QRhi submission within 5 seconds")
         QTest.qWait(200)
 
-    def sample(label, *, check_bounds=True):
-        screen = host.screen()
-        image = screen.grabWindow(int(host.winId())).toImage()
-        if image.isNull():
-            raise RuntimeError("Windows window capture returned no pixels")
-        sx, sy = image.width() / host.width(), image.height() / host.height()
-        origin = viewer.mapTo(host, QPoint(0, 0))
-        global_origin = host.mapToGlobal(QPoint(0, 0))
-        screen_rect = screen.geometry()
-        visible = [
-            max(0, round((screen_rect.left() - global_origin.x()) * sx)),
-            min(image.width(), round((screen_rect.right() + 1 - global_origin.x()) * sx)),
-            max(0, round((screen_rect.top() - global_origin.y()) * sy)),
-            min(image.height(), round((screen_rect.bottom() + 1 - global_origin.y()) * sy)),
-        ]
-        cx = round((origin.x() + viewer.width() / 2) * sx)
-        cy = round((origin.y() + viewer.height() / 2) * sy)
+    def sample(label):
+        from PySide6.QtCore import QRect, QRectF
 
-        def green(x, y):
-            c = image.pixelColor(x, y)
-            return c.green() > 100 and c.green() > c.red() * 1.5 and c.green() > c.blue() * 1.5
-
-        ok = green(cx, cy)
-        error = None
-        if check_bounds and ok:
-            xs = [x for x in range(visible[0], visible[1]) if green(x, cy)]
-            ys = [y for y in range(visible[2], visible[3]) if green(cx, y)]
-            crop = viewer._compute_crop_rect_pixels()
-            if crop is None:
-                from PySide6.QtCore import QRectF
-
-                w, h = viewer._display_texture_dimensions()
-                crop = QRectF(0, 0, w, h)
-            tc = viewer._transform_controller
-            left = tc.convert_image_to_viewport(crop.left(), crop.top())
-            right = tc.convert_image_to_viewport(crop.right(), crop.bottom())
-            expected = [
-                (origin.x() + left.x()) * sx,
-                (origin.x() + right.x()) * sx,
-                (origin.y() + left.y()) * sy,
-                (origin.y() + right.y()) * sy,
-            ]
-            # Overscan lies outside the selected monitor. Compare only pixels
-            # physically visible there, not undefined off-monitor grab pixels.
-            expected = [
-                max(expected[0], visible[0]),
-                min(expected[1], visible[1]),
-                max(expected[2], visible[2]),
-                min(expected[3], visible[3]),
-            ]
-            actual = [min(xs), max(xs) + 1, min(ys), max(ys) + 1]
-            error = max(abs(a - b) for a, b in zip(actual, expected, strict=True))
-            ok = error <= 3
+        origin = viewer.mapToGlobal(QPoint(0, 0))
+        viewport = QRect(origin, viewer.size())
+        crop = viewer._compute_crop_rect_pixels()
+        if crop is None:
+            width, height = viewer._display_texture_dimensions()
+            crop = QRectF(0, 0, width, height)
+        transform = viewer._transform_controller
+        left = transform.convert_image_to_viewport(crop.left(), crop.top()) + QPointF(origin)
+        right = transform.convert_image_to_viewport(crop.right(), crop.bottom()) + QPointF(origin)
+        expected = QRectF(left, right).normalized()
+        regions = []
+        for region_index, (record, image) in enumerate(
+            capture_visible_regions(viewport, _app.screens())
+        ):
+            result = evaluate_capture(record, image, expected)
+            regions.append(result)
+            if not result["ok"]:
+                failure = {
+                    "stage": label,
+                    "region": region_index,
+                    "status": result["status"],
+                    "reason": result.get("reason"),
+                }
+                if image is not None and not image.isNull():
+                    name = f"failure-{len(failures):03d}.png"
+                    image.save(str(args.output / name))
+                    failure["screenshot"] = name
+                failures.append(failure)
         samples.append(
-            {"stage": label, "ok": ok, "bounds_error_px": error, "submissions": submissions[0]}
+            {
+                "stage": label,
+                "ok": all(region["ok"] for region in regions),
+                "capture_method": "desktop_region",
+                "submissions": submissions[0],
+                "regions": regions,
+            }
         )
-        if not ok:
-            name = f"failure-{len(failures):03d}.png"
-            image.save(str(args.output / name))
-            failures.append({"stage": label, "screenshot": name})
 
     try:
         before = submissions[0]
@@ -230,6 +345,16 @@ def main() -> int:
                     viewer.request_viewport_relayout(reset_view=True)
                     wait_for_frame(before)
                     stage = f"{name}/{cycle}/{'full' if fullscreen else 'window'}"
+                    if fullscreen and args.fullscreen_overscan:
+                        controller = getattr(host, "_iphoto_fullscreen_controller", None)
+                        if controller is None or controller.phase != FullscreenPhase.WINDOWED:
+                            failures.append(
+                                {
+                                    "stage": stage,
+                                    "error": "overscan_not_active",
+                                    "phase": controller.phase.value if controller else None,
+                                }
+                            )
                     for index in range(5):
                         sample(f"{stage}/idle-{index}")
                         QTest.qWait(60)
@@ -268,6 +393,8 @@ def main() -> int:
         (args.output / "result.json").write_text(
             json.dumps(
                 {
+                    "schema_version": 2,
+                    "capture_method": "desktop_region",
                     "passed": not failures,
                     "cycles": args.cycles,
                     "poison_gl_state": args.poison_gl_state,

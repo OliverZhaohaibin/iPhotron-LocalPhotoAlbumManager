@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtWidgets import QWidget
 
-from ...windowed_fullscreen import enter_media_fullscreen, exit_media_fullscreen
+from ...windowed_fullscreen import (
+    enter_media_fullscreen,
+    exit_media_fullscreen,
+    is_media_fullscreen,
+    is_media_fullscreen_state_event,
+)
 
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..ui_main_window import Ui_MainWindow
+
 
 class EditFullscreenManager(QObject):
     """Handle immersive full screen transitions for the edit image viewer."""
@@ -46,6 +51,8 @@ class EditFullscreenManager(QObject):
         # Record the edit sidebar's width constraints so we can temporarily
         # relax them and then reinstate the user's customisation when exiting.
         self._fullscreen_edit_sidebar_constraints: tuple[int, int] | None = None
+        if isinstance(window, QWidget):
+            window.installEventFilter(self)
 
     # ------------------------------------------------------------------
     # Public API used by :class:`EditController`
@@ -120,32 +127,45 @@ class EditFullscreenManager(QObject):
             relax_navigation()
 
         splitter = self._ui.splitter
-        self._fullscreen_splitter_sizes = self._sanitise_splitter_sizes(
-            splitter.sizes()
-        )
+        self._fullscreen_splitter_sizes = self._sanitise_splitter_sizes(splitter.sizes())
         total = sum(self._fullscreen_splitter_sizes or [])
         if total <= 0:
             total = max(1, splitter.width())
         splitter.setSizes([0, total])
 
-        enter_media_fullscreen(self._window)
-
         self._fullscreen_active = True
+        enter_media_fullscreen(self._window)
 
         viewport = self._active_viewport()
         self._request_viewport_relayout(viewport, reset_view=True)
 
         return True
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._window and is_media_fullscreen_state_event(event):
+            QTimer.singleShot(0, self.reconcile_fullscreen_state)
+        return False
+
+    def reconcile_fullscreen_state(self) -> None:
+        """Restore Edit chrome after a system exit or failed fullscreen entry."""
+        if (
+            self._fullscreen_active
+            and isinstance(self._window, QWidget)
+            and not is_media_fullscreen(self._window)
+        ):
+            self._finish_fullscreen_exit(request_window_change=False)
+
     def exit_fullscreen_preview(self) -> bool:
-        """Restore standard chrome while retaining the shared viewer texture."""
+        """Restore chrome and the original window for an explicit user exit."""
+        return self._finish_fullscreen_exit(request_window_change=True)
 
-        if not self._fullscreen_active:
+    def _finish_fullscreen_exit(self, *, request_window_change: bool) -> bool:
+        if not self._fullscreen_active or not isinstance(self._window, QWidget):
             return False
-        if not isinstance(self._window, QWidget):
-            return False
-
-        exit_media_fullscreen(self._window)
+        # Clear first: restore operations can synchronously raise window events.
+        self._fullscreen_active = False
+        if request_window_change:
+            exit_media_fullscreen(self._window)
 
         for widget, was_visible in self._fullscreen_hidden_widgets:
             widget.setVisible(was_visible)
@@ -172,7 +192,6 @@ class EditFullscreenManager(QObject):
             self._ui.splitter.setSizes(self._fullscreen_splitter_sizes)
         self._fullscreen_splitter_sizes = None
 
-        self._fullscreen_active = False
         self._request_viewport_relayout(
             self._active_viewport(),
             reset_view=True,

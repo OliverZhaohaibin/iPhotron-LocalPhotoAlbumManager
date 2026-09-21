@@ -6,9 +6,19 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QDynamicPropertyChangeEvent, QEvent
 
 from iPhoto.gui.ui.window_manager import FramelessWindowManager
+
+
+def test_logical_fullscreen_failure_schedules_playback_recovery_without_native_state_event():
+    manager = FramelessWindowManager.__new__(FramelessWindowManager)
+    manager._window = MagicMock()
+    manager._reconcile_playback_fullscreen_state = MagicMock()
+    event = QDynamicPropertyChangeEvent(b"_iphoto_windowed_fullscreen_active")
+    with patch("iPhoto.gui.ui.window_manager.QTimer.singleShot") as single_shot:
+        assert manager.eventFilter(manager._window, event) is False
+    single_shot.assert_called_once_with(0, manager._reconcile_playback_fullscreen_state)
 
 
 def test_fullscreen_entry_explicitly_requests_fit_after_window_change() -> None:

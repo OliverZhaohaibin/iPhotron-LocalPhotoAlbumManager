@@ -25,7 +25,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n.font_policy import sync_widget_language_font
-from ..windowed_fullscreen import enter_media_fullscreen, exit_media_fullscreen, is_media_fullscreen
+from ..windowed_fullscreen import (
+    enter_media_fullscreen,
+    exit_media_fullscreen,
+    is_media_fullscreen,
+    is_media_fullscreen_state_event,
+)
 from ..windows_fullscreen_composition import install_fullscreen_composition_guard
 from .icon import load_icon
 from .styles import modern_scrollbar_style
@@ -123,6 +128,7 @@ class FramelessWindowManager(QObject):
         self.position_live_badge()
         self.position_resize_widgets()
         QTimer.singleShot(0, self._init_screen_tracking)
+        self._window.installEventFilter(self)
 
     def bind_detail_feature(self) -> None:
         """Attach immersive-window behaviour after the detail UI is created."""
@@ -150,6 +156,7 @@ class FramelessWindowManager(QObject):
     def cleanup(self) -> None:
         """Remove global filters and hide tooltip widgets during shutdown."""
 
+        self._window.removeEventFilter(self)
         app = QApplication.instance()
         if app is not None:
             if self._tooltip_filter is not None:
@@ -419,6 +426,14 @@ class FramelessWindowManager(QObject):
     # QObject overrides
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
         """Handle title-bar dragging and badge positioning."""
+
+        if (
+            watched is self._window
+            and event.type() == QEvent.Type.DynamicPropertyChange
+            and is_media_fullscreen_state_event(event)
+        ):
+            QTimer.singleShot(0, self._reconcile_playback_fullscreen_state)
+            return False
 
         if watched in self._drag_sources:
             if self._handle_title_bar_drag(event):

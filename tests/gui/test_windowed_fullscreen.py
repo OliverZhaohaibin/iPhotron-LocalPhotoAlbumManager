@@ -142,30 +142,212 @@ def test_normal_fullscreen_entry_logs_selected_policy_without_profiling(qapp, mo
         window.close()
 
 
-def test_resize_rejection_is_bounded_and_dpi_target_change_gets_new_attempts(qapp, monkeypatch):
+def _pump(qapp):
+    for _ in range(10):
+        qapp.processEvents()
+
+
+def _shown_window(qapp, *, maximized=False):
     window = QWidget()
+    window.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+    window.setGeometry(60, 80, 500, 350)
+    window.showMaximized() if maximized else window.show()
+    _pump(qapp)
+    return window
+
+
+@pytest.mark.parametrize("maximized", [False, True])
+def test_rejected_geometry_retries_without_resize_events_then_enters_native_once(
+    qapp, monkeypatch, maximized
+):
+    window = _shown_window(qapp, maximized=maximized)
+    original = window.geometry()
     controller = fullscreen.WindowedFullscreenController(window)
-    window.setProperty(fullscreen._ACTIVE, True)
+    setter = Mock()
+    native = Mock(wraps=window.showFullScreen)
+    monkeypatch.setattr(window, "setGeometry", setter)
+    monkeypatch.setattr(window, "showFullScreen", native)
+    try:
+        controller.enter()
+        _pump(qapp)
+        assert setter.call_count == 3
+        native.assert_called_once()
+        assert window.isFullScreen() and fullscreen.is_media_fullscreen(window)
+        assert controller.phase == fullscreen.FullscreenPhase.NATIVE
+        assert controller._pending_retry is None
+        controller.reflow()
+        assert setter.call_count == 3
+        controller.exit()
+        _pump(qapp)
+        assert not fullscreen.is_media_fullscreen(window)
+        assert window.geometry() == original
+        assert window.isMaximized() == maximized
+    finally:
+        window.close()
+
+
+def test_third_geometry_attempt_can_succeed_without_native_fallback(qapp, monkeypatch):
+    window = _shown_window(qapp)
+    controller = fullscreen.WindowedFullscreenController(window)
+    real_set = window.setGeometry
+    calls = []
+
+    def set_geometry(rect):
+        calls.append(rect)
+        if len(calls) == 3:
+            real_set(rect)
+
+    monkeypatch.setattr(window, "setGeometry", set_geometry)
+    native = Mock()
+    monkeypatch.setattr(window, "showFullScreen", native)
+    try:
+        controller.enter()
+        _pump(qapp)
+        assert len(calls) == 3
+        assert controller.phase == fullscreen.FullscreenPhase.WINDOWED
+        assert controller.verification_count > 0
+        assert controller._pending_retry is None
+        native.assert_not_called()
+        controller.exit()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("maximized", [False, True])
+def test_failed_native_fallback_restores_original_window_and_clears_fullscreen(
+    qapp, monkeypatch, maximized
+):
+    window = _shown_window(qapp, maximized=maximized)
+    original = window.geometry()
+    controller = fullscreen.WindowedFullscreenController(window)
+    monkeypatch.setattr(window, "setGeometry", Mock())
+    native = Mock()
+    monkeypatch.setattr(window, "showFullScreen", native)
+    try:
+        controller.enter()
+        _pump(qapp)
+        native.assert_called_once()
+        assert controller.phase == fullscreen.FullscreenPhase.INACTIVE
+        assert window.property(fullscreen._ACTIVE) is False
+        assert not fullscreen.is_media_fullscreen(window)
+        assert window.isMaximized() == maximized
+        assert window.geometry() == original
+        assert controller._pending_retry is None
+    finally:
+        window.close()
+
+
+def test_old_retry_cannot_change_a_new_entry(qapp, monkeypatch):
+    window = _shown_window(qapp)
+    controller = fullscreen.WindowedFullscreenController(window)
+    real_set = window.setGeometry
+    setter = Mock()
+    monkeypatch.setattr(window, "setGeometry", setter)
+    try:
+        controller.enter()
+        old_retry = controller._pending_retry
+        assert old_retry is not None
+        controller.exit()
+        monkeypatch.setattr(window, "setGeometry", real_set)
+        controller.enter()
+        count = controller._attempts
+        old_retry()
+        assert controller._attempts == count
+        assert controller.phase == fullscreen.FullscreenPhase.WINDOWED
+        controller.exit()
+    finally:
+        window.close()
+
+
+def test_screen_change_invalidates_queued_geometry_retry(qapp, monkeypatch):
+    window = _shown_window(qapp)
+    controller = fullscreen.WindowedFullscreenController(window)
     geometry = Mock(return_value=QRect(-1536, 0, 1536, 960))
     monkeypatch.setattr(window, "screen", lambda: SimpleNamespace(geometry=geometry))
     setter = Mock()
     monkeypatch.setattr(window, "setGeometry", setter)
-    for _ in range(20):
-        controller.eventFilter(window, QEvent(QEvent.Type.Resize))
-    assert setter.call_count == 3
-    assert controller.verification_count == 0
-    geometry.return_value = QRect(-1280, 0, 1280, 800)
-    controller.eventFilter(window, QEvent(QEvent.Type.DevicePixelRatioChange))
-    assert setter.call_count == 4
-    setter.assert_called_with(QRect(-1280, 0, 1280, 801))
+    try:
+        controller.enter()
+        old_retry = controller._pending_retry
+        geometry.return_value = QRect(-1280, 0, 1280, 800)
+        controller.eventFilter(window, QEvent(QEvent.Type.DevicePixelRatioChange))
+        assert controller._attempts == 1
+        before = setter.call_count
+        old_retry()
+        assert setter.call_count == before
+        setter.assert_called_with(QRect(-1280, 0, 1280, 801))
+        controller.exit()
+    finally:
+        window.close()
 
 
 def test_minimized_window_is_not_repositioned(qapp, monkeypatch):
     window = QWidget()
     controller = fullscreen.WindowedFullscreenController(window)
     window.setProperty(fullscreen._ACTIVE, True)
+    controller.phase = fullscreen.FullscreenPhase.ENTERING_WINDOWED
     monkeypatch.setattr(window, "isMinimized", lambda: True)
     setter = Mock()
     monkeypatch.setattr(window, "setGeometry", setter)
     controller.reflow()
     setter.assert_not_called()
+
+
+def test_system_maximize_supersedes_pending_native_fallback(qapp, monkeypatch):
+    window = _shown_window(qapp)
+    controller = fullscreen.WindowedFullscreenController(window)
+    monkeypatch.setattr(window, "setGeometry", Mock())
+    monkeypatch.setattr(window, "showFullScreen", Mock())
+    try:
+        controller.enter()
+        controller._dispatch_retry()
+        controller._dispatch_retry()
+        assert controller.phase == fullscreen.FullscreenPhase.ENTERING_NATIVE
+        stale_verification = controller._pending_retry
+        window.showMaximized()
+        stale_verification()
+        _pump(qapp)
+        assert window.isMaximized()
+        assert controller.phase == fullscreen.FullscreenPhase.INACTIVE
+        assert not fullscreen.is_media_fullscreen(window)
+    finally:
+        window.close()
+
+
+def test_accepted_close_cancels_pending_retry_without_reopening_window(qapp, monkeypatch):
+    window = _shown_window(qapp)
+    controller = fullscreen.WindowedFullscreenController(window)
+    monkeypatch.setattr(window, "setGeometry", Mock())
+    native = Mock()
+    monkeypatch.setattr(window, "showFullScreen", native)
+    controller.enter()
+    stale_retry = controller._pending_retry
+    window.close()
+    stale_retry()
+    _pump(qapp)
+    assert controller.phase == fullscreen.FullscreenPhase.INACTIVE
+    assert not window.isVisible()
+    native.assert_not_called()
+
+
+def test_ignored_close_keeps_fullscreen_session_active(qapp):
+    class RejectClose(QWidget):
+        def closeEvent(self, event):
+            event.ignore()
+
+    window = RejectClose()
+    window.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+    window.setGeometry(60, 80, 500, 350)
+    window.show()
+    _pump(qapp)
+    controller = fullscreen.WindowedFullscreenController(window)
+    try:
+        controller.enter()
+        assert window.close() is False
+        _pump(qapp)
+        assert window.isVisible()
+        assert controller.phase == fullscreen.FullscreenPhase.WINDOWED
+        assert fullscreen.is_media_fullscreen(window)
+    finally:
+        controller.exit()
+        window.hide()

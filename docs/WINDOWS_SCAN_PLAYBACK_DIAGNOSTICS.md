@@ -105,14 +105,33 @@ Windows desktop; keep its window unobscured and disable display sleep:
 
 The probe uses the production viewer in a translucent frameless Qt window and
 generated green images. It cycles plain/cropped/straightened images through
-fullscreen, windowed, idle and wheel zoom states. It reads compositor pixels
-with `QScreen.grabWindow`, never `grabFramebuffer` (which forces a fresh draw),
-and compares visible bounds with the CPU transform. The second run deliberately
+fullscreen, windowed, idle and wheel zoom states. It captures the viewer's visible
+desktop region on **each intersecting screen** using
+`screen.grabWindow(0, screenLocalX, screenLocalY, width, height)`, never a
+translucent HWND or `grabFramebuffer` (which forces a fresh draw). Coordinates
+are screen-local logical pixels; returned pixmap DPR and pixel dimensions drive
+each region's comparisons. Different-DPI regions are not stitched using a
+single window-wide scale. Overscan beyond all screens is excluded. The second run deliberately
 pollutes GL state before the renderer establishes its own state. Results go to
 `result.json` and `detail_events.jsonl`; only failing synthetic-window captures
 are saved. Keep other windows away from the probe to avoid false failures or
 unrelated content in failure captures. Exit code 0 means all sampled checks
 passed; this sampling does not rule out every transient between captures.
+
+`result.json` schema 2 identifies `capture_method=desktop_region` and records
+per-screen logical capture rectangles, returned DPR/size, and expected/observed
+pixel bounds. `capture_failed`, `no_visible_intersection`, and `pixel_mismatch`
+are distinct failures; missing required captures never count as a pass. Failure
+images contain only the sampled viewer/desktop intersections, not entire screens.
+Opaque and translucent modes use this identical desktop capture contract.
+
+**Historical-result correction:** revisions through `57de114b` used
+`grabWindow(host.winId())`. Qt explicitly does not support this for layered
+Windows windows (`WA_TranslucentBackground`). Those PNGs and their failure/pass
+counts are diagnostic artifacts, not reliable compositor acceptance evidence.
+Re-run the corrected probe for acceptance. Independent camera recordings and
+the user's visible-flicker reports remain valid.
+See [Qt's capture contract](https://doc.qt.io/qt-6/qscreen.html#grabWindow).
 
 This probe isolates the rendering/compositor contract. It does **not** replace
 the real application's fullscreen window-manager, Edit, video, multi-monitor or
@@ -186,6 +205,23 @@ This log is emitted without enabling the collector or detail profiler. When
 profiling is enabled, `fullscreen_strategy_selected` records the same choice;
 `fullscreen_composition_overscan(applied=true)` verifies geometry, and
 `fullscreen=true, qt_fullscreen=false` distinguishes logical and native state.
+
+If the same overscan target cannot be applied, the controller makes at most
+three attempts, including queued retries when Windows sends no Resize event.
+It then attempts native fullscreen once and stops resizing. Ordinary warning
+logs and `fullscreen_native_fallback` identify this outcome;
+`fullscreen_native_fallback_verified` confirms Qt entered native fullscreen.
+The original native-flicker risk may recur on this fallback, as explicitly chosen
+for recovery. If native entry also fails, the controller restores the original
+window and clears logical fullscreen, emitting `fullscreen_session_ended` with
+`reason=native_fallback_failed`. Playback and Edit both restore their chrome.
+Explicit exits restore the original normal/maximized state; system exits preserve
+the OS-selected state instead. Retry callbacks from an older entry/target cannot
+change a new fullscreen session. Minimize pauses retries until restore.
+
+For overscan probe runs, successful native fallback is still reported in traces;
+it is not evidence that the requested overscan path passed. Require overscan
+verification and review fallback events when assessing that configuration.
 
 The current collector's `-Scenario Fullscreen` follows the default policy.
 `-FullscreenOverscan` remains a supported explicit alias; use `-NativeFullscreen`

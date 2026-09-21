@@ -98,10 +98,11 @@ so do not conclude vsync was definitively disabled.
 The first failed PNG from each run is 3840×2400 with green bounds
 `[466,3375) × [110,2291)`. The logged current zoom is 1.0 (expected full-fit
 green bounds `[320,3520) × [0,2400)`). Those observed bounds match the preceding
-zoom 1/1.1 within approximately one pixel. Thus the screenshot sees stale
-presentation despite a newer draw/submission, rather than only a crop-math
-error. Failed PNGs contain green content; they are not direct captures of the
-black display intervals.
+zoom 1/1.1 within approximately one pixel. However, PR review identified that the
+probe used unsupported layered-HWND capture. The earlier inference of proven
+stale compositor presentation from these bounds is withdrawn. These PNGs and
+their 9/126 counts are only diagnostic artifacts and cannot establish compositor
+correctness/failure. They are not direct captures of the black display intervals.
 
 The external-camera recording `IMG_3259.MOV` is 11.67 seconds at 30 fps.
 Inspection confirms extended dark-screen intervals interrupted by brief green
@@ -124,8 +125,9 @@ reported Windows desktop before promoting it to a production default.
 The returned `probe-border` run verifies the native bit 18 times and records nine
 `fullscreen_composition_border(applied=true)` events. It still fails 9/126
 samples, all during fullscreen wheel zoom, with the same stale-size bounds as
-the other runs. Therefore the style-only border candidate is ineffective on
-this configuration and must not be promoted as the fix.
+the other runs, subject to the unsupported-capture limitation above. The user's
+independent report of continued visible flicker, rather than that pixel count,
+is the basis for retaining border as an ineffective candidate on this machine.
 
 Internet research found a closely related original Qt report: a frameless
 OpenGL window flickered at exactly fullscreen dimensions but not when its
@@ -182,3 +184,18 @@ remain different, inspect the remaining IDE process configuration then.
 
 This update does not diagnose or fix the separately documented filmstrip
 access-violation incident.
+
+## PR #931 review follow-up
+
+Desktop-region capture replaces layered-HWND capture, with per-screen coordinate
+conversion/DPR and explicit capture-error outcomes. The corrected probe needs a
+new interactive Windows run; historical automated counts are not a substitute.
+External camera evidence and the user's configuration-specific feedback are not
+invalidated by the capture bug.
+
+Overscan rejection now terminates after three bounded attempts and falls back
+once to native fullscreen. If that request also fails, the saved window state
+and chrome are restored. The user explicitly selected native fallback despite
+its known flicker risk. Edit now reconciles system-driven exits/maximization and
+does not normalize a window the OS just maximized. These changes require native
+Windows verification in addition to their local state-machine tests.

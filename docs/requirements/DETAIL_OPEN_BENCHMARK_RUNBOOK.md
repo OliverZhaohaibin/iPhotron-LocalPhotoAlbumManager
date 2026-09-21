@@ -127,6 +127,11 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
   `fullscreen_strategy_selected` 记录所选策略，不计作媒体事务。`-NativeFullscreen` 为旧路径对照。
   `--fullscreen-overscan`/`-FullscreenOverscan` 显式选择同一窗口的窗口式全屏；`fullscreen_composition_overscan(applied=true)` 及
   `fullscreen=true, qt_fullscreen=false` 证明配置生效，仍需实机像素/肉眼验收。
+  同一目标三次失败后只允许一次 `fullscreen_native_fallback`，成功时记录
+  `fullscreen_native_fallback_verified`；再次失败记录
+  `fullscreen_session_ended(reason=native_fallback_failed)` 并恢复窗口和控件。
+  这些 generation 0 事件不计入媒体事务。像素探针必须使用 schema 2 的
+  `desktop_region` 采样；旧的透明 HWND 截图及其通过/失败计数不能作为验收证据。
 - Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
   stale/failed upgrade 不得替换 current texture。
 

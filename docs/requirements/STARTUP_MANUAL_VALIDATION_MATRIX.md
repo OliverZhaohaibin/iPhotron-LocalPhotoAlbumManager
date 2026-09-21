@@ -65,6 +65,10 @@ Silicon 本轮由工程任务执行；Intel 保持 `pending_manual_validation`�
   句柄和 QRhi 层级，Qt 原生 fullscreen 为 false，但应用 fullscreen 为 true；验证
   任务栏遮挡、Alt-Tab、双击/Esc、最大化状态恢复、跨屏 DPI 与退出后的窗口几何。
   需同时验证 PyCharm Run、普通终端和打包启动；不能只用带诊断参数的启动代替普通入口验收。
+- Overscan 几何拒绝三次后仅回退一次原生全屏；原生进入也失败时恢复原窗口/控件。
+  验证无 Resize 事件、旧回调、最小化恢复，以及 Edit → 系统最大化 → 再次全屏。
+  系统退出时不得调用 showNormal 覆盖系统刚设置的最大化状态。像素验收采用桌面区域
+  采样，覆盖负坐标副屏、100%/150%/250% DPI、部分跨屏及透明顶层窗口。
 
 收集 Windows 版本、CPU/架构、Qt backend、构建参数、Defender 状态、盘类型和事件阈值。当前状态：`pending_manual_validation`。
 

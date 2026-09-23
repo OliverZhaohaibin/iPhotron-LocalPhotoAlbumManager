@@ -395,6 +395,22 @@ class RhiImageRenderer:
         self._last_still_upload_result = None
         return result
 
+    def prepare_still_upload(self, cb) -> None:
+        """Resolve the active still before the viewer calculates draw geometry."""
+        if self._rhi is None or self._pending_still is None:
+            return
+        updates = self._rhi.nextResourceUpdateBatch()
+        self._flush_pending_still_texture(updates)
+        cb.resourceUpdate(updates)
+        result = self._last_still_upload_result
+        if result is not None and result.get("activate") and not result.get("success"):
+            # upload_still_texture advertises candidate dimensions while queued.
+            # If allocation fails, restore the geometry of the retained texture
+            # before any uniforms or crop/zoom notifications consume it.
+            if not self.activate_still_texture(self._active_still_key):
+                self._texture_width = self._texture_height = 0
+                self._has_rgba_texture = False
+
     def activate_still_texture(self, key: object) -> bool:
         entry = self._still_textures.pop(key, None)
         if entry is None:
@@ -636,33 +652,35 @@ class RhiImageRenderer:
         cb.resourceUpdate(ru)
 
         cb.beginPass(render_target, clear_color, QRhiDepthStencilClearValue())
-        cb.setGraphicsPipeline(self._pipeline)
-        cb.setShaderResources(self._srb)
-        cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
-        cb.setVertexInput(0, [(self._vbuf, 0)])
-        cb.draw(6)
+        try:
+            cb.setGraphicsPipeline(self._pipeline)
+            cb.setShaderResources(self._srb)
+            cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
+            cb.setVertexInput(0, [(self._vbuf, 0)])
+            cb.draw(6)
 
-        if overlay_vertex_count:
-            overlay_pipeline = self._overlay_pipeline
-            overlay_vbuf = self._overlay_vbuf
-            overlay_srb = self._overlay_srb
-            if overlay_pipeline is not None and overlay_vbuf is not None and overlay_srb is not None:
-                cb.setGraphicsPipeline(overlay_pipeline)
-                cb.setShaderResources(overlay_srb)
-                cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
-                cb.setVertexInput(0, [(overlay_vbuf, 0)])
-                cb.draw(overlay_vertex_count)
-            elif not self._overlay_resource_gap_logged:
-                _LOGGER.warning(
-                    "QRhi crop overlay draw skipped; pipeline=%s vertex_buffer=%s "
-                    "shader_bindings=%s",
-                    overlay_pipeline is not None,
-                    overlay_vbuf is not None,
-                    overlay_srb is not None,
-                )
-                self._overlay_resource_gap_logged = True
+            if overlay_vertex_count:
+                overlay_pipeline = self._overlay_pipeline
+                overlay_vbuf = self._overlay_vbuf
+                overlay_srb = self._overlay_srb
+                if overlay_pipeline is not None and overlay_vbuf is not None and overlay_srb is not None:
+                    cb.setGraphicsPipeline(overlay_pipeline)
+                    cb.setShaderResources(overlay_srb)
+                    cb.setViewport(QRhiViewport(0, 0, output_size.width(), output_size.height()))
+                    cb.setVertexInput(0, [(overlay_vbuf, 0)])
+                    cb.draw(overlay_vertex_count)
+                elif not self._overlay_resource_gap_logged:
+                    _LOGGER.warning(
+                        "QRhi crop overlay draw skipped; pipeline=%s vertex_buffer=%s "
+                        "shader_bindings=%s",
+                        overlay_pipeline is not None,
+                        overlay_vbuf is not None,
+                        overlay_srb is not None,
+                    )
+                    self._overlay_resource_gap_logged = True
 
-        cb.endPass()
+        finally:
+            cb.endPass()
 
     # ------------------------------------------------------------------
     # Internals

@@ -114,6 +114,24 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
   `MediaRestoreRequest` 重放静态 Detail；同 source texture key 保持不变。
 - Edit fullscreen enter/exit：只允许 viewport/LOD 事件；不得出现同步 source load、CPU preview session 或
   以 `Path` 为 key 的新 GPU upload。
+- Windows 裁剪＋拉直全屏检查：使用采集器 `-Scenario Fullscreen`（固定 OpenGL），保留
+  `fullscreen_environment/fullscreen_trace`。同图不同 LOD 的 cover 应仅受比例/拉直角度影响；
+  进入和退出全屏均适配裁剪结果，LOD 替换不得改变手动视角。诊断事件使用 generation 0，
+  不计作新的媒体事务或 SLO 完成；用既有 GPU/LOD 事件关联内容代次。
+  该模式的限量 GL 查询有额外开销，不与未开启诊断的性能基线混用。实机操作和独立合成图
+  像素探针见 `docs/WINDOWS_SCAN_PLAYBACK_DIAGNOSTICS.md`。
+  后续 `--fullscreen-border`/`-FullscreenBorder` 是默认关闭的 Windows OpenGL 合成候选：
+  `fullscreen_composition_border(applied=true)` 只证明既有 HWND 的样式位已生效，
+  不代表真实屏幕已正确呈现。`fullscreen_gl_context` 记录上下文配置，不计作媒体事务。
+  已验证 border 对目标机器无效。Windows OpenGL 普通启动默认使用窗口式全屏；
+  `fullscreen_strategy_selected` 记录所选策略，不计作媒体事务。`-NativeFullscreen` 为旧路径对照。
+  `--fullscreen-overscan`/`-FullscreenOverscan` 显式选择同一窗口的窗口式全屏；`fullscreen_composition_overscan(applied=true)` 及
+  `fullscreen=true, qt_fullscreen=false` 证明配置生效，仍需实机像素/肉眼验收。
+  同一目标三次失败后只允许一次 `fullscreen_native_fallback`，成功时记录
+  `fullscreen_native_fallback_verified`；再次失败记录
+  `fullscreen_session_ended(reason=native_fallback_failed)` 并恢复窗口和控件。
+  这些 generation 0 事件不计入媒体事务。像素探针必须使用 schema 2 的
+  `desktop_region` 采样；旧的透明 HWND 截图及其通过/失败计数不能作为验收证据。
 - Edit crop/rotate/perspective/zoom：若需要更高 LOD，应记录 `lod_upgrade_requested/presented`，旧层保持显示，
   stale/failed upgrade 不得替换 current texture。
 

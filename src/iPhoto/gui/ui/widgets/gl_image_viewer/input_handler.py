@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
+
+from ....windowed_fullscreen import is_media_fullscreen
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 
 # Qt.LeftButton constant
@@ -149,7 +151,7 @@ class InputEventHandler:
             True if the event was handled and accepted
         """
         if event.button() == _LEFT_BUTTON:
-            if window is not None and window.isFullScreen():
+            if is_media_fullscreen(window):
                 self._on_fullscreen_exit()
             else:
                 self._on_fullscreen_toggle()

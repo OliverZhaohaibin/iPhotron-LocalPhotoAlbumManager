@@ -1,5 +1,11 @@
 # Windows scan-time still playback diagnostics
 
+For a guided PR #931 validation run that combines probes, state contracts, the
+application collector and explicit manual observations into one return ZIP, use
+`python .\tools\validate_windows_fullscreen.py` from the application environment.
+See [Windows 全屏一键验证与回传](WINDOWS_FULLSCREEN_VALIDATION.md). The individual
+collector and probe commands below remain available for focused diagnostics.
+
 Use this collector when scanning eventually makes all still photos blank while videos
 continue to play, or when Edit/fullscreen stops responding for photos.
 
@@ -49,6 +55,240 @@ powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_d
 4. Test fullscreen once, then close iPhoto normally. If it cannot close, press `Q` in the
    collector window to stop it.
 5. Send back the single ZIP path printed in green. By default it is created on the Desktop.
+
+## Fullscreen crop/straighten offset and flicker (OpenGL only)
+
+This scenario keeps Windows on QRhi/OpenGL. It does not run the experimental
+D3D11 comparison described in the separate section below.
+
+From the repository root, using the updated source checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen
+```
+
+For an updated packaged application, add `-AppPath "C:\path\to\entrypoint.exe"`.
+The scenario sets OpenGL, the Windows Qt platform and `IPHOTO_FULLSCREEN_DIAG=1`
+for the launched process, then restores the inherited environment. No original
+media, sidecars or screenshots are copied into this bundle.
+
+Use three stills: no adjustments, asymmetric crop only, and asymmetric crop plus
+straightening. For each, leave the window idle, enter fullscreen, leave it idle
+again, zoom using several wheel steps, then double-click to exit. Repeat at least
+20 fullscreen round trips; also exercise Esc/native exit, Edit, ordinary video
+and Live Photo. Repeat on available 100%, 125%, 150% and 200% display scales,
+including moving between monitors with different scales. Record each observed
+offset/flicker with `R`, then close the application normally.
+
+`detail_events.jsonl` adds:
+
+- `fullscreen_environment`: Qt/PySide version, backend, screen sizes, DPR and
+  refresh rates; GPU/driver and application revision remain in `system.json`.
+- `fullscreen_trace`: event, viewer identity, sequence/submission counts, window
+  fullscreen state, logical widget and physical render-target dimensions,
+  texture dimensions, crop, cover, zoom, pan, pending reset/upload and content
+  revision. The existing GPU/LOD events provide decode and asset generations.
+- `gl_entry`/`draw` samples: GL viewport, framebuffer/program binding, color
+  mask, blend/depth/stencil/cull/scissor enables and bounded error codes. Sampling
+  covers 120 submitted frames after interaction and then at most one sample per
+  event per second. These GL queries are disabled in normal operation.
+
+Compare the same media and actions before/after the fix. A historical executable
+without the new instrumentation still provides the collector's system/runtime
+logs, but cannot provide the new geometry events. Preserve that limitation when
+interpreting baseline results. Stable geometry plus visible flashing requires
+further compositor investigation; `frameSubmitted` is not proof of DWM scan-out.
+
+### Synthetic visible-window pixel probe
+
+Run this separately with the source environment on an unlocked, interactive
+Windows desktop; keep its window unobscured and disable display sleep:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 20 --output .\fullscreen-probe
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 20 --poison-gl-state --output .\fullscreen-probe-gl-state
+```
+
+The probe uses the production viewer in a translucent frameless Qt window and
+generated green images. It cycles plain/cropped/straightened images through
+fullscreen, windowed, idle and wheel zoom states. It captures the viewer's visible
+desktop region on **each intersecting screen** using
+`screen.grabWindow(0, screenLocalX, screenLocalY, width, height)`, never a
+translucent HWND or `grabFramebuffer` (which forces a fresh draw). Coordinates
+are screen-local logical pixels; returned pixmap DPR and pixel dimensions drive
+each region's comparisons. Different-DPI regions are not stitched using a
+single window-wide scale. Overscan beyond all screens is excluded. The second run deliberately
+pollutes GL state before the renderer establishes its own state. Results go to
+`result.json` and `detail_events.jsonl`; only failing synthetic-window captures
+are saved. Keep other windows away from the probe to avoid false failures or
+unrelated content in failure captures. Exit code 0 means all sampled checks
+passed; this sampling does not rule out every transient between captures.
+
+`result.json` schema 2 identifies `capture_method=desktop_region` and records
+per-screen logical capture rectangles, returned DPR/size, and expected/observed
+pixel bounds. `capture_failed`, `no_visible_intersection`, and `pixel_mismatch`
+are distinct failures; missing required captures never count as a pass. Failure
+images contain only the sampled viewer/desktop intersections, not entire screens.
+Opaque and translucent modes use this identical desktop capture contract.
+
+**Historical-result correction:** revisions through `57de114b` used
+`grabWindow(host.winId())`. Qt explicitly does not support this for layered
+Windows windows (`WA_TranslucentBackground`). Those PNGs and their failure/pass
+counts are diagnostic artifacts, not reliable compositor acceptance evidence.
+Re-run the corrected probe for acceptance. Independent camera recordings and
+the user's visible-flicker reports remain valid.
+See [Qt's capture contract](https://doc.qt.io/qt-6/qscreen.html#grabWindow).
+
+This probe isolates the rendering/compositor contract. It does **not** replace
+the real application's fullscreen window-manager, Edit, video, multi-monitor or
+packaged acceptance checks above. Local/offscreen tests cannot validate those
+Windows paths. Acceptance requires no accumulated crop offset, LOD-induced
+scale jumps, alternating blank/content frames or desktop leakage, and no
+unbounded idle redraw loop after the transitions settle.
+
+For a fullscreen flicker that persists with stable texture/geometry and no GL
+errors, run these three **separate** probe processes. Keep the same screen and
+DPI (including 250% on the reported device), and keep each window unobscured:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 3 --output .\probe-baseline
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 3 --opaque-window --output .\probe-opaque
+.\.venv\Scripts\python.exe .\tools\windows_fullscreen_probe.py --cycles 3 --swap-interval 0 --output .\probe-no-vsync
+```
+
+The baseline uses the application's default GL version/profile request. The
+opaque comparison only disables the host's translucent attribute; the no-vsync
+comparison only changes requested swap interval (which the driver may ignore).
+Neither changes production defaults. Share `result.json` and `detail_events.jsonl`
+from each directory, plus any failed synthetic captures. Report visible flicker
+even if sampled pixel checks pass. The three-cycle runs triage the cause; repeat
+the existing 20-cycle acceptance matrix after a candidate fix.
+
+Source-process collection now resolves nested Windows Python launchers using the
+runtime diagnostic PID or a descendant with a main HWND. If the GUI cannot be
+identified, collection fails instead of silently reporting launcher-only metrics.
+
+### Current Windows OpenGL fullscreen policy and PyCharm
+
+Windows OpenGL now defaults to windowed fullscreen in ordinary IDE, terminal and
+packaged launches. The existing window covers the screen plus one logical pixel
+of height; backend, render session and window handle remain unchanged.
+
+Before this default-policy change (including revision `14dcd388`), the strategy
+was opt-in: the collector's `-FullscreenOverscan` set
+`IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1` for its child, but PyCharm Run did not
+necessarily have that variable. Sharing an interpreter and source revision does
+not make those two process configurations identical. The collector restores its
+own environment after completion; it does not persist configuration into an
+already-running IDE.
+
+For those older revisions, add this entry under PyCharm **Run → Edit
+Configurations → the application's Python configuration → Environment variables**:
+
+```text
+IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1
+```
+
+Restart the app from that configuration. Keep the existing variables. Setting it
+in PyCharm's Terminal alone does not configure the separate Run process. See
+[JetBrains' Python run configuration documentation](https://www.jetbrains.com/help/pycharm/run-debug-configuration-python.html).
+`IPHOTO_RHI_BACKEND=opengl` may also be set to match the collector if a graphics
+backend override was already present; it is not needed for the Windows default.
+No diagnostic logging flags are necessary to activate the fix.
+
+Current policy:
+
+| Configuration | Windows OpenGL behavior |
+|---|---|
+| Variable absent, empty or `auto` | Windowed fullscreen (default) |
+| `IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=1` | Windowed fullscreen |
+| `IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN=0` | Native fullscreen comparison/rollback |
+| Other OS or non-OpenGL surface | Existing native behavior |
+
+Normal application logs now contain `Media fullscreen strategy=windowed_overscan`
+(or `native`) at entry, including the platform, actual surface type and override.
+This log is emitted without enabling the collector or detail profiler. When
+profiling is enabled, `fullscreen_strategy_selected` records the same choice;
+`fullscreen_composition_overscan(applied=true)` verifies geometry, and
+`fullscreen=true, qt_fullscreen=false` distinguishes logical and native state.
+
+If the same overscan target cannot be applied, the controller makes at most
+three attempts, including queued retries when Windows sends no Resize event.
+It then attempts native fullscreen once and stops resizing. Ordinary warning
+logs and `fullscreen_native_fallback` identify this outcome;
+`fullscreen_native_fallback_verified` confirms Qt entered native fullscreen.
+The original native-flicker risk may recur on this fallback, as explicitly chosen
+for recovery. If native entry also fails, the controller restores the original
+window and clears logical fullscreen, emitting `fullscreen_session_ended` with
+`reason=native_fallback_failed`. Playback and Edit both restore their chrome.
+Explicit exits restore the original normal/maximized state; system exits preserve
+the OS-selected state instead. Retry callbacks from an older entry/target cannot
+change a new fullscreen session. Minimize pauses retries until restore.
+
+For overscan probe runs, successful native fallback is still reported in traces;
+it is not evidence that the requested overscan path passed. Require overscan
+verification and review fallback events when assessing that configuration.
+
+The current collector's `-Scenario Fullscreen` follows the default policy.
+`-FullscreenOverscan` remains a supported explicit alias; use `-NativeFullscreen`
+for the old native path. `-FullscreenBorder` remains an ineffective historical
+control and forces native mode. These switches are mutually exclusive, and all
+require `-Scenario Fullscreen`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen -NativeFullscreen
+```
+
+The synthetic probe deliberately retains native fullscreen as its baseline;
+pass `--fullscreen-overscan` to exercise the current application strategy:
+
+```powershell
+python .\tools\windows_fullscreen_probe.py --cycles 3 --fullscreen-overscan --output .\probe-overscan
+```
+
+For direct PyCharm verification, first check the strategy log. If it says
+`native`, inspect explicit overrides and the actual surface type. If it says
+`windowed_overscan` but still flickers, record the PyCharm console and temporarily
+add `IPHOTO_DETAIL_PROFILE=1`, `IPHOTO_FULLSCREEN_DIAG=1`, and a writable
+`IPHOTO_DETAIL_PROFILE_PATH` to **that same Run configuration**. A separate
+collector launch does not capture the IDE process. This follow-up is only needed
+if the strategy matches but the behavior still differs.
+
+The user has confirmed no visible flicker/offset in the collector-enabled
+overscan run on the reported machine. This is not blanket validation across
+Windows drivers, taskbar/Alt-Tab, multiple screens, or DPI configurations. The
+independent filmstrip access violation remains tracked in its own bug report.
+
+Earlier border control (verified ineffective on the reported machine), retained
+for reproducing the comparison:
+
+```powershell
+python .\tools\windows_fullscreen_probe.py --cycles 3 --fullscreen-border --output .\probe-border
+```
+
+This opt-in candidate uses Qt's documented native `WS_BORDER` workaround for
+Windows fullscreen OpenGL composition. A one-pixel native border may be visible.
+It preserves the existing HWND, QRhi session, translucency and swap interval;
+Qt restores its saved normal style on exit. The probe must record a nonzero
+`fullscreen_border_verifications` in `result.json`; an unapplied workaround
+cannot count as a passing comparison. Share the whole `probe-border` directory
+and the visual result. The previous three groups need not be repeated.
+
+The corresponding historical application control is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_diagnostics.ps1 -Scenario Fullscreen -FullscreenBorder
+```
+
+Check plain/cropped/straightened stills, wheel zoom, repeated fullscreen entry,
+double-click/Esc exit, Edit preview, minimize/restore and multiple DPI scales.
+`fullscreen_composition_border` must show `applied=true`; failures report false
+and leave normal Qt window handling active. The candidate remains disabled in
+ordinary launches. These tools do not automatically change production defaults.
+New traces record actual top-level translucency and `fullscreen_gl_context`
+(GL version/profile, renderer and Qt context-reported swap interval). The latter
+does not override or prove a driver's effective vsync policy.
 
 ## First-media QRhi submission A/B
 

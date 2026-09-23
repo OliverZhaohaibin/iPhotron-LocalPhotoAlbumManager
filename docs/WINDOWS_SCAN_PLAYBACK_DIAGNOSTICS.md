@@ -1,5 +1,11 @@
 # Windows scan-time still playback diagnostics
 
+For a guided PR #931 validation run that combines probes, state contracts, the
+application collector and explicit manual observations into one return ZIP, use
+`python .\tools\validate_windows_fullscreen.py` from the application environment.
+See [Windows 全屏一键验证与回传](WINDOWS_FULLSCREEN_VALIDATION.md). The individual
+collector and probe commands below remain available for focused diagnostics.
+
 Use this collector when scanning eventually makes all still photos blank while videos
 continue to play, or when Edit/fullscreen stops responding for photos.
 

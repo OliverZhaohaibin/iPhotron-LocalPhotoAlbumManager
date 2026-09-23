@@ -17,6 +17,7 @@ from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer
 from PySide6.QtGui import QSurface
 
 from .detail_profile import emit_detail_event
+from .windows_taskbar import mark_fullscreen_window
 
 _ACTIVE = "_iphoto_windowed_fullscreen_active"
 _OVERRIDE = "IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"
@@ -56,6 +57,7 @@ class WindowedFullscreenController(QObject):
         self._attempts = 0
         self._epoch = 0
         self._pending_retry = None
+        self._restoring_maximized = False
         self._retry_timer = QTimer(self)
         self._retry_timer.setSingleShot(True)
         self._retry_timer.timeout.connect(self._dispatch_retry)
@@ -110,6 +112,7 @@ class WindowedFullscreenController(QObject):
         self._epoch += 1
         self._cancel_retry()
         self._attempt_key, self._attempts = None, 0
+        self._restoring_maximized = bool(self._state & Qt.WindowState.WindowMaximized)
         self.phase = FullscreenPhase.ENTERING_WINDOWED
         # Pending entry counts as immersive until a bounded terminal outcome.
         self.window.setProperty(_ACTIVE, True)
@@ -118,13 +121,36 @@ class WindowedFullscreenController(QObject):
             self.window.showNormal()
         finally:
             self._applying = False
-        self.reflow()
+        self._mark_shell(True)
+        if self._restoring_maximized:
+            # showNormal can produce delayed native state/size notifications.
+            # Do not race the first overscan with the maximized restoration.
+            self._queue_retry("windowed")
+        else:
+            self.reflow()
         self.window.raise_()
+
+    def _mark_shell(self, active: bool) -> None:
+        # Declare the immersive intent to Explorer before changing geometry.
+        # Overscan deliberately cannot rely on exact-monitor-size detection.
+        mark_fullscreen_window(int(self.window.internalWinId()), active)
+
+    def _is_system_maximize(self) -> bool:
+        return (
+            self.window.isMaximized()
+            and not self.window.isFullScreen()
+            and not (
+                self.phase in {FullscreenPhase.ENTERING_WINDOWED, FullscreenPhase.ENTERING_NATIVE}
+                and self._restoring_maximized
+            )
+        )
 
     def _deactivate(self, reason: str) -> None:
         self._epoch += 1
         self._cancel_retry()
+        self._restoring_maximized = False
         self.phase = FullscreenPhase.INACTIVE
+        self._mark_shell(False)
         self.window.setProperty(_ACTIVE, False)
         emit_detail_event("fullscreen_session_ended", generation=0, reason=reason)
 
@@ -153,7 +179,7 @@ class WindowedFullscreenController(QObject):
             or not window.isVisible()
         ):
             return
-        if window.isMaximized() and not window.isFullScreen():
+        if self._is_system_maximize():
             self._deactivate("system_maximized")
             return
         screen = window.screen()
@@ -163,8 +189,14 @@ class WindowedFullscreenController(QObject):
         if key != self._attempt_key:
             self._cancel_retry()
             self._attempt_key, self._attempts = key, 0
-        if not target.isEmpty() and window.geometry() == target and not window.isFullScreen():
+        if (
+            not target.isEmpty()
+            and window.geometry() == target
+            and not window.isFullScreen()
+            and not window.isMaximized()
+        ):
             self.phase = FullscreenPhase.WINDOWED
+            self._restoring_maximized = False
             self.verification_count += 1
             self._cancel_retry()
             return
@@ -175,6 +207,9 @@ class WindowedFullscreenController(QObject):
         self._applying = True
         error = None
         try:
+            if self._restoring_maximized and window.isMaximized():
+                window.showNormal()
+                self._mark_shell(True)
             if not target.isEmpty():
                 window.setGeometry(target)
         except (RuntimeError, ValueError) as exception:
@@ -186,6 +221,7 @@ class WindowedFullscreenController(QObject):
             and not target.isEmpty()
             and window.geometry() == target
             and not window.isFullScreen()
+            and not window.isMaximized()
         )
         emit_detail_event(
             "fullscreen_composition_overscan",
@@ -201,6 +237,7 @@ class WindowedFullscreenController(QObject):
         )
         if applied:
             self.phase = FullscreenPhase.WINDOWED
+            self._restoring_maximized = False
             self.verification_count += 1
             self._cancel_retry()
         elif self._attempts >= 3:
@@ -235,6 +272,7 @@ class WindowedFullscreenController(QObject):
             return  # WindowStateChange verifies again on restore, without a busy loop.
         if self.window.isFullScreen():
             self.phase = FullscreenPhase.NATIVE
+            self._restoring_maximized = False
             emit_detail_event("fullscreen_native_fallback_verified", generation=0)
             return
         _LOGGER.warning("Native fullscreen fallback did not enter; restoring the original window")
@@ -242,6 +280,17 @@ class WindowedFullscreenController(QObject):
         self._restore_window()
 
     def eventFilter(self, watched, event) -> bool:
+        if watched is self.window and event.type() == QEvent.Type.WindowStateChange:
+            emit_detail_event(
+                "fullscreen_window_state",
+                generation=0,
+                phase=self.phase.value,
+                attempts=self._attempts,
+                applying=self._applying,
+                restoring_maximized=self._restoring_maximized,
+                old_state=event.oldState().value,
+                state=self.window.windowState().value,
+            )
         if watched is not self.window or self._applying or self.phase == FullscreenPhase.INACTIVE:
             return False
         if event.type() == QEvent.Type.Close:
@@ -251,7 +300,7 @@ class WindowedFullscreenController(QObject):
         elif event.type() == QEvent.Type.WindowStateChange:
             if self.window.isMinimized():
                 return False
-            if self.window.isMaximized() and not self.window.isFullScreen():
+            if self._is_system_maximize():
                 self._deactivate("system_maximized")
             elif self.phase == FullscreenPhase.ENTERING_NATIVE:
                 self._queue_retry("native")
@@ -265,10 +314,14 @@ class WindowedFullscreenController(QObject):
             QEvent.Type.Resize,
             QEvent.Type.DevicePixelRatioChange,
         }:
+            if event.type() == QEvent.Type.Show:
+                self._mark_shell(True)  # Explorer forgets the mark on hide.
             if self.phase == FullscreenPhase.ENTERING_NATIVE and event.type() == QEvent.Type.Show:
                 self._queue_retry("native")
             else:
                 self.reflow()
+        elif event.type() == QEvent.Type.WindowActivate:
+            self._mark_shell(True)
         return False
 
 

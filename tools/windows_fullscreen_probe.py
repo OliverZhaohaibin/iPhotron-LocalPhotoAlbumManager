@@ -287,6 +287,10 @@ def main() -> int:
                 "ok": all(region["ok"] for region in regions),
                 "capture_method": "desktop_region",
                 "submissions": submissions[0],
+                "window_active": host.isActiveWindow(),
+                "window_state": host.windowState().value,
+                "window_geometry": list(host.geometry().getRect()),
+                "monotonic_ms": time.monotonic() * 1000,
                 "regions": regions,
             }
         )

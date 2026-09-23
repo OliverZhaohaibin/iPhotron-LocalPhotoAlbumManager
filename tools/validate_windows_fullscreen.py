@@ -62,6 +62,7 @@ MANUAL_CASES = (
 )
 CONTRACT_TESTS = (
     "tests/gui/test_windowed_fullscreen.py",
+    "tests/gui/test_windows_taskbar.py",
     "tests/ui/controllers/test_edit_fullscreen_manager.py",
     "tests/ui/test_window_manager_fullscreen.py",
     "tests/test_windows_desktop_capture.py",
@@ -709,7 +710,11 @@ def main():
                     str(folder / "junit.xml"),
                 ],
                 folder / "console.log",
-                env,
+                {
+                    **env,
+                    "IPHOTO_DETAIL_PROFILE": "1",
+                    "IPHOTO_DETAIL_PROFILE_PATH": str(folder / "detail_events.jsonl"),
+                },
                 300,
             )
             report["automatic"]["state_contracts"] = assess_contracts(folder / "junit.xml", process)

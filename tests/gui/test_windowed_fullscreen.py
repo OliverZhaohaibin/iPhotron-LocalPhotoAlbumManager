@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -147,6 +148,15 @@ def _pump(qapp):
         qapp.processEvents()
 
 
+def _wait_for(qapp, predicate):
+    from PySide6.QtTest import QTest
+
+    deadline = time.monotonic() + 2
+    while not predicate() and time.monotonic() < deadline:
+        QTest.qWait(10)
+    assert predicate(), "Window transition did not reach its required terminal state within 2s"
+
+
 def _shown_window(qapp, *, maximized=False):
     window = QWidget()
     window.setWindowFlag(Qt.WindowType.FramelessWindowHint)
@@ -169,7 +179,16 @@ def test_rejected_geometry_retries_without_resize_events_then_enters_native_once
     monkeypatch.setattr(window, "showFullScreen", native)
     try:
         controller.enter()
-        _pump(qapp)
+        _wait_for(
+            qapp,
+            lambda: (
+                controller.phase
+                in {
+                    fullscreen.FullscreenPhase.NATIVE,
+                    fullscreen.FullscreenPhase.INACTIVE,
+                }
+            ),
+        )
         assert setter.call_count == 3
         native.assert_called_once()
         assert window.isFullScreen() and fullscreen.is_media_fullscreen(window)
@@ -225,7 +244,7 @@ def test_failed_native_fallback_restores_original_window_and_clears_fullscreen(
     monkeypatch.setattr(window, "showFullScreen", native)
     try:
         controller.enter()
-        _pump(qapp)
+        _wait_for(qapp, lambda: controller.phase == fullscreen.FullscreenPhase.INACTIVE)
         native.assert_called_once()
         assert controller.phase == fullscreen.FullscreenPhase.INACTIVE
         assert window.property(fullscreen._ACTIVE) is False
@@ -351,3 +370,123 @@ def test_ignored_close_keeps_fullscreen_session_active(qapp):
     finally:
         controller.exit()
         window.hide()
+
+
+@pytest.mark.parametrize("native_succeeds", [True, False])
+def test_delayed_maximized_restore_cannot_cancel_bounded_entry(qapp, monkeypatch, native_succeeds):
+    """Reproduce a late maximize notification while the first restore is pending."""
+    from PySide6.QtGui import QWindowStateChangeEvent
+
+    window = _shown_window(qapp, maximized=True)
+    controller = fullscreen.WindowedFullscreenController(window)
+    original = window.geometry()
+    setter = Mock()
+    native = Mock(wraps=window.showFullScreen) if native_succeeds else Mock()
+    monkeypatch.setattr(window, "setGeometry", setter)
+    monkeypatch.setattr(window, "showFullScreen", native)
+    try:
+        controller.enter()
+        # Simulate WM state echoing the pre-entry maximized state after showNormal.
+        with monkeypatch.context() as delayed:
+            delayed.setattr(window, "isMaximized", lambda: True)
+            controller.eventFilter(window, QWindowStateChangeEvent(Qt.WindowState.WindowNoState))
+            assert controller.phase == fullscreen.FullscreenPhase.ENTERING_WINDOWED
+            assert window.property(fullscreen._ACTIVE) is True
+        _wait_for(
+            qapp,
+            lambda: (
+                controller.phase
+                in {
+                    fullscreen.FullscreenPhase.NATIVE,
+                    fullscreen.FullscreenPhase.INACTIVE,
+                }
+            ),
+        )
+        assert setter.call_count == 3
+        native.assert_called_once()
+        assert fullscreen.is_media_fullscreen(window) == native_succeeds
+        if native_succeeds:
+            controller.exit()
+        _wait_for(qapp, lambda: window.isMaximized() and window.geometry() == original)
+        assert window.isMaximized()
+        assert window.geometry() == original
+        assert controller._pending_retry is None
+    finally:
+        window.close()
+
+
+def test_shell_hint_precedes_overscan_and_clears_on_system_exit(qapp, monkeypatch):
+    window = _shown_window(qapp)
+    controller = fullscreen.WindowedFullscreenController(window)
+    events = []
+    real_set = window.setGeometry
+    monkeypatch.setattr(
+        fullscreen, "mark_fullscreen_window", lambda hwnd, flag: events.append((hwnd, flag))
+    )
+    monkeypatch.setattr(
+        window, "setGeometry", lambda rect: (events.append("geometry"), real_set(rect))
+    )
+    hwnd = int(window.internalWinId())
+    try:
+        controller.enter()
+        assert events.index((hwnd, True)) < events.index("geometry")
+        controller.eventFilter(window, QEvent(QEvent.Type.Show))
+        controller.eventFilter(window, QEvent(QEvent.Type.WindowActivate))
+        assert events.count((hwnd, True)) >= 3
+        window.showMaximized()
+        _wait_for(qapp, lambda: controller.phase == fullscreen.FullscreenPhase.INACTIVE)
+        assert events[-1] == (hwnd, False)
+        assert window.isMaximized()
+        controller.exit()
+        assert window.isMaximized()
+    finally:
+        window.close()
+
+
+def test_shell_failure_does_not_recreate_window_or_break_exit(qapp, monkeypatch):
+    window = _shown_window(qapp)
+    hwnd = int(window.internalWinId())
+    original = window.geometry()
+    controller = fullscreen.WindowedFullscreenController(window)
+    mark = Mock(return_value=False)
+    monkeypatch.setattr(fullscreen, "mark_fullscreen_window", mark)
+    try:
+        controller.enter()
+        assert controller.phase == fullscreen.FullscreenPhase.WINDOWED
+        controller.exit()
+        assert window.geometry() == original
+        assert int(window.internalWinId()) == hwnd
+        assert mark.call_args.args == (hwnd, False)
+    finally:
+        window.close()
+
+
+def test_delayed_maximize_during_native_failure_still_restores_original(qapp, monkeypatch):
+    from PySide6.QtGui import QWindowStateChangeEvent
+
+    window = _shown_window(qapp, maximized=True)
+    original = window.geometry()
+    controller = fullscreen.WindowedFullscreenController(window)
+    monkeypatch.setattr(window, "setGeometry", Mock())
+    monkeypatch.setattr(window, "showFullScreen", Mock())
+    try:
+        controller.enter()
+        for _ in range(3):
+            controller._dispatch_retry()
+        assert controller.phase == fullscreen.FullscreenPhase.ENTERING_NATIVE
+        with monkeypatch.context() as delayed:
+            delayed.setattr(window, "isMaximized", lambda: True)
+            controller.eventFilter(window, QWindowStateChangeEvent(Qt.WindowState.WindowNoState))
+            assert controller.phase == fullscreen.FullscreenPhase.ENTERING_NATIVE
+        _wait_for(
+            qapp,
+            lambda: (
+                controller.phase == fullscreen.FullscreenPhase.INACTIVE
+                and window.isMaximized()
+                and window.geometry() == original
+            ),
+        )
+        window.showFullScreen.assert_called_once()
+        assert window.property(fullscreen._ACTIVE) is False
+    finally:
+        window.close()

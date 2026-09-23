@@ -90,3 +90,29 @@ python .\tools\validate_windows_fullscreen.py --app-path "D:\Apps\iPhotron\entry
 ```
 
 默认每个自动探针最多运行 30 分钟，每个合约阶段最多 5 分钟。超时只结束脚本创建的对应进程树，不扫描关闭其他 iPhoto 实例。按一次 Ctrl+C 会尝试结束当前子进程并封装已完成/部分产物；如果直接杀掉验证脚本本身或在打包时再次中断，展开目录仍可用于恢复证据，不能保证 ZIP 完成。
+
+## 2026-09-23 回传结果与复验重点
+
+`iPhoto-windows-validation-20260923-102535-95784f.zip` 的外层 20 个文件与内层 8 个文件校验通过。运行版本为 `1346b613`，工作区标记为 dirty；三个工具的哈希与该版本的 CRLF 文件一致，其他本地变更未记录。环境为 Windows 11 build 26200、Qt/PySide 6.10.1，实际 OpenGL renderer 为 Intel Iris Xe（驱动 32.0.101.7088）；自动截图覆盖 3840×2400、250% DPI 的单屏。
+
+本次结果保持 **failed**：
+
+- 合约测试 54 通过、2 失败，均为原窗口最大化时的几何拒绝/原生回退场景，分别只尝试 2 次几何和未发出原生全屏请求。
+- 两组像素探针各 839/840 样本通过。失败发生在 `crop/17/full/idle-0` 和 `straighten/9/full/idle-0`。截图中的绿色主图仍在，Windows 任务栏覆盖底部 120 个物理像素；下一次采样恢复，提交计数不变。不能把这两帧改记通过，也不能据此认定发生了黑屏重绘。
+- 应用采集 PID 18004，47 条进程指标，约 49 秒正常退出，记录一次 overscan 进入和退出，未记录无响应/原生 fatal/强制停止。它不能证明整个人工矩阵或此前 filmstrip 崩溃已解决。
+- 所有人工项原先填写 P，但用户随后指出可能有遗漏；保留原始记录，重新验收时对未实际执行的项目填 S。多屏、其他 DPI、打包版本和 PyCharm 的通过不应由本次单屏源码日志推定。
+
+后续实现对两类问题分别处理：
+
+1. 从最大化进入时，第一轮几何调整排队到 `showNormal()` 之后。进入期间的旧最大化反馈不会提前清除逻辑全屏；恢复与几何调整仍在三次尝试预算内，随后至多一次原生回退。全屏建立后用户主动最大化仍退出沉浸界面。测试保留三次/一次及最终状态断言，以有上限的事件等待代替固定十次 `processEvents()`。
+2. 在调整 overscan 几何之前，通过 [ITaskbarList2::MarkFullscreenWindow](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-itaskbarlist2-markfullscreenwindow) 向 Explorer 声明全屏；显示/重新激活时重申，退出/失败/系统退出时撤销。它只声明活动窗口的 Shell 全屏意图，不改变 HWND、渲染后端或设置永久置顶。COM 失败记录 warning 与诊断事件，不能声称 Shell 已接受请求。
+
+这些改动需要新的 Windows 产物确认，旧包不能作为修复后的通过证据。优先用以下命令复验自动失败项（仍是每种图 20 次）：
+
+```powershell
+python .\tools\validate_windows_fullscreen.py --skip-app --non-interactive
+```
+
+该命令因主动跳过人工/应用阶段而显示 `incomplete` 是预期行为；应检查三项自动检查是否全部通过，并回传完整 ZIP。新增合约 `detail_events.jsonl` 记录进入阶段、状态变化和尝试次数；像素样本记录活动窗口状态、窗口几何和单调时钟，探针/应用日志记录 `fullscreen_shell_mark` 请求及结果。合约测试会故意注入失败，与真实应用日志分开解释。
+
+自动阶段通过后，再运行默认完整流程，特别核验：从最大化窗口进入全屏、全屏首帧任务栏遮挡、Alt-Tab、最小化恢复、Edit 中系统最大化，以及退出后的任务栏和窗口状态。保持原来的像素容差、采样次数与采样等待，不通过放宽阈值掩盖任务栏遮挡。

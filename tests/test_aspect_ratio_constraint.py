@@ -2,7 +2,10 @@
 
 import pytest
 from unittest.mock import MagicMock
+from PySide6.QtCore import QPointF
+from PySide6.QtGui import QIcon
 
+import iPhoto.gui.ui.widgets.edit_perspective_controls as perspective_controls_module
 from iPhoto.gui.ui.widgets.gl_crop.controller import (
     CropInteractionController,
     _fit_crop_aspect,
@@ -255,6 +258,59 @@ class TestEnforceAspect:
         assert crop["bottom"] >= bounds["bottom"]
 
 
+def test_resize_can_cross_unit_boundary_inside_perspective_quad():
+    """A visible transformed region beyond y=1 remains available to the yellow frame."""
+
+    model = CropSessionModel()
+    model.update_perspective(1.0, 0.0, aspect_ratio=1.5)
+    state = model.get_crop_state()
+    state.cx = 0.5
+    state.cy = 0.65
+    state.width = 0.2
+    state.height = 0.5
+    changed = MagicMock()
+    strategy = ResizeStrategy(
+        handle=CropHandle.BOTTOM,
+        model=model,
+        texture_size_provider=lambda: (300, 200),
+        get_effective_scale=lambda: 1.0,
+        get_dpr=lambda: 1.0,
+        on_crop_changed=changed,
+        apply_edge_push_zoom=MagicMock(),
+        locked_aspect=0.0,
+    )
+
+    strategy.on_drag(QPointF(0.0, 40.0))
+
+    assert state.bounds_normalised()[3] == pytest.approx(1.1)
+    assert model.is_crop_inside_quad()
+    changed.assert_called_once_with()
+
+
+def test_aspect_fit_reverts_when_minimum_size_still_exceeds_perspective_quad():
+    model = CropSessionModel()
+    model.update_perspective(0.0, -0.7, aspect_ratio=1.5)
+    state = model.get_crop_state()
+    state.cx = 0.31282668272247327
+    state.cy = 0.08812358506507939
+    state.width = 0.025
+    state.height = 0.025
+    assert model.is_crop_inside_quad()
+    snapshot = model.create_snapshot()
+
+    _fit_crop_aspect(
+        state,
+        0.5,
+        1500,
+        1000,
+        model.get_crop_bounds(),
+    )
+
+    assert not model.ensure_valid_or_revert(snapshot, allow_shrink=True)
+    assert model.create_snapshot() == pytest.approx(snapshot)
+    assert model.is_crop_inside_quad()
+
+
 # ---------------------------------------------------------------------------
 # _AspectRatioSection orientation toggle
 # ---------------------------------------------------------------------------
@@ -266,10 +322,19 @@ class TestAspectOrientationToggle:
     """Verify the landscape/portrait orientation buttons in _AspectRatioSection."""
 
     @pytest.fixture(autouse=True)
-    def section(self, qtbot):
+    def section(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            perspective_controls_module,
+            "load_icon",
+            lambda *_args, **_kwargs: QIcon(),
+        )
+        monkeypatch.setattr(
+            _AspectRatioSection,
+            "_update_orientation_icons",
+            lambda _self: None,
+        )
         self.widget = _AspectRatioSection()
         qtbot.addWidget(self.widget)
-        self.widget.show()
         self.emitted: list[float] = []
         self.widget.ratioSelected.connect(lambda r: self.emitted.append(r))
 
@@ -281,19 +346,19 @@ class TestAspectOrientationToggle:
         raise ValueError(f"Preset '{label}' not found")
 
     def test_orientation_hidden_for_freeform(self):
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()
 
     def test_orientation_hidden_for_original(self):
         self._select_preset("Original")
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()
 
     def test_orientation_hidden_for_square(self):
         self._select_preset("Square")
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()
 
     def test_orientation_shown_for_16_9(self):
         self._select_preset("16:9")
-        assert self.widget._orientation_widget.isVisible()
+        assert not self.widget._orientation_widget.isHidden()
 
     def test_16_9_default_landscape(self):
         self._select_preset("16:9")
@@ -322,6 +387,6 @@ class TestAspectOrientationToggle:
 
     def test_switching_preset_hides_orientation(self):
         self._select_preset("16:9")
-        assert self.widget._orientation_widget.isVisible()
+        assert not self.widget._orientation_widget.isHidden()
         self._select_preset("Freeform")
-        assert not self.widget._orientation_widget.isVisible()
+        assert self.widget._orientation_widget.isHidden()

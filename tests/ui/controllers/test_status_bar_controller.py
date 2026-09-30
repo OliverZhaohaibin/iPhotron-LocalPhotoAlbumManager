@@ -100,3 +100,124 @@ def test_album_load_progress_still_hides_when_no_scan_is_active(qapp: QApplicati
     assert progress.minimum() == 0
     assert progress.maximum() == 0
     assert status_bar.currentMessage() == "Album loaded."
+
+
+def test_empty_thumbnail_backfill_does_not_show_progress(qapp: QApplication) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 0, 0)
+    controller.handle_thumbnail_backfill_completed(Path("/library"))
+
+    assert progress.isHidden()
+    assert controller._progress_context is None
+    assert controller._thumbnail_backfill_active_requests == 0
+    assert status_bar.currentMessage() == ""
+
+
+def test_thumbnail_completion_hides_progress_before_count_reaches_total(
+    qapp: QApplication,
+) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 2, 5)
+    assert not progress.isHidden()
+
+    controller.handle_thumbnail_backfill_completed(Path("/library"))
+
+    assert progress.isHidden()
+    assert progress.minimum() == 0
+    assert progress.maximum() == 0
+    assert controller._progress_context is None
+    assert status_bar.currentMessage() == "Thumbnails updated."
+
+
+def test_thumbnail_final_progress_waits_for_model_completion(qapp: QApplication) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 5, 5)
+
+    assert not progress.isHidden()
+    assert progress.value() == 5
+    assert controller._progress_context == "thumbnail"
+    assert status_bar.currentMessage() == "Updating thumbnails… (5/5)"
+
+    controller.handle_thumbnail_backfill_completed(Path("/library"))
+
+    assert progress.isHidden()
+    assert controller._progress_context is None
+    assert status_bar.currentMessage() == "Thumbnails updated."
+
+
+def test_stale_thumbnail_completion_does_not_hide_newer_backfill(
+    qapp: QApplication,
+) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+    root = Path("/library")
+
+    # Request A reaches its final progress update, but its model-refresh-backed
+    # completion is delayed. Request B starts before that terminal event lands.
+    controller.handle_thumbnail_backfill_progress(root, 0, 5)
+    controller.handle_thumbnail_backfill_progress(root, 5, 5)
+    controller.handle_thumbnail_backfill_progress(root, 0, 8)
+    controller.handle_thumbnail_backfill_progress(root, 1, 8)
+
+    controller.handle_thumbnail_backfill_completed(root)
+
+    assert controller._thumbnail_backfill_active_requests == 1
+    assert controller._progress_context == "thumbnail"
+    assert not progress.isHidden()
+    assert progress.maximum() == 8
+    assert progress.value() == 1
+    assert status_bar.currentMessage() == "Updating thumbnails… (1/8)"
+
+    controller.handle_thumbnail_backfill_completed(root)
+
+    assert controller._thumbnail_backfill_active_requests == 0
+    assert controller._progress_context is None
+    assert progress.isHidden()
+    assert status_bar.currentMessage() == "Thumbnails updated."
+
+
+def test_overlapping_thumbnail_failure_waits_for_remaining_request(
+    qapp: QApplication,
+) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+    root = Path("/library")
+
+    controller.handle_thumbnail_backfill_progress(root, 0, 5)
+    controller.handle_thumbnail_backfill_progress(root, 0, 8)
+    controller.handle_thumbnail_backfill_progress(root, 1, 8)
+
+    controller.handle_thumbnail_backfill_failed(root, "decode crashed")
+
+    assert controller._thumbnail_backfill_active_requests == 1
+    assert controller._progress_context == "thumbnail"
+    assert not progress.isHidden()
+    assert progress.maximum() == 8
+    assert progress.value() == 1
+
+    controller.handle_thumbnail_backfill_completed(root)
+
+    assert controller._thumbnail_backfill_active_requests == 0
+    assert controller._progress_context is None
+    assert progress.isHidden()
+    assert status_bar.currentMessage() == "Thumbnail update failed."
+
+
+def test_thumbnail_failure_hides_in_progress_feedback(qapp: QApplication) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    progress = status_bar.progress_bar
+
+    controller.handle_thumbnail_backfill_progress(Path("/library"), 2, 5)
+    controller.handle_thumbnail_backfill_failed(Path("/library"), "decode crashed")
+
+    assert progress.isHidden()
+    assert progress.minimum() == 0
+    assert progress.maximum() == 0
+    assert controller._progress_context is None
+    assert status_bar.currentMessage() == "Thumbnail update failed."

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
+from iPhoto.application.services.recognition_merge_service import IdentityRef
 from iPhoto.gui.i18n.font_policy import language_font
 from iPhoto.people.image_utils import load_image_rgb
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
+from iPhoto.pets.records import PetSummary
 
 from .people_dashboard_shared import (
     CARD_HEIGHT,
@@ -29,22 +32,27 @@ from .people_dashboard_shared import (
     request_rendered_cover_pixmap,
 )
 
+if TYPE_CHECKING:
+    from .people_dashboard_board import GroupBoard, IdentityBoard
 
-class PeopleCard(QWidget):
+
+class IdentityCard(QWidget):
     activated = Signal(str)
     menuRequested = Signal(str, object)
 
     def __init__(
         self,
         *,
-        board: "PeopleBoard",
-        summary: PersonSummary,
+        board: IdentityBoard,
+        summary: object,
+        identity: IdentityRef,
         seed_index: int,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.board = board
         self.summary = summary
+        self.identity = identity
         self.seed_index = seed_index
         self._hovered = False
         self._dragging = False
@@ -60,11 +68,15 @@ class PeopleCard(QWidget):
         people_cover_cache().coverReady.connect(self._handle_cover_ready)
 
     @property
-    def person_id(self) -> str:
-        return self.summary.person_id
+    def identity_key(self) -> str:
+        return self.identity.key
+
+    @property
+    def entity_id(self) -> str:
+        return self.identity.entity_id
 
     def display_name(self) -> str:
-        return (self.summary.name or "").strip()
+        return (getattr(self.summary, "name", None) or "").strip()
 
     @property
     def is_dragging(self) -> bool:
@@ -105,7 +117,7 @@ class PeopleCard(QWidget):
             self.update()
 
     def _request_cover_art(self) -> tuple[str | None, QPixmap | None]:
-        thumbnail_path = self.summary.thumbnail_path
+        thumbnail_path = getattr(self.summary, "thumbnail_path", None)
         if thumbnail_path is not None:
             return request_cover_pixmap(thumbnail_path, (CARD_WIDTH * 2, CARD_HEIGHT * 2))
         return None, None
@@ -222,7 +234,12 @@ class PeopleCard(QWidget):
         painter.drawRoundedRect(badge_rect, 14, 14)
         painter.setPen(_qcolor("#FFFFFF"))
         painter.setFont(language_font(QFont("Segoe UI", 10, QFont.Weight.Bold)))
-        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self.summary.face_count))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, str(self._badge_count()))
+
+    def _badge_count(self) -> int:
+        if hasattr(self.summary, "asset_count"):
+            return max(0, int(getattr(self.summary, "asset_count") or 0))
+        return max(0, int(getattr(self.summary, "face_count", 0) or 0))
 
     def enterEvent(self, _event) -> None:  # noqa: N802
         if not self._dragging:
@@ -256,8 +273,7 @@ class PeopleCard(QWidget):
         if self._dragging:
             new_pos = self.mapToParent(local_pos - self._drag_offset)
             self.move(new_pos)
-            self.board.check_card_proximity(self)
-            self.board.update_card_order(self)
+            self.board.update_drag(self)
             event.accept()
             return
 
@@ -269,7 +285,7 @@ class PeopleCard(QWidget):
                 self.board.finish_drag(self)
                 self.end_drag()
             else:
-                self.activated.emit(self.person_id)
+                self.activated.emit(self.entity_id)
             self._press_pos = None
             self._drag_offset = None
             event.accept()
@@ -277,8 +293,62 @@ class PeopleCard(QWidget):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
-        self.menuRequested.emit(self.person_id, event.globalPos())
+        self.menuRequested.emit(self.identity_key, event.globalPos())
         event.accept()
+
+
+class PeopleCard(IdentityCard):
+    def __init__(
+        self,
+        *,
+        board: IdentityBoard,
+        summary: PersonSummary,
+        seed_index: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(
+            board=board,
+            summary=summary,
+            identity=IdentityRef("person", summary.person_id),
+            seed_index=seed_index,
+            parent=parent,
+        )
+        self.summary = summary
+
+    @property
+    def person_id(self) -> str:
+        return self.summary.person_id
+
+
+class PetCard(IdentityCard):
+    def __init__(
+        self,
+        *,
+        board: IdentityBoard,
+        summary: PetSummary,
+        seed_index: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(
+            board=board,
+            summary=summary,
+            identity=IdentityRef("pet", summary.pet_id),
+            seed_index=seed_index,
+            parent=parent,
+        )
+        self.summary = summary
+
+    @property
+    def pet_id(self) -> str:
+        return self.summary.pet_id
+
+    def display_name(self) -> str:
+        return (self.summary.name or "").strip()
+
+    def _badge_count(self) -> int:
+        if hasattr(self.summary, "asset_count"):
+            return max(0, int(getattr(self.summary, "asset_count") or 0))
+        return max(0, int(getattr(self.summary, "detection_count", 0) or 0))
 
 
 class GroupCard(QWidget):
@@ -290,7 +360,7 @@ class GroupCard(QWidget):
     def __init__(
         self,
         *,
-        board: "GroupBoard",
+        board: GroupBoard,
         summary: PeopleGroupSummary,
         seed_index: int,
         parent: QWidget | None = None,
@@ -394,7 +464,7 @@ class GroupCard(QWidget):
         gradient.setColorAt(1.0, _qcolor(bottom))
         painter.fillRect(rect, gradient)
 
-        members = list(self.summary.members[:4])
+        members = list((self.summary.members + self.summary.pet_members)[:4])
         if members:
             columns = 2 if len(members) > 1 else 1
             rows = 2 if len(members) > 2 else 1
@@ -426,7 +496,7 @@ class GroupCard(QWidget):
 
         width = GROUP_CARD_WIDTH * 2
         height = GROUP_CARD_HEIGHT * 2
-        members = list(self.summary.members[:4])
+        members = list((self.summary.members + self.summary.pet_members)[:4])
         collage = Image.new("RGBA", (width, height))
         if not members:
             return None
@@ -458,7 +528,7 @@ class GroupCard(QWidget):
 
     def _collage_signature_parts(self) -> list[str]:
         parts = [self.group_id]
-        for member in self.summary.members[:4]:
+        for member in (self.summary.members + self.summary.pet_members)[:4]:
             thumbnail_path = member.thumbnail_path
             if thumbnail_path is None:
                 parts.append("missing")
@@ -489,7 +559,9 @@ class GroupCard(QWidget):
         self._paint_bottom_overlay(painter, card_rect)
         painter.restore()
 
-        border_color = QColor("#2272F2") if (self._hovered or self._dragging) else QColor(255, 255, 255, 120)
+        border_color = (
+            QColor("#2272F2") if (self._hovered or self._dragging) else QColor(255, 255, 255, 120)
+        )
         border_width = 2.6 if (self._hovered or self._dragging) else 1.2
         painter.setPen(QPen(border_color, border_width))
         painter.setBrush(Qt.BrushStyle.NoBrush)

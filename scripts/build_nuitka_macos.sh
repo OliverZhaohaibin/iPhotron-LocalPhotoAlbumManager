@@ -11,9 +11,10 @@ Options:
   --python PATH                 Python executable to use.
   --output-dir DIR              Nuitka output directory. Defaults to dist.
   --jobs N                      Parallel Nuitka jobs. Defaults to half the CPU count.
+  --low-memory                  Use one compiler job, disable LTO, and enable Nuitka low-memory mode.
   --sdk-root DIR                PySide6-OsmAnd-SDK checkout. Defaults to ../PySide6-OsmAnd-SDK.
   --qt-root DIR                 Qt root passed to the SDK build. Defaults to /opt/homebrew/opt/qt.
-  --icon PATH                   Optional .icns file for the app bundle.
+  --icon PATH                   App icon (.icns or convertible image). Defaults to docs/picture/logo_new.ico.
   --skip-aot                    Skip Numba AOT filter compilation.
   --skip-sdk-runtime-build      Do not run the SDK macOS native runtime build.
   --skip-map-runtime-sync       Do not run scripts/sync_macos_map_extension.py.
@@ -56,6 +57,40 @@ require_macos_runtime_staged() {
   require_path "$bin_dir/osmand_native_widget.dylib"
 }
 
+PYSIDE_ASSETDOWNLOADER_DIR=""
+PYSIDE_ASSETDOWNLOADER_BACKUP=""
+
+restore_pyside_assetdownloader() {
+  if [[ -n "$PYSIDE_ASSETDOWNLOADER_BACKUP" && -d "$PYSIDE_ASSETDOWNLOADER_BACKUP" ]]; then
+    if [[ ! -e "$PYSIDE_ASSETDOWNLOADER_DIR" ]]; then
+      mv "$PYSIDE_ASSETDOWNLOADER_BACKUP" "$PYSIDE_ASSETDOWNLOADER_DIR"
+    else
+      warn "PySide assetdownloader already exists; backup retained at $PYSIDE_ASSETDOWNLOADER_BACKUP"
+    fi
+  fi
+}
+
+hide_unused_pyside_assetdownloader() {
+  local pyside_root
+  local workaround_dir
+  pyside_root="$("$PYTHON_BIN" -c 'from pathlib import Path; import PySide6; print(Path(PySide6.__file__).resolve().parent)')"
+  PYSIDE_ASSETDOWNLOADER_DIR="$pyside_root/Qt/qml/Qt/labs/assetdownloader"
+  workaround_dir="$OUTPUT_DIR/.build-workarounds"
+  PYSIDE_ASSETDOWNLOADER_BACKUP="$workaround_dir/assetdownloader"
+  if [[ ! -d "$PYSIDE_ASSETDOWNLOADER_DIR" && -d "$PYSIDE_ASSETDOWNLOADER_BACKUP" ]]; then
+    mv "$PYSIDE_ASSETDOWNLOADER_BACKUP" "$PYSIDE_ASSETDOWNLOADER_DIR"
+  fi
+  if [[ ! -d "$PYSIDE_ASSETDOWNLOADER_DIR" ]]; then
+    return
+  fi
+  mkdir -p "$workaround_dir"
+  [[ ! -e "$PYSIDE_ASSETDOWNLOADER_BACKUP" ]] || die \
+    "stale PySide assetdownloader backup exists: $PYSIDE_ASSETDOWNLOADER_BACKUP"
+  mv "$PYSIDE_ASSETDOWNLOADER_DIR" "$PYSIDE_ASSETDOWNLOADER_BACKUP"
+  trap restore_pyside_assetdownloader EXIT
+  echo "Temporarily hiding unused PySide Qt.labs.assetdownloader for Nuitka 4.0.x..."
+}
+
 find_built_app_bundle() {
   local preferred_app="$OUTPUT_DIR/main.app"
 
@@ -73,20 +108,27 @@ find_built_app_bundle() {
 stage_map_tiles_into_app() {
   local app_bundle="$1"
   local app_macos_dir="$app_bundle/Contents/MacOS"
-  local app_maps_dir="$app_macos_dir/maps"
+  local app_maps_dir="$app_bundle/Contents/Resources/maps"
   local staged_tiles_dir="$app_maps_dir/tiles"
+  local archive_path="$app_maps_dir/extension.tar"
 
   require_path "$app_macos_dir"
 
-  echo "Staging map tiles into $staged_tiles_dir..."
+  echo "Staging map extension for dependency repair..."
   mkdir -p "$app_maps_dir"
   rm -rf "$staged_tiles_dir"
-  cp -R "$ROOT_DIR/src/maps/tiles" "$app_maps_dir/"
+  rm -f "$archive_path"
+  mkdir -p "$staged_tiles_dir"
+  cp -R "$ROOT_DIR/src/maps/tiles/extension" "$staged_tiles_dir/"
+  # Finder/download provenance can be copied with map resources and is not
+  # valid signing metadata inside an app bundle. Clear it before signing the
+  # staged native binaries and sealing Resources.
+  /usr/bin/xattr -cr "$staged_tiles_dir"
 }
 
 resign_staged_map_runtime() {
   local app_bundle="$1"
-  local map_bin_dir="$app_bundle/Contents/MacOS/maps/tiles/extension/bin"
+  local map_bin_dir="$app_bundle/Contents/Resources/maps/tiles/extension/bin"
 
   require_command_or_path "/usr/bin/codesign"
   require_command_or_path "/usr/bin/file"
@@ -104,6 +146,45 @@ resign_staged_map_runtime() {
   done < <(find "$map_bin_dir" -type f -print0)
 }
 
+archive_staged_map_extension() {
+  local app_bundle="$1"
+  local app_maps_dir="$app_bundle/Contents/Resources/maps"
+  local staged_tiles_dir="$app_maps_dir/tiles"
+  local archive_path="$app_maps_dir/extension.tar"
+
+  require_command_or_path "/usr/bin/tar"
+  require_path "$staged_tiles_dir/extension"
+  echo "Archiving map extension as one lazily installed resource..."
+  COPYFILE_DISABLE=1 /usr/bin/tar -cf "$archive_path" \
+    -C "$staged_tiles_dir" extension
+  rm -rf "$staged_tiles_dir"
+  require_path "$archive_path"
+}
+
+prune_packaged_development_files() {
+  local app_bundle="$1"
+  local torch_headers="$app_bundle/Contents/MacOS/torch/include"
+
+  # PyTorch headers are only used to compile C++ extensions. They add roughly
+  # 10k files to the app resource seal and are never read by iPhotron at
+  # runtime, so retaining them directly taxes dyld verification and disk use.
+  if [[ -d "$torch_headers" ]]; then
+    echo "Removing packaged PyTorch development headers..."
+    rm -rf "$torch_headers"
+  fi
+}
+
+resign_app_bundle() {
+  local app_bundle="$1"
+
+  require_command_or_path "/usr/bin/codesign"
+  echo "Re-signing completed app bundle..."
+  # The 45k-file extension is sealed as one archive. It is installed by the
+  # existing background map worker on first map use, outside the startup path.
+  /usr/bin/codesign --force --sign - "$app_bundle"
+  /usr/bin/codesign --verify --strict --verbose=2 "$app_bundle"
+}
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -117,11 +198,13 @@ DEFAULT_JOBS=$(( (DEFAULT_JOBS + 1) / 2 ))
 JOBS="${JOBS:-$DEFAULT_JOBS}"
 SDK_ROOT="${SDK_ROOT:-$ROOT_DIR/../PySide6-OsmAnd-SDK}"
 QT_ROOT="${QT_ROOT:-/opt/homebrew/opt/qt}"
-ICON_PATH="${ICON_PATH:-}"
+ICON_PATH="${ICON_PATH:-$ROOT_DIR/docs/picture/logo_new.ico}"
 RUN_AOT=1
 RUN_SDK_RUNTIME_BUILD=1
 RUN_MAP_RUNTIME_SYNC=1
 FIX_MAP_DEPENDENCIES=1
+LOW_MEMORY=0
+LTO_MODE="yes"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -139,6 +222,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "--jobs requires a value"
       JOBS="$2"
       shift 2
+      ;;
+    --low-memory)
+      LOW_MEMORY=1
+      shift
       ;;
     --sdk-root)
       [[ $# -ge 2 ]] || die "--sdk-root requires a value"
@@ -181,6 +268,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$LOW_MEMORY" -eq 1 ]]; then
+  JOBS=1
+  LTO_MODE="no"
+fi
+
+# Keep compiler caches inside the final selected writable build root. Sandboxed
+# CI and local verification runners may not be allowed to mutate ~/Library/Caches.
+NUITKA_CACHE_DIR="${NUITKA_CACHE_DIR:-$OUTPUT_DIR/.nuitka-cache}"
+export NUITKA_CACHE_DIR
+
 [[ "$(uname -s)" == "Darwin" ]] || die "this script must be run on macOS"
 
 if [[ -z "$PYTHON_BIN" ]]; then
@@ -192,7 +289,7 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 
 require_command_or_path "$PYTHON_BIN"
-require_path "$ROOT_DIR/src/iPhoto/gui/main.py"
+require_path "$ROOT_DIR/src/entrypoint.py"
 require_path "$ROOT_DIR/src/iPhoto/schemas"
 require_path "$ROOT_DIR/src/iPhoto/gui/ui/icon"
 require_path "$ROOT_DIR/src/iPhoto/gui/ui/qml"
@@ -221,9 +318,13 @@ for shader_file in "${SHADER_FILES[@]}"; do
   require_path "$ROOT_DIR/src/iPhoto/gui/ui/widgets/$shader_file"
 done
 
-if [[ -n "$ICON_PATH" ]]; then
-  require_path "$ICON_PATH"
+require_path "$ICON_PATH"
+if [[ "$ICON_PATH" != *.icns ]]; then
+  "$PYTHON_BIN" -c 'import imageio' >/dev/null 2>&1 || die \
+    "imageio is required for Nuitka to convert the app icon; install it with: $PYTHON_BIN -m pip install imageio"
 fi
+"$PYTHON_BIN" -c 'import exiftool, pillow_heif, _pillow_heif' >/dev/null 2>&1 || die \
+  "PyExifTool, pillow-heif, and its native extension are required; install them with: $PYTHON_BIN -m pip install pyexiftool pillow-heif"
 
 if [[ "$RUN_AOT" -eq 1 ]]; then
   echo "Building AOT filter extension..."
@@ -280,7 +381,7 @@ nuitka_args=(
   "--output-filename=iPhotron"
   "--jobs=$JOBS"
   "--python-flag=no_site"
-  "--lto=yes"
+  "--lto=$LTO_MODE"
   "--clang"
   "--enable-plugin=pyside6"
   "--include-qt-plugins=qml,multimedia,platforms"
@@ -292,6 +393,7 @@ nuitka_args=(
   "--nofollow-import-to=pydantic"
   "--nofollow-import-to=pydantic_core"
   "--nofollow-import-to=typing_inspection"
+  "--nofollow-import-to=insightface.thirdparty.face3d"
   "--nofollow-import-to=iPhoto.tests"
   "--nofollow-import-to=pytest"
   "--include-package=iPhoto"
@@ -301,8 +403,12 @@ nuitka_args=(
   "--include-package=cv2"
   "--include-package=reverse_geocoder"
   "--include-package=insightface"
-  "--include-package=onnxruntime"
+  "--include-package=exiftool"
+  "--include-package=pillow_heif"
+  "--include-module=_pillow_heif"
+  "--noinclude-data-files=torch/include"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/resources/i18n=iPhoto/resources/i18n"
+  "--include-data-file=$ROOT_DIR/src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/schemas=iPhoto/schemas"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/icon=iPhoto/gui/ui/icon"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/qml=iPhoto/gui/ui/qml"
@@ -329,18 +435,21 @@ nuitka_args=(
   "--output-dir=$OUTPUT_DIR"
 )
 
+if [[ "$LOW_MEMORY" -eq 1 ]]; then
+  nuitka_args+=("--low-memory")
+fi
+
 if [[ -d "$ROOT_DIR/src/extension/models" ]]; then
   nuitka_args+=("--include-data-dir=$ROOT_DIR/src/extension/models=extension/models")
 else
   warn "face model cache not found; continuing without bundled extension/models"
 fi
 
-if [[ -n "$ICON_PATH" ]]; then
-  nuitka_args+=("--macos-app-icon=$ICON_PATH")
-fi
+nuitka_args+=("--macos-app-icon=$ICON_PATH")
 
-nuitka_args+=("$ROOT_DIR/src/iPhoto/gui/main.py")
+nuitka_args+=("$ROOT_DIR/src/entrypoint.py")
 
+hide_unused_pyside_assetdownloader
 echo "Building macOS app bundle with Nuitka..."
 "$PYTHON_BIN" "${nuitka_args[@]}"
 
@@ -348,6 +457,19 @@ APP_BUNDLE="$(find_built_app_bundle)"
 stage_map_tiles_into_app "$APP_BUNDLE"
 "$PYTHON_BIN" "$ROOT_DIR/scripts/sync_macos_map_extension.py" --repair-app-bundle "$APP_BUNDLE"
 resign_staged_map_runtime "$APP_BUNDLE"
+archive_staged_map_extension "$APP_BUNDLE"
+prune_packaged_development_files "$APP_BUNDLE"
+resign_app_bundle "$APP_BUNDLE"
+"$PYTHON_BIN" "$ROOT_DIR/tools/build_manifest.py" \
+  --root "$ROOT_DIR" \
+  --artifact "$APP_BUNDLE/Contents/MacOS/iPhotron" \
+  --build-driver "$ROOT_DIR/scripts/build_nuitka_macos.sh" \
+  --build-flag "profile=macos" \
+  --build-flag "low_memory=$LOW_MEMORY" \
+  --native-runtime "$ROOT_DIR/src/maps/tiles/extension/bin" \
+  --asset "$ROOT_DIR/src/maps/tiles" \
+  --asset "$ROOT_DIR/src/iPhoto/resources/i18n" \
+  --output "$OUTPUT_DIR/build-manifest.json"
 
 echo "Build complete. App bundles:"
 find "$OUTPUT_DIR" -maxdepth 3 -name "*.app" -print

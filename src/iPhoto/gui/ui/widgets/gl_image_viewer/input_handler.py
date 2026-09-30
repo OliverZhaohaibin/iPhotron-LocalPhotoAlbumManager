@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
+
+from ....windowed_fullscreen import is_media_fullscreen
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 
 # Qt.LeftButton constant
@@ -83,7 +85,6 @@ class InputEventHandler:
             if self._live_replay_enabled:
                 self._on_replay_requested()
             else:
-                self._on_cancel_auto_crop_lock()
                 self._transform_controller.handle_mouse_press(event)
         
         return False
@@ -101,7 +102,9 @@ class InputEventHandler:
             return True
         
         if not self._live_replay_enabled:
-            self._transform_controller.handle_mouse_move(event)
+            transform_changed = self._transform_controller.handle_mouse_move(event)
+            if transform_changed:
+                self._on_cancel_auto_crop_lock()
         
         return False
     
@@ -148,7 +151,7 @@ class InputEventHandler:
             True if the event was handled and accepted
         """
         if event.button() == _LEFT_BUTTON:
-            if window is not None and window.isFullScreen():
+            if is_media_fullscreen(window):
                 self._on_fullscreen_exit()
             else:
                 self._on_fullscreen_toggle()
@@ -161,5 +164,6 @@ class InputEventHandler:
             self._crop_controller.handle_wheel(event)
             return
         
-        self._on_cancel_auto_crop_lock()
-        self._transform_controller.handle_wheel(event)
+        transform_changed = self._transform_controller.handle_wheel(event)
+        if transform_changed:
+            self._on_cancel_auto_crop_lock()

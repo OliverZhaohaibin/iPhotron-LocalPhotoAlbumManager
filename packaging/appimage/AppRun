@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export APPDIR
+export PATH="$APPDIR/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$APPDIR/usr/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+for candidate in entrypoint.bin entrypoint main.bin main; do
+    if [ -x "$APPDIR/usr/bin/$candidate" ]; then
+        exec "$APPDIR/usr/bin/$candidate" "$@"
+    fi
+done
+
+echo "iPhotron executable not found in AppImage" >&2
+exit 127

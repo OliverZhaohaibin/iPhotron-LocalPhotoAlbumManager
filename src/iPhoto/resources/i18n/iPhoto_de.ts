@@ -237,6 +237,66 @@
             <source>Zoom</source>
             <translation>Zoomen</translation>
         </message>
+        <message>
+            <source>The photo library could not be opened during startup: %1</source>
+            <translation>Die Fotobibliothek konnte beim Start nicht geöffnet werden: %1</translation>
+        </message>
+        <message>
+            <source>The photo library database is in use by another process. Close other iPhotron versions and retry.</source>
+            <translation>Die Datenbank der Fotobibliothek wird von einem anderen Prozess verwendet. Schließen Sie andere iPhotron-Versionen und versuchen Sie es erneut.</translation>
+        </message>
+        <message>
+            <source>Windows or security software is temporarily using a migration file. Close other programs or retry shortly.</source>
+            <translation>Windows oder eine Sicherheitssoftware verwendet vorübergehend eine Migrationsdatei. Schließen Sie andere Programme oder versuchen Sie es gleich erneut.</translation>
+        </message>
+        <message>
+            <source>The photo library database is damaged. The original file has been preserved.</source>
+            <translation>Die Datenbank der Fotobibliothek ist beschädigt. Die Originaldatei wurde beibehalten.</translation>
+        </message>
+        <message>
+            <source>The photo library database is read-only. Remove its read-only attribute or grant modify access.</source>
+            <translation>Die Datenbank der Fotobibliothek ist schreibgeschützt. Entfernen Sie das Schreibschutzattribut oder gewähren Sie Änderungszugriff.</translation>
+        </message>
+        <message>
+            <source>The .iPhoto work folder cannot be updated. Check that folder's permissions.</source>
+            <translation>Der Arbeitsordner .iPhoto kann nicht aktualisiert werden. Prüfen Sie die Berechtigungen dieses Ordners.</translation>
+        </message>
+        <message>
+            <source>There is not enough free disk space to prepare the photo library.</source>
+            <translation>Es ist nicht genügend freier Speicherplatz vorhanden, um die Fotobibliothek vorzubereiten.</translation>
+        </message>
+        <message>
+            <source>The photo library database could not be opened. Check the path, drive, and security software.</source>
+            <translation>Die Datenbank der Fotobibliothek konnte nicht geöffnet werden. Prüfen Sie Pfad, Laufwerk und Sicherheitssoftware.</translation>
+        </message>
+        <message>
+            <source>A safety backup could not be created. Migration did not start and the original database was preserved.</source>
+            <translation>Es konnte keine Sicherheitskopie erstellt werden. Die Migration wurde nicht gestartet und die Originaldatenbank wurde beibehalten.</translation>
+        </message>
+        <message>
+            <source>The photo library database update failed. The original database and backup were preserved.</source>
+            <translation>Die Aktualisierung der Fotobibliotheksdatenbank ist fehlgeschlagen. Originaldatenbank und Sicherung wurden beibehalten.</translation>
+        </message>
+        <message>
+            <source>This photo library was created by a newer app version. Open it with the same or a newer version.</source>
+            <translation>Diese Fotobibliothek wurde mit einer neueren App-Version erstellt. Öffnen Sie sie mit derselben oder einer neueren Version.</translation>
+        </message>
+        <message>
+            <source>The photo library index was restored after an interrupted update.</source>
+            <translation>Der Index der Fotobibliothek wurde nach einer unterbrochenen Aktualisierung wiederhergestellt.</translation>
+        </message>
+        <message>
+            <source>The photo library was recovered and opened, but temporary migration files could not be removed. They will be cleaned up later.</source>
+            <translation>Die Fotobibliothek wurde wiederhergestellt und geöffnet, temporäre Migrationsdateien konnten jedoch nicht entfernt werden. Sie werden später bereinigt.</translation>
+        </message>
+        <message>
+            <source>The photo library opened, but temporary migration files could not be removed. They will be cleaned up on a later start.</source>
+            <translation>Die Fotobibliothek wurde geöffnet, temporäre Migrationsdateien konnten jedoch nicht entfernt werden. Sie werden bei einem späteren Start bereinigt.</translation>
+        </message>
+        <message>
+            <source>Dismiss</source>
+            <translation>Schließen</translation>
+        </message>
     </context>
     <context>
         <name>MapExtension</name>
@@ -364,6 +424,10 @@
             <translation>Miniaturen aktualisiert.</translation>
         </message>
         <message>
+            <source>Thumbnail update failed.</source>
+            <translation>Miniaturen konnten nicht aktualisiert werden.</translation>
+        </message>
+        <message>
             <source>Loading items…</source>
             <translation>Elemente werden geladen …</translation>
         </message>
@@ -444,7 +508,11 @@
         </message>
         <message>
             <source>Choose Someone Else…</source>
-            <translation>Andere Person auswählen …</translation>
+            <translation>Anderen Namen auswählen …</translation>
+        </message>
+        <message>
+            <source>New Name…</source>
+            <translation>Neuer Name …</translation>
         </message>
         <message>
             <source>New Person…</source>
@@ -459,8 +527,16 @@
             <translation>Nicht diese Person</translation>
         </message>
         <message>
+            <source>Not This Name</source>
+            <translation>Nicht dieser Name</translation>
+        </message>
+        <message>
             <source>Choose Someone Else</source>
-            <translation>Andere Person auswählen</translation>
+            <translation>Anderen Namen auswählen</translation>
+        </message>
+        <message>
+            <source>Assign to</source>
+            <translation>Zuweisen zu</translation>
         </message>
         <message>
             <source>Assign this face to</source>
@@ -475,8 +551,16 @@
             <translation>Neue Person</translation>
         </message>
         <message>
+            <source>New Name</source>
+            <translation>Neuer Name</translation>
+        </message>
+        <message>
             <source>Person name:</source>
             <translation>Name der Person:</translation>
+        </message>
+        <message>
+            <source>Name:</source>
+            <translation>Name:</translation>
         </message>
         <message>
             <source>Unnamed</source>
@@ -641,6 +725,34 @@
         <message>
             <source>Cannot Merge People</source>
             <translation>Personen können nicht zusammengeführt werden</translation>
+        </message>
+        <message>
+            <source>Merge Failed</source>
+            <translation>Zusammenführen fehlgeschlagen</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. No photos were deleted.</source>
+            <translation>Die Identitäten konnten nicht zusammengeführt werden. Es wurden keine Fotos gelöscht.</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. They may have changed since this view was loaded.</source>
+            <translation>Die Identitäten konnten nicht zusammengeführt werden. Möglicherweise wurden sie seit dem Laden dieser Ansicht geändert.</translation>
+        </message>
+        <message>
+            <source>Recognition Busy</source>
+            <translation>Erkennung ausgelastet</translation>
+        </message>
+        <message>
+            <source>Recognition data is still recovering. Please try again shortly.</source>
+            <translation>Die Erkennungsdaten werden noch wiederhergestellt. Bitte versuchen Sie es in Kürze erneut.</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Pets</source>
+            <translation>Haustiere können nicht zusammengeführt werden</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>Eine Haustieridentität darf nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie stattdessen eine doppelte Erkennung.</translation>
         </message>
         <message>
             <source>Merge Person</source>
@@ -1071,6 +1183,22 @@
             <source>Writing data, please wait...</source>
             <translation>Daten werden geschrieben, bitte warten …</translation>
         </message>
+        <message>
+            <source>The name could not be assigned. Please try again.</source>
+            <translation>Der Name konnte nicht zugewiesen werden. Bitte versuchen Sie es erneut.</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. The identities may have changed.</source>
+            <translation>Der Name konnte nicht zugewiesen werden. Die Identitäten wurden möglicherweise geändert.</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>Eine Haustieridentität kann nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie eine doppelte Erkennung, anstatt sie zusammenzuführen.</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>Eine Haustieridentität darf nicht zwei Erkennungen aus demselben Foto enthalten. Wählen Sie eine andere Identität für diese Erkennung.</translation>
+        </message>
     </context>
     <context>
         <name>PlayerBar</name>
@@ -1349,6 +1477,10 @@
         <message>
             <source>unnamed</source>
             <translation>unbenannt</translation>
+        </message>
+        <message>
+            <source>Pending confirmation</source>
+            <translation>Bestätigung ausstehend</translation>
         </message>
         <message>
             <source>Please enter a name before saving the face.</source>
@@ -1793,6 +1925,25 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
         <message>
             <source>Return to Map</source>
             <translation>Zurück zur Karte</translation>
+        </message>
+    </context>
+    <context>
+        <name>PetCard</name>
+        <message>
+            <source>Unconfirmed Cat</source>
+            <translation>Unbestätigte Katze</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Dog</source>
+            <translation>Unbestätigter Hund</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Pet</source>
+            <translation>Unbestätigtes Haustier</translation>
+        </message>
+        <message>
+            <source>Unconfirmed</source>
+            <translation>Unbestätigt</translation>
         </message>
     </context>
 </TS>

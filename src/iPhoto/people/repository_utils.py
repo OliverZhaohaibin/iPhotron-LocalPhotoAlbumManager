@@ -9,7 +9,7 @@ from typing import Iterable
 
 import numpy as np
 
-from iPhoto.people.records import FaceRecord
+from iPhoto.people.records import FaceRecord, IdentityGroupMember
 
 STABLE_PROFILE_MIN_SAMPLES = 3
 
@@ -65,8 +65,44 @@ def _unique_person_ids(person_ids: Iterable[str]) -> tuple[str, ...]:
     return tuple(unique)
 
 
+def _normalize_group_member(value: object) -> IdentityGroupMember | None:
+    if isinstance(value, IdentityGroupMember):
+        kind = str(value.kind or "").strip()
+        entity_id = str(value.entity_id or "").strip()
+    elif isinstance(value, tuple) and len(value) == 2:
+        kind = str(value[0] or "").strip()
+        entity_id = str(value[1] or "").strip()
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if ":" in text:
+            kind, entity_id = (part.strip() for part in text.split(":", 1))
+        else:
+            kind, entity_id = "person", text
+    if kind not in {"person", "pet"} or not entity_id:
+        return None
+    return IdentityGroupMember(kind=kind, entity_id=entity_id)
+
+
+def _unique_group_members(members: Iterable[object]) -> tuple[IdentityGroupMember, ...]:
+    unique: list[IdentityGroupMember] = []
+    seen: set[tuple[str, str]] = set()
+    for value in members:
+        member = _normalize_group_member(value)
+        if member is None:
+            continue
+        key = (member.kind, member.entity_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(member)
+    return tuple(unique)
+
+
 def _group_member_key(member_person_ids: Iterable[str]) -> str:
-    return "\x1f".join(sorted(_unique_person_ids(member_person_ids)))
+    members = _unique_group_members(member_person_ids)
+    return "\x1f".join(sorted(member.key for member in members))
 
 
 def _group_id_for_member_key(member_key: str) -> str:

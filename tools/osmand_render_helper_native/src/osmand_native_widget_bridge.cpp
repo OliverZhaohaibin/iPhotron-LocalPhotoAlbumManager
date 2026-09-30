@@ -59,6 +59,47 @@ __declspec(dllexport) void* osmand_create_map_widget(
     return widget;
 }
 
+__declspec(dllexport) void* osmand_create_map_widget_deferred(
+    void* parentWidgetPointer,
+    const wchar_t* obfPath,
+    const wchar_t* resourcesRoot,
+    const wchar_t* stylePath,
+    int nightMode)
+{
+    const auto configuration = OsmAndNativeMapWidget::Configuration{
+        QString::fromWCharArray(obfPath ? obfPath : L""),
+        QString::fromWCharArray(resourcesRoot ? resourcesRoot : L""),
+        QString::fromWCharArray(stylePath ? stylePath : L""),
+        nightMode != 0,
+    };
+    return OsmAndNativeMapWidget::createDeferred(
+        configuration,
+        reinterpret_cast<QWidget*>(parentWidgetPointer));
+}
+
+__declspec(dllexport) int osmand_widget_initialize_resources(
+    void* widgetPointer,
+    wchar_t* errorBuffer,
+    int errorBufferCapacity)
+{
+    auto* widget = widgetFromPointer(widgetPointer);
+    if (!widget)
+    {
+        writeErrorMessage(
+            QStringLiteral("Native OsmAnd widget is unavailable"),
+            errorBuffer,
+            errorBufferCapacity);
+        return 0;
+    }
+    QString errorMessage;
+    if (!widget->initializeResources(errorMessage))
+    {
+        writeErrorMessage(errorMessage, errorBuffer, errorBufferCapacity);
+        return 0;
+    }
+    return 1;
+}
+
 __declspec(dllexport) double osmand_widget_get_zoom(void* widgetPointer)
 {
     if (const auto* widget = widgetFromPointer(widgetPointer))
@@ -78,6 +119,13 @@ __declspec(dllexport) double osmand_widget_get_max_zoom(void* widgetPointer)
     if (const auto* widget = widgetFromPointer(widgetPointer))
         return widget->maxZoomLevel();
     return 0.0;
+}
+
+__declspec(dllexport) int osmand_widget_has_presented_frame(void* widgetPointer)
+{
+    if (const auto* widget = widgetFromPointer(widgetPointer))
+        return widget->hasPresentedFrame() ? 1 : 0;
+    return 0;
 }
 
 __declspec(dllexport) void osmand_widget_set_zoom(void* widgetPointer, double zoomLevel)

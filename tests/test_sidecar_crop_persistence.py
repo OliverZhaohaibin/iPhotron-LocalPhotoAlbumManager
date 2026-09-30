@@ -138,3 +138,22 @@ def test_perspective_values_roundtrip(tmp_path) -> None:
     assert vertical_node is not None and pytest.approx(0.3, rel=1e-6) == float(vertical_node.text)
     assert horizontal_node is not None and pytest.approx(-0.2, rel=1e-6) == float(horizontal_node.text)
 
+
+def test_extended_perspective_crop_roundtrips_without_unit_clamp(tmp_path) -> None:
+    asset = tmp_path / "extended-perspective.jpg"
+    asset.write_bytes(b"")
+    adjustments = {
+        "Crop_CX": -0.1,
+        "Crop_CY": 1.2,
+        "Crop_W": 1.3,
+        "Crop_H": 0.7,
+        "Perspective_Vertical": 1.0,
+    }
+
+    sidecar.save_adjustments(asset, adjustments)
+    loaded = sidecar.load_adjustments(asset)
+
+    assert loaded["Crop_CX"] == pytest.approx(-0.1)
+    assert loaded["Crop_CY"] == pytest.approx(1.2)
+    assert loaded["Crop_W"] == pytest.approx(1.3)
+    assert loaded["Crop_H"] == pytest.approx(0.7)

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Type
 
 from PySide6.QtCore import QModelIndex, QPoint, QTimer, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QListView
 
 from ....config import LONG_PRESS_THRESHOLD_MS
-from .gallery_scroll_controller import GalleryScrollController
+from .gallery_scroll_controller import AssetScrollController, GalleryScrollController
 
 _IS_DARWIN = sys.platform == "darwin"
 
@@ -30,10 +30,16 @@ class AssetGrid(QListView):
     viewportStateChanged = Signal(object)
     modelAboutToChange = Signal(object)
     modelChanged = Signal(object)
+    viewportVisibilityChanged = Signal(bool)
 
     _DRAG_CANCEL_THRESHOLD = 6
 
-    def __init__(self, parent=None) -> None:  # type: ignore[override]
+    def __init__(
+        self,
+        parent=None,
+        *,
+        scroll_controller_type: Type[AssetScrollController] = GalleryScrollController,
+    ) -> None:  # type: ignore[override]
         super().__init__(parent)
         self._press_timer = QTimer(self)
         self._press_timer.setSingleShot(True)
@@ -52,7 +58,7 @@ class AssetGrid(QListView):
         self._drop_handler: Optional[Callable[[List[Path]], None]] = None
         self._drop_validator: Optional[Callable[[List[Path]], bool]] = None
         self._preview_enabled = True
-        self._scroll_controller = GalleryScrollController(
+        self._scroll_controller = scroll_controller_type(
             self,
             self._schedule_visible_rows_update,
         )
@@ -109,7 +115,18 @@ class AssetGrid(QListView):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._scroll_controller.resume()
+        self.viewportVisibilityChanged.emit(True)
         QTimer.singleShot(0, self._schedule_visible_rows_update)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._update_timer.stop()
+        self._scroll_controller.suspend()
+        self.viewportVisibilityChanged.emit(False)
+        super().hideEvent(event)
+
+    def schedule_viewport_publish(self) -> None:
+        self._schedule_visible_rows_update()
 
     # ------------------------------------------------------------------
     # Preview configuration
@@ -269,7 +286,7 @@ class AssetGrid(QListView):
         return bool(buttons & Qt.MouseButton.LeftButton)
 
     def _schedule_visible_rows_update(self) -> None:
-        if not self._update_timer.isActive():
+        if self.isVisible() and not self._update_timer.isActive():
             self._update_timer.start()
 
     def _viewport_pos(self, event: QMouseEvent) -> QPoint:
@@ -317,6 +334,8 @@ class AssetGrid(QListView):
         return QPoint(event.x(), event.y())
 
     def _emit_visible_rows(self) -> None:
+        if not self.isVisible():
+            return
         model = self.model()
         if model is None:
             return

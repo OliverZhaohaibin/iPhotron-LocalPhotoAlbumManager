@@ -27,6 +27,10 @@
 
 **💡 Quick Install:** Click the buttons above to download the latest installer directly.
 
+**Latest stable release:** v6.6.8. The feature documentation below describes
+the current development branch. Features listed as Unreleased may not be
+available in the v6.6.8 installers above.
+
 - **Windows:** Run the `.exe` installer directly.
 - **Linux (.deb):** Install with the following command:
 
@@ -46,6 +50,10 @@ chmod +x iPhotron-6.6.8-x86_64.AppImage
 ```bash
 flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak
 ```
+
+The v6.6.8 Flatpak keeps its legacy filename and application identity. Future
+Flatpak bundles use `io.github.oliverzhaohaibin.iPhotron`; see the
+[Flatpak migration guide](docs/misc/BUILD_FLATPAK.md#migration-from-the-v668-legacy-id).
 
 **For developers** — install from source:
 
@@ -112,6 +120,8 @@ Key highlights:
 - 🗺 Optional map view that visualizes GPS metadata across all photos & videos and falls back gracefully when the maps extension is unavailable.
 - 👥 Optional People scanning with face clusters, names, covers, hidden people,
   and multi-person groups.
+- 🐾 Optional Pets scanning with cat/dog detection, identity clusters, names,
+  covers, hidden pets, pins, and People & Pets groups.
 ![Main interface](docs/picture/mainview.png)
 ![Preview interface](docs/picture/preview.png)
 ---
@@ -140,7 +150,7 @@ The extension currently contains:
 Platform maps notes:
 - iPhotron can use both the helper-backed OBF renderer and the native OsmAnd widget when the platform runtime is available.
 - If a sibling `PySide6-OsmAnd-SDK/` checkout exists, Linux and macOS development can prefer its `tools/osmand_render_helper_native/dist-*` widget builds.
-- The native Linux widget currently expects Qt's XCB desktop OpenGL path. When that backend is selected, iPhotron auto-sets `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop`, and `QT_XCB_GL_INTEGRATION=xcb_glx`.
+- The native Linux widget uses the XCB desktop OpenGL path when XCB has already been selected. iPhotron does not force a Wayland session onto XCB; it only supplies `QT_OPENGL=desktop` and `QT_XCB_GL_INTEGRATION=xcb_glx` defaults when `QT_QPA_PLATFORM=xcb` is already set by the user, launcher, or runtime.
 - On macOS, the legacy OpenGL map uses `QOpenGLWindow + createWindowContainer()` to avoid transparent-window `QOpenGLWidget` composition issues; media previews default to the Metal-capable QRhi path unless `IPHOTO_RHI_BACKEND=opengl` is set.
 
 | Without maps extension | With maps extension |
@@ -172,17 +182,32 @@ A "LIVE" badge appears on still photos — click to play the motion video inline
 The sidebar provides an auto-generated **Basic Library**, grouping photos into:
 `All Photos`, `Videos`, `Live Photos`, `Favorites`, and `Recently Deleted`.
 
-### 👥 People, Face Clusters & Groups
+### 👥🐾 People, Pets, Face Clusters & Groups
 The optional People pipeline detects faces, builds face clusters, and presents
 them as People cards. You can name people, merge duplicate clusters, hide or
 show hidden people, and keep chosen covers persistent across rescans.
+
+The independent Pets pipeline detects cats and dogs with YOLOX, creates DINOv2
+embeddings, and presents pet identity cards in the same dashboard. Pets can be
+named, merged, hidden, pinned, assigned covers, and opened as gallery queries.
+People and Pets may participate in the same identity groups while their runtime
+indexes and durable state remain separate.
+
+Strong People/face conflicts normally suppress the duplicate pet detection so
+it does not create another dashboard card, gallery result, detail annotation,
+or overlay. The runtime preserves a clearly larger pet-body detection that
+contains a smaller human face, however, so a legitimate pet being held by a
+person is not discarded. This cross-type filter compares geometry only; People
+and Pets records, models, indexes, and durable state remain independently owned.
 
 Drag people into groups to collect shared photos for multiple people. Group
 cards can use a selected cover, be reordered, and be disbanded when they are not
 pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo
 manager remains usable without installing the AI runtime, and People state is
 kept behind the library session so names, covers, hidden flags, groups, and
-manual faces survive rescans.
+manual faces survive rescans. Pet scanning uses the optional `pets-ai` extra;
+missing pet dependencies or models leave eligible rows pending without blocking
+the rest of the application.
 ![People and groups interface](docs/picture/People%20%26%20Group.png)
 
 ### ⚡ Large-Library Gallery
@@ -227,8 +252,9 @@ preserving original photos untouched.
 ### ℹ️ Floating Info Panel
 Toggle a floating metadata panel with EXIF, camera/lens details, exposure,
 aperture, focal length, dimensions, file size, and capture time. For assets
-with People data, the panel shows detected face avatars and lets you remove a
-face, move it to another person, or create a new person annotation.
+with recognition data, the panel and image overlay show face and pet
+annotations. Face and pet detections can be removed or moved to another/new
+identity through their owning service.
 
 Location tools are built in as well: geotagged assets can show an inline map,
 and assets without a location can use the "Assign a Location" search flow to
@@ -261,9 +287,12 @@ For deeper technical details, see the following docs:
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/architecture.md) | Current vNext library-scoped modular monolith architecture, module boundaries, legacy quarantine policy, data flow, and key design decisions |
+| [Architecture](docs/architecture.md) | Current vNext library-scoped modular monolith architecture, module boundaries, legacy removal policy, data flow, and key design decisions |
 | [Development](docs/development.md) | Dev environment, dependencies, debugging, and the side-project-based maps extension workflow for Windows, Linux, and macOS |
+| [Pets Runtime](docs/misc/PETS_RECOGNITION_RUNTIME.md) | Current Pets models, scan scheduling, persistence, mutation safety, and People & Pets composition contract |
 | [Executable Build](docs/misc/BUILD_EXE.md) | Nuitka packaging, AOT filters, QRhi shader assets, maps extension sync, and platform runtime notes |
+| [AppImage Build](docs/misc/BUILD_APPIMAGE.md) | Canonical Linux standalone-to-AppImage packaging and validation |
+| [Flatpak Build](docs/misc/BUILD_FLATPAK.md) | Canonical x86_64 standalone-wrapper Flatpak bundle workflow |
 | [Security](docs/security.md) | Permissions, encryption, data storage locations, threat model |
 | [Changelog](docs/CHANGELOG.md) | All version release notes and changes |
 
@@ -275,12 +304,14 @@ For deeper technical details, see the following docs:
 |------|----------|
 | **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata; writes GPS metadata for explicit Assign Location actions. |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info. |
-| **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning: face detection (`det_500m.onnx`) and face embeddings (`w600k_mbf.onnx`) from `src/extension/models/buffalo_s/`. |
+| **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning using a writable cache, explicit override, or staged/bundled models. |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optional Pets scanning using the platform user cache, an explicit override, or staged/bundled models. YOLOX can download with integrity checks; the current DINOv2 artifact must be pre-provisioned. |
 
 > Ensure FFmpeg/FFprobe are available in your system `PATH`; install ExifTool if
 > you want assigned GPS coordinates written back into original media files.
-> The AI face runtime is optional; install it with `pip install -e ".[ai-demo]"`
-> for source builds, and keep `extension/models` bundled for offline packaged builds.
+> Recognition runtimes are optional; install them with
+> `pip install -e ".[ai-demo,pets-ai]"` for source builds, and keep
+> `extension/models` bundled for offline packaged builds.
 
 Python dependencies (e.g., `Pillow`, `reverse-geocoder`) are auto-installed via `pyproject.toml`.
 

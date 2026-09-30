@@ -111,8 +111,7 @@ def test_show_information_uses_information_popup(qapp: QApplication) -> None:
 
     Because ``show_information`` blocks via a local event loop, we schedule
     a check-and-close via a single-shot timer.  The popup's properties are
-    captured before it is closed (``WA_DeleteOnClose`` destroys the C++
-    object on close).
+    captured before it is closed.
     """
 
     from PySide6.QtCore import QTimer
@@ -121,12 +120,20 @@ def test_show_information_uses_information_popup(qapp: QApplication) -> None:
     from iPhoto.gui.ui.widgets import dialogs
 
     parent = QWidget()
-    captured: list[dict[str, str]] = []
+    captured: list[dict[str, object]] = []
 
     def _check_and_close() -> None:
         children = parent.findChildren(InformationPopup)
         for child in children:
-            captured.append({"title": child.title(), "message": child.message()})
+            captured.append(
+                {
+                    "title": child.title(),
+                    "message": child.message(),
+                    "delete_on_close": child.testAttribute(
+                        Qt.WidgetAttribute.WA_DeleteOnClose
+                    ),
+                }
+            )
             child.close()
 
     QTimer.singleShot(50, _check_and_close)
@@ -135,6 +142,7 @@ def test_show_information_uses_information_popup(qapp: QApplication) -> None:
     assert len(captured) == 1
     assert captured[0]["title"] == "Test Title"
     assert captured[0]["message"] == "Test message"
+    assert captured[0]["delete_on_close"] is False
     parent.close()
 
 

@@ -97,8 +97,8 @@ class TestNormalisedCropFromMapping:
         assert w == 0.5
         assert h == 0.6
 
-    def test_out_of_range_clamping(self):
-        """Out-of-range values should be clamped."""
+    def test_perspective_extended_values_are_preserved(self):
+        """Valid post-transform crop coordinates may exceed the unit square."""
         values = {
             "Crop_CX": -0.1,
             "Crop_CY": 1.5,
@@ -106,9 +106,9 @@ class TestNormalisedCropFromMapping:
             "Crop_H": -0.5,
         }
         cx, cy, w, h = normalised_crop_from_mapping(values)
-        assert cx == 0.0
-        assert cy == 1.0
-        assert w == 1.0
+        assert cx == -0.1
+        assert cy == 1.5
+        assert w == 2.0
         assert h == 0.0
 
 
@@ -181,6 +181,13 @@ class TestLogicalCropToTexture:
             assert back_to_texture[1] == pytest.approx(original[1], abs=1e-6)
             assert back_to_texture[2] == pytest.approx(original[2], abs=1e-6)
             assert back_to_texture[3] == pytest.approx(original[3], abs=1e-6)
+
+    def test_rotation_round_trip_preserves_extended_perspective_crop(self):
+        original = (-0.15, 1.2, 1.3, 0.7)
+
+        for rotate_steps in range(4):
+            logical = texture_crop_to_logical(original, rotate_steps)
+            assert logical_crop_to_texture(logical, rotate_steps) == pytest.approx(original)
 
 
 class TestLogicalCropFromTexture:
@@ -407,4 +414,3 @@ class TestTextureRectToLogical:
         # Width is unchanged; x origin is mirrored
         assert w_flip == pytest.approx(w_no_flip)
         assert x_flip == pytest.approx(400.0 - x_no_flip - w_no_flip)
-

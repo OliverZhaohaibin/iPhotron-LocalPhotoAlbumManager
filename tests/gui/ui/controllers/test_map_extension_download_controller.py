@@ -165,6 +165,52 @@ def test_start_download_keeps_worker_alive_until_finished(
     owner.close()
 
 
+def test_bundled_archive_install_is_deferred_to_worker(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    del qapp
+    owner = QWidget()
+    archive_path = tmp_path / "extension.tar"
+    archive_path.write_bytes(b"archive")
+    captured_requests = []
+
+    class _FakeWorker(QRunnable):
+        def __init__(self, request) -> None:
+            super().__init__()
+            captured_requests.append(request)
+            self.signals = MapExtensionDownloadSignals()
+
+    context = SimpleNamespace(settings=SimpleNamespace(get=lambda *_args, **_kwargs: True))
+    controller = MapExtensionDownloadController(owner, context, package_root=tmp_path / "maps")
+
+    with patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.has_installed_osmand_extension",
+        return_value=False,
+    ), patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.has_pending_osmand_extension_install",
+        return_value=False,
+    ), patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.bundled_osmand_extension_archive",
+        return_value=archive_path,
+    ), patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.MapExtensionDownloadWorker",
+        _FakeWorker,
+    ), patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+    ) as global_instance:
+        installing = controller.maybe_prompt_on_startup()
+
+    assert installing is True
+    assert captured_requests[0].local_archive_path == archive_path
+    global_instance.return_value.start.assert_called_once()
+    controller._handle_finished()
+    if controller._progress_dialog is not None:
+        controller._progress_dialog.allow_close()
+        controller._progress_dialog.close()
+    owner.close()
+
+
 def test_startup_pending_install_is_recovered_and_verified(
     qapp: QApplication,
     tmp_path: Path,

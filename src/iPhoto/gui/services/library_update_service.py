@@ -10,6 +10,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CH
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from ...bootstrap.library_scan_service import LibraryScanService
+from ...bootstrap.startup_profile import mark
 from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ...errors import IPhotoError
 from ...utils.pathutils import resolve_work_dir
@@ -153,6 +154,7 @@ class LibraryUpdateService(QObject):
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        startup: bool = False,
     ) -> None:
         """Start an asynchronous scan for *root* through the bound session."""
 
@@ -178,9 +180,12 @@ class LibraryUpdateService(QObject):
                     scan_root,
                     include=include,
                     exclude=exclude,
+                    startup=startup,
                 )
                 return
 
+        if startup:
+            mark("startup_metadata_scan.started", root=scan_root)
         self._task_runner.start_scan(
             root=scan_root,
             include=include,

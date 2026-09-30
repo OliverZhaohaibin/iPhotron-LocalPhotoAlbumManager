@@ -28,6 +28,7 @@ from PySide6.QtGui import (
     QWindow,
 )
 from PySide6.QtOpenGL import QOpenGLWindow
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 
 from maps.map_sources import (
@@ -275,6 +276,19 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
         ctypes.c_int,
     ]
     library.osmand_create_map_widget.restype = ctypes.c_void_p
+    deferred_create = getattr(library, "osmand_create_map_widget_deferred", None)
+    initialize_resources = getattr(library, "osmand_widget_initialize_resources", None)
+    if deferred_create is not None and initialize_resources is not None:
+        deferred_create.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+        ]
+        deferred_create.restype = ctypes.c_void_p
+        initialize_resources.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+        initialize_resources.restype = ctypes.c_int
     get_event_target = getattr(library, "osmand_widget_get_event_target", None)
     if get_event_target is not None:
         get_event_target.argtypes = [ctypes.c_void_p]
@@ -286,6 +300,10 @@ def _load_bridge(library_path: Path) -> _BridgeAPI:
     library.osmand_widget_get_min_zoom.restype = ctypes.c_double
     library.osmand_widget_get_max_zoom.argtypes = [ctypes.c_void_p]
     library.osmand_widget_get_max_zoom.restype = ctypes.c_double
+    has_presented_frame = getattr(library, "osmand_widget_has_presented_frame", None)
+    if has_presented_frame is not None:
+        has_presented_frame.argtypes = [ctypes.c_void_p]
+        has_presented_frame.restype = ctypes.c_int
     library.osmand_widget_set_zoom.argtypes = [ctypes.c_void_p, ctypes.c_double]
     library.osmand_widget_set_zoom.restype = None
     library.osmand_widget_reset_view.argtypes = [ctypes.c_void_p]
@@ -362,6 +380,7 @@ class NativeOsmAndWidget(QWidget):
     viewChanged = Signal(float, float, float)
     panned = Signal(QPointF)
     panFinished = Signal()
+    firstFramePresented = Signal()
 
     def __init__(
         self,
@@ -390,15 +409,37 @@ class NativeOsmAndWidget(QWidget):
         self._bridge = _load_bridge(library_path)
         error_buffer = ctypes.create_unicode_buffer(4096)
         parent_pointer = int(shiboken6.getCppPointer(self)[0])
-        native_pointer = self._bridge.library.osmand_create_map_widget(
-            ctypes.c_void_p(parent_pointer),
-            str(self._map_source.data_path),
-            str(self._map_source.resources_root or ""),
-            str(self._map_source.style_path or ""),
-            0,
-            ctypes.cast(error_buffer, ctypes.c_void_p),
-            len(error_buffer),
+        deferred_create = getattr(
+            self._bridge.library,
+            "osmand_create_map_widget_deferred",
+            None,
         )
+        initialize_resources = getattr(
+            self._bridge.library,
+            "osmand_widget_initialize_resources",
+            None,
+        )
+        self._deferred_resources_pending = bool(
+            deferred_create is not None and initialize_resources is not None
+        )
+        if self._deferred_resources_pending:
+            native_pointer = deferred_create(
+                ctypes.c_void_p(parent_pointer),
+                str(self._map_source.data_path),
+                str(self._map_source.resources_root or ""),
+                str(self._map_source.style_path or ""),
+                0,
+            )
+        else:
+            native_pointer = self._bridge.library.osmand_create_map_widget(
+                ctypes.c_void_p(parent_pointer),
+                str(self._map_source.data_path),
+                str(self._map_source.resources_root or ""),
+                str(self._map_source.style_path or ""),
+                0,
+                ctypes.cast(error_buffer, ctypes.c_void_p),
+                len(error_buffer),
+            )
         if not native_pointer:
             message = error_buffer.value or "Failed to create the native OsmAnd widget"
             print(f"[NativeOsmAndWidget] osmand_create_map_widget failed: {message}", file=sys.stderr)
@@ -410,7 +451,7 @@ class NativeOsmAndWidget(QWidget):
         )
 
         self._native_pointer = ctypes.c_void_p(native_pointer)
-        self._native_widget = shiboken6.wrapInstance(int(native_pointer), QWidget)
+        self._native_widget = shiboken6.wrapInstance(int(native_pointer), QOpenGLWidget)
         self._native_widget.setObjectName("NativeOsmAndMapWidget")
         self._native_event_target = self._native_widget
         get_event_target = getattr(self._bridge.library, "osmand_widget_get_event_target", None)
@@ -444,6 +485,10 @@ class NativeOsmAndWidget(QWidget):
         self._drag_cursor = DragCursorManager()
         self._overlay_window: _NativeMarkerOverlayWindow | None = None
         self._overlay_container: QWidget | None = None
+        self._first_frame_presented = False
+        frame_swapped = getattr(self._native_widget, "frameSwapped", None)
+        if frame_swapped is not None and not self._deferred_resources_pending:
+            frame_swapped.connect(self._emit_first_frame_presented)
 
         min_zoom = float(self._bridge.library.osmand_widget_get_min_zoom(self._native_pointer)) or 2.0
         max_zoom = float(self._bridge.library.osmand_widget_get_max_zoom(self._native_pointer)) or 19.0
@@ -467,6 +512,25 @@ class NativeOsmAndWidget(QWidget):
         self._deferred_view_sync_timer.timeout.connect(self._emit_view_change)
         self._sync_native_widget_geometry()
         self._emit_view_change()
+
+    def start_deferred_content(self) -> None:
+        if self._is_shutdown() or not self._deferred_resources_pending:
+            return
+        error_buffer = ctypes.create_unicode_buffer(4096)
+        initialize_resources = self._bridge.library.osmand_widget_initialize_resources
+        ready = initialize_resources(
+            self._native_pointer,
+            ctypes.cast(error_buffer, ctypes.c_void_p),
+            len(error_buffer),
+        )
+        if not ready:
+            message = error_buffer.value or "Failed to initialise native OsmAnd resources"
+            raise TileLoadingError(message)
+        self._deferred_resources_pending = False
+        self._native_widget.update()
+
+    def prepare_surface(self) -> None:
+        """The native QOpenGLWidget shell is attached during initialisation."""
 
     @property
     def zoom(self) -> float:
@@ -664,8 +728,6 @@ class NativeOsmAndWidget(QWidget):
         super().showEvent(event)
         if self._is_shutdown():
             return
-        self.setUpdatesEnabled(True)
-        self._native_widget.setUpdatesEnabled(True)
         if not self._state_timer.isActive():
             self._state_timer.start()
         self._sync_native_widget_geometry()
@@ -680,9 +742,6 @@ class NativeOsmAndWidget(QWidget):
                 self._deferred_view_sync_timer.stop()
             self._reset_drag_cursor()
             self._bridge_dragging = False
-            self._native_widget.setUpdatesEnabled(False)
-            if self._overlay_container is not None:
-                self._overlay_container.hide()
         super().hideEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
@@ -696,9 +755,22 @@ class NativeOsmAndWidget(QWidget):
         self._last_view_state = (center_x, center_y, zoom)
         self.viewChanged.emit(center_x, center_y, zoom)
 
+    def _emit_first_frame_presented(self) -> None:
+        if self._first_frame_presented:
+            return
+        self._first_frame_presented = True
+        self.firstFramePresented.emit()
+
     def _poll_view_state(self) -> None:
         if self._is_shutdown():
             return
+        has_presented_frame = getattr(
+            self._bridge.library,
+            "osmand_widget_has_presented_frame",
+            None,
+        )
+        if has_presented_frame is not None and has_presented_frame(self._native_pointer):
+            self._emit_first_frame_presented()
         current_state = self._read_view_state()
         if self._last_view_state is None:
             self._last_view_state = current_state

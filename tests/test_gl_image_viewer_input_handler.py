@@ -29,6 +29,8 @@ class TestInputEventHandler:
         self.on_fullscreen_exit = Mock()
         self.on_fullscreen_toggle = Mock()
         self.on_cancel_crop_lock = Mock()
+        self.transform_controller.handle_mouse_move.return_value = False
+        self.transform_controller.handle_wheel.return_value = False
 
         self.handler = InputEventHandler(
             crop_controller=self.crop_controller,
@@ -62,7 +64,7 @@ class TestInputEventHandler:
         result = self.handler.handle_mouse_press(event)
         
         assert result is False
-        self.on_cancel_crop_lock.assert_called_once()
+        self.on_cancel_crop_lock.assert_not_called()
         self.transform_controller.handle_mouse_press.assert_called_once_with(event)
 
     def test_replay_mode_triggers_callback(self):
@@ -99,6 +101,16 @@ class TestInputEventHandler:
         assert result is False
         self.transform_controller.handle_mouse_move.assert_called_once_with(event)
 
+    def test_mouse_move_cancels_crop_lock_only_after_pan_changes(self):
+        """A real drag, rather than its preceding press, should unlock framing."""
+        self.crop_controller.is_active.return_value = False
+        self.transform_controller.handle_mouse_move.return_value = True
+        event = Mock()
+
+        self.handler.handle_mouse_move(event)
+
+        self.on_cancel_crop_lock.assert_called_once_with()
+
     def test_wheel_routes_to_crop_when_active(self):
         """Wheel events should route to crop controller when active."""
         self.crop_controller.is_active.return_value = True
@@ -109,14 +121,25 @@ class TestInputEventHandler:
         self.crop_controller.handle_wheel.assert_called_once_with(event)
         self.transform_controller.handle_wheel.assert_not_called()
 
-    def test_wheel_cancels_crop_lock_when_inactive(self):
-        """Wheel events should cancel crop lock when crop inactive."""
+    def test_zoom_wheel_cancels_crop_lock_when_transform_changes(self):
+        """A wheel event should unlock framing only when it changes zoom."""
         self.crop_controller.is_active.return_value = False
+        self.transform_controller.handle_wheel.return_value = True
         
         event = Mock()
         self.handler.handle_wheel(event)
         
         self.on_cancel_crop_lock.assert_called_once()
+        self.transform_controller.handle_wheel.assert_called_once_with(event)
+
+    def test_navigation_wheel_preserves_crop_lock(self):
+        """Item navigation must not turn viewport framing into manual state."""
+        self.crop_controller.is_active.return_value = False
+        event = Mock()
+
+        self.handler.handle_wheel(event)
+
+        self.on_cancel_crop_lock.assert_not_called()
         self.transform_controller.handle_wheel.assert_called_once_with(event)
 
     def test_double_click_with_fullscreen_window(self):
@@ -131,6 +154,22 @@ class TestInputEventHandler:
         
         assert result is True
         self.on_fullscreen_exit.assert_called_once()
+
+    def test_fullscreen_double_click_sequence_preserves_crop_lock(self):
+        """The press preceding Qt's double-click event must not unlock framing."""
+        self.crop_controller.is_active.return_value = False
+        event = Mock()
+        event.button.return_value = Qt.LeftButton
+        window = Mock()
+        window.isFullScreen.return_value = True
+
+        self.handler.handle_mouse_press(event)
+        self.handler.handle_mouse_release(event)
+        result = self.handler.handle_double_click_with_window(event, window)
+
+        assert result is True
+        self.on_cancel_crop_lock.assert_not_called()
+        self.on_fullscreen_exit.assert_called_once_with()
 
     def test_double_click_with_normal_window(self):
         """Double-click should toggle fullscreen when window is normal."""

@@ -110,3 +110,28 @@ def test_bind_library_dialog_skips_initial_scan_when_scope_complete(
 
     scan_service.is_scan_scope_complete.assert_called_once_with(selected_root)
     context.facade.scan_root_async.assert_not_called()
+
+
+def test_bind_library_dialog_refuses_switch_during_active_edit(monkeypatch) -> None:
+    context = _Context(Path("/old"))
+    select_directory = Mock()
+    show_error = Mock()
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.controllers.dialog_controller.dialogs.select_directory",
+        select_directory,
+    )
+    monkeypatch.setattr(
+        "iPhoto.gui.ui.controllers.dialog_controller.dialogs.show_error",
+        show_error,
+    )
+    controller = DialogController(
+        object(),
+        context,
+        Mock(),
+        library_rebind_preflight=lambda: False,
+    )
+
+    assert controller.bind_library_dialog() is None
+    select_directory.assert_not_called()
+    assert context.open_calls == []
+    show_error.assert_called_once()

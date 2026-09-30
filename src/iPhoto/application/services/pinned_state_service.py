@@ -22,6 +22,9 @@ class PinnedPeopleEntityResolverPort(Protocol):
     def has_group(self, group_id: str) -> bool:
         """Return whether a People group exists."""
 
+    def has_pet(self, pet_id: str) -> bool:
+        """Return whether a pet cluster exists."""
+
 
 @dataclass(frozen=True, slots=True)
 class PinnedSidebarItem:
@@ -59,7 +62,7 @@ class PinnedSidebarStateService:
             item_id = str(entry.get("item_id") or "").strip()
             label = str(entry.get("label") or "").strip()
             custom_label = bool(entry.get("custom_label", False))
-            if kind not in {"album", "person", "group"} or not item_id or not label:
+            if kind not in {"album", "person", "pet", "group"} or not item_id or not label:
                 continue
             resolved.append(
                 PinnedSidebarItem(
@@ -101,6 +104,20 @@ class PinnedSidebarStateService:
         return self._write_item(
             PinnedSidebarItem(
                 kind="person",
+                item_id=normalized_id,
+                label=label.strip(),
+                custom_label=False,
+            ),
+            library_root=library_root,
+        )
+
+    def pin_pet(self, pet_id: str, label: str, *, library_root: Path | None) -> bool:
+        normalized_id = self._normalize_item_id("pet", pet_id)
+        if normalized_id is None:
+            return False
+        return self._write_item(
+            PinnedSidebarItem(
+                kind="pet",
                 item_id=normalized_id,
                 label=label.strip(),
                 custom_label=False,
@@ -261,8 +278,10 @@ class PinnedSidebarStateService:
         library_root: Path | None,
         *,
         person_ids: tuple[str, ...] = (),
+        pet_ids: tuple[str, ...] = (),
         group_ids: tuple[str, ...] = (),
         person_redirects: dict[str, str] | None = None,
+        pet_redirects: dict[str, str] | None = None,
         group_redirects: dict[str, str | None] | None = None,
     ) -> bool:
         library_key = self._library_key(library_root)
@@ -274,17 +293,25 @@ class PinnedSidebarStateService:
             for source, target in (person_redirects or {}).items()
             if str(source).strip() and str(target).strip()
         }
+        pet_redirect_map = {
+            str(source).strip(): str(target).strip()
+            for source, target in (pet_redirects or {}).items()
+            if str(source).strip() and str(target).strip()
+        }
         group_redirect_map = {
             str(source).strip(): (str(target).strip() if target is not None else None)
             for source, target in (group_redirects or {}).items()
             if str(source).strip()
         }
         target_person_ids = tuple(dict.fromkeys(person_id for person_id in person_ids if person_id))
+        target_pet_ids = tuple(dict.fromkeys(pet_id for pet_id in pet_ids if pet_id))
         target_group_ids = tuple(dict.fromkeys(group_id for group_id in group_ids if group_id))
         if (
             not target_person_ids
+            and not target_pet_ids
             and not target_group_ids
             and not person_redirect_map
+            and not pet_redirect_map
             and not group_redirect_map
         ):
             return False
@@ -301,6 +328,9 @@ class PinnedSidebarStateService:
             next_entry = dict(entry)
             if entry_kind == "person" and entry_item_id in person_redirect_map:
                 next_entry["item_id"] = person_redirect_map[entry_item_id]
+                updated = True
+            elif entry_kind == "pet" and entry_item_id in pet_redirect_map:
+                next_entry["item_id"] = pet_redirect_map[entry_item_id]
                 updated = True
             elif entry_kind == "group" and entry_item_id in group_redirect_map:
                 redirect_target = group_redirect_map[entry_item_id]
@@ -324,7 +354,7 @@ class PinnedSidebarStateService:
             )
             for entry in entries
             if isinstance(entry, dict)
-            and str(entry.get("kind") or "").strip() in {"person", "group"}
+            and str(entry.get("kind") or "").strip() in {"person", "pet", "group"}
             and str(entry.get("item_id") or "").strip()
             and str(entry.get("label") or "").strip()
         ]
@@ -338,7 +368,12 @@ class PinnedSidebarStateService:
             for item in pinned_items
             if item.kind == "group" and item.item_id in target_group_ids
         }
-        if not pinned_person_ids and not pinned_group_ids:
+        pinned_pet_ids = {
+            item.item_id
+            for item in pinned_items
+            if item.kind == "pet" and item.item_id in target_pet_ids
+        }
+        if not pinned_person_ids and not pinned_pet_ids and not pinned_group_ids:
             if updated:
                 self._persist(payload)
                 return True
@@ -356,7 +391,10 @@ class PinnedSidebarStateService:
         stale_group_ids = [
             group_id for group_id in pinned_group_ids if not resolver.has_group(group_id)
         ]
-        if not stale_person_ids and not stale_group_ids:
+        stale_pet_ids = [
+            pet_id for pet_id in pinned_pet_ids if not resolver.has_pet(pet_id)
+        ]
+        if not stale_person_ids and not stale_pet_ids and not stale_group_ids:
             if updated:
                 self._persist(payload)
                 return True
@@ -371,6 +409,10 @@ class PinnedSidebarStateService:
                     (
                         str(entry.get("kind") or "").strip() == "person"
                         and str(entry.get("item_id") or "").strip() in stale_person_ids
+                    )
+                    or (
+                        str(entry.get("kind") or "").strip() == "pet"
+                        and str(entry.get("item_id") or "").strip() in stale_pet_ids
                     )
                     or (
                         str(entry.get("kind") or "").strip() == "group"

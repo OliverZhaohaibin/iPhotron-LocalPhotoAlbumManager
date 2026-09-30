@@ -7,7 +7,7 @@ implementation entry point.
 Current architecture source of truth:
 
 - `docs/architecture.md`
-- `AGENT.md`
+- `AGENTS.md`
 - focused guardrails under `docs/misc/`
 
 Archives:

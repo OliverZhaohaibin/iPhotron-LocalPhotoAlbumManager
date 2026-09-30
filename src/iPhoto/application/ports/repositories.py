@@ -159,8 +159,12 @@ class AssetRepositoryPort(Protocol):
         micro_thumbnail: bytes | None = None,
         thumb_cache_key: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Update thumbnail readiness for one row."""
+        expected_revision: str | None = None,
+    ) -> bool:
+        """Conditionally publish thumbnail readiness for one row."""
+
+    def mark_thumbnail_stale(self, rel: str, *, desired_revision: str) -> bool:
+        """Select a desired thumbnail revision and suppress the old micro layer."""
 
     def create_scan_job(
         self,

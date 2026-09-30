@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QRhiWidget
 
 _LOGGER = logging.getLogger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-_VALID_BACKENDS = {"auto", "metal", "opengl"}
+_VALID_BACKENDS = {"auto", "metal", "opengl", "d3d11"}
 
 
 def _normalised_backend_override() -> str:
@@ -18,7 +18,7 @@ def _normalised_backend_override() -> str:
     if raw_value in _VALID_BACKENDS:
         return raw_value
     _LOGGER.warning(
-        "Ignoring unsupported IPHOTO_RHI_BACKEND=%r; expected auto, metal, or opengl",
+        "Ignoring unsupported IPHOTO_RHI_BACKEND=%r; expected auto, metal, opengl, or d3d11",
         raw_value,
     )
     return "auto"
@@ -34,21 +34,34 @@ def select_qrhi_widget_api() -> "QRhiWidget.Api":
     override = _normalised_backend_override()
     opengl_api = _qt_api("OpenGL")
     metal_api = _qt_api("Metal")
-    if opengl_api is None:
-        raise RuntimeError("This Qt build does not expose the QRhi OpenGL backend")
+    d3d11_api = _qt_api("Direct3D11")
+
+    def require_opengl() -> "QRhiWidget.Api":
+        if opengl_api is None:
+            raise RuntimeError("This Qt build does not expose the QRhi OpenGL backend")
+        return opengl_api
 
     if override == "opengl":
-        return opengl_api
+        return require_opengl()
 
     if override == "metal":
         if metal_api is not None:
             return metal_api
         _LOGGER.warning("IPHOTO_RHI_BACKEND=metal requested but this Qt build has no Metal QRhi backend")
-        return opengl_api
+        return require_opengl()
+
+    if override == "d3d11":
+        if sys.platform == "win32" and d3d11_api is not None:
+            return d3d11_api
+        _LOGGER.warning(
+            "IPHOTO_RHI_BACKEND=d3d11 requested outside a compatible Windows Qt build; "
+            "falling back to OpenGL"
+        )
+        return require_opengl()
 
     if sys.platform == "darwin" and metal_api is not None:
         return metal_api
-    return opengl_api
+    return require_opengl()
 
 
 def selected_rhi_backend_name() -> str:

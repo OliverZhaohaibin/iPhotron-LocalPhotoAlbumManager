@@ -13,11 +13,14 @@ and the offline maps extension together. The Location view's native Linux maps
 runtime depends on the helper binary plus the shared libraries under
 `maps/tiles/extension/bin/`.
 
-Builds that ship the People page with face scanning enabled must also preserve
-the packaged AI runtime from the standalone bundle: `insightface`,
-`onnxruntime`, and the shared `extension/models` model cache. These are added at
-the Nuitka stage described in [`BUILD_EXE.md`](BUILD_EXE.md); the `.deb` stage
-must not strip them from `/opt/iPhotron/`.
+Builds that ship People/Pets recognition must also preserve the selected AI
+runtimes from the standalone bundle. People needs `insightface` and
+`onnxruntime`; Pets needs `onnxruntime`, `torch`, `torchvision`, `usearch`, and
+`certifi`. Offline builds also retain any explicitly staged
+`extension/models` artifacts.
+These are added at the Nuitka stage described in
+[`BUILD_EXE.md`](BUILD_EXE.md); the `.deb` stage must not strip them from
+`/opt/iPhotron/`.
 
 ## Prerequisites
 
@@ -36,7 +39,7 @@ iPhotron_VERSION_amd64/
 │   └── control
 ├── opt/
 │   └── iPhotron/                 ← standalone app bundle copied here
-│       ├── iPhotron             ← main executable (name may vary by build)
+│       ├── entrypoint.bin       ← default Linux Nuitka executable
 │       └── maps/
 │           └── tiles/
 │               └── extension/
@@ -56,12 +59,22 @@ iPhotron_VERSION_amd64/
 
 ## The `control` File
 
-The `DEBIAN/control` file contains the package metadata. Create it with content
-like the following:
+Read the release version from `pyproject.toml` once and use the expanded value
+for both the staging directory and package metadata:
+
+```bash
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+PKG_ROOT="iPhotron_${VERSION}_amd64"
+```
+
+The `DEBIAN/control` file contains the package metadata. Create it with the
+expanded value of `VERSION` rather than a hard-coded release number. The
+`${VERSION}` marker below means the value printed by the command above; do not
+write the marker literally into the final control file.
 
 ```
 Package: iPhotron
-Version: 5.00
+Version: ${VERSION}
 Section: graphics
 Priority: optional
 Architecture: amd64
@@ -77,21 +90,33 @@ Description: Folder-native local photo album manager
 > | Field | Value | Notes |
 > |-------|-------|-------|
 > | `Package` | `iPhotron` | Binary package name |
-> | `Version` | `5.00` | Upstream version; update to match your release |
+> | `Version` | `${VERSION}` | Exact upstream version read from `pyproject.toml` |
 > | `Architecture` | `amd64` | Target CPU architecture (x86-64) |
 > | `Maintainer` | `OliverZhao` | Name (and optionally email) of the package maintainer |
 > | `Description` | short + long | First line is the synopsis; indented lines form the long description |
 
 ## Build Steps
 
-1. **Prepare the staging tree** — copy your compiled iPhotron binary into the correct location inside the staging directory:
+1. **Prepare the staging tree** — copy the maintained Linux standalone into the correct location inside the staging directory:
 
    ```bash
-   PKG_ROOT=iPhotron_5.00_amd64
+   VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+   PKG_ROOT="iPhotron_${VERSION}_amd64"
    APP_ROOT="$PKG_ROOT/opt/iPhotron"
    BIN_ROOT="$PKG_ROOT/usr/local/bin"
-   APP_DIST=dist/YOUR_STANDALONE_DIR
-   APP_EXECUTABLE=YOUR_EXECUTABLE_NAME
+   APP_DIST=dist/entrypoint.dist
+   APP_EXECUTABLE=""
+
+   for candidate in entrypoint.bin entrypoint; do
+     if [ -x "$APP_DIST/$candidate" ]; then
+       APP_EXECUTABLE="$candidate"
+       break
+     fi
+   done
+   test -n "$APP_EXECUTABLE" || {
+     echo "entrypoint.bin/entrypoint not found in $APP_DIST" >&2
+     exit 2
+   }
 
    mkdir -p "$PKG_ROOT/DEBIAN" "$APP_ROOT" "$BIN_ROOT"
    cp -a "$APP_DIST/." "$APP_ROOT/"
@@ -99,8 +124,8 @@ Description: Folder-native local photo album manager
    chmod 755 "$BIN_ROOT/iPhotron"
    ```
 
-   Replace `YOUR_STANDALONE_DIR` and `YOUR_EXECUTABLE_NAME` with the actual
-   Nuitka output names produced by your Linux build.
+   `scripts/build_nuitka_fast.sh` produces `dist/entrypoint.dist`; the loop
+   accepts the two executable names used by supported Nuitka versions.
 
    Before continuing, verify that the maps extension is still present inside
    the staged app bundle:
@@ -118,12 +143,14 @@ Description: Folder-native local photo album manager
    - `maps/tiles/extension/bin/libOsmAndCoreTools_shared.so`
    - `maps/tiles/extension/search/geonames.sqlite3`
 
-   If this release includes offline-ready People scanning, also verify the face
-   runtime payload from the Nuitka bundle:
+   If this release includes offline-ready People/Pets scanning, also verify the
+   recognition runtime payload from the Nuitka bundle:
 
    ```bash
    find "$APP_ROOT" -path '*insightface*' -o -path '*onnxruntime*'
    find "$APP_ROOT/extension/models" -name 'det_500m.onnx' -o -name 'w600k_mbf.onnx'
+   find "$APP_ROOT" -path '*torch*' -o -path '*torchvision*' -o -path '*usearch*'
+   find "$APP_ROOT/extension/models/pets" -name 'yolox_nano_coco.onnx' -o -name 'dinov2_vits14.pt'
    ```
 
 2. **Create the `control` file** — save the content from the section above to `"$PKG_ROOT/DEBIAN/control"` and ensure it is not world-writable:
@@ -146,14 +173,14 @@ Description: Folder-native local photo album manager
    dpkg-deb --info "${PKG_ROOT}.deb"
    dpkg-deb --contents "${PKG_ROOT}.deb"
    dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'maps/tiles/extension'
-   # If this build ships offline-ready People scanning:
+   # If this build ships offline-ready People/Pets scanning:
    dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'extension/models'
    ```
 
    After installing on a clean test machine, open a small image library and
-   verify that the People page can create face clusters. For a fuller smoke
-   test, name a person, set a cover, create a group, restart iPhotron, and
-   confirm those user decisions persist.
+   verify that the People & Pets page can create each enabled cluster type. For
+   a fuller smoke test, name an identity, set a cover, create a group, restart
+   iPhotron, and confirm those user decisions persist.
 
 ## Installation
 
@@ -188,5 +215,6 @@ sudo apt remove iPhotron
 | Binary not found after install | Wrong install path in staging tree, or launcher points to the wrong standalone executable | Ensure the launcher under `usr/local/bin/` points to the executable copied into `/opt/iPhotron/` |
 | Location view falls back unexpectedly after install | `maps/tiles/extension/` was not included in the package | Re-stage the standalone bundle and verify the `.deb` contents include `World_basemap_2.obf`, resources, and Linux map binaries |
 | Native maps fail with GLX/XCB startup errors | The runtime was installed correctly, but the desktop session lacks XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
-| People scan is unavailable in the installed app | The standalone build was produced without the optional face runtime | Rebuild the standalone app with `insightface`, `onnxruntime`, and `src/extension/models` included before staging the `.deb` |
+| People scan is unavailable in the installed app | The standalone build was produced without the optional face runtime or offline model staging | Rebuild with `insightface` and `onnxruntime`; if offline People support is promised, explicitly stage `src/extension/models` before building the standalone |
 | People scan starts but never creates clusters | The model cache or an InsightFace submodel/dependency is missing from `/opt/iPhotron/` | Verify `extension/models`, exclude unused `albumentations`/`pydantic` packages at the Nuitka stage, and keep InsightFace limited to detection and recognition |
+| Pets scan is unavailable in the installed app | The standalone build omitted `pets-ai` packages or `extension/models/pets` | Rebuild the standalone app with `onnxruntime`, `torch`, `torchvision`, `usearch`, `certifi`, and both Pets model files before staging the `.deb` |

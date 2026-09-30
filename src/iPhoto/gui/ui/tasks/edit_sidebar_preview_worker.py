@@ -37,7 +37,12 @@ class EditSidebarPreviewSignals(QObject):
         super().__init__(parent)
 
 
-def build_edit_sidebar_preview(source_image: QImage, target_height: int) -> EditSidebarPreviewResult:
+def build_edit_sidebar_preview(
+    source_image: QImage,
+    target_height: int,
+    *,
+    color_stats: ColorStats | None = None,
+) -> EditSidebarPreviewResult:
     """Build a sidebar preview synchronously from *source_image*."""
 
     if source_image.isNull():
@@ -52,7 +57,7 @@ def build_edit_sidebar_preview(source_image: QImage, target_height: int) -> Edit
     else:
         preview = scale_qimage_to_height_for_worker(source_image, normalized_target_height)
 
-    stats = compute_color_statistics(preview)
+    stats = color_stats or compute_color_statistics(preview)
     return EditSidebarPreviewResult(preview, stats)
 
 
@@ -65,6 +70,7 @@ class EditSidebarPreviewWorker(QRunnable):
         *,
         generation: int,
         target_height: int,
+        color_stats: ColorStats | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -76,6 +82,7 @@ class EditSidebarPreviewWorker(QRunnable):
         self._generation = int(generation)
         requested_height = int(target_height)
         self._target_height = -1 if requested_height < 0 else max(64, requested_height)
+        self._color_stats = color_stats
         self.signals = EditSidebarPreviewSignals()
 
     # ------------------------------------------------------------------
@@ -88,7 +95,11 @@ class EditSidebarPreviewWorker(QRunnable):
             return
 
         try:
-            result = build_edit_sidebar_preview(self._source_image, self._target_height)
+            result = build_edit_sidebar_preview(
+                self._source_image,
+                self._target_height,
+                color_stats=self._color_stats,
+            )
             self.signals.ready.emit(result, self._generation)
         except Exception as exc:  # pragma: no cover - defensive logging path
             _LOGGER.exception("Failed to prepare edit sidebar preview")

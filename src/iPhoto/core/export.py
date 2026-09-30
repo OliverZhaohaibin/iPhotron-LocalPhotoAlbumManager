@@ -10,7 +10,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtGui import QImage, QTransform
+from PySide6.QtGui import QImage
 
 from ..application.ports import EditServicePort
 from ..errors import ExternalToolError
@@ -83,46 +83,10 @@ def render_image(path: Path, *, edit_service: EditServicePort | None = None) -> 
     # 3. Apply Filters
     filtered_image = apply_adjustments(image, resolved_adjustments)
 
-    # 4. Apply Geometry
-    cx = _clamp(float(raw_adjustments.get("Crop_CX", 0.5)))
-    cy = _clamp(float(raw_adjustments.get("Crop_CY", 0.5)))
-    w = _clamp(float(raw_adjustments.get("Crop_W", 1.0)))
-    h = _clamp(float(raw_adjustments.get("Crop_H", 1.0)))
-
-    # Constrain crop to image bounds
-    half_w = w * 0.5
-    half_h = h * 0.5
-    cx = max(half_w, min(1.0 - half_w, cx))
-    cy = max(half_h, min(1.0 - half_h, cy))
-
-    img_w = filtered_image.width()
-    img_h = filtered_image.height()
-
-    rect_w = int(round(w * img_w))
-    rect_h = int(round(h * img_h))
-    rect_left = int(round((cx - half_w) * img_w))
-    rect_top = int(round((cy - half_h) * img_h))
-
-    # Clamp pixels
-    rect_left = max(0, rect_left)
-    rect_top = max(0, rect_top)
-    rect_w = min(rect_w, img_w - rect_left)
-    rect_h = min(rect_h, img_h - rect_top)
-
-    if rect_w > 0 and rect_h > 0:
-        filtered_image = filtered_image.copy(rect_left, rect_top, rect_w, rect_h)
-
-    # Flip Horizontal
-    if bool(raw_adjustments.get("Crop_FlipH", False)):
-        filtered_image = filtered_image.mirrored(True, False)
-
-    # Rotate 90
-    rotate_steps = int(float(raw_adjustments.get("Crop_Rotate90", 0.0))) % 4
-    if rotate_steps > 0:
-        transform = QTransform().rotate(rotate_steps * 90)
-        filtered_image = filtered_image.transformed(transform)
-
-    return filtered_image
+    # Apply the same transform-then-crop pipeline used by previews and video
+    # export.  In particular, this preserves crop coordinates that lie outside
+    # the original unit square but inside the perspective-corrected image.
+    return apply_geometry_and_crop(filtered_image, raw_adjustments)
 
 
 def render_video(
@@ -235,11 +199,6 @@ def render_video(
     if stderr:
         _LOGGER.debug("ffmpeg video export stderr for %s: %s", path, stderr)
     return True
-
-
-def _clamp(val: float) -> float:
-    return max(0.0, min(1.0, val))
-
 
 def get_unique_destination(destination: Path) -> Path:
     """Return *destination* or a variant with a counter if it exists."""

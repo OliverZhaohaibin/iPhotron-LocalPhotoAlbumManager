@@ -16,7 +16,7 @@ This note protects Recently Deleted, restore metadata, and durable user state.
 - Restore must keep Live Photo pairs together only when the restore planner
   identifies the pair. Do not add same-stem motion files for non-Live assets.
 - Scan merge and rescan must not implicitly clear durable user decisions such as
-  favorites, hidden/trash state, pinned/order, manual metadata, People state, or
+  favorites, hidden/trash state, pinned/order, manual metadata, People/Pets state, or
   edit sidecars.
 
 ## Focused Checks

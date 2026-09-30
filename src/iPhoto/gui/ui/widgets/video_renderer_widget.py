@@ -21,6 +21,7 @@ import logging
 import os
 import struct
 import sys
+import weakref
 from pathlib import Path
 from typing import Optional
 
@@ -48,16 +49,31 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QRhiWidget, QWidget
 
-try:
-    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat, QVideoSink
-except (ModuleNotFoundError, ImportError):  # pragma: no cover
-    QVideoFrame = None  # type: ignore[assignment, misc]
-    QVideoFrameFormat = None  # type: ignore[assignment, misc]
-    QVideoSink = None  # type: ignore[assignment, misc]
+from iPhoto.gui.detail_profile import emit_detail_event
+
+QVideoFrame = None  # type: ignore[assignment, misc]
+QVideoFrameFormat = None  # type: ignore[assignment, misc]
 
 from .render_backend import qrhi_api_name, select_qrhi_widget_api
 
 _log = logging.getLogger(__name__)
+
+
+def _load_video_frame_types() -> None:
+    """Load QtMultimedia frame types only when playback begins."""
+
+    global QVideoFrame, QVideoFrameFormat
+    if QVideoFrame is not None and QVideoFrameFormat is not None:
+        return
+    try:
+        from PySide6.QtMultimedia import (
+            QVideoFrame as _QVideoFrame,
+            QVideoFrameFormat as _QVideoFrameFormat,
+        )
+    except (ModuleNotFoundError, ImportError):  # pragma: no cover
+        return
+    QVideoFrame = _QVideoFrame
+    QVideoFrameFormat = _QVideoFrameFormat
 
 # Shader .qsb files live next to this module.
 _SHADER_DIR = Path(__file__).resolve().parent
@@ -214,6 +230,7 @@ def _resolve_frame_rotation_cw(
 def _classify_frame_format(fmt: "QVideoFrameFormat") -> tuple[int, int, int, int]:
     """Return (format, colorspace, transfer, range) shader enum values for *fmt*."""
 
+    _load_video_frame_types()
     if QVideoFrameFormat is None:
         return _FMT_RGBA, _CS_BT709, _TF_SDR, _RANGE_LIMITED
 
@@ -266,11 +283,13 @@ class VideoRendererWidget(QRhiWidget):
     nativeSizeChanged(QSizeF)
         Emitted when the decoded video resolution changes.
     firstFrameReady()
-        Emitted once after the first opaque frame has been rendered.
+        Emitted after the first opaque frame has been submitted for composition.
     """
 
     nativeSizeChanged = Signal(QSizeF)
     firstFrameReady = Signal()
+    videoFramePresented = Signal(int, int)
+    renderResourcesInvalidated = Signal()
     zoomChanged = Signal(float)
 
     _ZOOM_MIN = 0.1
@@ -301,7 +320,15 @@ class VideoRendererWidget(QRhiWidget):
         self._frame_dirty = False
         self._native_size = QSizeF()
         self._first_render_done = False
+        self._first_render_submission_pending = False
         self._has_frame = False
+        self._frame_presentation_pending = False
+        self._frame_content_generation = 0
+        self._frame_content_serial = 0
+        self._frame_content_revision = 0
+        self._rendered_content_identity: tuple[int, int, int] | None = None
+        self._last_composed_content_identity: tuple[int, int, int] | None = None
+        self._presentation_suppressed_generation: int | None = None
         self._viewport_fill_enabled = False
         self._zoom_factor = 1.0
         self._transparent_rounded_clip_enabled = False
@@ -342,10 +369,72 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_h: int = 0
         self._container_linux_180_hint: bool = False
 
+        # ``render()`` only records commands. Delay presentation acknowledgements
+        # until QRhiWidget confirms that the top-level composition was submitted.
+        owner_ref = weakref.ref(self)
+
+        def _handle_frame_submitted() -> None:
+            owner = owner_ref()
+            if owner is not None:
+                owner._on_frame_submitted()
+
+        self._frame_submitted_handler = _handle_frame_submitted
+        self.frameSubmitted.connect(_handle_frame_submitted)
+
     def render_backend_name(self) -> str:
         """Return the active QRhi backend name for diagnostics/tests."""
 
         return qrhi_api_name(self._rhi_api)
+
+    def begin_presentation_transition(self, generation: int) -> None:
+        """Suppress video draws while retaining allocated QRhi textures."""
+
+        generation = int(generation)
+        if generation <= 0:
+            raise ValueError("presentation transition generation must be positive")
+        self._presentation_suppressed_generation = generation
+        self._frame_presentation_pending = False
+        self._rendered_content_identity = None
+        emit_detail_event(
+            "presentation_suppressed",
+            generation=generation,
+            renderer="video_renderer",
+        )
+
+    def complete_presentation_transition(self, generation: int) -> bool:
+        """Resume video draws only for the owning media generation."""
+
+        if int(generation) != self._presentation_suppressed_generation:
+            return False
+        self._presentation_suppressed_generation = None
+        emit_detail_event(
+            "presentation_resumed",
+            generation=int(generation),
+            renderer="video_renderer",
+        )
+        return True
+
+    def presentation_transition_active(self, generation: int) -> bool:
+        """Return whether this generation still owns presentation suppression."""
+
+        return int(generation) == self._presentation_suppressed_generation
+
+    def cancel_presentation_transition(self) -> None:
+        """Cancel suppression without destroying QRhi resources."""
+
+        generation = self._presentation_suppressed_generation
+        self._presentation_suppressed_generation = None
+        self._frame_presentation_pending = False
+        self._rendered_content_identity = None
+        if generation is not None:
+            emit_detail_event(
+                "presentation_suppression_cancelled",
+                generation=generation,
+                renderer="video_renderer",
+            )
+
+    def _presentation_is_suppressed(self) -> bool:
+        return getattr(self, "_presentation_suppressed_generation", None) is not None
 
     # ------------------------------------------------------------------
     # Public API
@@ -422,13 +511,24 @@ class VideoRendererWidget(QRhiWidget):
         self._refresh_display_rotation()
         self.update()
 
-    def update_frame(self, frame: "QVideoFrame") -> None:
+    def update_frame(
+        self,
+        frame: "QVideoFrame",
+        *,
+        content_generation: int = 0,
+        content_serial: int = 0,
+    ) -> None:
         """Accept a new video frame and schedule a repaint."""
+        _load_video_frame_types()
         if frame is None or not frame.isValid():
             return
         self._current_frame = frame
         self._frame_dirty = True
         self._has_frame = True
+        self._frame_presentation_pending = True
+        self._frame_content_generation = max(0, int(content_generation))
+        self._frame_content_serial = max(0, int(content_serial))
+        self._frame_content_revision += 1
 
         # Check for resolution change
         fmt = frame.surfaceFormat()
@@ -476,6 +576,10 @@ class VideoRendererWidget(QRhiWidget):
         self._container_raw_h = 0
         self._container_linux_180_hint = False
         self._has_frame = False
+        self._frame_presentation_pending = False
+        self._frame_content_generation = 0
+        self._frame_content_serial = 0
+        self._rendered_content_identity = None
         self._user_rotate90_steps = 0
         if self._zoom_factor != 1.0:
             self._zoom_factor = 1.0
@@ -709,11 +813,16 @@ class VideoRendererWidget(QRhiWidget):
             # target. Normal playback stays opaque; preview popups stay clear.
             cb.beginPass(
                 self.renderTarget(),
-                self._pass_clear_color(self._letterbox_color),
+                (
+                    self._transition_clear_color()
+                    if VideoRendererWidget._presentation_is_suppressed(self)
+                    else self._pass_clear_color(self._letterbox_color)
+                ),
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         rhi = self.rhi()
@@ -722,6 +831,25 @@ class VideoRendererWidget(QRhiWidget):
 
         output_size = self.renderTarget().pixelSize()
         if output_size.isEmpty():
+            return
+
+        suppressed_generation = self._presentation_suppressed_generation
+        suppressed_frame_ready = bool(
+            suppressed_generation is not None
+            and self._has_frame
+            and self._frame_dirty
+            and self._frame_content_generation == suppressed_generation
+            and self._current_frame is not None
+        )
+        if suppressed_generation is not None and not suppressed_frame_ready:
+            cb.beginPass(
+                self.renderTarget(),
+                self._transition_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         # When no video frame has been loaded (or after clear_frame()), fill
@@ -735,22 +863,49 @@ class VideoRendererWidget(QRhiWidget):
                 QRhiDepthStencilClearValue(),
             )
             cb.endPass()
-            self._emit_first_frame_ready()
+            self._queue_first_frame_ready()
+            self._rendered_content_identity = None
             return
 
         ru = rhi.nextResourceUpdateBatch()
+        staged_suppressed_frame = False
 
         # Upload frame data if dirty.
         # Only clear the dirty flag *after* the upload succeeds so that a
         # failed map/upload attempt is retried on the next render cycle
         # instead of leaving uninitialized textures on screen.
         if self._frame_dirty:
-            if self._upload_frame(rhi, ru):
-                self._frame_dirty = False
-                # Release the decoded frame reference immediately so the
-                # hardware decoder can recycle its buffer.  All pixel data
-                # has already been copied into GPU textures.
-                self._current_frame = None
+            try:
+                upload_succeeded = self._upload_frame(rhi, ru)
+            except Exception:
+                if suppressed_generation is None:
+                    raise
+                upload_succeeded = False
+            if upload_succeeded:
+                staged_suppressed_frame = suppressed_generation is not None
+                if not staged_suppressed_frame:
+                    self._frame_dirty = False
+                    # Release the decoded frame reference immediately so the
+                    # hardware decoder can recycle its buffer. All pixel data
+                    # has already been copied into GPU textures.
+                    self._current_frame = None
+            elif suppressed_generation is not None:
+                emit_detail_event(
+                    "video_gpu_upload_retry",
+                    generation=int(suppressed_generation),
+                    renderer="video_renderer",
+                    backend=self.render_backend_name(),
+                    failure_stage="upload",
+                )
+                cb.beginPass(
+                    self.renderTarget(),
+                    self._transition_clear_color(),
+                    QRhiDepthStencilClearValue(),
+                )
+                cb.endPass()
+                self._queue_first_frame_ready()
+                self._rendered_content_identity = None
+                return
 
         # Update uniform buffer
         self._update_uniforms(ru, output_size)
@@ -770,13 +925,36 @@ class VideoRendererWidget(QRhiWidget):
         cb.setVertexInput(0, vbuf_binding)
         cb.draw(6)  # 6 vertices = 2 triangles
         cb.endPass()
-        self._emit_first_frame_ready()
+        if staged_suppressed_frame and suppressed_generation is not None:
+            self._frame_dirty = False
+            self._current_frame = None
+            self.complete_presentation_transition(suppressed_generation)
+        self._queue_first_frame_ready()
+        if self._frame_presentation_pending and not self._frame_dirty:
+            self._frame_presentation_pending = False
+            self._rendered_content_identity = (
+                self._frame_content_generation,
+                self._frame_content_serial,
+                self._frame_content_revision,
+            )
 
-    def _emit_first_frame_ready(self) -> None:
-        """Notify listeners that the first opaque frame has been rendered."""
+    def _queue_first_frame_ready(self) -> None:
+        """Record that an opaque frame is waiting for window submission."""
         if not self._first_render_done:
+            self._first_render_submission_pending = True
+
+    def _on_frame_submitted(self) -> None:
+        """Publish draw acknowledgements after top-level composition submits."""
+
+        if self._first_render_submission_pending:
+            self._first_render_submission_pending = False
             self._first_render_done = True
             self.firstFrameReady.emit()
+        identity = self._rendered_content_identity
+        if identity is not None and identity != self._last_composed_content_identity:
+            self._last_composed_content_identity = identity
+            generation, serial, _revision = identity
+            self.videoFramePresented.emit(generation, serial)
 
     def _pass_clear_color(self, fallback: QColor) -> QColor:
         """Return the render-pass clear colour for the current opacity mode."""
@@ -787,10 +965,46 @@ class VideoRendererWidget(QRhiWidget):
         color.setAlpha(255)
         return color
 
+    def _transition_clear_color(self) -> QColor:
+        color = QColor(self._letterbox_color)
+        color.setAlpha(255)
+        return color
+
     def releaseResources(self) -> None:  # type: ignore[override]
-        """Clean up GPU resources."""
+        """Destroy resources owned by the current QRhi before it disappears."""
+
+        for name in (
+            "_pipeline",
+            "_srb",
+            "_tex_y",
+            "_tex_uv",
+            "_tex_rgba",
+            "_sampler",
+            "_ubuf",
+            "_vbuf",
+        ):
+            resource = getattr(self, name)
+            if resource is not None:
+                try:
+                    resource.destroy()
+                except RuntimeError:
+                    _log.debug("QRhi resource %s was already unavailable", name)
+                setattr(self, name, None)
         self._initialized = False
-        # Qt will clean up RHI resources when the widget is destroyed
+        self._tex_y_fmt = None
+        self._tex_uv_fmt = None
+        self._first_render_done = False
+        self._first_render_submission_pending = False
+        self._frame_presentation_pending = False
+        self._frame_content_generation = 0
+        self._frame_content_serial = 0
+        self._frame_content_revision = 0
+        self._rendered_content_identity = None
+        self._last_composed_content_identity = None
+        self._current_frame = None
+        self._frame_dirty = False
+        self._has_frame = False
+        self.renderResourcesInvalidated.emit()
 
     # ------------------------------------------------------------------
     # Frame upload helpers
@@ -801,6 +1015,7 @@ class VideoRendererWidget(QRhiWidget):
         Returns ``True`` if the upload succeeded.  A return of ``False``
         means the frame should be retried on the next render cycle.
         """
+        _load_video_frame_types()
         frame = self._current_frame
         if frame is None:
             return False

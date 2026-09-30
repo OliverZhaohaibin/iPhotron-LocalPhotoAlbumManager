@@ -27,6 +27,10 @@
 
 **💡 Schnellinstallation:** Klicken Sie auf die Schaltflächen oben, um das neueste Installationsprogramm direkt herunterzuladen.
 
+**Neueste stabile Version:** v6.6.8. Die folgende Funktionsdokumentation
+beschreibt den aktuellen Entwicklungszweig. Als Unreleased markierte Funktionen
+sind möglicherweise nicht in den obigen v6.6.8-Installern enthalten.
+
 - **Windows:** Führen Sie das `.exe`-Installationsprogramm direkt aus.
 - **Linux:** Installationsbefehl:
 
@@ -46,6 +50,11 @@ chmod +x iPhotron-6.6.8-x86_64.AppImage
 ```bash
 flatpak install --user ./com.github.OliverZhaohaibin.iPhotron-6.6.8-x86_64.flatpak
 ```
+
+Das Flatpak v6.6.8 behält seinen historischen Dateinamen und seine bisherige
+Anwendungsidentität. Zukünftige Bundles verwenden
+`io.github.oliverzhaohaibin.iPhotron`; Hinweise enthält der
+[Flatpak-Migrationsleitfaden](../misc/BUILD_FLATPAK.md#migration-from-the-v668-legacy-id).
 
 **Für Entwickler:**
 
@@ -111,6 +120,7 @@ Wichtige Highlights:
 - 🎥 Vollständige **Live Photo**-Paarungs- und Wiedergabeunterstützung.
 - 🗺 Optionale Kartenansicht, die GPS-Metadaten über alle Fotos und Videos visualisiert und ohne Maps Extension sauber zurückfällt.
 - 👥 Optionales People-Scanning mit Face Clusters, Namen, Covern, versteckten Personen und Mehrpersonen-Gruppen.
+- 🐾 Optionales Pets-Scanning mit Katzen-/Hundeerkennung, Tier-Identitätsclustern, Namen, Covern, versteckten und angepinnten Tieren.
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
 ---
@@ -141,7 +151,7 @@ Die Extension enthält derzeit:
 Hinweise zur Kartenlaufzeit:
 - iPhotron kann den helper-basierten OBF-Renderer und das native OsmAnd-Widget verwenden, sobald die jeweilige Plattformlaufzeit vorhanden ist.
 - Wenn neben diesem Repository ein `PySide6-OsmAnd-SDK/`-Checkout existiert, können Linux und macOS dessen Widget-Builds aus `tools/osmand_render_helper_native/dist-*` bevorzugen.
-- Das native Linux-Widget erwartet derzeit den XCB- + Desktop-OpenGL-Pfad von Qt. Bei Auswahl dieses Backends setzt iPhotron automatisch `QT_QPA_PLATFORM=xcb`, `QT_OPENGL=desktop` und `QT_XCB_GL_INTEGRATION=xcb_glx`.
+- Das native Linux-Widget verwendet den XCB- + Desktop-OpenGL-Pfad, wenn XCB bereits vom Benutzer, Launcher oder der Laufzeit ausgewählt wurde. iPhotron erzwingt keinen Wechsel einer Wayland-Sitzung zu XCB; nur bei bereits gesetztem `QT_QPA_PLATFORM=xcb` werden die Standardwerte `QT_OPENGL=desktop` und `QT_XCB_GL_INTEGRATION=xcb_glx` ergänzt.
 - Unter macOS verwendet die Legacy-OpenGL-Karte `QOpenGLWindow + createWindowContainer()`, um Kompositionsprobleme von `QOpenGLWidget` in transparenten Hauptfenstern zu vermeiden. Medienvorschauen nutzen standardmäßig den Metal-fähigen QRhi-Pfad, außer `IPHOTO_RHI_BACKEND=opengl` ist gesetzt.
 
 | Ohne Maps Extension | Mit Maps Extension |
@@ -175,11 +185,21 @@ Ein "LIVE"-Badge erscheint auf Standbildern — klicken Sie, um das Bewegungsvid
 Die Seitenleiste bietet eine automatisch generierte **Grundbibliothek**, die Fotos in Gruppen einteilt:
 `Alle Fotos`, `Videos`, `Live Photos`, `Favoriten` und `Kürzlich gelöscht`.
 
-### 👥 People, Face Clusters & Gruppen
+### 👥🐾 People, Pets, Face Clusters & Gruppen
 Die optionale People-Pipeline erkennt Gesichter, erstellt Face Clusters und
 zeigt sie als People-Karten an. Personen können benannt, doppelte Cluster
 zusammengeführt, versteckt oder wieder eingeblendet werden; ausgewählte Cover
 bleiben über erneute Scans hinweg erhalten.
+
+Die unabhängige Pets-Pipeline erkennt Katzen und Hunde mit YOLOX, erzeugt
+DINOv2-Embeddings und zeigt Tier-Identitätskarten im selben Dashboard. Tiere
+können benannt, zusammengeführt, versteckt, angepinnt und mit einem Cover
+versehen werden. Personen und Tiere können in gemeinsamen Identity-Gruppen
+erscheinen, während Laufzeitindex und dauerhafter Zustand getrennt bleiben.
+Deutliche People-/Gesichtskonflikte unterdrücken normalerweise eine doppelte
+Tiererkennung. Die Laufzeit behält jedoch einen deutlich größeren
+Tierkörper-Erkennungsrahmen bei, der ein kleineres menschliches Gesicht enthält,
+damit ein von einer Person gehaltenes Tier nicht verworfen wird.
 
 Mehrere Personen lassen sich zu Gruppen zusammenfassen, um gemeinsame Fotos
 anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
@@ -188,7 +208,8 @@ Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
 Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar. People-Zustand bleibt
 hinter der Library-Session-Grenze dauerhaft erhalten, damit Namen, Cover,
 versteckte Personen, Gruppen und manuelle Gesichtsanmerkungen erneute Scans
-überstehen.
+überstehen. Das Pets-Scanning verwendet das optionale `pets-ai`-Extra; fehlende
+Abhängigkeiten oder Modelle blockieren die übrige Anwendung nicht.
 ![People and groups interface](<../picture/People & Group.png>)
 
 ### ⚡ Gallery für große Bibliotheken
@@ -235,9 +256,10 @@ Alle Bearbeitungen werden über die Edit-Session-Oberfläche in
 ### ℹ️ Schwebendes Info-Panel
 Schalten Sie ein schwebendes Metadaten-Panel um, das EXIF,
 Kamera-/Objektivinformationen, Belichtung, Blende, Brennweite, Abmessungen,
-Dateigröße und Aufnahmezeit anzeigt. Für Assets mit People-Daten zeigt das
-Panel erkannte Gesicht-Avatare und erlaubt es, ein Gesicht zu entfernen, einer
-anderen Person zuzuweisen oder eine neue Personenannotation zu erstellen.
+Dateigröße und Aufnahmezeit anzeigt. Für Assets mit Erkennungsdaten zeigen das
+Panel und das Bild-Overlay Gesichts- und Tierannotationen; Erkennungen können
+über den jeweils zuständigen Dienst entfernt oder einer anderen/neuen Identität
+zugewiesen werden.
 
 Auch Standortwerkzeuge sind integriert: Assets mit GPS-Daten können eine
 eingebettete Karte anzeigen, und Assets ohne Standort können über den
@@ -273,7 +295,10 @@ Detaillierte technische Dokumentation (auf Englisch):
 |----------|-------------|
 | [Architecture](../architecture.md) | Aktuelle vNext library-scoped modular monolith Architektur, Modulgrenzen, Legacy-Quarantäne, Datenfluss und wichtige Designentscheidungen |
 | [Development](../development.md) | Entwicklungsumgebung, Abhängigkeiten, Debugging und der maps-extension-Workflow für Windows, Linux und macOS |
+| [Pets Runtime](../misc/PETS_RECOGNITION_RUNTIME.md) | Aktueller Vertrag für Tiermodelle, Scan-Planung, Persistenz, Mutationssicherheit und People-&-Pets-Komposition |
 | [Executable Build](../misc/BUILD_EXE.md) | Nuitka-Paketierung, AOT, QRhi-Shader-Assets, maps-extension-Synchronisierung und Plattformlaufzeit-Hinweise |
+| [AppImage Build](../misc/BUILD_APPIMAGE.md) | Kanonischer Linux-Workflow vom Standalone-Bundle zum AppImage |
+| [Flatpak Build](../misc/BUILD_FLATPAK.md) | Kanonischer x86_64-Standalone-Wrapper für ein Flatpak-Bundle |
 | [Security](../security.md) | Berechtigungen, Verschlüsselung, Datenspeicherorte, Bedrohungsmodell |
 | [Changelog](../CHANGELOG.md) | Alle Versionshinweise und Änderungen |
 
@@ -285,13 +310,14 @@ Detaillierte technische Dokumentation (auf Englisch):
 |----------|-------|
 | **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten und schreibt GPS-Daten bei expliziten Assign-Location-Aktionen. |
 | **FFmpeg / FFprobe** | Erzeugt Video-Miniaturansichten und analysiert Videoinformationen. |
-| **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning: Gesichtserkennung (`det_500m.onnx`) und Face Embeddings (`w600k_mbf.onnx`) aus `src/extension/models/buffalo_s/`. |
+| **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning mit einem beschreibbaren Cache, explizitem Override oder bereitgestellten/gebündelten Modellen. |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optionales Pets-Scanning mit Benutzer-Cache, explizitem Override oder bereitgestellten/gebündelten Modellen. YOLOX kann mit Integritätsprüfung heruntergeladen werden; das aktuelle DINOv2-Artefakt muss vorab bereitgestellt werden. |
 
 > FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein. Installieren Sie
 > ExifTool zusätzlich, wenn zugewiesene GPS-Koordinaten in Originaldateien
 > zurückgeschrieben werden sollen.
-> Die AI-Gesichtslaufzeit ist optional; für Source-Builds kann sie mit
-> `pip install -e ".[ai-demo]"` installiert werden. Offline-Pakete sollten
+> Die AI-Erkennungslaufzeiten sind optional; für Source-Builds können sie mit
+> `pip install -e ".[ai-demo,pets-ai]"` installiert werden. Offline-Pakete sollten
 > `extension/models` mitliefern.
 
 Python-Abhängigkeiten wie `Pillow` und `reverse-geocoder` werden über

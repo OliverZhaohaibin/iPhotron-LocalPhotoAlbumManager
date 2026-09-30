@@ -1,70 +1,8 @@
-
 import sys
-import os
-import types
 import pytest
 from unittest.mock import MagicMock, patch
-import importlib.util
 
-# Setup dummy package structure to avoid triggering real __init__.py imports
-# that require system dependencies (libpulse, etc) we might not have or want to load.
-# This essentially isolates the module under test.
-
-def setup_dummy_packages():
-    packages = [
-        'iPhoto',
-        'iPhoto.core',
-        'iPhoto.gui',
-        'iPhoto.gui.ui',
-        'iPhoto.gui.ui.widgets',
-    ]
-    for pkg in packages:
-        if pkg not in sys.modules:
-            m = types.ModuleType(pkg)
-            m.__path__ = []
-            sys.modules[pkg] = m
-
-def load_module_from_file(module_name, file_path):
-    if module_name in sys.modules and hasattr(sys.modules[module_name], '__file__') and sys.modules[module_name].__file__ == file_path:
-        return sys.modules[module_name]
-
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None:
-        raise ImportError(f"Could not load spec for {file_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-setup_dummy_packages()
-
-this_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(this_dir)
-widgets_dir = os.path.join(
-    project_root, 'src', 'iPhoto', 'gui', 'ui', 'widgets',
-)
-core_dir = os.path.join(
-    project_root, 'src', 'iPhoto', 'core',
-)
-
-selective_color_path = os.path.abspath(os.path.join(core_dir, 'selective_color_resolver.py'))
-perspective_math_path = os.path.abspath(os.path.join(widgets_dir, 'perspective_math.py'))
-gl_shader_manager_path = os.path.abspath(os.path.join(widgets_dir, 'gl_shader_manager.py'))
-gl_texture_manager_path = os.path.abspath(os.path.join(widgets_dir, 'gl_texture_manager.py'))
-gl_uniform_state_path = os.path.abspath(os.path.join(widgets_dir, 'gl_uniform_state.py'))
-gl_offscreen_path = os.path.abspath(os.path.join(widgets_dir, 'gl_offscreen.py'))
-gl_renderer_path = os.path.abspath(os.path.join(widgets_dir, 'gl_renderer.py'))
-
-# Load helper modules before gl_renderer (which imports them via relative imports)
-load_module_from_file('iPhoto.core.selective_color_resolver', selective_color_path)
-load_module_from_file('iPhoto.gui.ui.widgets.perspective_math', perspective_math_path)
-load_module_from_file('iPhoto.gui.ui.widgets.gl_shader_manager', gl_shader_manager_path)
-load_module_from_file('iPhoto.gui.ui.widgets.gl_texture_manager', gl_texture_manager_path)
-load_module_from_file('iPhoto.gui.ui.widgets.gl_uniform_state', gl_uniform_state_path)
-load_module_from_file('iPhoto.gui.ui.widgets.gl_offscreen', gl_offscreen_path)
-
-# Load gl_renderer
-gl_renderer_mod = load_module_from_file('iPhoto.gui.ui.widgets.gl_renderer', gl_renderer_path)
+from iPhoto.gui.ui.widgets import gl_renderer as gl_renderer_mod
 
 GLRenderer = gl_renderer_mod.GLRenderer
 from PySide6.QtCore import QPointF
@@ -94,6 +32,35 @@ def renderer(mock_gl_funcs):
         renderer = GLRenderer(mock_gl_funcs)
         renderer.initialize_resources()
         return renderer
+
+
+def test_each_draw_establishes_fixed_function_state_without_binding_fbo(renderer, mock_gl_funcs):
+    renderer._texture_id = 1
+    renderer._texture_width = 100
+    renderer._texture_height = 100
+    for _ in range(2):
+        mock_gl_funcs.reset_mock()
+        renderer.render(view_width=800, view_height=600, scale=1,
+                        pan=QPointF(), adjustments={})
+        mock_gl_funcs.glViewport.assert_called_once_with(0, 0, 800, 600)
+        mock_gl_funcs.glColorMask.assert_called_once_with(True, True, True, True)
+        disabled = {call.args[0] for call in mock_gl_funcs.glDisable.call_args_list}
+        gl = gl_renderer_mod.gl
+        assert {gl.GL_BLEND, gl.GL_DEPTH_TEST, gl.GL_STENCIL_TEST,
+                gl.GL_CULL_FACE, gl.GL_SCISSOR_TEST} <= disabled
+        mock_gl_funcs.glBindFramebuffer.assert_not_called()
+        names = [call[0] for call in mock_gl_funcs.method_calls]
+        assert names.index("glColorMask") < names.index("glDrawArrays")
+
+
+def test_shader_bind_failure_is_not_reported_as_a_successful_draw(renderer, mock_gl_funcs):
+    renderer._texture_id = 1
+    renderer._texture_width = renderer._texture_height = 100
+    renderer._program.bind.return_value = False
+    with pytest.raises(RuntimeError, match="Failed to bind shader"):
+        renderer.render(view_width=800, view_height=600, scale=1,
+                        pan=QPointF(), adjustments={})
+    mock_gl_funcs.glDrawArrays.assert_not_called()
 
 def test_render_uploads_perspective_rows_as_vec3_uniforms(renderer, mock_gl_funcs, monkeypatch):
     """Perspective transforms should upload through vec3 rows, not matrix uniforms."""

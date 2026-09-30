@@ -2,21 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping, MutableMapping
 
-import math
-
 import numpy as np
-try:
-    from numba import jit
-except ImportError:
-    def jit(*args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
 from PySide6.QtCore import Qt
 
 try:  # pragma: no cover - availability depends on runtime environment
@@ -317,7 +307,6 @@ def _smoothstep(edge0: float, edge1: float, x: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-@jit(nopython=True, inline="always")
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     if value < minimum:
         return minimum

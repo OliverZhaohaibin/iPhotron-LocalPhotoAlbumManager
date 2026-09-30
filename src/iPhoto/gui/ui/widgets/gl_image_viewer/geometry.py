@@ -36,6 +36,7 @@ floating-point error accumulation across repeated rotations.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 
@@ -57,12 +58,17 @@ def normalised_crop_from_mapping(
     Returns
     -------
     tuple[float, float, float, float]
-        Normalised (cx, cy, width, height) tuple clamped to [0, 1]
+        Logical (cx, cy, width, height) tuple. Perspective-corrected crops may
+        extend outside [0, 1].
     """
-    cx = clamp_unit(values.get("Crop_CX", 0.5))
-    cy = clamp_unit(values.get("Crop_CY", 0.5))
-    width = clamp_unit(values.get("Crop_W", 1.0))
-    height = clamp_unit(values.get("Crop_H", 1.0))
+    def _finite(key: str, default: float) -> float:
+        value = float(values.get(key, default))
+        return value if math.isfinite(value) else default
+
+    cx = _finite("Crop_CX", 0.5)
+    cy = _finite("Crop_CY", 0.5)
+    width = max(0.0, _finite("Crop_W", 1.0))
+    height = max(0.0, _finite("Crop_H", 1.0))
     return (cx, cy, width, height)
 
 
@@ -112,25 +118,25 @@ def texture_crop_to_logical(
         # Step 1: 90° CW (270° CCW) - texture TOP becomes visual RIGHT
         # Transformation: (x', y') = (1-y, x)
         return (
-            clamp_unit(1.0 - tcy),
-            clamp_unit(tcx),
-            clamp_unit(th),
-            clamp_unit(tw),
+            1.0 - tcy,
+            tcx,
+            th,
+            tw,
         )
     if rotate_steps == 2:
         return (
-            clamp_unit(1.0 - tcx),
-            clamp_unit(1.0 - tcy),
-            clamp_unit(tw),
-            clamp_unit(th),
+            1.0 - tcx,
+            1.0 - tcy,
+            tw,
+            th,
         )
     # Step 3: 90° CCW (270° CW) - texture TOP becomes visual LEFT  
     # Transformation: (x', y') = (y, 1-x)
     return (
-        clamp_unit(tcy),
-        clamp_unit(1.0 - tcx),
-        clamp_unit(th),
-        clamp_unit(tw),
+        tcy,
+        1.0 - tcx,
+        th,
+        tw,
     )
 
 
@@ -159,35 +165,30 @@ def logical_crop_to_texture(
     """
     lcx, lcy, lw, lh = crop
     if rotate_steps == 0:
-        return (
-            clamp_unit(lcx),
-            clamp_unit(lcy),
-            clamp_unit(lw),
-            clamp_unit(lh),
-        )
+        return (lcx, lcy, lw, lh)
     if rotate_steps == 1:
         # Step 1 inverse: (x, y) = (y', 1-x') 
         # (reverse of the forward 90° CW transformation)
         return (
-            clamp_unit(lcy),
-            clamp_unit(1.0 - lcx),
-            clamp_unit(lh),
-            clamp_unit(lw),
+            lcy,
+            1.0 - lcx,
+            lh,
+            lw,
         )
     if rotate_steps == 2:
         return (
-            clamp_unit(1.0 - lcx),
-            clamp_unit(1.0 - lcy),
-            clamp_unit(lw),
-            clamp_unit(lh),
+            1.0 - lcx,
+            1.0 - lcy,
+            lw,
+            lh,
         )
     # Step 3 inverse: (x, y) = (1-y', x')
     # (reverse of the forward 90° CCW transformation)
     return (
-        clamp_unit(1.0 - lcy),
-        clamp_unit(lcx),
-        clamp_unit(lh),
-        clamp_unit(lw),
+        1.0 - lcy,
+        lcx,
+        lh,
+        lw,
     )
 
 

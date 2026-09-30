@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -39,6 +39,8 @@ class InformationPopup(QWidget):
 
     _DEFAULT_WIDTH = 360
     _CORNER_RADIUS = 12.0
+
+    closed = Signal()
 
     def __init__(
         self,
@@ -219,6 +221,13 @@ class InformationPopup(QWidget):
             self._apply_close_button_style()
             self._apply_content_style()
         super().changeEvent(event)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Notify blocking helpers before the widget is disposed."""
+
+        super().closeEvent(event)
+        if event.isAccepted():
+            self.closed.emit()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """Draw an anti-aliased rounded rectangle matching the window palette."""

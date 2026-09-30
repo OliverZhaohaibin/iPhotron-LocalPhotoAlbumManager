@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, Mapping
+import os
+import threading
+import time
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Dict
 
 from ..core.adjustment_mapping import (
     BW_DEFAULTS,
@@ -331,15 +335,19 @@ def save_adjustments(asset_path: Path, adjustments: Mapping[str, Any]) -> Path:
     # Write video trim adjustments
     _write_video_node(root, adjustments)
 
-    tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
+    tmp_path = sidecar_path.with_name(
+        f".{sidecar_path.name}.{os.getpid()}.{threading.get_ident()}."
+        f"{time.monotonic_ns()}.tmp"
+    )
     tree = ET.ElementTree(root)
-    tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
-
     try:
+        tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
         tmp_path.replace(sidecar_path)
-    except OSError:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return sidecar_path
 
 

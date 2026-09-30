@@ -221,6 +221,23 @@ class FaceScanWorker(QThread):
             for item in detected
             if not item.asset_id or str(item.asset_id) not in failed_ids
         ]
+        metrics = getattr(pipeline, "last_scan_metrics", None)
+        LOGGER.info(
+            "Face scan batch processed for %s: assets=%d candidates=%d accepted=%d "
+            "low_confidence=%d too_small=%d tiny_area=%d relative_area=%d "
+            "retry=%d failed=%d quality_version=%s",
+            self._library_root,
+            len(batch),
+            getattr(metrics, "face_candidates_total", 0),
+            getattr(metrics, "face_accepted", 0),
+            getattr(metrics, "face_rejected_confidence", 0),
+            getattr(metrics, "face_rejected_size", 0),
+            getattr(metrics, "face_rejected_tiny_area", 0),
+            getattr(metrics, "face_rejected_relative_area", 0),
+            len(first_retry_ids),
+            len(failed_ids),
+            getattr(pipeline, "candidate_quality_version", "legacy"),
+        )
 
         event = coordinator.submit_detected_batch(
             retry_detected,

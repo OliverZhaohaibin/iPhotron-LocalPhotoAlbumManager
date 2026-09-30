@@ -146,6 +146,38 @@ class GLRenderer:
         """Upload *image* to the GPU and return ``(id, width, height)``."""
         return self._tex_mgr.upload_texture(image)
 
+    def upload_still_texture(self, key: object, image: QImage) -> tuple[int, int, int]:
+        return self._tex_mgr.upload_still_texture(key, image)
+
+    def activate_still_texture(self, key: object) -> bool:
+        return self._tex_mgr.activate_still_texture(key)
+
+    def touch_still_texture(self, key: object) -> bool:
+        return self._tex_mgr.touch_still_texture(key)
+
+    def warm_still_texture(self, key: object, image: QImage) -> bool:
+        return self._tex_mgr.warm_still_texture(key, image)
+
+    def take_still_upload_result(self) -> dict[str, object] | None:
+        return self._tex_mgr.take_still_upload_result()
+
+    def has_still_texture(self, key: object) -> bool:
+        return self._tex_mgr.has_still_texture(key)
+
+    def still_residency_bytes(self) -> dict[object, int]:
+        """Return diagnostic estimated bytes for resident still textures."""
+
+        return self._tex_mgr.still_residency_bytes()
+
+    def texture_uses_mipmaps(self) -> bool:
+        return self._tex_mgr.texture_uses_mipmaps()
+
+    def clear_still_residency(self) -> None:
+        self._tex_mgr.clear_still_residency()
+
+    def trim_still_residency(self) -> None:
+        self._tex_mgr.trim_still_residency()
+
     def upload_video_frame(self, frame) -> tuple[int, int]:
         """Upload a decoded video frame directly as shader-readable textures."""
 
@@ -216,6 +248,19 @@ class GLRenderer:
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
+    def prepare_draw_state(self, width: int, height: int) -> None:
+        """Own every fixed-function state used by the media pass.
+
+        QRhi's compositor and other widgets use this same context. Initialization
+        state is not a frame contract; never bind a different framebuffer here.
+        """
+        gf = self._gl_funcs
+        gf.glViewport(0, 0, max(1, int(width)), max(1, int(height)))
+        gf.glColorMask(True, True, True, True)
+        for capability in (gl.GL_BLEND, gl.GL_DEPTH_TEST, gl.GL_STENCIL_TEST,
+                           gl.GL_CULL_FACE, gl.GL_SCISSOR_TEST):
+            gf.glDisable(capability)
+
     def render(
         self,
         *,
@@ -239,6 +284,7 @@ class GLRenderer:
         if scale <= 0.0:
             return
 
+        self.prepare_draw_state(int(view_width), int(view_height))
         gf = self._gl_funcs
         diagnose_errors = sys.platform.startswith("linux")
 
@@ -262,8 +308,7 @@ class GLRenderer:
 
         _drain_gl_errors("at render entry")
         if not self._program.bind():
-            _LOGGER.error("Failed to bind shader program: %s", self._program.log())
-            return
+            raise RuntimeError(f"Failed to bind shader program: {self._program.log()}")
 
         dummy_vao_bound = False
         try:
@@ -285,6 +330,10 @@ class GLRenderer:
             self._set_uniform1i("uTex", 0)
             has_video_texture = self._tex_mgr.has_video_texture()
             self._set_uniform1i("uSourceKind", 1 if has_video_texture else 0)
+            self._set_uniform1i(
+                "uTextureHasMipmaps",
+                1 if self._tex_mgr.texture_uses_mipmaps() else 0,
+            )
 
             if has_video_texture:
                 video_y_tex, video_uv_tex = self._tex_mgr.video_texture_ids()

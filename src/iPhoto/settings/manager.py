@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,16 @@ from .schema import DEFAULT_SETTINGS, merge_with_defaults
 
 def default_settings_path() -> Path:
     """Return the default settings.json location for the current platform."""
+
+    benchmark_override = os.environ.get("IPHOTO_SETTINGS_PATH", "").strip()
+    benchmark_mode = (
+        os.environ.get("IPHOTO_STARTUP_BENCHMARK", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and os.environ.get("IPHOTO_STARTUP_PROFILE", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if benchmark_mode and benchmark_override:
+        return Path(benchmark_override).expanduser()
 
     if os.name == "nt":
         base = os.environ.get("APPDATA")
@@ -67,6 +79,32 @@ class SettingsManager(QObject):
         # Defender observes both the temporary file and its replacement.
         if not path_existed or payload != merged:
             self._write()
+
+    def load_with_recovery(self) -> str | None:
+        """Load settings, preserving an invalid file and falling back to defaults."""
+
+        try:
+            self.load()
+            return None
+        except (SettingsLoadError, SettingsValidationError) as exc:
+            path = self._path or default_settings_path()
+            self._path = path
+            backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+            backup_error: str | None = None
+            if path.exists():
+                try:
+                    shutil.move(os.fspath(path), os.fspath(backup))
+                except OSError as move_exc:
+                    backup_error = str(move_exc)
+            self._data = deepcopy(DEFAULT_SETTINGS)
+            try:
+                self._write()
+            except OSError as write_exc:
+                backup_error = backup_error or str(write_exc)
+            message = f"Recovered invalid settings: {exc}"
+            if backup_error:
+                message += f" (backup/write warning: {backup_error})"
+            return message
 
     def get(self, key: str, default: Any | None = None) -> Any:
         """Return the value for *key*, supporting dotted access for nested keys."""

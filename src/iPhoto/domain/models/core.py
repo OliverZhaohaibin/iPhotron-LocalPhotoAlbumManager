@@ -33,6 +33,7 @@ class Asset:
     is_favorite: bool = False
     parent_album_path: Optional[str] = None
     face_status: Optional[str] = None
+    pet_status: Optional[str] = None
 
     # Live Photo support
     content_identifier: Optional[str] = None

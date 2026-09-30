@@ -8,6 +8,7 @@ functionality without any direct dependency on QOpenGLWidget or Qt event handlin
 from __future__ import annotations
 
 import enum
+import math
 from collections.abc import Mapping
 
 from PySide6.QtCore import QPointF, Qt
@@ -64,13 +65,17 @@ class CropBoxState:
         self.min_width: float = 0.02
         self.min_height: float = 0.02
 
-    def set_from_mapping(self, values: Mapping[str, float]) -> None:
+    def set_from_mapping(
+        self,
+        values: Mapping[str, float],
+        bounds: tuple[float, float, float, float] | None = None,
+    ) -> None:
         """Initialize crop state from a mapping of adjustment values."""
         self.cx = float(values.get("Crop_CX", 0.5))
         self.cy = float(values.get("Crop_CY", 0.5))
         self.width = float(values.get("Crop_W", 1.0))
         self.height = float(values.get("Crop_H", 1.0))
-        self.clamp()
+        self.clamp(bounds)
 
     def as_mapping(self) -> dict[str, float]:
         """Export crop state as a mapping of adjustment values."""
@@ -113,21 +118,33 @@ class CropBoxState:
         """Return crop center in pixel coordinates."""
         return QPointF(self.cx * image_width, self.cy * image_height)
 
-    def translate_pixels(self, delta: QPointF, image_size: tuple[int, int]) -> None:
+    def translate_pixels(
+        self,
+        delta: QPointF,
+        image_size: tuple[int, int],
+        bounds: tuple[float, float, float, float] | None = None,
+    ) -> None:
         """Move crop box by delta in pixel coordinates."""
         iw, ih = image_size
         if iw <= 0 or ih <= 0:
             return
         self.cx += float(delta.x()) / float(iw)
         self.cy += float(delta.y()) / float(ih)
-        self.clamp()
+        self.clamp(bounds)
 
-    def zoom_about_point(self, anchor_x: float, anchor_y: float, factor: float) -> None:
+    def zoom_about_point(
+        self,
+        anchor_x: float,
+        anchor_y: float,
+        factor: float,
+        bounds: tuple[float, float, float, float] | None = None,
+    ) -> None:
         """Scale the crop rectangle around *anchor* while preserving constraints."""
 
         safe_factor = max(1e-4, abs(float(factor)))
-        anchor_norm_x = max(0.0, min(1.0, float(anchor_x)))
-        anchor_norm_y = max(0.0, min(1.0, float(anchor_y)))
+        left, top, right, bottom = bounds or (0.0, 0.0, 1.0, 1.0)
+        anchor_norm_x = max(left, min(right, float(anchor_x)))
+        anchor_norm_y = max(top, min(bottom, float(anchor_y)))
 
         current_cx = float(self.cx)
         current_cy = float(self.cy)
@@ -137,8 +154,8 @@ class CropBoxState:
         new_width = current_width / safe_factor
         new_height = current_height / safe_factor
 
-        new_width = max(self.min_width, min(1.0, new_width))
-        new_height = max(self.min_height, min(1.0, new_height))
+        new_width = max(self.min_width, min(right - left, new_width))
+        new_height = max(self.min_height, min(bottom - top, new_height))
 
         new_cx = anchor_norm_x - (anchor_norm_x - current_cx) / safe_factor
         new_cy = anchor_norm_y - (anchor_norm_y - current_cy) / safe_factor
@@ -147,7 +164,7 @@ class CropBoxState:
         self.cy = new_cy
         self.width = new_width
         self.height = new_height
-        self.clamp()
+        self.clamp((left, top, right, bottom))
 
     def drag_edge_pixels(
         self, handle: CropHandle, delta: QPointF, image_size: tuple[int, int]
@@ -201,11 +218,35 @@ class CropBoxState:
 
         self.clamp()
 
-    def clamp(self) -> None:
-        """Ensure crop state remains within valid bounds."""
-        self.width = max(self.min_width, min(1.0, self.width))
-        self.height = max(self.min_height, min(1.0, self.height))
+    def clamp(
+        self,
+        bounds: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        """Keep the crop finite and inside the supplied logical bounds.
+
+        Perspective and straighten can project valid source pixels outside the
+        unit square, so callers that own transform state pass the projected
+        image bounds instead of implicitly clipping to ``[0, 1]``.
+        """
+
+        left, top, right, bottom = bounds or (0.0, 0.0, 1.0, 1.0)
+        if not all(math.isfinite(value) for value in (left, top, right, bottom)):
+            left, top, right, bottom = (0.0, 0.0, 1.0, 1.0)
+        if right <= left or bottom <= top:
+            left, top, right, bottom = (0.0, 0.0, 1.0, 1.0)
+
+        if not math.isfinite(self.width):
+            self.width = self.min_width
+        if not math.isfinite(self.height):
+            self.height = self.min_height
+        if not math.isfinite(self.cx):
+            self.cx = (left + right) * 0.5
+        if not math.isfinite(self.cy):
+            self.cy = (top + bottom) * 0.5
+
+        self.width = max(self.min_width, min(right - left, self.width))
+        self.height = max(self.min_height, min(bottom - top, self.height))
         half_w = self.width * 0.5
         half_h = self.height * 0.5
-        self.cx = max(half_w, min(1.0 - half_w, self.cx))
-        self.cy = max(half_h, min(1.0 - half_h, self.cy))
+        self.cx = max(left + half_w, min(right - half_w, self.cx))
+        self.cy = max(top + half_h, min(bottom - half_h, self.cy))

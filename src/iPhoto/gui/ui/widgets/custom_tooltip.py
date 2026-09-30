@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Iterable
 from typing import cast
@@ -38,6 +39,8 @@ _TEXT_FLAGS = (
     | Qt.TextFlag.TextWordWrap
     | Qt.TextFlag.TextWrapAnywhere
 )
+
+logger = logging.getLogger(__name__)
 
 
 class FloatingToolTip(QWidget):
@@ -274,6 +277,25 @@ class ToolTipEventFilter(QObject):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
         """Intercept tooltip events and display them using the floating popup."""
+
+        try:
+            return self._event_filter(watched, event)
+        except (AttributeError, RuntimeError, TypeError):
+            logger.debug(
+                "Floating tooltip event filter ignored an event after an error",
+                exc_info=True,
+            )
+            try:
+                self._tooltip.hide_tooltip()
+            except (AttributeError, RuntimeError, TypeError):
+                logger.debug(
+                    "Floating tooltip failed to hide after an event-filter error",
+                    exc_info=True,
+                )
+            return False
+
+    def _event_filter(self, watched: QObject, event: QEvent) -> bool:
+        """Implementation for :meth:`eventFilter` with Qt boundary handling outside."""
 
         if id(watched) in self._ignored_ids:
             return False

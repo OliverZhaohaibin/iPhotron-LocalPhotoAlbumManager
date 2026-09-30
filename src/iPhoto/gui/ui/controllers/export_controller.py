@@ -11,12 +11,19 @@ from PySide6.QtWidgets import QFileDialog, QWidget
 
 from ....application.ports import EditServicePort
 from ....config import EXPORT_DIR_NAME
-from ....core.export import DEFAULT_EXPORT_FORMAT, export_asset
 from ....library.runtime_controller import LibraryRuntimeController
 from ...i18n import tr
 from ...ui.widgets.dialogs import show_error
 from ..widgets.notification_toast import NotificationToast
 from .status_bar_controller import StatusBarController
+
+DEFAULT_EXPORT_FORMAT = "jpg"
+
+
+def _export_asset(*args, **kwargs):
+    from ....core.export import export_asset
+
+    return export_asset(*args, **kwargs)
 
 
 class ExportSignals(QObject):
@@ -52,7 +59,7 @@ class ExportWorker(QRunnable):
         for i, path in enumerate(self._paths):
             if not path.exists():
                 continue
-            if export_asset(
+            if _export_asset(
                 path,
                 self._export_root,
                 self._library_root,
@@ -133,7 +140,7 @@ class LibraryExportWorker(QRunnable):
         success = 0
         fail = 0
         for i, path in enumerate(to_export):
-            if export_asset(
+            if _export_asset(
                 path,
                 self._export_root,
                 root,

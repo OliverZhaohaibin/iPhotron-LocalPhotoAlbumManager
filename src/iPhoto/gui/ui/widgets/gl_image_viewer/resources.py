@@ -290,3 +290,8 @@ class TextureResourceManager:
 
     def mark_texture_lost(self) -> None:
         self._texture_dirty = self._current_image is not None and not self._current_image.isNull()
+
+    def cancel_pending_upload(self) -> None:
+        """Keep a resident fallback while the session selects a lower LOD."""
+        self._texture_dirty = False
+        self._force_upload = False

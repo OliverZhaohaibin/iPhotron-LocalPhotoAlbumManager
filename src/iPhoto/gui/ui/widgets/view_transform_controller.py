@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -34,65 +35,19 @@ def compute_fit_to_view_scale(
 
 def compute_rotation_cover_scale(
     texture_size: tuple[int, int],
-    base_scale: float,
     straighten_degrees: float,
-    rotate_steps: int,
-    physical_texture_size: tuple[int, int] | None = None,
 ) -> float:
-    """Return the scale multiplier that keeps rotated images free of black corners.
-    
-    Args:
-        texture_size: Logical (rotation-aware) dimensions used for frame calculation
-        base_scale: Scale factor calculated from logical dimensions
-        straighten_degrees: Straighten angle in degrees
-        rotate_steps: Number of 90° rotations
-        physical_texture_size: Physical (original) dimensions for bounds checking.
-                              If None, uses texture_size (for backward compatibility).
-                              When provided, texture_size is assumed to be logical (already rotated),
-                              so only straighten_degrees is applied, not the 90° rotation steps.
-    """
+    """Return a dimensionless cover factor for rotation-aware image dimensions.
 
-    tex_w, tex_h = texture_size
-    if tex_w <= 0 or tex_h <= 0 or base_scale <= 0.0:
+    Quarter turns are already represented by the logical dimensions. Neither
+    viewport pixels nor the resolution of a decoded LOD belongs in this ratio.
+    """
+    width, height = texture_size
+    if width <= 0 or height <= 0 or not math.isfinite(straighten_degrees):
         return 1.0
-    
-    # When physical_texture_size is provided, texture_size (logical) already accounts
-    # for the 90° rotation, so we only apply straighten_degrees
-    if physical_texture_size is not None:
-        total_degrees = float(straighten_degrees)  # Only straighten, no 90° rotation
-    else:
-        total_degrees = float(straighten_degrees) + float(int(rotate_steps)) * -90.0
-        
-    if abs(total_degrees) <= 1e-5:
-        return 1.0
-    theta = math.radians(total_degrees)
-    cos_t = math.cos(theta)
-    sin_t = math.sin(theta)
-    
-    # Frame corners calculated in logical space (rotation-aware dimensions)
-    half_frame_w = tex_w * base_scale * 0.5
-    half_frame_h = tex_h * base_scale * 0.5
-    corners = [
-        (-half_frame_w, -half_frame_h),
-        (half_frame_w, -half_frame_h),
-        (half_frame_w, half_frame_h),
-        (-half_frame_w, half_frame_h),
-    ]
-    
-    # Use physical dimensions for bounds checking (corners are rotated back to texture space)
-    if physical_texture_size is not None:
-        phys_w, phys_h = physical_texture_size
-    else:
-        phys_w, phys_h = tex_w, tex_h
-    
-    scale = 1.0
-    for xf, yf in corners:
-        x_prime = xf * cos_t + yf * sin_t
-        y_prime = -xf * sin_t + yf * cos_t
-        s_corner = max((2.0 * abs(x_prime)) / phys_w, (2.0 * abs(y_prime)) / phys_h)
-        if s_corner > scale:
-            scale = s_corner
-    return max(scale, 1.0)
+    theta = math.radians(straighten_degrees)
+    cosine, sine = abs(math.cos(theta)), abs(math.sin(theta))
+    return max(1.0, cosine + height / width * sine, cosine + width / height * sine)
 
 
 class ViewTransformController:
@@ -126,6 +81,10 @@ class ViewTransformController:
         self._on_next_item = on_next_item
         self._on_prev_item = on_prev_item
 
+        self._batch_depth = 0
+        self._batch_update = False
+        self._batch_zoom = False
+        self._batch_transform = False
         self._zoom_factor: float = 1.0
         self._min_zoom: float = 0.1
         self._max_zoom: float = 16.0
@@ -243,7 +202,7 @@ class ViewTransformController:
         ):
             return
         self._pan_px = QPointF(pan)
-        self._viewer.update()
+        self._request_update()
         self._emit_view_transform_changed()
 
     def minimum_zoom(self) -> float:
@@ -252,13 +211,16 @@ class ViewTransformController:
     def maximum_zoom(self) -> float:
         return self._max_zoom
 
-    def set_zoom_factor_direct(self, factor: float) -> None:
-        clamped = max(self._min_zoom, min(self._max_zoom, float(factor)))
+    def set_zoom_factor_direct(self, factor: float, *, automatic: bool = False) -> None:
+        clamped = (
+            max(1e-6, float(factor)) if automatic
+            else max(self._min_zoom, min(self._max_zoom, float(factor)))
+        )
         if abs(clamped - self._zoom_factor) < 1e-6:
             return
         self._zoom_factor = clamped
-        self._viewer.update()
-        self._on_zoom_changed(self._zoom_factor)
+        self._request_update()
+        self._emit_zoom_changed()
         self._emit_view_transform_changed()
 
     def set_zoom_limits(self, minimum: float, maximum: float) -> None:
@@ -287,7 +249,9 @@ class ViewTransformController:
     def set_zoom(self, factor: float, anchor: Optional[QPointF] = None) -> bool:
         """Update the zoom factor while keeping *anchor* stationary."""
 
-        clamped = max(self._min_zoom, min(self._max_zoom, float(factor)))
+        lower = min(self._min_zoom, self._zoom_factor)
+        upper = max(self._max_zoom, self._zoom_factor)
+        clamped = max(lower, min(upper, float(factor)))
         if abs(clamped - self._zoom_factor) < 1e-6:
             return False
 
@@ -319,8 +283,8 @@ class ViewTransformController:
                 )
 
         self._zoom_factor = clamped
-        self._viewer.update()
-        self._on_zoom_changed(self._zoom_factor)
+        self._request_update()
+        self._emit_zoom_changed()
         self._emit_view_transform_changed()
         return True
 
@@ -330,8 +294,8 @@ class ViewTransformController:
         changed = abs(self._zoom_factor - 1.0) > 1e-6 or abs(self._pan_px.x()) > 1e-6 or abs(self._pan_px.y()) > 1e-6
         self._zoom_factor = 1.0
         self._pan_px = QPointF(0.0, 0.0)
-        self._viewer.update()
-        self._on_zoom_changed(self._zoom_factor)
+        self._request_update()
+        self._emit_zoom_changed()
         if changed:
             self._emit_view_transform_changed()
         return changed
@@ -361,6 +325,11 @@ class ViewTransformController:
             return False
         self.set_pan_pixels(target_pan)
         return True
+
+    def cancel_pointer_gesture(self) -> None:
+        """End a drag before a fullscreen transition changes pointer geometry."""
+        self._is_panning = False
+        self._viewer.unsetCursor()
 
     def handle_mouse_release(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -537,9 +506,9 @@ class ViewTransformController:
         if fit_result is None:
             return False
 
-        target_zoom, target_scale = fit_result
-        self.set_zoom_factor_direct(target_zoom)
-        self.apply_image_center_pixels(rect.center(), scale=target_scale)
+        target_zoom, _ = fit_result
+        self.set_zoom_factor_direct(target_zoom, automatic=True)
+        self.apply_image_center_pixels(rect.center(), scale=self.get_effective_scale())
         return True
 
     def compute_texture_rect_fit(self, rect: QRectF) -> tuple[float, float] | None:
@@ -573,7 +542,7 @@ class ViewTransformController:
             )
         if target_scale <= 0.0:
             return None
-        return (target_scale / base_scale, target_scale)
+        return (target_scale / (base_scale * self._image_cover_scale), target_scale)
 
     # ------------------------------------------------------------------
     # Convenience methods that use internal viewport state
@@ -603,10 +572,45 @@ class ViewTransformController:
         if abs(clamped - self._image_cover_scale) <= 1e-4:
             return
         self._image_cover_scale = clamped
-        self._viewer.update()
+        self._request_update()
         self._emit_view_transform_changed()
 
+    @contextmanager
+    def batch_changes(self, *, repaint: bool = True):
+        """Publish only the final transform, never intermediate zoom/pan pairs."""
+        self._batch_depth += 1
+        try:
+            yield
+        finally:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                update, zoom, transform = (
+                    self._batch_update, self._batch_zoom, self._batch_transform
+                )
+                self._batch_update = self._batch_zoom = self._batch_transform = False
+                if update and repaint:
+                    self._viewer.update()
+                if zoom:
+                    self._on_zoom_changed(self._zoom_factor)
+                if transform and self._on_view_transform_changed is not None:
+                    self._on_view_transform_changed()
+
+    def _request_update(self) -> None:
+        if self._batch_depth:
+            self._batch_update = True
+        else:
+            self._viewer.update()
+
+    def _emit_zoom_changed(self) -> None:
+        if self._batch_depth:
+            self._batch_zoom = True
+        else:
+            self._on_zoom_changed(self._zoom_factor)
+
     def _emit_view_transform_changed(self) -> None:
+        if self._batch_depth:
+            self._batch_transform = True
+            return
         if self._on_view_transform_changed is not None:
             self._on_view_transform_changed()
 

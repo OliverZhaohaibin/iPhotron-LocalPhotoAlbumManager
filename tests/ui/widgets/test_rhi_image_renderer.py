@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from unittest.mock import Mock
 
 import pytest
 
@@ -202,6 +203,31 @@ def test_rhi_create_failure_never_replaces_active_still_texture() -> None:
     assert renderer._tex_rgba is active
     assert tuple(renderer._still_textures) == ("current",)
     assert active.destroyed is False
+
+
+@pytest.mark.parametrize("create_result", [True, False])
+def test_still_preparation_resolves_dimensions_before_viewer_framing(create_result) -> None:
+    renderer = RhiImageRenderer()
+    active = _FakeTexture(QSize(8, 8))
+    fake_rhi = _FakeTextureRhi(create_result=create_result)
+    updates = _FakeResourceUpdateBatch()
+    fake_rhi.nextResourceUpdateBatch = lambda: updates
+    renderer._rhi = fake_rhi
+    renderer._still_textures["current"] = (active, 256)
+    renderer._active_still_key = "current"
+    renderer._tex_rgba = active
+    renderer.upload_still_texture("replacement", _image(16, 8))
+    assert renderer.texture_size() == (16, 8)
+
+    command_buffer = Mock()
+    renderer.prepare_still_upload(command_buffer)
+
+    command_buffer.resourceUpdate.assert_called_once_with(updates)
+    assert renderer.texture_size() == ((16, 8) if create_result else (8, 8))
+    result = renderer.take_still_upload_result()
+    assert result is not None and result["success"] is create_result
+    assert renderer.has_texture()
+    assert renderer._pending_still is None
 
 
 def test_rhi_prefetch_drops_when_only_visible_texture_blocks_budget() -> None:

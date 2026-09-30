@@ -108,7 +108,7 @@ def test_raw_gl_suppression_clears_without_drawing_or_mutating_residency() -> No
     viewer.renderTarget.return_value = target
     command_buffer = Mock()
 
-    GLImageViewer.render(viewer, command_buffer)
+    GLImageViewer._render_frame(viewer, command_buffer)
 
     command_buffer.beginPass.assert_called_once()
     command_buffer.beginExternal.assert_not_called()
@@ -203,6 +203,7 @@ def test_adjusted_video_upload_failure_keeps_suppression_and_retry_input(
     viewer._gl_funcs = mocker.Mock()
     viewer._renderer = mocker.Mock()
     viewer._renderer.has_texture.return_value = True
+    viewer._renderer.texture_size.return_value = (64, 48)
     viewer._renderer.upload_video_frame.side_effect = RuntimeError("upload failed")
     viewer._renderer.take_still_upload_result.return_value = None
     retained_frame = mocker.Mock()
@@ -646,7 +647,7 @@ def test_windows_gl_first_texture_failure_is_reported_before_no_texture_return(
         return_value=SimpleNamespace(GL_COLOR_BUFFER_BIT=0x4000),
     )
 
-    GLImageViewer.render(viewer, Mock())
+    GLImageViewer._render_frame(viewer, Mock())
 
     viewer.stillTextureAllocationFailed.emit.assert_called_once_with(
         "first-gl-still",

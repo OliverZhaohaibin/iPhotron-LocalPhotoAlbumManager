@@ -1,5 +1,10 @@
 [CmdletBinding()]
 param(
+    [ValidateSet("ScanPlayback", "Fullscreen")]
+    [string]$Scenario = "ScanPlayback",
+    [switch]$FullscreenBorder,
+    [switch]$FullscreenOverscan,
+    [switch]$NativeFullscreen,
     [string]$AppPath = "",
     [string]$PythonExe = "",
     [string]$OutputRoot = "",
@@ -11,6 +16,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
+
+if (($FullscreenBorder -and $FullscreenOverscan) -or
+    ($NativeFullscreen -and ($FullscreenBorder -or $FullscreenOverscan))) {
+    throw "Choose only one fullscreen override: -FullscreenBorder, -FullscreenOverscan, or -NativeFullscreen"
+}
+if (($FullscreenBorder -or $FullscreenOverscan -or $NativeFullscreen) -and
+    $Scenario -ne "Fullscreen") {
+    throw "Fullscreen overrides require -Scenario Fullscreen"
+}
 
 function Resolve-Executable {
     param([Parameter(Mandatory = $true)][string]$Candidate)
@@ -109,39 +123,52 @@ function Add-ReproductionMarker {
 function Resolve-SourceApplicationProcess {
     param(
         [Parameter(Mandatory = $true)]$LauncherProcess,
-        [int]$TimeoutMilliseconds = 5000
+        [Parameter(Mandatory = $true)][string]$StackPath,
+        [int]$TimeoutMilliseconds = 15000
     )
 
+    # A Windows venv may start more than one Python launcher. Never select the
+    # first live child: it can stay alive with zero CPU and no application HWND.
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     do {
         try {
-            $children = @(Get-CimInstance Win32_Process -Filter (
-                "ParentProcessId = {0}" -f $LauncherProcess.Id
-            ) -ErrorAction Stop | Sort-Object CreationDate -Descending)
-            foreach ($child in $children) {
-                $candidate = Get-Process -Id ([int]$child.ProcessId) `
-                    -ErrorAction SilentlyContinue
-                if ($candidate -and -not $candidate.HasExited) {
+            $descendantIds = New-Object 'System.Collections.Generic.HashSet[int]'
+            $pendingIds = New-Object 'System.Collections.Generic.Queue[int]'
+            $pendingIds.Enqueue([int]$LauncherProcess.Id)
+            while ($pendingIds.Count -gt 0) {
+                $parentId = $pendingIds.Dequeue()
+                if (-not $descendantIds.Add($parentId)) { continue }
+                $children = @(Get-CimInstance Win32_Process -Filter (
+                    "ParentProcessId = {0}" -f $parentId
+                ) -ErrorAction Stop)
+                foreach ($child in $children) {
+                    $pendingIds.Enqueue([int]$child.ProcessId)
+                }
+            }
+
+            # This header is emitted inside the GUI process before first paint.
+            # Require ancestry as well, so a stale/unrelated PID cannot be selected.
+            if (Test-Path -LiteralPath $StackPath -PathType Leaf) {
+                $header = Get-Content -LiteralPath $StackPath -TotalCount 1 |
+                    ConvertFrom-Json -ErrorAction Stop
+                if ($header.event -eq "runtime_diagnostics_started" -and
+                    $descendantIds.Contains([int]$header.pid)) {
+                    $candidate = Get-Process -Id ([int]$header.pid) -ErrorAction SilentlyContinue
+                    if ($candidate -and -not $candidate.HasExited) { return $candidate }
+                }
+            }
+            foreach ($candidateId in $descendantIds) {
+                $candidate = Get-Process -Id $candidateId -ErrorAction SilentlyContinue
+                if ($candidate -and -not $candidate.HasExited -and
+                    $candidate.MainWindowHandle -ne [IntPtr]::Zero) {
                     return $candidate
                 }
             }
         }
         catch {}
-        try {
-            $LauncherProcess.Refresh()
-            if ($LauncherProcess.HasExited) {
-                break
-            }
-            if ($LauncherProcess.MainWindowHandle -ne [IntPtr]::Zero) {
-                return $LauncherProcess
-            }
-        }
-        catch {
-            break
-        }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    return $LauncherProcess
+    throw "Could not identify the GUI process; refusing to collect launcher-only metrics."
 }
 
 function Write-SystemSnapshot {
@@ -192,7 +219,7 @@ function Write-SystemSnapshot {
     $snapshot = [ordered]@{
         session_id = $SessionId
         collected_utc = [DateTime]::UtcNow.ToString("o")
-        collector_version = 2
+        collector_version = 4
         launch_mode = $Launch.Mode
         application_name = $appFile.Name
         application_size_bytes = $appFile.Length
@@ -388,6 +415,28 @@ $diagnosticEnvironment = [ordered]@{
     PYTHONFAULTHANDLER = "1"
     QT_LOGGING_RULES = "qt.qpa.gl=true;qt.rhi.*=true;qt.multimedia.*=true"
 }
+if ($Scenario -eq "Fullscreen") {
+    $diagnosticEnvironment["IPHOTO_RHI_BACKEND"] = "opengl"
+    $diagnosticEnvironment["IPHOTO_FULLSCREEN_DIAG"] = "1"
+    $diagnosticEnvironment["QT_QPA_PLATFORM"] = "windows"
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "0"
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "auto"
+}
+if ($FullscreenBorder) {
+    if ($Scenario -ne "Fullscreen") { throw "-FullscreenBorder requires -Scenario Fullscreen" }
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "1"
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "0"
+}
+if ($FullscreenOverscan) {
+    if ($Scenario -ne "Fullscreen" -or $FullscreenBorder) {
+        throw "-FullscreenOverscan requires -Scenario Fullscreen without -FullscreenBorder"
+    }
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "1"
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_BORDER"] = "0"
+}
+if ($NativeFullscreen) {
+    $diagnosticEnvironment["IPHOTO_WINDOWS_FULLSCREEN_OVERSCAN"] = "0"
+}
 if ($launch.Mode -eq "source") {
     $sourceRoot = Join-Path $repositoryRoot "src"
     $inheritedPythonPath = [Environment]::GetEnvironmentVariable(
@@ -426,14 +475,24 @@ try {
     }
     $process = Start-Process @startParameters
     if ($launch.Mode -eq "source") {
-        $process = Resolve-SourceApplicationProcess -LauncherProcess $process
+        $process = Resolve-SourceApplicationProcess -LauncherProcess $process -StackPath $stackPath
     }
     Add-ReproductionMarker -MarkerPath $markerPath -Marker "application_started" `
         -ProcessId $process.Id
 
     Write-Host ""
     Write-Host "iPhoto diagnostic collection started (PID $($process.Id))." -ForegroundColor Cyan
-    Write-Host "1. Reproduce scanning until still photos become blank / Edit stops responding."
+    Add-ReproductionMarker -MarkerPath $markerPath -Marker "scenario_$Scenario" `
+        -ProcessId $process.Id
+    if ($Scenario -eq "Fullscreen") {
+        Write-Host "1. Test unedited, cropped, then cropped + straightened stills."
+        Write-Host "   For each: windowed idle, fullscreen idle, wheel zoom, double-click exit."
+        Write-Host "   Repeat 20 times; also test Esc, Edit, video and Live Photo."
+        Write-Host "   Press R for each observed offset or flicker. No media pixels are collected."
+    }
+    else {
+        Write-Host "1. Reproduce scanning until still photos become blank / Edit stops responding."
+    }
     Write-Host "2. When the problem is visible, return here and press R once."
     Write-Host "3. Then close iPhoto normally. If it cannot close, press Q here to stop it."
     Write-Host "Collection automatically stops after $MaxMinutes minutes."

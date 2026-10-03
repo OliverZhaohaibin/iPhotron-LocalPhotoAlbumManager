@@ -11,6 +11,35 @@ permissions:
   contents: read
 
 jobs:
+  map-extension-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux Qt libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libpulse0
+      - run: python -m pip install -e ".[test]"
+      - name: Test offline installation and download recovery
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -q tests/infrastructure/test_map_extension_installer.py
+          tests/ui/tasks/test_map_extension_download_worker.py
+          tests/gui/ui/controllers/test_map_extension_download_controller.py
+          tests/gui/coordinators/test_location_info_coordinator.py
+          tests/test_map_sources.py tests/test_map_runtime_service.py tests/test_build_manifest.py
+      - run: python tools/check_architecture.py
+
   maps-scale-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 10

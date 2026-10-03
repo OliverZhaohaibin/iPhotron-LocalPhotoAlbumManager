@@ -40,6 +40,7 @@ def test_open_toggle_initialises_recognition_before_publishing_presentation() ->
     coordinator._recognition_initialized = False
     coordinator._recognition_initialization_attempted = False
     coordinator._map_runtime_getter = Mock(return_value=None)
+    coordinator._map_extension_download = SimpleNamespace(prepare_runtime=lambda callback: callback())
 
     LocationInfoCoordinator.toggle(coordinator)
 
@@ -75,3 +76,14 @@ def test_failed_recognition_initialisation_is_not_retried_on_reopen() -> None:
 
     coordinator._recognition_provider.assert_called_once_with()
     panel.set_face_actions_enabled.assert_called_once_with(False)
+
+
+def test_info_runtime_probe_waits_for_extension_preparation():
+    callbacks = []
+    coordinator = LocationInfoCoordinator.__new__(LocationInfoCoordinator)
+    coordinator._window = SimpleNamespace(ui=SimpleNamespace(info_panel=None))
+    coordinator._map_extension_download = SimpleNamespace(prepare_runtime=callbacks.append)
+    coordinator._map_runtime_getter = Mock()
+    LocationInfoCoordinator.toggle(coordinator)
+    assert len(callbacks) == 1
+    coordinator._map_runtime_getter.assert_not_called()

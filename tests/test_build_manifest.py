@@ -109,3 +109,20 @@ def test_build_manifest_records_linux_distribution_and_libc(
         "libc_name": "glibc",
         "libc_version": "2.39",
     }
+
+
+def test_manifest_records_app_and_map_package_identity(tmp_path):
+    import shutil
+    repository = Path(__file__).resolve().parents[1]
+    package = Path("src/iPhoto/infrastructure/services/map_extension_packages.py")
+    (tmp_path / package.parent).mkdir(parents=True)
+    shutil.copyfile(repository / package, tmp_path / package)
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "6.6.8"\n')
+    artifact = tmp_path / "app.exe"
+    artifact.write_bytes(b"exe")
+    manifest = create_manifest(root=tmp_path, artifact=artifact, build_driver=artifact,
+                               build_flags=[], native_runtime=None, assets=[])
+    assert manifest["app_version"] == "6.6.8"
+    windows = next(p for p in manifest["map_extension_packages"] if p["platform"] == "win32")
+    assert windows["size"] == 538920928
+    assert len(windows["sha256"]) == 64

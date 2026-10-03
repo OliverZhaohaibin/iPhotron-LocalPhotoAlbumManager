@@ -1661,3 +1661,15 @@ def test_photo_map_view_rebuilds_when_runtime_package_root_changes(
         assert controller_instances[1].set_assets_calls == [(assets, library_root)]
     finally:
         view.close()
+
+
+def test_map_surface_waits_for_extension_preparation(qapp, monkeypatch, tmp_path):
+    builds = []
+    monkeypatch.setattr(photo_map_view_module.PhotoMapView, "_build_map_widget", lambda self: builds.append(True))
+    view = photo_map_view_module.PhotoMapView(defer_runtime=True)
+    assert builds == []
+    view.set_assets([], tmp_path)
+    view.clear()
+    view.set_map_runtime(None)
+    assert builds == [True]
+    view.shutdown()

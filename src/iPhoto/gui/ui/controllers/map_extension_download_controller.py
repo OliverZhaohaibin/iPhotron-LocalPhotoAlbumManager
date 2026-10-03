@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QProcess, QThreadPool, Qt
+from PySide6.QtCore import QCoreApplication, QProcess, Qt, QThreadPool, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -21,23 +22,12 @@ from PySide6.QtWidgets import (
 )
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
+from iPhoto.application.ports.map_extension import MapExtensionError
 from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadRequest,
-    MapExtensionDownloadResult,
     MapExtensionDownloadWorker,
 )
-from maps.map_sources import (
-    apply_pending_osmand_extension_install,
-    bundled_osmand_extension_archive,
-    default_osmand_extension_root,
-    default_pending_osmand_extension_root,
-    has_installed_osmand_extension,
-    has_pending_osmand_extension_install,
-    supports_map_extension_download,
-    verify_osmand_extension_install,
-)
 
-LOGGER = logging.getLogger(__name__)
 _SHOW_STARTUP_PROMPT_KEY = "ui.show_map_extension_startup_prompt"
 
 
@@ -99,143 +89,145 @@ class _MapExtensionProgressDialog(QDialog):
 
 
 class MapExtensionDownloadController:
-    """Coordinate startup prompts, download progress, and restart requests."""
+    """Own UI choices and serialize preparation before map surfaces are created."""
 
-    def __init__(
-        self,
-        parent: QWidget,
-        context: RuntimeEntryContract,
-        *,
-        package_root: Path,
-        on_bundled_install_ready: Callable[[], None] | None = None,
-    ) -> None:
+    def __init__(self, parent, context: RuntimeEntryContract, *, package_root: Path):
         self._parent = parent
         self._context = context
         self._package_root = Path(package_root).resolve()
-        self._progress_dialog: _MapExtensionProgressDialog | None = None
+        self._progress_dialog = None
         self._download_inflight = False
-        self._latest_result: MapExtensionDownloadResult | None = None
-        self._active_worker: MapExtensionDownloadWorker | None = None
-        self._temporarily_hidden_windows: list[QWidget] = []
-        self._startup_prompt: QMessageBox | None = None
-        self._on_bundled_install_ready = on_bundled_install_ready
-        self._bundled_install_inflight = False
+        self._latest_result = None
+        self._latest_error = None
+        self._active_worker = None
+        self._last_request = None
+        self._temporarily_hidden_windows = []
+        self._startup_prompt = None
+        self._runtime_prepared = False
+        self._prepare_callbacks: list[Callable[[], None]] = []
 
-    def _tr(self, source_text: str) -> str:
-        return QCoreApplication.translate("MapExtension", source_text, None)
+    def _tr(self, text):
+        return QCoreApplication.translate("MapExtension", text, None)
+
+    def set_package_root(self, package_root):
+        if package_root is not None:
+            self._package_root = Path(package_root).resolve()
+
+    def prepare_runtime(self, callback: Callable[[], None]) -> None:
+        """Both map page and InfoPanel wait here before any capability probe."""
+        if self._runtime_prepared:
+            callback()
+            return
+        if callback not in self._prepare_callbacks:
+            self._prepare_callbacks.append(callback)
+        if not self._download_inflight:
+            self._start(
+                MapExtensionDownloadRequest(self._package_root, sys.platform, operation="prepare")
+            )
 
     def maybe_prompt_on_startup(self) -> bool:
-        """Prepare the extension on first map use.
-
-        Returns ``True`` while a bundled archive is being installed, allowing
-        the caller to defer capability detection until the worker finishes.
-        """
-
-        if has_installed_osmand_extension(self._package_root):
-            return False
-        if has_pending_osmand_extension_install(self._package_root):
-            self._recover_pending_install_on_startup()
-            return False
-        bundled_archive = bundled_osmand_extension_archive(self._package_root)
-        if bundled_archive is not None:
-            self._start_bundled_install(bundled_archive)
+        if not self._runtime_prepared:
+            self.prepare_runtime(lambda: self.maybe_prompt_on_startup())
             return True
-        if not supports_map_extension_download():
+        if (
+            self._latest_result is None
+            or self._latest_result.status != "missing"
+            or self._startup_prompt is not None
+            or not self._context.map_extensions.download_url(sys.platform)
+            or not self._context.settings.get(_SHOW_STARTUP_PROMPT_KEY, True)
+        ):
             return False
-        if not bool(self._context.settings.get(_SHOW_STARTUP_PROMPT_KEY, True)):
-            return False
+        box = QMessageBox(self._parent)
+        box.setWindowTitle(self._tr("Map Extension"))
+        box.setText(self._tr("Download the offline map extension now?"))
+        download = box.addButton(self._tr("Download"), QMessageBox.ButtonRole.AcceptRole)
+        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
+        box.addButton(self._tr("Not Now"), QMessageBox.ButtonRole.RejectRole)
+        checkbox = QCheckBox(self._tr("Do not show again"), box)
+        box.setCheckBox(checkbox)
+        self._startup_prompt = box
 
-        message_box = QMessageBox(self._parent)
-        message_box.setIcon(QMessageBox.Icon.Question)
-        message_box.setWindowTitle(self._tr("Map Extension"))
-        message_box.setText(self._tr("Download the offline map extension now?"))
-        message_box.setInformativeText(
-            self._tr("The map extension enables the bundled offline OsmAnd map runtime.")
-        )
-        download_button = message_box.addButton(
-            self._tr("Download"),
-            QMessageBox.ButtonRole.AcceptRole,
-        )
-        message_box.addButton(self._tr("Not Now"), QMessageBox.ButtonRole.RejectRole)
-        do_not_show_checkbox = QCheckBox(self._tr("Do not show again"), message_box)
-        message_box.setCheckBox(do_not_show_checkbox)
-        self._startup_prompt = message_box
+        def finished(_result):
+            self._startup_prompt = None
+            if checkbox.isChecked():
+                self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
+            if box.clickedButton() is download:
+                self.start_download(source="startup")
+            elif box.clickedButton() is local:
+                self.install_from_file()
+            box.deleteLater()
 
-        def _finished(_result: int) -> None:
-            try:
-                if message_box.clickedButton() is download_button:
-                    self.start_download(source="startup")
-                elif do_not_show_checkbox.isChecked():
-                    self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
-            finally:
-                self._startup_prompt = None
-                message_box.deleteLater()
-
-        message_box.finished.connect(_finished)
-        message_box.open()
+        box.finished.connect(finished)
+        box.open()
         return False
 
-    def set_package_root(self, package_root: Path | None) -> None:
-        """Update the active maps package root used for prompt/download checks."""
-
-        if package_root is None:
-            return
-        self._package_root = Path(package_root).resolve()
-
-    def start_download(self, *, source: str) -> None:
-        del source
+    def show_options(self) -> None:
         if self._download_inflight:
             if self._progress_dialog is not None:
                 self._progress_dialog.raise_()
-                self._progress_dialog.activateWindow()
             return
+        box = QMessageBox(self._parent)
+        box.setWindowTitle(self._tr("Map Extension"))
+        box.setText(self._tr("Choose how to install the map extension."))
+        online = box.addButton(self._tr("Download"), QMessageBox.ButtonRole.AcceptRole)
+        browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
+        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        available = bool(self._context.map_extensions.download_url(sys.platform))
+        online.setEnabled(available)
+        browser.setEnabled(available)
+        box.exec()
+        if box.clickedButton() is online:
+            self.start_download(source="settings")
+        elif box.clickedButton() is browser:
+            self.open_download_page()
+        elif box.clickedButton() is local:
+            self.install_from_file()
 
-        if not supports_map_extension_download():
-            QMessageBox.warning(
-                self._parent,
-                self._tr("Map Extension"),
-                self._tr("Map extension downloads are unavailable on this platform."),
+    def open_download_page(self):
+        url = self._context.map_extensions.download_url(sys.platform)
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def install_from_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self._parent,
+            self._tr("Install Map Extension"),
+            "",
+            self._tr("Map extension archives (*.zip *.tar.xz)"),
+        )
+        if path:
+            self._start(
+                MapExtensionDownloadRequest(
+                    self._package_root,
+                    sys.platform,
+                    local_archive_path=Path(path),
+                    defer_activation=self._runtime_prepared,
+                )
             )
-            return
 
-        self._download_inflight = True
-        self._latest_result = None
-        self._bundled_install_inflight = False
-        self._hide_blocking_top_level_windows()
-        self._progress_dialog = _MapExtensionProgressDialog(self._parent)
-        self._progress_dialog.show()
-        self._progress_dialog.raise_()
-        self._progress_dialog.activateWindow()
-
-        worker = MapExtensionDownloadWorker(
+    def start_download(self, *, source: str, network_mode="system"):
+        del source
+        self._start(
             MapExtensionDownloadRequest(
-                package_root=self._package_root,
-                platform=sys.platform,
+                self._package_root,
+                sys.platform,
+                network_mode=network_mode,
+                defer_activation=self._runtime_prepared,
             )
         )
-        worker.signals.progress.connect(self._handle_progress)
-        worker.signals.ready.connect(self._handle_ready)
-        worker.signals.error.connect(self._handle_error)
-        worker.signals.finished.connect(self._handle_finished)
-        self._active_worker = worker
-        QThreadPool.globalInstance().start(worker, -1)
 
-    def _start_bundled_install(self, archive_path: Path) -> None:
+    def _start(self, payload):
         if self._download_inflight:
             return
         self._download_inflight = True
+        self._last_request = payload
         self._latest_result = None
-        self._bundled_install_inflight = True
+        self._latest_error = None
+        self._hide_blocking_top_level_windows()
         self._progress_dialog = _MapExtensionProgressDialog(self._parent)
         self._progress_dialog.show()
-
-        worker = MapExtensionDownloadWorker(
-            MapExtensionDownloadRequest(
-                package_root=self._package_root,
-                platform=sys.platform,
-                local_archive_path=archive_path,
-            )
-        )
+        worker = MapExtensionDownloadWorker(payload, self._context.map_extensions)
         worker.signals.progress.connect(self._handle_progress)
         worker.signals.ready.connect(self._handle_ready)
         worker.signals.error.connect(self._handle_error)
@@ -243,119 +235,122 @@ class MapExtensionDownloadController:
         self._active_worker = worker
         QThreadPool.globalInstance().start(worker, -1)
 
-    def _handle_progress(self, current: int, total: int, message: str) -> None:
+    def _handle_progress(self, current, total, message):
         if self._progress_dialog is not None:
-            self._progress_dialog.update_progress(int(current), int(total), str(message))
+            self._progress_dialog.update_progress(current, total, self._tr(message))
 
-    def _handle_ready(self, result: object) -> None:
-        if isinstance(result, MapExtensionDownloadResult):
-            self._latest_result = result
-        install_verified = verify_osmand_extension_install(
-            self._package_root, platform=sys.platform
-        )
-        if not install_verified:
-            self._handle_error(
-                self._install_verification_failed_message(
-                    self._tr(
-                        "Map extension download finished, but the install folder was not "
-                        "renamed successfully."
-                    )
-                )
-            )
-            return
-        if self._progress_dialog is not None:
-            self._progress_dialog.update_progress(
-                100,
-                100,
-                self._tr("Map extension is installed. Restart required."),
-            )
-            self._progress_dialog.allow_close()
-            self._progress_dialog.close()
-            self._progress_dialog.deleteLater()
-            self._progress_dialog = None
+    def _handle_ready(self, result):
+        self._latest_result = result
 
-        if self._bundled_install_inflight:
-            callback = self._on_bundled_install_ready
-            if callback is not None:
-                callback()
-            return
+    def _handle_error(self, failure):
+        self._latest_error = failure
 
-        restart_now = QMessageBox.question(
-            self._parent,
-            self._tr("Restart Required"),
-            self._tr("Map extension download finished. Restart now to activate it?"),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if restart_now != QMessageBox.StandardButton.Yes:
-            self._restore_temporarily_hidden_windows()
-        if restart_now == QMessageBox.StandardButton.Yes:
-            self._restart_application()
-
-    def _handle_error(self, message: str) -> None:
+    def _handle_finished(self):
+        # Release the old worker before a dialog can start a replacement job.
+        self._download_inflight = False
+        self._active_worker = None
+        payload = self._last_request
         if self._progress_dialog is not None:
             self._progress_dialog.allow_close()
             self._progress_dialog.close()
             self._progress_dialog.deleteLater()
             self._progress_dialog = None
         self._restore_temporarily_hidden_windows()
-        QMessageBox.critical(
-            self._parent,
-            self._tr("Map Extension"),
-            str(message) or self._tr("Failed to download the map extension."),
-        )
-
-    def _handle_finished(self) -> None:
-        self._download_inflight = False
-        self._bundled_install_inflight = False
-        self._active_worker = None
-
-    def _recover_pending_install_on_startup(self) -> None:
-        try:
-            apply_pending_osmand_extension_install(self._package_root)
-        except Exception:
-            LOGGER.warning("Failed to recover pending map extension install", exc_info=True)
-            QMessageBox.critical(
-                self._parent,
-                self._tr("Map Extension"),
-                self._install_verification_failed_message(
-                    self._tr(
-                        "A pending map extension install exists, but it could not be activated."
-                    )
-                ),
-            )
+        if payload is None:
             return
-
-        if verify_osmand_extension_install(self._package_root, platform=sys.platform):
-            QMessageBox.information(
+        preparing = payload.operation == "prepare"
+        failure = self._latest_error
+        result = self._latest_result
+        if preparing:
+            self._runtime_prepared = True
+            callbacks, self._prepare_callbacks = self._prepare_callbacks, []
+            for callback in callbacks:
+                callback()
+        if failure is not None:
+            self._show_failure(failure)
+        elif result is not None and (not preparing or result.status == "pending_restart"):
+            message = self._tr("Map extension is ready. Restart now to activate it?")
+            if result.status == "pending_restart":
+                message = self._tr("Map extension is staged and waiting for restart. Restart now?")
+            answer = QMessageBox.question(
                 self._parent,
-                self._tr("Map Extension"),
-                self._tr(
-                    "Map extension installation was completed. Restart the application to "
-                    "activate it."
-                ),
+                self._tr("Restart Required"),
+                message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
-            return
+            if answer == QMessageBox.StandardButton.Yes:
+                self._restart_application()
+        # Map use may have been requested while installation was already busy.
+        if not preparing and self._prepare_callbacks and not self._download_inflight:
+            self._start(
+                MapExtensionDownloadRequest(self._package_root, sys.platform, operation="prepare")
+            )
 
-        QMessageBox.critical(
-            self._parent,
-            self._tr("Map Extension"),
-            self._install_verification_failed_message(
-                self._tr(
-                    "A pending map extension install was found, but the installed files could "
-                    "not be verified."
-                )
+    def _show_failure(self, failure):
+        messages = {
+            "refused": self._tr(
+                "The connection was refused. Check your system proxy or try another download method."
             ),
+            "timeout": self._tr("The map extension download timed out. Please try again."),
+            "dns": self._tr("The download server name could not be resolved."),
+            "tls": self._tr("The download server certificate could not be verified."),
+            "http": self._tr("The download server returned an error."),
+            "permission": self._tr(
+                "The map extension folder is not writable or its files are in use. Check the folder shown in Details."
+            ),
+            "disk": self._tr("There is not enough disk space to install the map extension."),
+            "busy": self._tr(
+                "Another map extension installation is running. Try again when it finishes."
+            ),
+            "unknown_package": self._tr(
+                "This is not a supported map extension package. Download the official package for this app version."
+            ),
+            "unsupported": self._tr(
+                "This map extension package is incompatible with this app or platform."
+            ),
+            "integrity": self._tr(
+                "The map extension package is damaged or incomplete. Download it again."
+            ),
+            "incomplete": self._tr(
+                "The map extension is missing required map, search or runtime files."
+            ),
+            "unsafe_archive": self._tr("The map extension archive contains an unsafe path."),
+            "missing_file": self._tr("The selected map extension archive could not be found."),
+        }
+        box = QMessageBox(self._parent)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self._tr("Map Extension"))
+        box.setText(
+            messages.get(
+                getattr(failure, "category", ""),
+                self._tr(
+                    "Map extension installation failed. Try again or install a downloaded archive."
+                ),
+            )
         )
+        if isinstance(failure, MapExtensionError):
+            box.setDetailedText(str(failure))
+        retry = box.addButton(self._tr("Retry"), QMessageBox.ButtonRole.AcceptRole)
+        direct = box.addButton(self._tr("Try Direct Connection"), QMessageBox.ButtonRole.ActionRole)
+        browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
+        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        online = bool(self._context.map_extensions.download_url(sys.platform))
+        direct.setEnabled(online and getattr(failure, "stage", "") == "download")
+        browser.setEnabled(online)
+        payload = self._last_request
+        box.exec()
+        if box.clickedButton() is retry and payload is not None:
+            from dataclasses import replace
 
-    def _install_verification_failed_message(self, prefix: str) -> str:
-        pending_root = default_pending_osmand_extension_root(self._package_root)
-        extension_root = default_osmand_extension_root(self._package_root)
-        return (
-            f"{prefix}\n\n"
-            f"{self._tr('Pending folder')}: {pending_root}\n"
-            f"{self._tr('Active extension folder')}: {extension_root}"
-        )
+            self._start(replace(payload, defer_activation=self._runtime_prepared))
+        elif box.clickedButton() is direct:
+            self.start_download(source="recovery", network_mode="direct")
+        elif box.clickedButton() is browser:
+            self.open_download_page()
+        elif box.clickedButton() is local:
+            self.install_from_file()
 
     def _restart_application(self) -> None:
         app = QCoreApplication.instance()
@@ -382,7 +377,7 @@ class MapExtensionDownloadController:
             app.quit()
 
     def _restart_command(self, app: QCoreApplication) -> tuple[str, list[str]]:
-        if getattr(sys, "frozen", False):
+        if getattr(sys, "frozen", False) or "__compiled__" in globals():
             program = app.applicationFilePath()
             arguments = list(sys.argv[1:])
             return program, arguments

@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from maps import map_sources
 from maps.map_sources import (
     DEFAULT_HELPER_RELATIVE_PATHS,
@@ -22,6 +24,14 @@ from maps.map_sources import (
     resolve_osmand_helper_command,
     resolve_osmand_native_widget_library,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_extension_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+    monkeypatch.delenv("APPIMAGE", raising=False)
 
 
 def _create_extension_assets(package_root: Path) -> Path:
@@ -47,6 +57,9 @@ def _create_extension_assets_at(extension_root: Path) -> Path:
         Path("tiles") / "extension"
     )
     helper_path.write_bytes(b"helper")
+    # Tests deliberately simulate platforms after map_sources was imported.
+    # Supply the extensionless helper for Linux simulations on a Windows host.
+    (extension_root / "bin" / "osmand_render_helper").write_bytes(b"helper")
     return extension_root
 
 
@@ -477,13 +490,9 @@ def test_has_installed_osmand_extension_detects_external_runtime_when_bundled_ex
         encoding="utf-8",
     )
     external_data_home = tmp_path / "xdg-data"
-    if map_sources.os.name == "nt":
-        monkeypatch.setenv("APPDATA", str(external_data_home))
-        external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
-    else:
-        monkeypatch.setattr(map_sources.sys, "platform", "linux")
-        monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
-        external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
+    monkeypatch.setattr(map_sources.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
+    external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
     _create_extension_assets_at(external_root)
     monkeypatch.delenv("APPIMAGE", raising=False)
     monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
@@ -631,7 +640,7 @@ def test_apply_pending_osmand_extension_install_promotes_to_external_runtime_for
     (pending_root / "search").mkdir()
     _create_search_database(pending_root / "search" / "geonames.sqlite3")
     (pending_root / "bin").mkdir()
-    (pending_root / "bin" / DEFAULT_HELPER_RELATIVE_PATHS[0].name).write_bytes(b"helper")
+    (pending_root / "bin" / "osmand_render_helper").write_bytes(b"helper")
     (pending_root / "marker.txt").write_text("external", encoding="utf-8")
 
     assert apply_pending_osmand_extension_install(package_root) is True

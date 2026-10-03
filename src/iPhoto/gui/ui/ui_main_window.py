@@ -347,17 +347,12 @@ class Ui_MainWindow(QObject):
         return self.preview_window
 
     def _create_map_feature(self) -> object:
-        from maps.map_sources import apply_pending_osmand_extension_install
         from .widgets.photo_map_view import PhotoMapView
 
         assert self._main_window is not None
-        maps_root = Path(__file__).resolve().parents[3] / "maps"
-        try:
-            apply_pending_osmand_extension_install(maps_root)
-        except Exception:
-            _LOGGER.warning("Failed to apply pending map extension install", exc_info=True)
         self.map_view = PhotoMapView(
-            map_runtime=getattr(self._library, "map_runtime", None),
+            map_runtime=None,
+            defer_runtime=True,
             map_interaction_service=getattr(self._library, "map_interaction_service", None),
         )
         self.map_page = QWidget()

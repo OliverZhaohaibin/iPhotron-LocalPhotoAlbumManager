@@ -1,240 +1,47 @@
-"""Background worker that downloads and stages the map extension archive."""
+"""Qt transport for the process-scoped map extension application service."""
 
 from __future__ import annotations
 
-import logging
-import socket
-import shutil
-import tarfile
-import tempfile
-import zipfile
-from dataclasses import dataclass
-from pathlib import Path
-from urllib import request
-
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from maps.map_sources import (
-    apply_pending_osmand_extension_install,
-    default_osmand_download_url,
-    default_osmand_extension_root,
-    default_pending_osmand_extension_root,
-    default_osmand_tiles_root,
-    is_valid_osmand_search_database,
-    supports_map_extension_download,
-    verify_osmand_extension_install,
+from iPhoto.application.ports.map_extension import (
+    MapExtensionError,
 )
-
-_LOGGER = logging.getLogger(__name__)
-_CHUNK_SIZE = 1024 * 256
-_DOWNLOAD_TIMEOUT_SECONDS = 30
-
-
-@dataclass(frozen=True)
-class MapExtensionDownloadRequest:
-    package_root: Path
-    platform: str
-    local_archive_path: Path | None = None
-
-
-@dataclass(frozen=True)
-class MapExtensionDownloadResult:
-    pending_root: Path
-    extension_root: Path
+from iPhoto.application.ports.map_extension import (
+    MapExtensionRequest as MapExtensionDownloadRequest,
+)
+from iPhoto.application.ports.map_extension import (
+    MapExtensionResult as MapExtensionDownloadResult,
+)
+from iPhoto.application.services.map_extension_service import MapExtensionService
 
 
 class MapExtensionDownloadSignals(QObject):
     progress = Signal(int, int, str)
     ready = Signal(object)
-    error = Signal(str)
+    error = Signal(object)
     finished = Signal()
-
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__(parent)
 
 
 class MapExtensionDownloadWorker(QRunnable):
-    """Download the published archive and stage it for the next restart."""
-
-    def __init__(self, request_payload: MapExtensionDownloadRequest) -> None:
+    def __init__(self, request_payload: MapExtensionDownloadRequest, service: MapExtensionService):
         super().__init__()
         self.setAutoDelete(True)
         self._request = request_payload
+        self._service = service
         self.signals = MapExtensionDownloadSignals()
 
-    def run(self) -> None:  # pragma: no cover - exercised by focused tests
+    def run(self):
         try:
-            result = self._download_and_stage()
+            result = self._service.execute(self._request, self.signals.progress.emit)
             self.signals.ready.emit(result)
-        except Exception as exc:  # noqa: BLE001 - isolate worker failures
-            _LOGGER.exception("Failed to download map extension")
-            self.signals.error.emit(str(exc))
+        except MapExtensionError as exc:
+            self.signals.error.emit(exc)
+        except Exception:
+            # Never expose unknown exception strings (URLs may carry credentials).
+            self.signals.error.emit(MapExtensionError("installation", self._request.operation))
         finally:
             self.signals.finished.emit()
-
-    def _download_and_stage(self) -> MapExtensionDownloadResult:
-        local_archive = self._request.local_archive_path
-        if local_archive is None:
-            if not supports_map_extension_download(self._request.platform):
-                raise RuntimeError("Map extension download is unavailable on this platform.")
-            download_url = default_osmand_download_url(self._request.platform)
-            if not download_url:
-                raise RuntimeError("Map extension download URL is unavailable.")
-        else:
-            local_archive = Path(local_archive).resolve()
-            if not local_archive.is_file():
-                raise RuntimeError("Bundled map extension archive is missing.")
-
-        tiles_root = default_osmand_tiles_root(self._request.package_root)
-        tiles_root.mkdir(parents=True, exist_ok=True)
-        pending_root = default_pending_osmand_extension_root(self._request.package_root)
-        extension_root = default_osmand_extension_root(self._request.package_root)
-
-        tmp_dir = Path(tempfile.mkdtemp(prefix="iphoto-map-extension-"))
-        install_verified = False
-        try:
-            archive_name = "extension.zip" if self._request.platform == "win32" else "extension.tar.xz"
-            archive_path = local_archive or (tmp_dir / archive_name)
-            extracted_root = tmp_dir / "extracted"
-            extracted_root.mkdir(parents=True, exist_ok=True)
-            if local_archive is None:
-                self._download_archive(download_url, archive_path)
-            else:
-                self.signals.progress.emit(5, 100, "Preparing bundled map extension...")
-            self._extract_archive(archive_path, extracted_root)
-            staged_extension_root = extracted_root / "extension"
-            self.signals.progress.emit(96, 100, "Validating map extension...")
-            self._validate_extension_root(staged_extension_root)
-            self._publish_pending_install(staged_extension_root, pending_root)
-            self._install_and_verify_pending_root()
-            install_verified = True
-        finally:
-            self._cleanup_temporary_directory(tmp_dir, report_progress=install_verified)
-
-        self.signals.progress.emit(100, 100, "Map extension installed.")
-        return MapExtensionDownloadResult(
-            pending_root=pending_root,
-            extension_root=extension_root,
-        )
-
-    def _download_archive(self, download_url: str, archive_path: Path) -> None:
-        self.signals.progress.emit(0, 0, "Downloading map extension...")
-        try:
-            with request.urlopen(download_url, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response, archive_path.open(
-                "wb"
-            ) as handle:
-                total_header = response.headers.get("Content-Length", "").strip()
-                try:
-                    total = int(total_header)
-                except ValueError:
-                    total = 0
-
-                received = 0
-                while True:
-                    chunk = response.read(_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    received += len(chunk)
-                    self.signals.progress.emit(
-                        received,
-                        total,
-                        "Downloading map extension...",
-                    )
-        except TimeoutError as exc:
-            raise RuntimeError(
-                "Map extension download timed out. Please check your connection and try again."
-            ) from exc
-        except socket.timeout as exc:
-            raise RuntimeError(
-                "Map extension download timed out. Please check your connection and try again."
-            ) from exc
-
-    def _extract_archive(self, archive_path: Path, extracted_root: Path) -> None:
-        self.signals.progress.emit(95, 100, "Extracting map extension...")
-        suffixes = archive_path.suffixes
-        if suffixes[-2:] == [".tar", ".xz"]:
-            with tarfile.open(archive_path, mode="r:xz") as archive:
-                archive.extractall(extracted_root, filter="data")
-            return
-        if archive_path.suffix == ".tar":
-            with tarfile.open(archive_path, mode="r:") as archive:
-                archive.extractall(extracted_root, filter="data")
-            return
-        if archive_path.suffix == ".zip":
-            with zipfile.ZipFile(archive_path) as archive:
-                self._extract_zip_safely(archive, extracted_root)
-            return
-        raise RuntimeError(f"Unsupported map extension archive: {archive_path.name}")
-
-    @staticmethod
-    def _extract_zip_safely(archive: zipfile.ZipFile, extracted_root: Path) -> None:
-        root = extracted_root.resolve()
-        for member in archive.infolist():
-            destination = (root / member.filename).resolve()
-            if destination != root and root not in destination.parents:
-                raise RuntimeError("Map extension archive contains an unsafe path.")
-        archive.extractall(root)
-
-    def _validate_extension_root(self, extension_root: Path) -> None:
-        required_paths = (
-            extension_root / "World_basemap_2.obf",
-            extension_root / "rendering_styles" / "snowmobile.render.xml",
-            extension_root / "search" / "geonames.sqlite3",
-        )
-        for candidate in required_paths:
-            if not candidate.exists():
-                raise RuntimeError(
-                    "Downloaded map extension is incomplete: "
-                    f"missing '{candidate.relative_to(extension_root)}'."
-                )
-        if not is_valid_osmand_search_database(required_paths[2]):
-            raise RuntimeError(
-                "Downloaded map extension is incomplete: search/geonames.sqlite3 "
-                "is not a valid GeoNames search database."
-            )
-
-        helper_candidates = (
-            extension_root / "bin" / "osmand_render_helper.exe",
-            extension_root / "bin" / "osmand_render_helper_sdk.exe",
-        ) if self._request.platform == "win32" else (
-            extension_root / "bin" / "osmand_render_helper",
-            extension_root / "bin" / "osmand_render_helper_sdk",
-        )
-        if not any(candidate.is_file() for candidate in helper_candidates):
-            raise RuntimeError("Downloaded map extension is incomplete: helper binary is missing.")
-
-    def _publish_pending_install(self, extension_root: Path, pending_root: Path) -> None:
-        self.signals.progress.emit(97, 100, "Staging map extension...")
-        if pending_root.exists():
-            shutil.rmtree(pending_root)
-        shutil.move(str(extension_root), str(pending_root))
-
-    def _install_and_verify_pending_root(self) -> None:
-        self.signals.progress.emit(98, 100, "Installing map extension...")
-        try:
-            apply_pending_osmand_extension_install(self._request.package_root)
-        except Exception as exc:
-            raise RuntimeError(
-                "Map extension files were downloaded, but the install folder could not be activated."
-            ) from exc
-
-        self.signals.progress.emit(99, 100, "Verifying installed files...")
-        if not verify_osmand_extension_install(
-            self._request.package_root,
-            platform=self._request.platform,
-        ):
-            raise RuntimeError(
-                "Map extension files were downloaded, but the install folder is still incomplete or stuck as '.pending'."
-            )
-
-    def _cleanup_temporary_directory(self, tmp_dir: Path, *, report_progress: bool = True) -> None:
-        if report_progress:
-            self.signals.progress.emit(99, 100, "Finalizing map extension install...")
-        try:
-            shutil.rmtree(tmp_dir)
-        except Exception:  # noqa: BLE001 - cleanup must not invalidate a verified install
-            _LOGGER.warning("Failed to remove temporary map extension directory: %s", tmp_dir, exc_info=True)
 
 
 __all__ = [

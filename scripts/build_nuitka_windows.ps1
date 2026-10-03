@@ -324,3 +324,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Build manifest generation failed with exit code $LASTEXITCODE"
 }
 Write-Host "Build manifest: $manifestOutput"
+
+# Keep build provenance with the executable so support can distinguish an old
+# installer payload from a tag that already contains a fix.
+Copy-Item -LiteralPath $manifestOutput -Destination (Join-Path $OutputDir 'entrypoint.dist\build-manifest.json') -Force

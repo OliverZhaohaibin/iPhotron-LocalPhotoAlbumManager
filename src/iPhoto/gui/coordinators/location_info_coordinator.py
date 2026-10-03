@@ -67,6 +67,13 @@ class LocationInfoCoordinator(QObject):
         return self._write_queue
 
     def toggle(self) -> None:
+        panel = getattr(self._window.ui, "info_panel", None)
+        if panel is not None and panel.isVisible():
+            self._detail.toggle_info_panel()
+            return
+        self._map_extension_download.prepare_runtime(self._toggle_prepared)
+
+    def _toggle_prepared(self) -> None:
         ui = self._window.ui
         panel = getattr(ui, "info_panel", None)
         if panel is not None and panel.isVisible():
@@ -74,11 +81,13 @@ class LocationInfoCoordinator(QObject):
             return
         if panel is None:
             panel = ui.ensure_info_panel()
-        panel.set_map_runtime(self._map_runtime_getter())
+        runtime = self._map_runtime_getter()
+        panel.set_map_runtime(runtime)
+        self._detail.set_map_runtime(runtime)
         if self._panel is not panel:
             self._detail.set_info_panel(panel)
             panel.downloadMapExtensionRequested.connect(
-                lambda: self._map_extension_download.start_download(source="info_panel")
+                lambda: self._map_extension_download.show_options()
             )
             self._panel = panel
         self._initialize_recognition_once(panel)
@@ -102,12 +111,15 @@ class LocationInfoCoordinator(QObject):
     def rebind_library(self) -> None:
         self._recognition_initialized = False
         self._recognition_initialization_attempted = False
-        map_runtime = self._map_runtime_getter()
         self._write_queue.bind_library_root(self._library_root_getter())
+        panel = getattr(self._window.ui, "info_panel", None)
+        if panel is not None:
+            self._map_extension_download.prepare_runtime(self._rebind_prepared)
+
+    def _rebind_prepared(self) -> None:
+        map_runtime = self._map_runtime_getter()
         self._detail.set_map_runtime(map_runtime)
-        self._map_extension_download.set_package_root(
-            self._package_root_resolver(map_runtime)
-        )
+        self._map_extension_download.set_package_root(self._package_root_resolver(map_runtime))
         panel = getattr(self._window.ui, "info_panel", None)
         if panel is not None:
             panel.set_map_runtime(map_runtime)

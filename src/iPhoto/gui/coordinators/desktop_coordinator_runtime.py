@@ -49,7 +49,6 @@ from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.viewmodels.detail_viewmodel import DetailViewModel
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
-from maps.map_sources import supports_map_extension_download
 
 if TYPE_CHECKING:
     from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
@@ -87,10 +86,9 @@ class DesktopCoordinatorRuntime(QObject):
             window,
             context,
             package_root=self._resolve_map_package_root(None),
-            on_bundled_install_ready=self._handle_bundled_map_install_ready,
         )
         if hasattr(window.ui, "download_map_extension_action"):
-            window.ui.download_map_extension_action.setEnabled(False)
+            window.ui.download_map_extension_action.setEnabled(True)
 
         self._event_bus = context.event_bus
         edit_service_getter = self._edit_service
@@ -637,7 +635,7 @@ class DesktopCoordinatorRuntime(QObject):
         ui.rescan_action.triggered.connect(self._status_bar.begin_scan)
         ui.rescan_action.triggered.connect(self._gallery_vm.rescan_current)
         ui.download_map_extension_action.triggered.connect(
-            lambda: self._map_extension_download.start_download(source="settings")
+            lambda: self._map_extension_download.show_options()
         )
         ui.edit_button.clicked.connect(self._detail_vm.request_edit)
         # ui.edit_rotate_left_button is handled by EditCoordinator in Edit Mode
@@ -764,20 +762,17 @@ class DesktopCoordinatorRuntime(QObject):
             map_view = getattr(ui, "map_view", None)
             if map_view is None:
                 return
-            self._activate_map_services()
-            map_runtime = self._map_runtime()
             self._map_extension_download.set_package_root(
-                self._resolve_map_package_root(map_runtime)
+                self._resolve_map_package_root(self._map_runtime())
             )
-            if hasattr(ui, "download_map_extension_action"):
-                ui.download_map_extension_action.setEnabled(
-                    supports_map_extension_download()
-                )
-            installing_bundled_extension = (
+
+            def prepared():
+                if self._is_shutting_down:
+                    return
+                self._activate_map_services()
+                map_view.set_map_runtime(self._map_runtime())
                 self._map_extension_download.maybe_prompt_on_startup()
-            )
-            if not installing_bundled_extension:
-                map_view.set_map_runtime(map_runtime)
+            self._map_extension_download.prepare_runtime(prepared)
             map_view.set_map_interaction_service(self._map_interaction_service())
             map_view.assetActivated.connect(self._on_map_asset_activated)
             map_view.clusterActivated.connect(self._on_cluster_activated)
@@ -794,20 +789,6 @@ class DesktopCoordinatorRuntime(QObject):
 
         if feature == "people":
             self._bind_people_feature(widget)
-
-    def _handle_bundled_map_install_ready(self) -> None:
-        """Refresh map capabilities after the background bundled install."""
-
-        if self._is_shutting_down:
-            return
-        map_view = getattr(self._window.ui, "map_view", None)
-        if map_view is None:
-            return
-        map_runtime = self._map_runtime()
-        refresh = getattr(map_runtime, "refresh", None)
-        if callable(refresh):
-            refresh()
-        map_view.set_map_runtime(map_runtime)
 
     def _toggle_info_panel(self) -> None:
         self._ensure_location_info_coordinator().toggle()
@@ -895,17 +876,17 @@ class DesktopCoordinatorRuntime(QObject):
         ui = getattr(window, "ui", None)
         map_feature_active = ui is not None and hasattr(ui, "map_view")
         if map_feature_active:
-            self._activate_map_services()
-        map_runtime = self._map_runtime() if map_feature_active else None
-        map_interaction_service = (
-            self._map_interaction_service() if map_feature_active else None
-        )
-        if map_feature_active:
             self._map_extension_download.set_package_root(
-                self._resolve_map_package_root(map_runtime)
+                self._resolve_map_package_root(self._map_runtime())
             )
-            ui.map_view.set_map_runtime(map_runtime)
-            ui.map_view.set_map_interaction_service(map_interaction_service)
+
+            def bind_prepared_map():
+                if self._is_shutting_down:
+                    return
+                self._activate_map_services()
+                ui.map_view.set_map_runtime(self._map_runtime())
+                ui.map_view.set_map_interaction_service(self._map_interaction_service())
+            self._map_extension_download.prepare_runtime(bind_prepared_map)
         recognition = getattr(self, "_recognition", None)
         if recognition is not None:
             recognition.rebind_library()

@@ -14,6 +14,21 @@ from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinat
 MainCoordinator = DesktopCoordinatorRuntime
 
 
+class _MapPreparation:
+    """Controlled asynchronous boundary; callbacks run only when completed."""
+
+    def __init__(self):
+        self.callbacks = []
+        self.set_package_root = MagicMock()
+        self.prepare_runtime = MagicMock(side_effect=self.callbacks.append)
+        self.maybe_prompt_on_startup = MagicMock(return_value=False)
+
+    def complete(self):
+        callbacks, self.callbacks = self.callbacks, []
+        for callback in callbacks:
+            callback()
+
+
 def test_on_library_tree_updated_rebinds_core_domains_only() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     root = Path("/library")
@@ -30,10 +45,18 @@ def test_on_library_tree_updated_rebinds_core_domains_only() -> None:
     coordinator._recognition = None
     coordinator._location_info = None
     coordinator._logger = MagicMock()
-    coordinator._map_extension_download = MagicMock()
+    coordinator._map_extension_download = _MapPreparation()
+    coordinator._is_shutting_down = False
     coordinator._window = MagicMock(ui=MagicMock())
 
     coordinator._on_library_tree_updated()
+
+    coordinator._window.ui.map_view.set_map_runtime.assert_not_called()
+    coordinator._map_extension_download.set_package_root.assert_called_once_with(
+        Path("/session/maps").resolve()
+    )
+    coordinator._map_extension_download.prepare_runtime.assert_called_once()
+    coordinator._map_extension_download.complete()
 
     coordinator.gallery.rebind_library.assert_called_once_with()
     coordinator.detail.rebind_library.assert_called_once_with(
@@ -183,10 +206,18 @@ def test_on_library_tree_updated_rebinds_created_optional_domains() -> None:
     coordinator._recognition = MagicMock()
     coordinator._location_info = MagicMock()
     coordinator._logger = MagicMock()
-    coordinator._map_extension_download = MagicMock()
+    coordinator._map_extension_download = _MapPreparation()
+    coordinator._is_shutting_down = False
     coordinator._window = MagicMock(ui=MagicMock())
 
     coordinator._on_library_tree_updated()
+
+    coordinator._window.ui.map_view.set_map_runtime.assert_not_called()
+    coordinator._map_extension_download.set_package_root.assert_called_once_with(
+        Path("/session/maps").resolve()
+    )
+    coordinator._map_extension_download.prepare_runtime.assert_called_once()
+    coordinator._map_extension_download.complete()
 
     coordinator.gallery.rebind_library.assert_called_once_with()
     coordinator.detail.rebind_library.assert_called_once_with(
@@ -212,7 +243,8 @@ def test_external_library_epoch_change_safely_invalidates_edit_first() -> None:
     coordinator._recognition = None
     coordinator._location_info = None
     coordinator._logger = MagicMock()
-    coordinator._map_extension_download = MagicMock()
+    coordinator._map_extension_download = _MapPreparation()
+    coordinator._is_shutting_down = False
     coordinator._window = MagicMock(ui=SimpleNamespace())
 
     coordinator._on_library_tree_updated()
@@ -254,12 +286,20 @@ def test_map_feature_activation_binds_lazy_location_and_map_services() -> None:
             download_map_extension_action=MagicMock(),
         )
     )
-    coordinator._map_extension_download = MagicMock()
+    coordinator._map_extension_download = _MapPreparation()
+    coordinator._is_shutting_down = False
     coordinator._map_extension_download.maybe_prompt_on_startup.return_value = False
     coordinator._on_map_asset_activated = MagicMock()
     coordinator._on_cluster_activated = MagicMock()
 
     coordinator._on_feature_created("map", object())
+
+    coordinator._map_extension_download.set_package_root.assert_called_once_with(
+        Path("/session/maps").resolve()
+    )
+    library.activate_map_services.assert_not_called()
+    map_view.set_map_runtime.assert_not_called()
+    coordinator._map_extension_download.complete()
 
     library.activate_map_services.assert_called_once_with(
         location_service,
@@ -512,3 +552,52 @@ def test_handle_people_snapshot_sidebar_refresh_prunes_people_pins_before_refres
         group_redirects={"group-a": "group-b"},
     )
     coordinator._window.ui.sidebar.refresh_tree_model.assert_called_once_with()
+
+
+def test_library_rebind_does_not_create_absent_map_services():
+    coordinator = MainCoordinator.__new__(MainCoordinator)
+    coordinator._context = MagicMock(library_epoch=0)
+    coordinator._context.library_session = None
+    coordinator._context.library.root.return_value = Path("/library")
+    coordinator._window = SimpleNamespace(ui=SimpleNamespace())
+    coordinator.gallery = MagicMock()
+    coordinator.detail = MagicMock()
+    coordinator._logger = MagicMock()
+    coordinator._recognition = None
+    coordinator._location_info = None
+    coordinator._map_extension_download = _MapPreparation()
+    coordinator._map_runtime = MagicMock()
+    coordinator._activate_map_services = MagicMock()
+    coordinator._on_library_tree_updated()
+    coordinator._map_runtime.assert_not_called()
+    coordinator._activate_map_services.assert_not_called()
+    coordinator._map_extension_download.prepare_runtime.assert_not_called()
+    coordinator._map_extension_download.set_package_root.assert_not_called()
+
+
+def test_map_preparation_completion_during_shutdown_does_not_bind():
+    for activation in ("create", "rebind"):
+        coordinator = MainCoordinator.__new__(MainCoordinator)
+        runtime = SimpleNamespace(package_root=lambda: Path("/session/maps"))
+        coordinator._context = MagicMock(library_epoch=0)
+        coordinator._context.library_session = None
+        coordinator._context.library.map_runtime = runtime
+        coordinator._window = MagicMock(ui=MagicMock())
+        coordinator._is_shutting_down = False
+        coordinator._map_extension_download = _MapPreparation()
+        coordinator._activate_map_services = MagicMock()
+        coordinator._on_map_asset_activated = MagicMock()
+        coordinator._on_cluster_activated = MagicMock()
+        coordinator._logger = MagicMock()
+        coordinator.gallery = MagicMock()
+        coordinator.detail = MagicMock()
+        coordinator._recognition = None
+        coordinator._location_info = None
+        if activation == "create":
+            coordinator._on_feature_created("map", object())
+        else:
+            coordinator._on_library_tree_updated()
+        coordinator._is_shutting_down = True
+        coordinator._map_extension_download.complete()
+        coordinator._activate_map_services.assert_not_called()
+        coordinator._window.ui.map_view.set_map_runtime.assert_not_called()

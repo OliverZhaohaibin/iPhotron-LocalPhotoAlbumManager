@@ -9,9 +9,12 @@ import importlib.metadata
 import json
 import os
 import platform
+import runpy
 import shutil
 import stat
 import subprocess
+import tomllib
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -158,13 +161,27 @@ def create_manifest(
             _sha256_path(native_runtime) if native_runtime is not None else "not-included"
         ),
         "assets_sha256": _canonical_hash(
-            {
-                _asset_label(path): _sha256_path(path)
-                for path in sorted(assets, key=_asset_label)
-            }
+            {_asset_label(path): _sha256_path(path) for path in sorted(assets, key=_asset_label)}
         ),
     }
+    project_file = root / "pyproject.toml"
+    app_version = None
+    if project_file.is_file():
+        app_version = (
+            tomllib.loads(project_file.read_text(encoding="utf-8"))
+            .get("project", {})
+            .get("version")
+        )
+    package_file = root / "src/iPhoto/infrastructure/services/map_extension_packages.py"
+    map_packages = []
+    if package_file.is_file():
+        map_packages = [
+            asdict(package) | {"url": package.url}
+            for package in runpy.run_path(str(package_file))["PACKAGES"]
+        ]
     return {
+        "app_version": app_version,
+        "map_extension_packages": map_packages,
         "schema_version": SCHEMA_VERSION,
         "source_revision": _git_revision(root),
         "artifact_path": artifact.name,
@@ -209,9 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             args.native_runtime.expanduser().resolve() if args.native_runtime else None
         ),
         assets=[path.expanduser().resolve() for path in args.asset],
-        artifact_tree=(
-            args.artifact_tree.expanduser().resolve() if args.artifact_tree else None
-        ),
+        artifact_tree=(args.artifact_tree.expanduser().resolve() if args.artifact_tree else None),
     )
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

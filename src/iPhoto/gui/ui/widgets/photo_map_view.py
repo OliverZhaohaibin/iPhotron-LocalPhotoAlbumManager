@@ -310,6 +310,7 @@ class PhotoMapView(QWidget):
         *,
         map_source: MapSourceSpec | None = None,
         map_runtime: MapRuntimePort | None = None,
+        defer_runtime: bool = False,
         map_interaction_service: MapInteractionServicePort | None = None,
     ) -> None:
         super().__init__(parent)
@@ -361,7 +362,8 @@ class PhotoMapView(QWidget):
                 filter_candidate.ignore_object(self._tooltip)
         self._last_tooltip_text = ""
         self._thumbnail_loader = ThumbnailLoader(self)
-        self._build_map_widget()
+        if not defer_runtime:
+            self._build_map_widget()
 
     def set_map_interaction_service(
         self,
@@ -401,7 +403,8 @@ class PhotoMapView(QWidget):
         )
         self._map_package_root = resolve_map_package_root(map_runtime)
         if (
-            self._map_runtime_capabilities != previous_capabilities
+            not hasattr(self, "_map_widget")
+            or self._map_runtime_capabilities != previous_capabilities
             or self._map_package_root != previous_package_root
         ):
             self._rebuild_map_widget()
@@ -423,7 +426,8 @@ class PhotoMapView(QWidget):
             return
         self._assets = list(assets)
         self._assets_library_root = library_root
-        self._marker_controller.set_assets(self._assets, library_root)
+        if hasattr(self, "_marker_controller"):
+            self._marker_controller.set_assets(self._assets, library_root)
 
     def clear(self) -> None:
         """Remove all markers from the map."""
@@ -435,7 +439,8 @@ class PhotoMapView(QWidget):
             self._last_tooltip_text = ""
         self._assets = []
         self._assets_library_root = None
-        self._marker_controller.clear()
+        if hasattr(self, "_marker_controller"):
+            self._marker_controller.clear()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

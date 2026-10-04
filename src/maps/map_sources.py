@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import shlex
@@ -429,7 +430,9 @@ def verify_osmand_extension_install(package_root: Path | None = None, *, platfor
     )
 
 
-def apply_pending_osmand_extension_install(package_root: Path | None = None) -> bool:
+def apply_pending_osmand_extension_install(
+    package_root: Path | None = None, *, platform: str | None = None
+) -> bool:
     """Promote a staged extension into place.
 
     Returns ``True`` when a pending install existed and was promoted.
@@ -440,6 +443,8 @@ def apply_pending_osmand_extension_install(package_root: Path | None = None) -> 
     if not pending_root.exists():
         return False
 
+    if not validate_osmand_extension_root(pending_root, platform=platform):
+        raise ValueError("Pending map extension is incomplete")
     extension_root = _managed_osmand_extension_root(root)
     backup_root = extension_root.with_name(extension_root.name + ".backup")
 
@@ -460,7 +465,10 @@ def apply_pending_osmand_extension_install(package_root: Path | None = None) -> 
         raise
     else:
         if backup_root.exists():
-            shutil.rmtree(backup_root)
+            try:
+                shutil.rmtree(backup_root)
+            except OSError:
+                logging.getLogger(__name__).warning("Map backup cleanup deferred: %s", backup_root)
     return True
 
 
@@ -584,6 +592,11 @@ def _bundled_maps_root(package_root: Path) -> Path:
     return root
 
 
+def managed_osmand_extension_root(package_root: Path) -> Path:
+    """Return the installation target, never a bundled read fallback."""
+    return _managed_osmand_extension_root(package_root)
+
+
 def _managed_osmand_extension_root(package_root: Path) -> Path:
     root = Path(package_root).resolve()
     override_root = os.environ.get(ENV_OSMAND_EXTENSION_ROOT, "").strip()
@@ -609,6 +622,9 @@ def _sdk_roots(repo_root: Path) -> tuple[Path, ...]:
 
 def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
     normalized_root = Path(package_root).resolve()
+    selected = default_osmand_extension_root(normalized_root)
+    if validate_osmand_extension_root(selected, platform=sys.platform):
+        return tuple(selected / "bin" / path.name for path in DEFAULT_HELPER_RELATIVE_PATHS)
     repo_root = _repo_root(normalized_root)
     sdk_roots = _sdk_roots(repo_root)
     sdk_candidates = _collect_candidate_paths(sdk_roots, SDK_HELPER_RELATIVE_PATHS) if sdk_roots else ()
@@ -623,6 +639,9 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
 
 def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
     normalized_root = Path(package_root).resolve()
+    selected = default_osmand_extension_root(normalized_root)
+    if validate_osmand_extension_root(selected, platform=sys.platform):
+        return tuple(selected / "bin" / path.name for path in DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS)
     repo_root = _repo_root(normalized_root)
     sdk_roots = _sdk_roots(repo_root)
     sdk_candidates: tuple[Path, ...] = ()
@@ -766,6 +785,7 @@ __all__ = [
     "bundled_osmand_extension_archive",
     "apply_pending_osmand_extension_install",
     "default_osmand_extension_root",
+    "managed_osmand_extension_root",
     "default_osmand_tiles_root",
     "default_osmand_download_url",
     "default_pending_osmand_extension_root",

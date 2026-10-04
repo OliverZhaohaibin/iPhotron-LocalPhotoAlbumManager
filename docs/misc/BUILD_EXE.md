@@ -533,22 +533,29 @@ After building, confirm that:
 
 ## Windows Installer Notes
 
-The Inno Setup script `tools/v4.50.iss` supports an **optional downloadable map
-extension package**. At install time it downloads
-`iPhotos-maps-extension-win-msvc-package.zip` and extracts it into
-`{app}\maps\tiles`, expecting the archive to contain an `extension\...` root.
+The settings menu offers online download, browser download, and local archive
+installation. Normal Windows installations write to
+`%LOCALAPPDATA%\iPhoto\extensions\maps\v1\tiles\extension`; bundled map
+files under the application directory are a read-only fallback. Do not make
+running the application as administrator a requirement.
 
-That means the archive should unpack to:
+The public Windows ZIP must contain an `extension/` root. Its size and SHA-256
+are pinned in `map_extension_packages.py`. Publish the ZIP separately from the
+application, preserve old release assets, and update the supported package
+catalogue only after testing map rendering and offline search with the packaged
+application. Filename/version labels alone do not establish native compatibility.
 
-- `{app}\maps\tiles\extension\World_basemap_2.obf`
-- `{app}\maps\tiles\extension\misc\...`
-- `{app}\maps\tiles\extension\poi\...`
-- `{app}\maps\tiles\extension\rendering_styles\...`
-- `{app}\maps\tiles\extension\routing\...`
-- `{app}\maps\tiles\extension\bin\...`
+`build_nuitka_windows.ps1` writes `build-manifest.json` beside the executable,
+including app version, source revision, build architecture and supported map
+package identities. Distribute that file with the application. The installer
+logs its actual target directory and available build identity for diagnostics.
+The macOS build seals `extension.tar.sha256` beside the bundled tar before app
+signing; first-use installation verifies this checksum without network access.
 
-If you regenerate the optional archive for a release, keep the root folder name
-as `extension` so the install script lands the files in the correct location.
+See [Map Extension Installation](MAP_EXTENSION_INSTALLATION.md) for user recovery
+steps, and the [packaged validation matrix](../requirements/MAP_EXTENSION_INSTALL_VALIDATION.md)
+for the required release gate. The historical `tools/v4.50.iss` recipe is no
+longer an implementation reference in this repository.
 
 ## Troubleshooting
 

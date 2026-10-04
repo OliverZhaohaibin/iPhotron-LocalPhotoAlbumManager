@@ -147,6 +147,12 @@ The extension currently contains:
   - macOS: `osmand_render_helper`, `osmand_native_widget.dylib`, and copied
     non-system Mach-O dependencies
 
+On Windows and Linux, install the extension from the settings menu: download
+inside the app, use your browser, or select an already downloaded archive.
+On macOS, the bundled extension is prepared automatically on first map use. Windows installs into your
+local user profile without administrator rights. See
+[map installation and download recovery](docs/misc/MAP_EXTENSION_INSTALLATION.md).
+
 Platform maps notes:
 - iPhotron can use both the helper-backed OBF renderer and the native OsmAnd widget when the platform runtime is available.
 - If a sibling `PySide6-OsmAnd-SDK/` checkout exists, Linux and macOS development can prefer its `tools/osmand_render_helper_native/dist-*` widget builds.

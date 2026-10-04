@@ -373,6 +373,15 @@ caches/renderers, maps runtime discovery, and supporting runtime services. It
 implements application ports and may depend on domain values. It must not import
 GUI modules or own product workflow decisions.
 
+Map component installation is process-scoped: `RuntimeContext.map_extensions`
+lazily composes `MapExtensionService` with `MapExtensionPort`. The infrastructure
+installer owns network/archive/filesystem operations; the Qt worker transports
+progress, typed errors and results. Map pages defer surface construction and
+InfoPanel waits for the same background preparation before probing session map
+capabilities. An installation that is only staged returns `pending_restart`;
+it is never presented as already activated. The package directory remains a
+read-only fallback, separate from the managed write target.
+
 ### GUI
 
 `gui/` owns PySide6 presentation: views, widgets, controllers, viewmodels,

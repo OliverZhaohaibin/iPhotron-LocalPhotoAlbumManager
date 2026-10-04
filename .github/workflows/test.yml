@@ -37,6 +37,7 @@ jobs:
           tests/ui/tasks/test_map_extension_download_worker.py
           tests/gui/ui/controllers/test_map_extension_download_controller.py
           tests/gui/coordinators/test_location_info_coordinator.py
+          tests/gui/coordinators/test_main_coordinator_asset_runtime_boundary.py
           tests/test_map_sources.py tests/test_map_runtime_service.py tests/test_build_manifest.py
       - run: python tools/check_architecture.py
 

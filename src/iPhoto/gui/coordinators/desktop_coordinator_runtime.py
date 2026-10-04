@@ -762,6 +762,10 @@ class DesktopCoordinatorRuntime(QObject):
             map_view = getattr(ui, "map_view", None)
             if map_view is None:
                 return
+            self._map_extension_download.set_package_root(
+                self._resolve_map_package_root(self._map_runtime())
+            )
+
             def prepared():
                 if self._is_shutting_down:
                     return
@@ -872,6 +876,10 @@ class DesktopCoordinatorRuntime(QObject):
         ui = getattr(window, "ui", None)
         map_feature_active = ui is not None and hasattr(ui, "map_view")
         if map_feature_active:
+            self._map_extension_download.set_package_root(
+                self._resolve_map_package_root(self._map_runtime())
+            )
+
             def bind_prepared_map():
                 if self._is_shutting_down:
                     return

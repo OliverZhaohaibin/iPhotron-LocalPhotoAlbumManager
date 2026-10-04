@@ -6,6 +6,8 @@ import io
 from pathlib import Path
 import socket
 import sqlite3
+import sys
+from contextlib import closing
 import struct
 import tarfile
 from urllib.error import HTTPError, URLError
@@ -28,12 +30,13 @@ def progress(*args):
     pass
 
 
-def extension(root: Path, platform="linux", marker=b"new"):
+def extension(root: Path, platform=None, marker=b"new"):
+    platform = platform or sys.platform
     (root / "rendering_styles").mkdir(parents=True)
     (root / "rendering_styles" / "snowmobile.render.xml").write_text("<renderingStyle />")
     (root / "World_basemap_2.obf").write_bytes(marker)
     (root / "search").mkdir()
-    with sqlite3.connect(root / "search" / "geonames.sqlite3") as db:
+    with closing(sqlite3.connect(root / "search" / "geonames.sqlite3")) as db, db:
         db.execute("""CREATE TABLE search_index (
             norm_name TEXT, name_priority INTEGER, population INTEGER,
             geoname_id INTEGER, matched_name TEXT, primary_name TEXT, asciiname TEXT,
@@ -59,7 +62,8 @@ def extension(root: Path, platform="linux", marker=b"new"):
 
 
 @pytest.fixture
-def setup(tmp_path, monkeypatch):
+def setup(tmp_path, monkeypatch, map_platform):
+    map_platform(sys.platform)
     target = tmp_path / "用户" / "LocalAppData" / "tiles" / "extension"
     monkeypatch.setenv(map_sources.ENV_OSMAND_EXTENSION_ROOT, str(target))
     package_root = tmp_path / "Program Files" / "iPhoto" / "maps"
@@ -72,13 +76,13 @@ def setup(tmp_path, monkeypatch):
             if path.is_file():
                 zipped.write(path, path.relative_to(source.parent))
     package = MapExtensionPackage(
-        "linux",
+        sys.platform,
         "extension.zip",
         archive.stat().st_size,
         hashlib.sha256(archive.read_bytes()).hexdigest(),
     )
     adapter = MapExtensionInstaller((package,))
-    payload = MapExtensionRequest(package_root, "linux", archive)
+    payload = MapExtensionRequest(package_root, sys.platform, archive)
     return adapter, payload, target, package
 
 
@@ -214,7 +218,7 @@ def test_package_identity_checks(setup, change, category):
     elif change == "size":
         payload.local_archive_path.write_bytes(b"truncated")
     elif change == "platform":
-        payload = replace(payload, platform="win32")
+        payload = replace(payload, platform="linux" if payload.platform == "win32" else "win32")
     else:
         adapter = MapExtensionInstaller((replace(package, app_major=99),))
     with pytest.raises(MapExtensionError) as caught:
@@ -378,7 +382,10 @@ def test_truncated_response_retries_at_most_three_times(setup, monkeypatch):
     assert len(attempts) == 3
 
 
-def test_macos_bundled_tar_is_verified_and_installed_offline(setup, tmp_path, monkeypatch):
+def test_macos_bundled_tar_is_verified_and_installed_offline(
+    setup, tmp_path, monkeypatch, map_platform
+):
+    map_platform("darwin")
     adapter, payload, target, _ = setup
     source = tmp_path / "mac" / "extension"
     extension(source, "darwin")
@@ -394,14 +401,16 @@ def test_macos_bundled_tar_is_verified_and_installed_offline(setup, tmp_path, mo
     )
 
 
-def test_runtime_uses_only_complete_selected_root(setup, monkeypatch):
+def test_runtime_uses_only_complete_selected_root(setup):
     _, payload, target, _ = setup
-    monkeypatch.setattr(map_sources.sys, "platform", "linux")
     extension(payload.package_root / "tiles/extension")
     (target / "bin").mkdir(parents=True)
-    (target / "bin/osmand_render_helper").write_bytes(b"incomplete")
+    helper_name = (
+        "osmand_render_helper.exe" if payload.platform == "win32" else "osmand_render_helper"
+    )
+    (target / "bin" / helper_name).write_bytes(b"incomplete")
     assert map_sources.resolve_osmand_helper_command(payload.package_root) == (
-        str(payload.package_root / "tiles/extension/bin/osmand_render_helper"),
+        str(payload.package_root / "tiles/extension/bin" / helper_name),
     )
 
 
@@ -415,8 +424,10 @@ def test_tar_extension_root_must_not_be_symlink(tmp_path):
         MapExtensionInstaller()._validate(root, "linux")
 
 
-def test_actual_windows_layout_uses_user_profile_for_offline_install(tmp_path, monkeypatch):
-    monkeypatch.setattr(map_sources.sys, "platform", "win32")
+def test_actual_windows_layout_uses_user_profile_for_offline_install(
+    tmp_path, monkeypatch, map_platform
+):
+    map_platform("win32")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "用户"))
     monkeypatch.delenv(map_sources.ENV_OSMAND_EXTENSION_ROOT, raising=False)
     package_root = tmp_path / "Program Files" / "maps"
@@ -480,3 +491,52 @@ def test_disk_full_is_reported_before_network(setup, monkeypatch):
     with pytest.raises(MapExtensionError) as caught:
         adapter.execute(replace(payload, local_archive_path=None), progress)
     assert caught.value.category == "disk"
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_extension_fixture_releases_sqlite_before_rename(tmp_path, monkeypatch, fail):
+    connections = []
+    connect = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def execute(self, query, *args):
+            if fail:
+                raise sqlite3.OperationalError("fixture failure")
+            return super().execute(query, *args)
+
+    def tracked(*args, **kwargs):
+        conn = connect(*args, factory=Connection, **kwargs)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", tracked)
+    root = tmp_path / "extension"
+    try:
+        if fail:
+            with pytest.raises(sqlite3.OperationalError, match="fixture failure"):
+                extension(root)
+        else:
+            extension(root)
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            sqlite3.Connection.execute(connections[0], "SELECT 1")
+        renamed = tmp_path / "renamed"
+        root.rename(renamed)
+        (renamed / "search/geonames.sqlite3").unlink()
+    finally:
+        for connection in connections:
+            connection.close()
+
+
+def test_default_install_fixture_matches_host_platform(setup):
+    adapter, payload, target, package = setup
+    assert payload.platform == sys.platform == package.platform == map_sources.sys.platform
+    result = adapter.execute(payload, progress)
+    helper = (
+        target
+        / "bin"
+        / ("osmand_render_helper.exe" if sys.platform == "win32" else "osmand_render_helper")
+    )
+    assert helper.is_file()
+    assert map_sources.resolve_osmand_helper_command(payload.package_root) == (str(helper),)
+    assert result.status == "installed"

@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QRunnable, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
 from iPhoto.gui.ui.controllers.map_extension_download_controller import (
@@ -18,7 +18,6 @@ from iPhoto.gui.ui.controllers.map_extension_download_controller import (
 )
 from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadResult,
-    MapExtensionDownloadSignals,
 )
 
 
@@ -210,3 +209,81 @@ def test_nuitka_restart_does_not_pass_executable_as_an_argument(controller, monk
     monkeypatch.setattr(module.sys, "argv", ["C:/Program Files/iPhoto/entrypoint.exe", "album"])
     app = SimpleNamespace(applicationFilePath=lambda: "C:/Program Files/iPhoto/entrypoint.exe")
     assert controller._restart_command(app) == ("C:/Program Files/iPhoto/entrypoint.exe", ["album"])
+
+
+def test_preparation_reuses_normalized_root_but_reprepares_changed_root(controller, tmp_path):
+    calls = []
+    with patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+    ) as pool:
+        root = controller._package_root
+        controller.prepare_runtime(lambda: calls.append("first"))
+        controller._active_worker.signals.finished.emit()
+        controller.set_package_root(root / ".")
+        controller.prepare_runtime(lambda: calls.append("same"))
+        assert calls == ["first", "same"]
+        assert pool.return_value.start.call_count == 1
+        controller.set_package_root(tmp_path / "other")
+        controller.prepare_runtime(lambda: calls.append("other"))
+        assert calls == ["first", "same"]
+        assert pool.return_value.start.call_count == 2
+        controller._active_worker.signals.finished.emit()
+        assert calls == ["first", "same", "other"]
+
+
+@pytest.mark.parametrize("return_to_first_root", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+def test_old_completion_never_releases_new_root_callbacks(
+    controller, tmp_path, return_to_first_root, failed
+):
+    from iPhoto.application.ports.map_extension import MapExtensionError
+
+    calls = []
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+        ) as pool,
+        patch.object(controller, "_show_failure") as show_error,
+    ):
+        first_root = controller._package_root
+        controller.prepare_runtime(lambda: calls.append("stale"))
+        old_worker = controller._active_worker
+        controller.set_package_root(tmp_path / "other")
+        if return_to_first_root:
+            controller.set_package_root(first_root)
+        controller.prepare_runtime(lambda: calls.append("current"))
+        assert pool.return_value.start.call_count == 1
+        if failed:
+            old_worker.signals.error.emit(MapExtensionError("permission", "prepare"))
+        else:
+            old_worker.signals.ready.emit(MapExtensionDownloadResult(Path("pending"), first_root))
+        old_worker.signals.finished.emit()
+        assert calls == []
+        assert not controller._runtime_prepared
+        show_error.assert_not_called()
+        assert pool.return_value.start.call_count == 2
+        new_worker = controller._active_worker
+        assert new_worker is not old_worker
+        assert new_worker._request.package_root == controller._package_root
+        new_worker.signals.finished.emit()
+        assert calls == ["current"]
+        assert controller._runtime_prepared
+
+
+def test_callback_root_change_stops_remaining_stale_callbacks(controller, tmp_path):
+    calls = []
+
+    def switch_root():
+        controller.set_package_root(tmp_path / "other")
+        controller.prepare_runtime(lambda: calls.append("new"))
+
+    with patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+    ):
+        controller.prepare_runtime(switch_root)
+        controller.prepare_runtime(lambda: calls.append("stale"))
+        controller._active_worker.signals.finished.emit()
+        assert calls == []
+        assert not controller._runtime_prepared
+        controller._active_worker.signals.finished.emit()
+        assert calls == ["new"]

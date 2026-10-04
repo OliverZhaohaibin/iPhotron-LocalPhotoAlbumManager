@@ -104,14 +104,25 @@ class MapExtensionDownloadController:
         self._temporarily_hidden_windows = []
         self._startup_prompt = None
         self._runtime_prepared = False
+        self._package_generation = 0
+        self._active_generation = 0
         self._prepare_callbacks: list[Callable[[], None]] = []
 
     def _tr(self, text):
         return QCoreApplication.translate("MapExtension", text, None)
 
     def set_package_root(self, package_root):
-        if package_root is not None:
-            self._package_root = Path(package_root).resolve()
+        if package_root is None:
+            return
+        root = Path(package_root).resolve()
+        if root == self._package_root:
+            return
+        self._package_root = root
+        self._package_generation += 1
+        self._runtime_prepared = False
+        self._latest_result = None
+        self._latest_error = None
+        self._prepare_callbacks.clear()
 
     def prepare_runtime(self, callback: Callable[[], None]) -> None:
         """Both map page and InfoPanel wait here before any capability probe."""
@@ -146,9 +157,13 @@ class MapExtensionDownloadController:
         checkbox = QCheckBox(self._tr("Do not show again"), box)
         box.setCheckBox(checkbox)
         self._startup_prompt = box
+        generation = self._package_generation
 
         def finished(_result):
             self._startup_prompt = None
+            if generation != self._package_generation:
+                box.deleteLater()
+                return
             if checkbox.isChecked():
                 self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
             if box.clickedButton() is download:
@@ -222,6 +237,7 @@ class MapExtensionDownloadController:
             return
         self._download_inflight = True
         self._last_request = payload
+        self._active_generation = self._package_generation
         self._latest_result = None
         self._latest_error = None
         self._hide_blocking_top_level_windows()
@@ -250,6 +266,7 @@ class MapExtensionDownloadController:
         self._download_inflight = False
         self._active_worker = None
         payload = self._last_request
+        generation = self._active_generation
         if self._progress_dialog is not None:
             self._progress_dialog.allow_close()
             self._progress_dialog.close()
@@ -258,6 +275,13 @@ class MapExtensionDownloadController:
         self._restore_temporarily_hidden_windows()
         if payload is None:
             return
+        if generation != self._package_generation:
+            # The old worker may finish after a library/runtime rebind. Its
+            # result cannot release callbacks waiting for the new root.
+            self._latest_result = None
+            self._latest_error = None
+            self._start_waiting_preparation()
+            return
         preparing = payload.operation == "prepare"
         failure = self._latest_error
         result = self._latest_result
@@ -265,7 +289,12 @@ class MapExtensionDownloadController:
             self._runtime_prepared = True
             callbacks, self._prepare_callbacks = self._prepare_callbacks, []
             for callback in callbacks:
+                if generation != self._package_generation:
+                    break
                 callback()
+        if generation != self._package_generation:
+            self._start_waiting_preparation()
+            return
         if failure is not None:
             self._show_failure(failure)
         elif result is not None and (not preparing or result.status == "pending_restart"):
@@ -282,7 +311,10 @@ class MapExtensionDownloadController:
             if answer == QMessageBox.StandardButton.Yes:
                 self._restart_application()
         # Map use may have been requested while installation was already busy.
-        if not preparing and self._prepare_callbacks and not self._download_inflight:
+        self._start_waiting_preparation()
+
+    def _start_waiting_preparation(self):
+        if self._prepare_callbacks and not self._download_inflight:
             self._start(
                 MapExtensionDownloadRequest(self._package_root, sys.platform, operation="prepare")
             )

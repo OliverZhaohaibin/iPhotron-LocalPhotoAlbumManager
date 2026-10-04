@@ -71,7 +71,12 @@ class LocationInfoCoordinator(QObject):
         if panel is not None and panel.isVisible():
             self._detail.toggle_info_panel()
             return
-        self._map_extension_download.prepare_runtime(self._toggle_prepared)
+        self._prepare_runtime(self._toggle_prepared)
+
+    def _prepare_runtime(self, callback: Callable[[], None]) -> None:
+        runtime = self._map_runtime_getter()
+        self._map_extension_download.set_package_root(self._package_root_resolver(runtime))
+        self._map_extension_download.prepare_runtime(callback)
 
     def _toggle_prepared(self) -> None:
         ui = self._window.ui
@@ -114,12 +119,11 @@ class LocationInfoCoordinator(QObject):
         self._write_queue.bind_library_root(self._library_root_getter())
         panel = getattr(self._window.ui, "info_panel", None)
         if panel is not None:
-            self._map_extension_download.prepare_runtime(self._rebind_prepared)
+            self._prepare_runtime(self._rebind_prepared)
 
     def _rebind_prepared(self) -> None:
         map_runtime = self._map_runtime_getter()
         self._detail.set_map_runtime(map_runtime)
-        self._map_extension_download.set_package_root(self._package_root_resolver(map_runtime))
         panel = getattr(self._window.ui, "info_panel", None)
         if panel is not None:
             panel.set_map_runtime(map_runtime)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -40,7 +41,8 @@ def test_open_toggle_initialises_recognition_before_publishing_presentation() ->
     coordinator._recognition_initialized = False
     coordinator._recognition_initialization_attempted = False
     coordinator._map_runtime_getter = Mock(return_value=None)
-    coordinator._map_extension_download = SimpleNamespace(prepare_runtime=lambda callback: callback())
+    coordinator._map_extension_download = SimpleNamespace(prepare_runtime=lambda callback: callback(), set_package_root=Mock())
+    coordinator._package_root_resolver = lambda _: Path("maps")
 
     LocationInfoCoordinator.toggle(coordinator)
 
@@ -82,8 +84,11 @@ def test_info_runtime_probe_waits_for_extension_preparation():
     callbacks = []
     coordinator = LocationInfoCoordinator.__new__(LocationInfoCoordinator)
     coordinator._window = SimpleNamespace(ui=SimpleNamespace(info_panel=None))
-    coordinator._map_extension_download = SimpleNamespace(prepare_runtime=callbacks.append)
-    coordinator._map_runtime_getter = Mock()
+    coordinator._map_extension_download = SimpleNamespace(prepare_runtime=callbacks.append, set_package_root=Mock())
+    runtime = SimpleNamespace(capabilities=Mock())
+    coordinator._map_runtime_getter = Mock(return_value=runtime)
+    coordinator._package_root_resolver = lambda _: Path("maps")
     LocationInfoCoordinator.toggle(coordinator)
     assert len(callbacks) == 1
-    coordinator._map_runtime_getter.assert_not_called()
+    runtime.capabilities.assert_not_called()
+    coordinator._map_extension_download.set_package_root.assert_called_once_with(Path("maps"))

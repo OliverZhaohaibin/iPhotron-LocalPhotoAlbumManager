@@ -23,3 +23,6 @@ class MapExtensionService:
 
     def download_url(self, platform: str) -> str | None:
         return self._adapter.download_url(platform)
+
+    def supports_local_install(self, platform: str) -> bool:
+        return self._adapter.supports_local_install(platform)

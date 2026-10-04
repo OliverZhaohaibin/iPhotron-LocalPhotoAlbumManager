@@ -540,3 +540,44 @@ def test_default_install_fixture_matches_host_platform(setup):
     assert helper.is_file()
     assert map_sources.resolve_osmand_helper_command(payload.package_root) == (str(helper),)
     assert result.status == "installed"
+
+
+@pytest.mark.parametrize(
+    "platform,supported",
+    [("win32", True), ("linux", True), ("darwin", False), ("unsupported", False)],
+)
+def test_local_install_capability_matches_supported_download_catalogue(platform, supported):
+    service = MapExtensionService(MapExtensionInstaller())
+    assert service.supports_local_install(platform) is supported
+    assert bool(service.download_url(platform)) is supported
+
+
+def test_incompatible_package_cannot_enable_manual_or_online_install(setup):
+    _, payload, target, package = setup
+    adapter = MapExtensionInstaller((replace(package, app_major=99),))
+    service = MapExtensionService(adapter)
+    assert service.supports_local_install(payload.platform) is False
+    assert service.download_url(payload.platform) is None
+    with pytest.raises(MapExtensionError, match="unsupported"):
+        adapter._obtain_archive(replace(payload, local_archive_path=None), target, progress)
+    with pytest.raises(MapExtensionError, match="unsupported"):
+        adapter._verify_archive(payload.local_archive_path, payload.platform)
+
+
+def test_download_selection_uses_same_compatibility_filter_as_local_install(setup, monkeypatch):
+    _, payload, target, package = setup
+    incompatible = replace(package, app_major=99, filename="unsupported.zip", sha256="0" * 64)
+    adapter = MapExtensionInstaller((incompatible, package))
+    service = MapExtensionService(adapter)
+    assert service.supports_local_install(payload.platform) is True
+    assert service.download_url(payload.platform) == package.url
+    packages = []
+
+    def download(selected, path, mode, progress):
+        packages.append(selected)
+        path.write_bytes(payload.local_archive_path.read_bytes())
+
+    monkeypatch.setattr(adapter, "_download", download)
+    target.parent.mkdir(parents=True)
+    adapter._obtain_archive(replace(payload, local_archive_path=None), target, progress)
+    assert packages == [package]

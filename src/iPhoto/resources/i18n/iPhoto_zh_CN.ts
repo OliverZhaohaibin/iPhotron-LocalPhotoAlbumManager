@@ -492,6 +492,14 @@
             <source>Installing map extension...</source>
             <translation>正在安装地图扩展...</translation>
         </message>
+        <message>
+            <source>On macOS, the map extension is included with the app and prepared automatically the first time you use maps.</source>
+            <translation>在 macOS 上，地图扩展随应用提供，并会在首次使用地图时自动准备。</translation>
+        </message>
+        <message>
+            <source>Manual map extension installation is not available on this platform.</source>
+            <translation>此平台不支持手动安装地图扩展。</translation>
+        </message>
     </context>
     <context>
         <name>StatusBar</name>

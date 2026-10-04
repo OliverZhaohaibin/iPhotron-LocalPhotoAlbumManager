@@ -153,6 +153,7 @@ class MapExtensionDownloadController:
         box.setText(self._tr("Download the offline map extension now?"))
         download = box.addButton(self._tr("Download"), QMessageBox.ButtonRole.AcceptRole)
         local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
+        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
         box.addButton(self._tr("Not Now"), QMessageBox.ButtonRole.RejectRole)
         checkbox = QCheckBox(self._tr("Do not show again"), box)
         box.setCheckBox(checkbox)
@@ -181,6 +182,11 @@ class MapExtensionDownloadController:
             if self._progress_dialog is not None:
                 self._progress_dialog.raise_()
             return
+        available = bool(self._context.map_extensions.download_url(sys.platform))
+        local_available = self._context.map_extensions.supports_local_install(sys.platform)
+        if not available and not local_available:
+            self._show_manual_install_unavailable()
+            return
         box = QMessageBox(self._parent)
         box.setWindowTitle(self._tr("Map Extension"))
         box.setText(self._tr("Choose how to install the map extension."))
@@ -188,9 +194,9 @@ class MapExtensionDownloadController:
         browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
         local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
-        available = bool(self._context.map_extensions.download_url(sys.platform))
         online.setEnabled(available)
         browser.setEnabled(available)
+        local.setEnabled(local_available)
         box.exec()
         if box.clickedButton() is online:
             self.start_download(source="settings")
@@ -205,6 +211,9 @@ class MapExtensionDownloadController:
             QDesktopServices.openUrl(QUrl(url))
 
     def install_from_file(self):
+        if not self._context.map_extensions.supports_local_install(sys.platform):
+            self._show_manual_install_unavailable()
+            return
         path, _ = QFileDialog.getOpenFileName(
             self._parent,
             self._tr("Install Map Extension"),
@@ -220,6 +229,23 @@ class MapExtensionDownloadController:
                     defer_activation=self._runtime_prepared,
                 )
             )
+
+    def _show_manual_install_unavailable(self):
+        if sys.platform == "darwin":
+            message = self._tr(
+                "On macOS, the map extension is included with the app and prepared "
+                "automatically the first time you use maps."
+            )
+        else:
+            message = self._tr(
+                "Manual map extension installation is not available on this platform."
+            )
+        QMessageBox.information(
+            self._parent,
+            self._tr("Map Extension"),
+            message,
+            QMessageBox.StandardButton.Close,
+        )
 
     def start_download(self, *, source: str, network_mode="system"):
         del source
@@ -297,10 +323,8 @@ class MapExtensionDownloadController:
             return
         if failure is not None:
             self._show_failure(failure)
-        elif result is not None and (not preparing or result.status == "pending_restart"):
-            message = self._tr("Map extension is ready. Restart now to activate it?")
-            if result.status == "pending_restart":
-                message = self._tr("Map extension is staged and waiting for restart. Restart now?")
+        elif result is not None and result.status == "pending_restart":
+            message = self._tr("Map extension is staged and waiting for restart. Restart now?")
             answer = QMessageBox.question(
                 self._parent,
                 self._tr("Restart Required"),
@@ -371,6 +395,7 @@ class MapExtensionDownloadController:
         online = bool(self._context.map_extensions.download_url(sys.platform))
         direct.setEnabled(online and getattr(failure, "stage", "") == "download")
         browser.setEnabled(online)
+        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
         payload = self._last_request
         box.exec()
         if box.clickedButton() is retry and payload is not None:

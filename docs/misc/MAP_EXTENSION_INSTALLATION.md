@@ -1,11 +1,15 @@
 # 地图扩展安装与下载恢复
 
-修复版的设置菜单提供地图扩展入口，无需先打开地图页面：
+修复版的设置菜单提供地图扩展入口，无需先打开地图页面。
+Windows 和 Linux 支持以下手动安装方式：
 
 - **下载**：使用当前环境变量或系统代理配置。失败后“重试”会重新读取配置。
 - **用浏览器下载**：浏览器下载完成后，回到该入口选择“从本地安装”。
 - **从本地安装**：选择官方 ZIP（Windows）或 tar.xz（Linux），无需联网。
 - **尝试直连**：仅在下载失败后由用户选择，只对这一次下载生效，不修改系统代理。
+
+macOS 的地图扩展随签名应用提供，首次使用地图或位置面板时自动准备，
+不提供手动导入 ZIP/tar.xz 的入口。设置菜单会显示这一说明。
 
 正常 Windows 安装目录是：
 
@@ -17,6 +21,7 @@
 `IPHOTO_OSMAND_EXTENSION_ROOT`，它会覆盖默认写入位置；文件夹不可写时，
 请移除不需要的覆盖或将其改到当前用户可写目录。
 
+安装已成功激活时，进度窗口直接关闭，不要求重启。
 “已暂存、等待重启”表示安装包已验证，但尚未激活。重启后首次使用地图或
 位置面板时，应用在后台恢复安装。文件占用时保留旧地图和待安装文件；不要
 手动删除正在使用的 DLL。下载成功而安装失败时，应用保留完整压缩包供重试。
@@ -53,8 +58,12 @@ bebc4885c8c96c82f5701c5ffc6bb064ae53b6e9c42e523abdfe1c6d945506b8
 
 ## English quick guide
 
-Open Map Extension in Settings, then choose Download, Download in Browser, or
-Install from File. A local official archive can be installed completely offline.
+On Windows and Linux, open Map Extension in Settings, then choose Download,
+Download in Browser, or Install from File. A local official archive can be
+installed completely offline. On macOS, the extension is included with the
+signed app and prepared automatically on first use; manual archive import is
+not offered. An activated installation closes the progress window without a
+restart prompt.
 Windows uses `%LOCALAPPDATA%\iPhoto\extensions\maps\v1\tiles\extension`.
 Retry refreshes system proxy settings; Try Direct Connection affects only the
 current download. A staged extension still requires restart before activation.

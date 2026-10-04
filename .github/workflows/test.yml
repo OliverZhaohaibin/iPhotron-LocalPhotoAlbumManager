@@ -34,6 +34,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: >-
           python -m pytest -q tests/infrastructure/test_map_extension_installer.py
+          tests/application/test_map_extension_service.py
           tests/ui/tasks/test_map_extension_download_worker.py
           tests/gui/ui/controllers/test_map_extension_download_controller.py
           tests/gui/coordinators/test_location_info_coordinator.py

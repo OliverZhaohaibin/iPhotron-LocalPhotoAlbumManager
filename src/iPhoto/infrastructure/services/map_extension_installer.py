@@ -114,8 +114,14 @@ class MapExtensionInstaller:
     def __init__(self, packages: tuple[MapExtensionPackage, ...] = PACKAGES):
         self._packages = packages
 
+    def _supported_packages(self, platform: str) -> tuple[MapExtensionPackage, ...]:
+        return tuple(p for p in self._packages if p.platform == platform and p.app_major == 6)
+
+    def supports_local_install(self, platform: str) -> bool:
+        return bool(self._supported_packages(platform))
+
     def download_url(self, platform: str) -> str | None:
-        package = next((p for p in self._packages if p.platform == platform), None)
+        package = next(iter(self._supported_packages(platform)), None)
         return package.url if package else None
 
     def execute(
@@ -170,9 +176,7 @@ class MapExtensionInstaller:
             source = Path(payload.local_archive_path)
             self._verify_archive(source, payload.platform)
             return source
-        package = next(
-            (p for p in self._packages if p.platform == payload.platform and p.app_major == 6), None
-        )
+        package = next(iter(self._supported_packages(payload.platform)), None)
         if package is None:
             raise MapExtensionError("unsupported", "download")
         cache = target.parent / ".downloads"
@@ -256,7 +260,7 @@ class MapExtensionInstaller:
         match = next((p for p in candidates if p.sha256 == digest), None)
         if match is None:
             raise MapExtensionError("integrity", "verify")
-        if match.platform != platform or match.app_major != 6:
+        if match not in self._supported_packages(platform):
             raise MapExtensionError("unsupported", "verify")
 
     def _validate(self, root: Path, platform: str) -> None:

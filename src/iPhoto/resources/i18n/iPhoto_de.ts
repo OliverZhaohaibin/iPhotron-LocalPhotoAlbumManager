@@ -492,6 +492,14 @@
             <source>Installing map extension...</source>
             <translation>Kartenerweiterung wird installiert...</translation>
         </message>
+        <message>
+            <source>On macOS, the map extension is included with the app and prepared automatically the first time you use maps.</source>
+            <translation>Unter macOS ist die Kartenerweiterung in der App enthalten und wird bei der ersten Kartennutzung automatisch vorbereitet.</translation>
+        </message>
+        <message>
+            <source>Manual map extension installation is not available on this platform.</source>
+            <translation>Auf dieser Plattform kann die Kartenerweiterung nicht manuell installiert werden.</translation>
+        </message>
     </context>
     <context>
         <name>StatusBar</name>

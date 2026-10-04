@@ -93,7 +93,10 @@ def test_restart_failure_restores_hidden_windows(qapp: QApplication, tmp_path: P
 
 @pytest.fixture
 def controller(qapp, tmp_path):
-    service = SimpleNamespace(download_url=lambda _: "https://example.invalid/extension.zip")
+    service = SimpleNamespace(
+        download_url=lambda _: "https://example.invalid/extension.zip",
+        supports_local_install=lambda _: True,
+    )
     context = SimpleNamespace(
         map_extensions=service, settings=SimpleNamespace(get=lambda *a: False)
     )
@@ -141,8 +144,9 @@ def test_shared_preparation_defers_all_callbacks_until_finished(controller):
     assert events[-1] == "ready"
 
 
-def test_pending_result_prompts_restart_without_claiming_installed(controller):
-    controller._last_request = SimpleNamespace(operation="install")
+@pytest.mark.parametrize("operation", ["install", "prepare"])
+def test_pending_result_prompts_restart_without_claiming_installed(controller, operation):
+    controller._last_request = SimpleNamespace(operation=operation)
     controller._handle_ready(
         MapExtensionDownloadResult(Path("pending"), Path("active"), "pending_restart")
     )
@@ -150,6 +154,7 @@ def test_pending_result_prompts_restart_without_claiming_installed(controller):
         "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
     ) as question:
         controller._handle_finished()
+    question.assert_called_once()
     assert "staged" in question.call_args.args[2]
     assert "waiting for restart" in question.call_args.args[2]
 
@@ -287,3 +292,239 @@ def test_callback_root_change_stops_remaining_stale_callbacks(controller, tmp_pa
         assert not controller._runtime_prepared
         controller._active_worker.signals.finished.emit()
         assert calls == ["new"]
+
+
+@pytest.mark.parametrize("operation", ["install", "prepare"])
+def test_installed_result_does_not_prompt_restart(controller, operation):
+    from iPhoto.gui.ui.tasks.map_extension_download_worker import MapExtensionDownloadRequest
+
+    owner = controller._parent
+    owner.show()
+    floating = QWidget(owner, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
+    floating.show()
+    try:
+        with (
+            patch(
+                "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+            ),
+            patch(
+                "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
+            ) as question,
+            patch(
+                "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.information"
+            ) as information,
+        ):
+            controller._start(
+                MapExtensionDownloadRequest(controller._package_root, "win32", operation=operation)
+            )
+            worker = controller._active_worker
+            assert floating.isHidden()
+            worker.signals.ready.emit(
+                MapExtensionDownloadResult(Path("pending"), Path("active"), "installed")
+            )
+            worker.signals.finished.emit()
+        question.assert_not_called()
+        information.assert_not_called()
+        assert floating.isVisible()
+        assert controller._progress_dialog is None
+        assert controller._active_worker is None
+        assert not controller._download_inflight
+    finally:
+        floating.close()
+
+
+def test_installed_result_continues_waiting_preparation_without_restart(controller):
+    callbacks = []
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+        ) as pool,
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
+        ) as question,
+    ):
+        controller.start_download(source="settings")
+        install_worker = controller._active_worker
+        controller.prepare_runtime(lambda: callbacks.append("ready"))
+        install_worker.signals.ready.emit(
+            MapExtensionDownloadResult(Path("pending"), Path("active"))
+        )
+        install_worker.signals.finished.emit()
+        assert pool.return_value.start.call_count == 2
+        prepare_worker = controller._active_worker
+        assert prepare_worker._request.operation == "prepare"
+        assert callbacks == []
+        prepare_worker.signals.ready.emit(
+            MapExtensionDownloadResult(Path("pending"), Path("active"))
+        )
+        prepare_worker.signals.finished.emit()
+    question.assert_not_called()
+    assert callbacks == ["ready"]
+
+
+def test_error_takes_precedence_over_installed_result(controller):
+    from iPhoto.application.ports.map_extension import MapExtensionError
+
+    controller._last_request = SimpleNamespace(operation="install")
+    failure = MapExtensionError("permission", "activate")
+    controller._handle_ready(MapExtensionDownloadResult(Path("pending"), Path("active")))
+    controller._handle_error(failure)
+    with (
+        patch.object(controller, "_show_failure") as show_failure,
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
+        ) as question,
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.information"
+        ) as information,
+    ):
+        controller._handle_finished()
+    show_failure.assert_called_once_with(failure)
+    question.assert_not_called()
+    information.assert_not_called()
+
+
+@pytest.fixture
+def platform_controller(controller, monkeypatch):
+    from iPhoto.gui.ui.controllers import map_extension_download_controller as module
+
+    def configure(platform):
+        monkeypatch.setattr(module, "sys", SimpleNamespace(platform=platform))
+        controller._context.map_extensions = SimpleNamespace(
+            download_url=lambda p: (
+                "https://example.invalid/extension.zip" if p in {"win32", "linux"} else None
+            ),
+            supports_local_install=lambda p: p in {"win32", "linux"},
+        )
+        controller._context.settings.get = lambda *args: True
+        return controller
+
+    return configure
+
+
+@pytest.mark.parametrize("platform", ["darwin", "unsupported"])
+@pytest.mark.parametrize("entry", ["show_options", "install_from_file"])
+def test_unsupported_manual_install_shows_information_without_chooser(
+    platform_controller, platform, entry
+):
+    controller = platform_controller(platform)
+    from PySide6.QtWidgets import QMessageBox
+
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.information"
+        ) as information,
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QFileDialog.getOpenFileName"
+        ) as chooser,
+        patch.object(controller, "_start") as start,
+    ):
+        getattr(controller, entry)()
+    chooser.assert_not_called()
+    start.assert_not_called()
+    information.assert_called_once()
+    assert information.call_args.args[3] == QMessageBox.StandardButton.Close
+    text = information.call_args.args[2]
+    if platform == "darwin":
+        assert "included with the app" in text
+        assert "automatically" in text
+    else:
+        assert "not available" in text
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_supported_platform_imports_local_archive(platform_controller, platform, tmp_path):
+    controller = platform_controller(platform)
+    archive = tmp_path / ("extension.zip" if platform == "win32" else "extension.tar.xz")
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QFileDialog.getOpenFileName",
+            return_value=(str(archive), ""),
+        ),
+        patch.object(controller, "_start") as start,
+    ):
+        controller.install_from_file()
+    start.assert_called_once()
+    request = start.call_args.args[0]
+    assert request.platform == platform
+    assert request.local_archive_path == archive
+
+
+@pytest.mark.parametrize("entry", ["show_options", "maybe_prompt_on_startup", "_show_failure"])
+@pytest.mark.parametrize("supported", [False, True])
+def test_manual_install_buttons_follow_service_capability(
+    controller, monkeypatch, entry, supported
+):
+    from PySide6.QtWidgets import QMessageBox
+    from iPhoto.application.ports.map_extension import MapExtensionError
+
+    controller._context.map_extensions.supports_local_install = lambda _: supported
+    controller._context.settings.get = lambda *args: True
+    controller._runtime_prepared = True
+    controller._latest_result = MapExtensionDownloadResult(
+        Path("pending"), Path("active"), "missing"
+    )
+    states = []
+
+    def observe(box):
+        local = next(button for button in box.buttons() if button.text() == "Install from File...")
+        states.append(local.isEnabled())
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", observe)
+    monkeypatch.setattr(QMessageBox, "open", observe)
+    if entry == "_show_failure":
+        controller._show_failure(MapExtensionError("refused", "download"))
+    else:
+        getattr(controller, entry)()
+    assert states == [supported]
+    if controller._startup_prompt is not None:
+        controller._startup_prompt.deleteLater()
+        controller._startup_prompt = None
+
+
+def test_macos_has_no_manual_startup_prompt(platform_controller):
+    controller = platform_controller("darwin")
+    controller._runtime_prepared = True
+    controller._latest_result = MapExtensionDownloadResult(
+        Path("pending"), Path("active"), "missing"
+    )
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.open"
+        ) as opened,
+        patch.object(controller, "_start") as start,
+    ):
+        assert controller.maybe_prompt_on_startup() is False
+    opened.assert_not_called()
+    start.assert_not_called()
+
+
+def test_macos_recovery_disables_local_install(platform_controller, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from iPhoto.application.ports.map_extension import MapExtensionError
+
+    controller = platform_controller("darwin")
+    states = []
+
+    def observe(box):
+        states.append({b.text(): b.isEnabled() for b in box.buttons()})
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", observe)
+    with patch.object(controller, "_start") as start:
+        controller._show_failure(MapExtensionError("permission", "prepare"))
+    assert states[0]["Install from File..."] is False
+    assert states[0]["Download in Browser"] is False
+    start.assert_not_called()
+
+
+def test_controller_constructor_does_not_resolve_install_capabilities(qapp, tmp_path):
+    class Context:
+        @property
+        def map_extensions(self):
+            raise AssertionError("install service resolved during startup")
+
+    owner = QWidget()
+    MapExtensionDownloadController(owner, Context(), package_root=tmp_path)
+    owner.close()

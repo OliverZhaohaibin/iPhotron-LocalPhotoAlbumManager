@@ -279,7 +279,7 @@ def test_fresh_proxy_on_retry_and_cache_reused_after_install_failure(setup, monk
     monkeypatch.setattr(module.request, "getproxies", lambda: next(proxies))
     handlers = []
 
-    def build(handler):
+    def build(handler, *_handlers):
         handlers.append(handler.proxies)
 
         class Opener:
@@ -314,7 +314,7 @@ def test_direct_uses_empty_proxy_without_mutating_global_opener(setup, monkeypat
     data = payload.local_archive_path.read_bytes()
     global_opener = module.request._opener
 
-    def build(handler):
+    def build(handler, *_handlers):
         assert handler.proxies == {}
 
         class Opener:
@@ -351,11 +351,10 @@ def test_network_errors_do_not_leak_credentials_or_retry_nontransient(
     )
     monkeypatch.setattr(module.request, "proxy_bypass", lambda _: False)
 
-    class Opener:
-        def open(self, *a, **k):
-            raise reason if isinstance(reason, HTTPError) else URLError(reason)
+    def https_open(handler, req):
+        raise reason if isinstance(reason, HTTPError) else URLError(reason)
 
-    monkeypatch.setattr(module.request, "build_opener", lambda *a: Opener())
+    monkeypatch.setattr(module.request.HTTPSHandler, "https_open", https_open)
     monkeypatch.setattr(module.time, "sleep", lambda _: pytest.fail("unexpected retry"))
     with pytest.raises(MapExtensionError) as caught:
         adapter.execute(replace(payload, local_archive_path=None), progress)
@@ -363,6 +362,37 @@ def test_network_errors_do_not_leak_credentials_or_retry_nontransient(
     assert "127.0.0.1:7890" in str(caught.value)
     assert "password" not in str(caught.value)
     assert "secret" not in str(caught.value)
+    assert not list(target.parent.rglob("*.part"))
+
+
+@pytest.mark.parametrize("redirect", [False, True])
+def test_dns_error_reports_the_actual_download_hop(setup, monkeypatch, redirect):
+    from email.message import Message
+
+    adapter, payload, target, _ = setup
+    asset_host = "release-assets.githubusercontent.com"
+    asset_url = f"https://{asset_host}/payload?signature=secret"
+    monkeypatch.setattr(module.request, "getproxies", lambda: {})
+
+    def https_open(handler, req):
+        if redirect and req.host == "github.com":
+            response = Response(b"", 0)
+            response.code = 302
+            response.msg = "Found"
+            response.headers = Message()
+            response.headers["Location"] = asset_url
+            response.info = lambda: response.headers
+            return response
+        raise URLError(socket.gaierror(11001, "host not found"))
+
+    monkeypatch.setattr(module.request.HTTPSHandler, "https_open", https_open)
+    with pytest.raises(MapExtensionError) as caught:
+        adapter.execute(replace(payload, local_archive_path=None), progress)
+    failure = caught.value
+    assert (failure.category, failure.stage, failure.code) == ("dns", "download", 11001)
+    assert f"host={asset_host if redirect else 'github.com'};" in failure.detail
+    assert "proxy=none" in failure.detail
+    assert "secret" not in failure.detail
     assert not list(target.parent.rglob("*.part"))
 
 

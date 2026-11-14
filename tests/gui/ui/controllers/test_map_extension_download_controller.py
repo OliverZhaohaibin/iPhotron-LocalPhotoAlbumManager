@@ -13,10 +13,12 @@ pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
+from iPhoto.application.ports.map_extension import MapExtensionError
 from iPhoto.gui.ui.controllers.map_extension_download_controller import (
     MapExtensionDownloadController,
 )
 from iPhoto.gui.ui.tasks.map_extension_download_worker import (
+    MapExtensionDownloadRequest,
     MapExtensionDownloadResult,
 )
 
@@ -198,12 +200,142 @@ def test_failure_dialog_runs_after_worker_is_released(controller):
     dialog.assert_called_once()
 
 
-def test_browser_download_uses_official_package_url(controller):
-    with patch(
-        "iPhoto.gui.ui.controllers.map_extension_download_controller.QDesktopServices.openUrl"
-    ) as open_url:
+@pytest.mark.parametrize("browser_opened", [True, False])
+def test_browser_download_offers_local_install(controller, monkeypatch, tmp_path, browser_opened):
+    from PySide6.QtWidgets import QMessageBox
+
+    archive = tmp_path / "extension.zip"
+
+    def select_install(box):
+        assert box.styleSheet()
+        if browser_opened:
+            assert box.text() == "Select the archive after the download finishes."
+        else:
+            assert box.informativeText() == "https://example.invalid/extension.zip"
+            assert box.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+        next(b for b in box.buttons() if b.text() == "Install from File...").click()
+
+    monkeypatch.setattr(QMessageBox, "exec", select_install)
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QDesktopServices.openUrl",
+            return_value=browser_opened,
+        ) as open_url,
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QFileDialog.getOpenFileName",
+            return_value=(str(archive), ""),
+        ),
+        patch.object(controller, "_start") as start,
+    ):
         controller.open_download_page()
+    open_url.assert_called_once()
     assert open_url.call_args.args[0].toString() == "https://example.invalid/extension.zip"
+    assert start.call_args.args[0].local_archive_path == archive
+
+
+@pytest.mark.parametrize("choice", ["Retry", "Download in Browser", "Cancel"])
+def test_dns_failure_shows_vpn_guidance_and_supported_actions(controller, monkeypatch, choice):
+    from PySide6.QtWidgets import QMessageBox
+
+    payload = MapExtensionDownloadRequest(controller._package_root, "win32")
+    controller._last_request = payload
+    failure = MapExtensionError("dns", "download", code=11001, detail="host=github.com; proxy=none")
+
+    def select_action(box):
+        assert box.styleSheet()
+        assert box.text() == "Could not download the map extension from GitHub."
+        assert "VPN" in box.informativeText()
+        assert "11001" in box.detailedText()
+        assert "host=github.com" in box.detailedText()
+        buttons = {button.text(): button for button in box.buttons()}
+        assert "Install from File..." not in buttons
+        assert "Try Direct Connection" not in buttons
+        button = box.button(QMessageBox.StandardButton.Cancel) if choice == "Cancel" else buttons[choice]
+        button.click()
+
+    monkeypatch.setattr(QMessageBox, "exec", select_action)
+    with (
+        patch.object(controller, "_start") as start,
+        patch.object(controller, "open_download_page") as browser,
+    ):
+        controller._show_failure(failure)
+    assert start.call_count == (choice == "Retry")
+    assert browser.call_count == (choice == "Download in Browser")
+    if choice == "Retry":
+        start.assert_called_once_with(payload)
+
+
+def test_cancel_file_picker_after_browser_download_does_not_install(controller, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    def select_install(box):
+        next(b for b in box.buttons() if b.text() == "Install from File...").click()
+
+    monkeypatch.setattr(QMessageBox, "exec", select_install)
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QDesktopServices.openUrl",
+            return_value=True,
+        ),
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QFileDialog.getOpenFileName",
+            return_value=("", ""),
+        ),
+        patch.object(controller, "_start") as start,
+    ):
+        controller.open_download_page()
+    start.assert_not_called()
+
+
+def test_settings_can_import_after_closing_the_browser_handoff(controller, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+
+    archive = tmp_path / "extension.zip"
+
+    def select_close_or_install(box):
+        close = box.button(QMessageBox.StandardButton.Close)
+        if close is not None:
+            close.click()
+        else:
+            next(b for b in box.buttons() if b.text() == "Install from File...").click()
+
+    monkeypatch.setattr(QMessageBox, "exec", select_close_or_install)
+    with (
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QDesktopServices.openUrl",
+            return_value=True,
+        ),
+        patch(
+            "iPhoto.gui.ui.controllers.map_extension_download_controller.QFileDialog.getOpenFileName",
+            return_value=(str(archive), ""),
+        ) as chooser,
+        patch.object(controller, "_start") as start,
+    ):
+        controller.open_download_page()
+        chooser.assert_not_called()
+        start.assert_not_called()
+        controller.show_options()
+    assert start.call_args.args[0].local_archive_path == archive
+
+
+@pytest.mark.parametrize(
+    ("category", "stage", "message"),
+    [
+        ("refused", "download", "The connection was refused."),
+        ("timeout", "download", "The map extension download timed out."),
+        ("integrity", "verify", "The map extension package is damaged or incomplete."),
+    ],
+)
+def test_other_failures_keep_their_own_message(controller, monkeypatch, category, stage, message):
+    from PySide6.QtWidgets import QMessageBox
+
+    def observe(box):
+        assert box.text().startswith(message)
+        assert "VPN" not in box.informativeText()
+        box.button(QMessageBox.StandardButton.Cancel).click()
+
+    monkeypatch.setattr(QMessageBox, "exec", observe)
+    controller._show_failure(MapExtensionError(category, stage))
 
 
 def test_nuitka_restart_does_not_pass_executable_as_an_argument(controller, monkeypatch):

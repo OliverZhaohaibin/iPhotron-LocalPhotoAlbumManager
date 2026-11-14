@@ -4,16 +4,17 @@ Status: **manual packaged validation required**. Source/offscreen tests do not
 prove the Windows installer payload, native Qt/DLL compatibility or graphics.
 Do not close #920 solely because unit tests pass or a source tag uses LocalAppData.
 
-Record app version, executable SHA-256, source revision from build-manifest.json,
+Record app version, executable SHA-256, source revision from the build manifest,
 OS/architecture, actual install root, extension hash and pass/fail for each row.
-Keep the build manifest with the distributed executable and attach the completed
-matrix to release validation evidence.
+Attach the build manifest and completed matrix to release validation evidence.
 
 | Target / scenario | Required result |
 | --- | --- |
 | Windows 11, ordinary user, app under Program Files | No elevation; all new map files under LocalAppData; package folder unchanged |
 | Windows, Chinese user path and TEMP on another volume | Extraction/staging uses target volume; no rename across volumes or path-length failure |
 | Windows, offline official ZIP | No network; hash verification, installation, restart, map rendering and place search succeed |
+| Windows VPN/TUN, GitHub or release asset host fails to resolve | Details identify the failed host and DNS code. Download in Browser opens the official asset and offers Install from File. Import the archive and verify map rendering and search. |
+| Map download popups, light and dark themes, English, German and Simplified Chinese | Text and buttons fit, Details can be expanded, and keyboard dismissal leaves the settings import entry available. |
 | Windows, local proxy port closed | Classified connection refusal; Retry, Direct, Browser and local installation available |
 | Windows, proxy changed while app remains running | Retry uses updated configuration; Direct does not change system/app defaults |
 | Windows, DLL in use / interrupted activation | Old installation retained or restored; validated pending survives; next launch activates before DLL load |

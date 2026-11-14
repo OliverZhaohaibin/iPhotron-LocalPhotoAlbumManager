@@ -5,7 +5,6 @@ from __future__ import annotations
 import errno
 import hashlib
 import http.client
-import json
 import logging
 import os
 import shutil
@@ -82,6 +81,31 @@ def _endpoint(value: str) -> str:
         return "invalid"
 
 
+class _DownloadHTTPSHandler(request.HTTPSHandler):
+    """Observe each hop after urllib has selected the proxy."""
+
+    def __init__(self):
+        super().__init__()
+        self.host = ""
+        self.proxy = "none"
+
+    def https_open(self, req):
+        self.host = parse.urlsplit(req.full_url).hostname or "unknown"
+        self.proxy = _endpoint(req.host) if req._tunnel_host or req.has_proxy() else "none"
+        return super().https_open(req)
+
+
+class _DownloadRedirectHandler(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if parse.urlsplit(newurl).scheme.lower() != "https":
+            raise error.HTTPError(req.full_url, code, msg, headers, fp)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            # The proxy handler will add credentials for the next hop if needed.
+            redirected.remove_header("Proxy-authorization")
+        return redirected
+
+
 def _failure(exc: Exception, stage: str, detail: str = "") -> MapExtensionError:
     reason = exc.reason if isinstance(exc, error.URLError) else exc
     code = getattr(reason, "winerror", None) or getattr(reason, "errno", None)
@@ -129,21 +153,11 @@ class MapExtensionInstaller:
     ) -> MapExtensionResult:
         target = map_sources.managed_osmand_extension_root(payload.package_root)
         stage = "prepare"
-        manifest = Path(payload.package_root).parent / "build-manifest.json"
-        identity = {}
-        if manifest.is_file():
-            try:
-                candidate = json.loads(manifest.read_text(encoding="utf-8"))
-                identity = candidate if isinstance(candidate, dict) else {}
-            except (OSError, ValueError):
-                pass
         _LOG.info(
-            "Map component operation=%s platform=%s root=%s app=%s revision=%s",
+            "Map component operation=%s platform=%s root=%s",
             payload.operation,
             payload.platform,
             target,
-            identity.get("app_version", "source"),
-            identity.get("source_revision", "unknown"),
         )
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -205,34 +219,24 @@ class MapExtensionInstaller:
                 if mode == "direct"
                 else ("environment" if request.getproxies_environment() else "system")
             )
-            # A new opener on every attempt observes changed system proxies.
-            opener = request.build_opener(request.ProxyHandler(proxies))
-            host = parse.urlsplit(package.url).hostname or ""
-            bypass = mode == "direct" or request.proxy_bypass(host)
-            proxy = (
-                "none"
-                if bypass
-                else _endpoint(proxies["https"])
-                if proxies.get("https")
-                else "none"
+            route = _DownloadHTTPSHandler()
+            opener = request.build_opener(
+                request.ProxyHandler(proxies), route, _DownloadRedirectHandler()
             )
-            detail = f"host={host}; proxy_source={source}; proxy={proxy}; attempt={attempt + 1}"
             progress(0, 0, "Downloading map extension...")
             try:
                 req = request.Request(
                     package.url, headers={"User-Agent": "iPhotron-map-installer/1"}
                 )
                 with opener.open(req, timeout=_TIMEOUT) as response, partial.open("wb") as handle:
-                    response_url = getattr(response, "url", package.url)
-                    detail += f"; response_host={parse.urlsplit(response_url).hostname or host}"
                     length = response.headers.get("Content-Length")
                     if length is not None and int(length) != package.size:
-                        raise MapExtensionError("integrity", "download", detail=detail)
+                        raise MapExtensionError("integrity", "download")
                     received = 0
                     while chunk := response.read(_CHUNK):
                         received += len(chunk)
                         if received > package.size:
-                            raise MapExtensionError("integrity", "download", detail=detail)
+                            raise MapExtensionError("integrity", "download")
                         handle.write(chunk)
                         progress(received, package.size, "Downloading map extension...")
                     if received != package.size:
@@ -241,6 +245,11 @@ class MapExtensionInstaller:
             except MapExtensionError:
                 raise
             except Exception as exc:
+                host = route.host or parse.urlsplit(package.url).hostname
+                detail = (
+                    f"host={host}; proxy_source={source}; proxy={route.proxy}; "
+                    f"attempt={attempt + 1}"
+                )
                 failure = _failure(exc, "download", detail)
                 transient = failure.category in {"timeout", "interrupted"} or (
                     failure.category == "http" and failure.code in {408, 429, 500, 502, 503, 504}

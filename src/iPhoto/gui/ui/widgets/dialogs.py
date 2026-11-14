@@ -42,7 +42,7 @@ def select_directory(
     return Path(path)
 
 
-def _apply_theme(box: QMessageBox, parent: QWidget | None) -> None:
+def apply_message_box_theme(box: QMessageBox, parent: QWidget | None) -> None:
     """Apply the active theme colors to the message box."""
     # Prioritize parent palette if available, otherwise fallback to app palette
     if parent:
@@ -125,7 +125,7 @@ def show_error(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
         QMessageBox.StandardButton.Ok,
         parent,
     )
-    _apply_theme(box, parent)
+    apply_message_box_theme(box, parent)
     box.exec()
 
 
@@ -208,7 +208,7 @@ def confirm_action(
     yes_btn = box.addButton(yes_label, QMessageBox.ButtonRole.YesRole)
     box.addButton(no_label, QMessageBox.ButtonRole.NoRole)
 
-    _apply_theme(box, parent)
+    apply_message_box_theme(box, parent)
     box.exec()
 
     clicked = box.clickedButton()

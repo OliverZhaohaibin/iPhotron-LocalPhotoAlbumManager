@@ -4,8 +4,8 @@
 Windows 和 Linux 支持以下手动安装方式：
 
 - **下载**：使用当前环境变量或系统代理配置。失败后“重试”会重新读取配置。
-- **用浏览器下载**：浏览器下载完成后，回到该入口选择“从本地安装”。
-- **从本地安装**：选择官方 ZIP（Windows）或 tar.xz（Linux），无需联网。
+- **在浏览器中下载**：打开官方安装包链接，应用随即显示“从文件安装…”。下载完成后，回到应用选择下载好的文件。若关闭了提示，也可以从设置菜单进入。
+- **从文件安装…**：选择官方 ZIP（Windows）或 tar.xz（Linux），无需联网。
 - **尝试直连**：仅在下载失败后由用户选择，只对这一次下载生效，不修改系统代理。
 
 macOS 的地图扩展随签名应用提供，首次使用地图或位置面板时自动准备，
@@ -31,6 +31,8 @@ macOS 的地图扩展随签名应用提供，首次使用地图或位置面板�
 - `WinError 5`：目标目录权限或文件占用问题。检查“详细信息”中的安装位置。
 - `WinError 10061`：连接被拒绝，可能发生在代理或下载服务器连接处；不能
   单凭错误码确定原因。浏览器与应用可能使用不同代理配置。
+- `WinError 11001`：无法解析下载域名。检查“详细信息”中的主机名和代理状态。
+  使用 VPN 时可尝试切换节点；如果关闭 VPN 后仍能访问 GitHub，也可暂时关闭后重试。
 - 校验失败：文件损坏、不完整或不在当前应用支持的官方包清单中，请重新下载。
 - 不兼容：平台、原生架构或扩展兼容版本不匹配。不要改名来绕过检查。
 
@@ -68,6 +70,6 @@ Windows uses `%LOCALAPPDATA%\iPhoto\extensions\maps\v1\tiles\extension`.
 Retry refreshes system proxy settings; Try Direct Connection affects only the
 current download. A staged extension still requires restart before activation.
 
-Report the app version, `build-manifest.json` source revision, error category,
-OS error code and installation stage from Details. Diagnostics omit proxy
+Report the app version, error category, host, OS error code and installation
+stage from Details. Diagnostics omit proxy
 credentials and signed URL query strings. Review local paths before sharing.

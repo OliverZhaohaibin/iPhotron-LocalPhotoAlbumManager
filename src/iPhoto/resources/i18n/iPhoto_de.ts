@@ -393,6 +393,22 @@
             <translation>Im Browser herunterladen</translation>
         </message>
         <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>Wählen Sie nach dem Download das Archiv aus, um die Installation fortzusetzen.</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>Der Browser konnte nicht geöffnet werden. Kopieren Sie diesen Link, um das Archiv herunterzuladen.</translation>
+        </message>
+        <message>
+            <source>Could not download the map extension from GitHub.</source>
+            <translation>Die Kartenerweiterung konnte nicht von GitHub heruntergeladen werden.</translation>
+        </message>
+        <message>
+            <source>The download server name could not be resolved. Check your network or proxy settings and try again. If you use a VPN, try switching servers. If GitHub is reachable without the VPN, you can temporarily turn it off and retry.</source>
+            <translation>Der Name des Downloadservers konnte nicht aufgelöst werden. Prüfen Sie Ihre Netzwerk- oder Proxyeinstellungen und versuchen Sie es erneut. Wenn Sie ein VPN verwenden, wechseln Sie den Server. Falls GitHub ohne VPN erreichbar ist, können Sie das VPN vorübergehend deaktivieren und es erneut versuchen.</translation>
+        </message>
+        <message>
             <source>Install Map Extension</source>
             <translation>Kartenerweiterung installieren</translation>
         </message>
@@ -499,6 +515,28 @@
         <message>
             <source>Manual map extension installation is not available on this platform.</source>
             <translation>Auf dieser Plattform kann die Kartenerweiterung nicht manuell installiert werden.</translation>
+        </message>
+    </context>
+    <context>
+        <name>QMessageBox</name>
+        <message>
+            <source>Show Details...</source>
+            <translation>Details anzeigen…</translation>
+        </message>
+        <message>
+            <source>Hide Details...</source>
+            <translation>Details ausblenden…</translation>
+        </message>
+    </context>
+    <context>
+        <name>QPlatformTheme</name>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
         </message>
     </context>
     <context>

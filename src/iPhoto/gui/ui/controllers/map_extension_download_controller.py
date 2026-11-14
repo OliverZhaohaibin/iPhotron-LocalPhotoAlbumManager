@@ -27,6 +27,7 @@ from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadRequest,
     MapExtensionDownloadWorker,
 )
+from iPhoto.gui.ui.widgets.dialogs import apply_message_box_theme
 
 _SHOW_STARTUP_PROMPT_KEY = "ui.show_map_extension_startup_prompt"
 
@@ -148,8 +149,7 @@ class MapExtensionDownloadController:
             or not self._context.settings.get(_SHOW_STARTUP_PROMPT_KEY, True)
         ):
             return False
-        box = QMessageBox(self._parent)
-        box.setWindowTitle(self._tr("Map Extension"))
+        box = self._message_box()
         box.setText(self._tr("Download the offline map extension now?"))
         download = box.addButton(self._tr("Download"), QMessageBox.ButtonRole.AcceptRole)
         local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
@@ -187,13 +187,13 @@ class MapExtensionDownloadController:
         if not available and not local_available:
             self._show_manual_install_unavailable()
             return
-        box = QMessageBox(self._parent)
-        box.setWindowTitle(self._tr("Map Extension"))
+        box = self._message_box()
         box.setText(self._tr("Choose how to install the map extension."))
         online = box.addButton(self._tr("Download"), QMessageBox.ButtonRole.AcceptRole)
         browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
         local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
-        box.addButton(QMessageBox.StandardButton.Cancel)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setEscapeButton(cancel)
         online.setEnabled(available)
         browser.setEnabled(available)
         local.setEnabled(local_available)
@@ -207,8 +207,32 @@ class MapExtensionDownloadController:
 
     def open_download_page(self):
         url = self._context.map_extensions.download_url(sys.platform)
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
+        if not url:
+            return
+
+        opened = QDesktopServices.openUrl(QUrl(url))
+        box = self._message_box()
+        box.setIcon(QMessageBox.Icon.Information if opened else QMessageBox.Icon.Warning)
+        if opened:
+            box.setText(self._tr("Select the archive after the download finishes."))
+        else:
+            box.setText(self._tr("Could not open the browser. Copy this link to download the archive."))
+            box.setInformativeText(url)
+            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.AcceptRole)
+        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
+        close = box.addButton(QMessageBox.StandardButton.Close)
+        box.setEscapeButton(close)
+        box.exec()
+        if box.clickedButton() is local and local.isEnabled():
+            self.install_from_file()
+
+    def _message_box(self) -> QMessageBox:
+        box = QMessageBox(self._parent)
+        box.setWindowTitle(self._tr("Map Extension"))
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        apply_message_box_theme(box, self._parent)
+        return box
 
     def install_from_file(self):
         if not self._context.map_extensions.supports_local_install(sys.platform):
@@ -344,6 +368,9 @@ class MapExtensionDownloadController:
             )
 
     def _show_failure(self, failure):
+        category = getattr(failure, "category", "")
+        stage = getattr(failure, "stage", "")
+        dns_failure = category == "dns" and stage == "download"
         messages = {
             "refused": self._tr(
                 "The connection was refused. Check your system proxy or try another download method."
@@ -374,39 +401,57 @@ class MapExtensionDownloadController:
             "unsafe_archive": self._tr("The map extension archive contains an unsafe path."),
             "missing_file": self._tr("The selected map extension archive could not be found."),
         }
-        box = QMessageBox(self._parent)
+        box = self._message_box()
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle(self._tr("Map Extension"))
-        box.setText(
-            messages.get(
-                getattr(failure, "category", ""),
+        if dns_failure:
+            box.setText(self._tr("Could not download the map extension from GitHub."))
+            box.setInformativeText(
                 self._tr(
-                    "Map extension installation failed. Try again or install a downloaded archive."
-                ),
+                    "The download server name could not be resolved. Check your network or proxy "
+                    "settings and try again. If you use a VPN, try switching servers. If GitHub is "
+                    "reachable without the VPN, you can temporarily turn it off and retry."
+                )
             )
-        )
+        else:
+            box.setText(
+                messages.get(
+                    category,
+                    self._tr(
+                        "Map extension installation failed. Try again or install a downloaded archive."
+                    ),
+                )
+            )
         if isinstance(failure, MapExtensionError):
             box.setDetailedText(str(failure))
         retry = box.addButton(self._tr("Retry"), QMessageBox.ButtonRole.AcceptRole)
-        direct = box.addButton(self._tr("Try Direct Connection"), QMessageBox.ButtonRole.ActionRole)
         browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
-        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
-        box.addButton(QMessageBox.StandardButton.Cancel)
         online = bool(self._context.map_extensions.download_url(sys.platform))
-        direct.setEnabled(online and getattr(failure, "stage", "") == "download")
         browser.setEnabled(online)
-        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
+        direct = local = None
+        if not dns_failure:
+            direct = box.addButton(
+                self._tr("Try Direct Connection"), QMessageBox.ButtonRole.ActionRole
+            )
+            direct.setEnabled(online and stage == "download")
+            local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
+            local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(retry)
+        box.setEscapeButton(cancel)
         payload = self._last_request
         box.exec()
-        if box.clickedButton() is retry and payload is not None:
+        clicked = box.clickedButton()
+        if clicked is None:
+            return
+        if clicked is retry and payload is not None:
             from dataclasses import replace
 
             self._start(replace(payload, defer_activation=self._runtime_prepared))
-        elif box.clickedButton() is direct:
+        elif clicked is direct:
             self.start_download(source="recovery", network_mode="direct")
-        elif box.clickedButton() is browser:
+        elif clicked is browser:
             self.open_download_page()
-        elif box.clickedButton() is local:
+        elif clicked is local:
             self.install_from_file()
 
     def _restart_application(self) -> None:

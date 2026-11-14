@@ -382,7 +382,7 @@
         </message>
         <message>
             <source>Install from File...</source>
-            <translation>从本地安装...</translation>
+            <translation>从文件安装…</translation>
         </message>
         <message>
             <source>Choose how to install the map extension.</source>
@@ -390,7 +390,23 @@
         </message>
         <message>
             <source>Download in Browser</source>
-            <translation>用浏览器下载</translation>
+            <translation>在浏览器中下载</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>下载完成后，选择安装包继续安装。</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>无法打开浏览器。请复制下方链接并在浏览器中下载安装包。</translation>
+        </message>
+        <message>
+            <source>Could not download the map extension from GitHub.</source>
+            <translation>无法从 GitHub 下载地图扩展。</translation>
+        </message>
+        <message>
+            <source>The download server name could not be resolved. Check your network or proxy settings and try again. If you use a VPN, try switching servers. If GitHub is reachable without the VPN, you can temporarily turn it off and retry.</source>
+            <translation>当前网络无法解析下载服务器的地址。请检查网络或代理设置后重试。如果正在使用 VPN，可尝试切换节点。若关闭 VPN 后仍能访问 GitHub，也可暂时关闭后重试。</translation>
         </message>
         <message>
             <source>Install Map Extension</source>
@@ -499,6 +515,28 @@
         <message>
             <source>Manual map extension installation is not available on this platform.</source>
             <translation>此平台不支持手动安装地图扩展。</translation>
+        </message>
+    </context>
+    <context>
+        <name>QMessageBox</name>
+        <message>
+            <source>Show Details...</source>
+            <translation>显示详细信息…</translation>
+        </message>
+        <message>
+            <source>Hide Details...</source>
+            <translation>隐藏详细信息…</translation>
+        </message>
+    </context>
+    <context>
+        <name>QPlatformTheme</name>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
         </message>
     </context>
     <context>

@@ -92,6 +92,17 @@ class RuntimeContext:
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
     _deferred_startup_scan_root: Path | None = field(init=False, default=None, repr=False)
 
+    @property
+    def map_extensions(self):
+        """Construct the process-scoped installer only on explicit map use."""
+        service = getattr(self, "_map_extensions", None)
+        if service is None:
+            from ..application.services.map_extension_service import MapExtensionService
+            from ..infrastructure.services.map_extension_installer import MapExtensionInstaller
+            service = MapExtensionService(MapExtensionInstaller())
+            self._map_extensions = service
+        return service
+
     def __post_init__(self) -> None:
         self.translation = _create_translation_manager(self.settings)
         self.theme = _create_theme_manager(self.settings)

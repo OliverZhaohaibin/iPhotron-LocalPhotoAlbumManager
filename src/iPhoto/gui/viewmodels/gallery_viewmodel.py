@@ -218,17 +218,17 @@ class GalleryViewModel(BaseViewModel):
         self.can_return_to_map.value = False
         self._clear_cluster_gallery_context()
         self._location_session.set_mode("map")
-        self.route_requested.emit("map")
-
-        if (
+        has_snapshot = (
             self._location_session.root == root
             and self._location_session.has_snapshot
             and not self._location_session.invalidated
-        ):
+        )
+        # Submit the session's GPS query before constructing the map surface.
+        if not has_snapshot:
+            self._request_location_assets(root)
+        self.route_requested.emit("map")
+        if has_snapshot:
             self.map_assets_changed.emit(self._location_session.full_assets(), root)
-            return
-
-        self._request_location_assets(root)
 
     def open_location_asset(self, rel: str) -> None:
         root = self._context.library.root()
@@ -474,6 +474,8 @@ class GalleryViewModel(BaseViewModel):
         root: Path,
         assets: list,
     ) -> None:
+        if self._context.library.root() != root:
+            return
         if not self._location_session.accept_loaded(serial, root, list(assets)):
             return
         if self._location_session.mode == "map":

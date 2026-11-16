@@ -457,3 +457,43 @@ def qtbot():
     finally:
         helper.close_widgets()
         app.processEvents()
+
+
+@pytest.fixture()
+def map_platform(monkeypatch):
+    """Simulate one maps platform without changing Python/Qt's host platform."""
+    from types import SimpleNamespace
+
+    from maps import map_sources
+
+    def configure(platform):
+        binary_root = Path("tiles") / "extension" / "bin"
+        suffix = ".exe" if platform == "win32" else ""
+        helper = binary_root / f"osmand_render_helper{suffix}"
+        helpers = (helper,)
+        if platform != "darwin":
+            helpers += (binary_root / f"osmand_render_helper_sdk{suffix}",)
+        library_suffix = {"win32": ".dll", "darwin": ".dylib", "linux": ".so"}[platform]
+        widget = binary_root / f"osmand_native_widget{library_suffix}"
+        mingw_widget = binary_root / f"libosmand_native_widget{library_suffix}"
+        sdk_root = Path("tools") / "osmand_render_helper_native" / (
+            "dist-macosx" if platform == "darwin" else "dist-linux"
+        )
+        values = {
+            "sys": SimpleNamespace(platform=platform),
+            "DEFAULT_HELPER_RELATIVE_PATH": helper,
+            "DEFAULT_HELPER_RELATIVE_PATHS": helpers,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH": widget,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC": widget,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW": mingw_widget,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS": (widget, mingw_widget),
+            "SDK_HELPER_RELATIVE_PATHS": () if platform == "win32" else (sdk_root / helper.name,),
+            "SDK_NATIVE_WIDGET_RELATIVE_PATHS": () if platform == "win32" else (
+                sdk_root / widget.name, sdk_root / mingw_widget.name
+            ),
+        }
+        for name, value in values.items():
+            monkeypatch.setattr(map_sources, name, value)
+        return platform
+
+    return configure

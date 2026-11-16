@@ -380,6 +380,140 @@
             <source>Failed to relaunch the application automatically. Please restart it manually.</source>
             <translation>无法自动重新启动应用。请手动重启。</translation>
         </message>
+        <message>
+            <source>Install from File...</source>
+            <translation>从文件安装…</translation>
+        </message>
+        <message>
+            <source>Choose how to install the map extension.</source>
+            <translation>选择地图扩展的安装方式。</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>在浏览器中下载</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>下载完成后，选择安装包继续安装。</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>无法打开浏览器。请复制下方链接并在浏览器中下载安装包。</translation>
+        </message>
+        <message>
+            <source>Could not download the map extension from GitHub.</source>
+            <translation>无法从 GitHub 下载地图扩展。</translation>
+        </message>
+        <message>
+            <source>Check your VPN or network proxy settings, or download the archive in your browser and install it from a file.</source>
+            <translation>请检查 VPN 或网络代理设置，或使用浏览器下载压缩包后从文件安装。</translation>
+        </message>
+        <message>
+            <source>Install Map Extension</source>
+            <translation>安装地图扩展</translation>
+        </message>
+        <message>
+            <source>Map extension archives (*.zip *.tar.xz)</source>
+            <translation>地图扩展压缩包 (*.zip *.tar.xz)</translation>
+        </message>
+        <message>
+            <source>Map extension is ready. Restart now to activate it?</source>
+            <translation>地图扩展已准备就绪。现在重启以启用？</translation>
+        </message>
+        <message>
+            <source>Map extension is staged and waiting for restart. Restart now?</source>
+            <translation>地图扩展已暂存，等待重启后完成安装。现在重启？</translation>
+        </message>
+        <message>
+            <source>The map extension folder is not writable or its files are in use. Check the folder shown in Details.</source>
+            <translation>地图扩展文件夹无法写入，或文件正在使用。请检查“详细信息”中的文件夹。</translation>
+        </message>
+        <message>
+            <source>There is not enough disk space to install the map extension.</source>
+            <translation>磁盘空间不足，无法安装地图扩展。</translation>
+        </message>
+        <message>
+            <source>Another map extension installation is running. Try again when it finishes.</source>
+            <translation>另一个地图扩展安装正在进行，请在完成后重试。</translation>
+        </message>
+        <message>
+            <source>This is not a supported map extension package. Download the official package for this app version.</source>
+            <translation>不支持此地图扩展压缩包。请下载适用于当前应用版本的官方包。</translation>
+        </message>
+        <message>
+            <source>This map extension package is incompatible with this app or platform.</source>
+            <translation>此地图扩展压缩包与当前应用或平台不兼容。</translation>
+        </message>
+        <message>
+            <source>The map extension package is damaged or incomplete. Download it again.</source>
+            <translation>地图扩展压缩包损坏或不完整，请重新下载。</translation>
+        </message>
+        <message>
+            <source>The map extension is missing required map, search or runtime files.</source>
+            <translation>地图扩展缺少必要的地图、搜索或运行文件。</translation>
+        </message>
+        <message>
+            <source>The map extension archive contains an unsafe path.</source>
+            <translation>地图扩展压缩包包含不安全的路径。</translation>
+        </message>
+        <message>
+            <source>The selected map extension archive could not be found.</source>
+            <translation>找不到所选的地图扩展压缩包。</translation>
+        </message>
+        <message>
+            <source>Map extension installation failed. Try again or install a downloaded archive.</source>
+            <translation>地图扩展安装失败。请重试，或安装已下载的压缩包。</translation>
+        </message>
+        <message>
+            <source>Retry</source>
+            <translation>重试</translation>
+        </message>
+        <message>
+            <source>Downloading map extension...</source>
+            <translation>正在下载地图扩展...</translation>
+        </message>
+        <message>
+            <source>Extracting map extension...</source>
+            <translation>正在解压地图扩展...</translation>
+        </message>
+        <message>
+            <source>Validating map extension...</source>
+            <translation>正在验证地图扩展...</translation>
+        </message>
+        <message>
+            <source>Installing map extension...</source>
+            <translation>正在安装地图扩展...</translation>
+        </message>
+        <message>
+            <source>On macOS, the map extension is included with the app and prepared automatically the first time you use maps.</source>
+            <translation>在 macOS 上，地图扩展随应用提供，并会在首次使用地图时自动准备。</translation>
+        </message>
+        <message>
+            <source>Manual map extension installation is not available on this platform.</source>
+            <translation>此平台不支持手动安装地图扩展。</translation>
+        </message>
+    </context>
+    <context>
+        <name>QMessageBox</name>
+        <message>
+            <source>Show Details...</source>
+            <translation>显示详细信息…</translation>
+        </message>
+        <message>
+            <source>Hide Details...</source>
+            <translation>隐藏详细信息…</translation>
+        </message>
+    </context>
+    <context>
+        <name>QPlatformTheme</name>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
+        </message>
     </context>
     <context>
         <name>StatusBar</name>

@@ -303,6 +303,7 @@ class MarkerController(QObject):
     DENSITY_ADAPTATION_START_ASSET_COUNT = 1_000
     DENSITY_ADAPTATION_FULL_ASSET_COUNT = 2_000
     TARGET_VISIBLE_CLUSTERS = 160.0
+    VIEWPORT_DEBOUNCE_MS = 80
     ZOOM_THRESHOLD_REFERENCE = 7.0
     MAX_ZOOM_OUT_THRESHOLD_FACTOR = 6.0
     DENSITY_FULL_EFFECT_ZOOM_DELTA = 3.0
@@ -326,6 +327,7 @@ class MarkerController(QObject):
         self._assets: list[GeotaggedAsset] = []
         self._library_root: Optional[Path] = None
         self._clusters: list[_MarkerCluster] = []
+        self._has_cluster_snapshot = False
         self._current_representative_rels: set[str] = set()
         self._city_annotations: list[CityAnnotation] = []
         self._view_center_x = 0.5
@@ -341,7 +343,6 @@ class MarkerController(QObject):
 
         self._cluster_timer = QTimer(self)
         self._cluster_timer.setSingleShot(True)
-        self._cluster_timer.setInterval(80)
         self._cluster_timer.timeout.connect(self._rebuild_clusters)
 
         self._cluster_thread = QThread(self)
@@ -394,6 +395,7 @@ class MarkerController(QObject):
         self._assets = normalized_assets
         self._library_root = library_root
         if not same_root:
+            self._has_cluster_snapshot = False
             self._current_representative_rels.clear()
             self._city_annotations = []
             self._thumbnail_loader.reset_for_album(library_root)
@@ -407,6 +409,7 @@ class MarkerController(QObject):
         self._invalidate_cluster_request()
         self._assets = []
         self._clusters = []
+        self._has_cluster_snapshot = False
         self._current_representative_rels.clear()
         self._city_annotations = []
         self._library_root = None
@@ -423,6 +426,7 @@ class MarkerController(QObject):
     def shutdown(self) -> None:
         """Stop worker threads so the application can exit cleanly."""
 
+        self._cluster_timer.stop()
         self._invalidate_cluster_request()
         if self._cluster_thread.isRunning():
             self._cluster_thread.quit()
@@ -567,7 +571,7 @@ class MarkerController(QObject):
         self._invalidate_cluster_request()
         if self._is_panning:
             return
-        self._cluster_timer.start()
+        self._cluster_timer.start(self.VIEWPORT_DEBOUNCE_MS if self._has_cluster_snapshot else 0)
 
     def _invalidate_cluster_request(self) -> None:
         """Cancel worker output that no longer matches the current map state."""
@@ -809,6 +813,7 @@ class MarkerController(QObject):
             cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
 
         self._clusters = clusters
+        self._has_cluster_snapshot = True
         self._update_city_annotations_for_clusters(self._clusters)
         self.clustersUpdated.emit(self._clusters)
         # Publish the cluster set before synchronous cache hits so the overlay

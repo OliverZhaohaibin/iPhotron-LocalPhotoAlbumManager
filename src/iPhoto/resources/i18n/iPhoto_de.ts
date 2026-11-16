@@ -380,6 +380,140 @@
             <source>Failed to relaunch the application automatically. Please restart it manually.</source>
             <translation>Die Anwendung konnte nicht automatisch neu gestartet werden. Bitte starten Sie sie manuell neu.</translation>
         </message>
+        <message>
+            <source>Install from File...</source>
+            <translation>Aus Datei installieren...</translation>
+        </message>
+        <message>
+            <source>Choose how to install the map extension.</source>
+            <translation>Wählen Sie, wie die Kartenerweiterung installiert werden soll.</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>Im Browser herunterladen</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>Wählen Sie nach dem Download das Archiv aus, um die Installation fortzusetzen.</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>Der Browser konnte nicht geöffnet werden. Kopieren Sie diesen Link, um das Archiv herunterzuladen.</translation>
+        </message>
+        <message>
+            <source>Could not download the map extension from GitHub.</source>
+            <translation>Die Kartenerweiterung konnte nicht von GitHub heruntergeladen werden.</translation>
+        </message>
+        <message>
+            <source>Check your VPN or network proxy settings, or download the archive in your browser and install it from a file.</source>
+            <translation>Prüfen Sie Ihre VPN- oder Proxy-Einstellungen oder laden Sie das Archiv im Browser herunter und installieren Sie es aus der Datei.</translation>
+        </message>
+        <message>
+            <source>Install Map Extension</source>
+            <translation>Kartenerweiterung installieren</translation>
+        </message>
+        <message>
+            <source>Map extension archives (*.zip *.tar.xz)</source>
+            <translation>Kartenerweiterungsarchive (*.zip *.tar.xz)</translation>
+        </message>
+        <message>
+            <source>Map extension is ready. Restart now to activate it?</source>
+            <translation>Die Kartenerweiterung ist bereit. Zum Aktivieren jetzt neu starten?</translation>
+        </message>
+        <message>
+            <source>Map extension is staged and waiting for restart. Restart now?</source>
+            <translation>Die Kartenerweiterung ist vorgemerkt und wartet auf einen Neustart. Jetzt neu starten?</translation>
+        </message>
+        <message>
+            <source>The map extension folder is not writable or its files are in use. Check the folder shown in Details.</source>
+            <translation>Der Ordner der Kartenerweiterung ist nicht beschreibbar oder Dateien werden verwendet. Prüfen Sie den Ordner unter Details.</translation>
+        </message>
+        <message>
+            <source>There is not enough disk space to install the map extension.</source>
+            <translation>Nicht genügend Speicherplatz zum Installieren der Kartenerweiterung.</translation>
+        </message>
+        <message>
+            <source>Another map extension installation is running. Try again when it finishes.</source>
+            <translation>Eine andere Installation der Kartenerweiterung läuft. Versuchen Sie es nach deren Abschluss erneut.</translation>
+        </message>
+        <message>
+            <source>This is not a supported map extension package. Download the official package for this app version.</source>
+            <translation>Dieses Kartenerweiterungspaket wird nicht unterstützt. Laden Sie das offizielle Paket für diese App-Version herunter.</translation>
+        </message>
+        <message>
+            <source>This map extension package is incompatible with this app or platform.</source>
+            <translation>Dieses Kartenerweiterungspaket ist mit dieser App oder Plattform nicht kompatibel.</translation>
+        </message>
+        <message>
+            <source>The map extension package is damaged or incomplete. Download it again.</source>
+            <translation>Das Kartenerweiterungspaket ist beschädigt oder unvollständig. Laden Sie es erneut herunter.</translation>
+        </message>
+        <message>
+            <source>The map extension is missing required map, search or runtime files.</source>
+            <translation>Der Kartenerweiterung fehlen erforderliche Karten-, Such- oder Laufzeitdateien.</translation>
+        </message>
+        <message>
+            <source>The map extension archive contains an unsafe path.</source>
+            <translation>Das Kartenerweiterungsarchiv enthält einen unsicheren Pfad.</translation>
+        </message>
+        <message>
+            <source>The selected map extension archive could not be found.</source>
+            <translation>Das ausgewählte Kartenerweiterungsarchiv wurde nicht gefunden.</translation>
+        </message>
+        <message>
+            <source>Map extension installation failed. Try again or install a downloaded archive.</source>
+            <translation>Die Installation der Kartenerweiterung ist fehlgeschlagen. Versuchen Sie es erneut oder installieren Sie ein heruntergeladenes Archiv.</translation>
+        </message>
+        <message>
+            <source>Retry</source>
+            <translation>Erneut versuchen</translation>
+        </message>
+        <message>
+            <source>Downloading map extension...</source>
+            <translation>Kartenerweiterung wird heruntergeladen...</translation>
+        </message>
+        <message>
+            <source>Extracting map extension...</source>
+            <translation>Kartenerweiterung wird entpackt...</translation>
+        </message>
+        <message>
+            <source>Validating map extension...</source>
+            <translation>Kartenerweiterung wird überprüft...</translation>
+        </message>
+        <message>
+            <source>Installing map extension...</source>
+            <translation>Kartenerweiterung wird installiert...</translation>
+        </message>
+        <message>
+            <source>On macOS, the map extension is included with the app and prepared automatically the first time you use maps.</source>
+            <translation>Unter macOS ist die Kartenerweiterung in der App enthalten und wird bei der ersten Kartennutzung automatisch vorbereitet.</translation>
+        </message>
+        <message>
+            <source>Manual map extension installation is not available on this platform.</source>
+            <translation>Auf dieser Plattform kann die Kartenerweiterung nicht manuell installiert werden.</translation>
+        </message>
+    </context>
+    <context>
+        <name>QMessageBox</name>
+        <message>
+            <source>Show Details...</source>
+            <translation>Details anzeigen…</translation>
+        </message>
+        <message>
+            <source>Hide Details...</source>
+            <translation>Details ausblenden…</translation>
+        </message>
+    </context>
+    <context>
+        <name>QPlatformTheme</name>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
+        </message>
     </context>
     <context>
         <name>StatusBar</name>

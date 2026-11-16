@@ -186,7 +186,7 @@ def test_merge_scan_rows_preserves_manual_location_and_metadata(
 def test_read_geotagged(store: IndexStore) -> None:
     gps_data = {"lat": 51.5, "lon": -0.1}
     rows = [
-        {"rel": "geo.jpg", "gps": gps_data},
+        {"rel": "geo.jpg", "gps": gps_data, "micro_thumbnail": b"thumbnail", "location": "London"},
         {"rel": "plain.jpg", "gps": None},
         {"rel": "geo2.jpg", "gps": {"lat": 0, "lon": 0}}
     ]
@@ -198,6 +198,10 @@ def test_read_geotagged(store: IndexStore) -> None:
     assert "geo.jpg" in rels
     assert "geo2.jpg" in rels
     assert "plain.jpg" not in rels
+    row = next(r for r in geotagged if r["rel"] == "geo.jpg")
+    assert row["gps"] == gps_data
+    assert row["location"] == "London"
+    assert "micro_thumbnail" not in row
 
 def test_upsert_row(store: IndexStore) -> None:
     rows = [{"rel": "a.jpg", "id": "1"}]

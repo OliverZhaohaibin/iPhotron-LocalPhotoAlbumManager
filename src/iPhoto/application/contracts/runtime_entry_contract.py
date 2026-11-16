@@ -15,6 +15,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ...library.runtime_controller import LibraryRuntimeController
     from ...settings.manager import SettingsManager
     from ...bootstrap.library_session import LibrarySession
+    from ..services.map_extension_service import MapExtensionService
 
 
 @runtime_checkable
@@ -32,6 +33,9 @@ class RuntimeEntryContract(Protocol):
     library_session: "LibrarySession | None"
     recent_albums: list[Path]
     defer_startup_tasks: bool
+
+    @property
+    def map_extensions(self) -> "MapExtensionService": ...
 
     def open_library(self, root: Path) -> "LibrarySession":
         """Bind and return the active library session."""

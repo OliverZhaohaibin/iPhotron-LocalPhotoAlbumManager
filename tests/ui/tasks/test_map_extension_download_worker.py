@@ -1,291 +1,51 @@
-"""Tests for :mod:`iPhoto.gui.ui.tasks.map_extension_download_worker`."""
+"""Qt workers transport results; installation regressions live in infrastructure tests."""
 
-from __future__ import annotations
-
-import os
-import socket
-import sqlite3
-import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip(
-    "PySide6",
-    reason="PySide6 is required for worker tests",
-    exc_type=ImportError,
-)
-pytest.importorskip(
-    "PySide6.QtWidgets",
-    reason="Qt widgets are required for worker tests",
-    exc_type=ImportError,
-)
-
-from PySide6.QtWidgets import QApplication
-
+pytest.importorskip("PySide6")
+from iPhoto.application.ports.map_extension import MapExtensionError
 from iPhoto.gui.ui.tasks.map_extension_download_worker import (
-    MapExtensionDownloadResult,
-    MapExtensionDownloadRequest,
     MapExtensionDownloadWorker,
-    _DOWNLOAD_TIMEOUT_SECONDS,
+    MapExtensionDownloadRequest,
+    MapExtensionDownloadResult,
 )
 
 
-def _create_search_database(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE search_index (
-                norm_name TEXT NOT NULL,
-                name_priority INTEGER NOT NULL,
-                population INTEGER NOT NULL,
-                geoname_id INTEGER NOT NULL,
-                matched_name TEXT NOT NULL,
-                primary_name TEXT NOT NULL,
-                asciiname TEXT,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL,
-                feature_code TEXT,
-                country_code TEXT,
-                admin1_code TEXT,
-                admin2_code TEXT,
-                admin3_code TEXT,
-                admin4_code TEXT,
-                PRIMARY KEY (norm_name, name_priority, population DESC, geoname_id)
-            ) WITHOUT ROWID;
-            CREATE TABLE prefix_cache (
-                prefix TEXT NOT NULL,
-                rank INTEGER NOT NULL,
-                name_priority INTEGER NOT NULL,
-                population INTEGER NOT NULL,
-                geoname_id INTEGER NOT NULL,
-                matched_name TEXT NOT NULL,
-                primary_name TEXT NOT NULL,
-                asciiname TEXT,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL,
-                feature_code TEXT,
-                country_code TEXT,
-                admin1_code TEXT,
-                admin2_code TEXT,
-                admin3_code TEXT,
-                admin4_code TEXT,
-                PRIMARY KEY (prefix, rank)
-            ) WITHOUT ROWID;
-            """
-        )
+def test_worker_transports_progress_result_and_finished():
+    payload = MapExtensionDownloadRequest(Path("maps"), "win32")
+    result = MapExtensionDownloadResult(Path("pending"), Path("active"), "pending_restart")
+
+    def execute(request, progress):
+        assert request is payload
+        progress(1, 10, "Downloading map extension...")
+        return result
+
+    worker = MapExtensionDownloadWorker(payload, SimpleNamespace(execute=execute))
+    events = []
+    worker.signals.progress.connect(lambda *args: events.append(args))
+    worker.signals.ready.connect(lambda value: events.append(value))
+    worker.signals.finished.connect(lambda: events.append("finished"))
+    worker.run()
+    assert events == [(1, 10, "Downloading map extension..."), result, "finished"]
 
 
-@pytest.fixture()
-def qapp() -> QApplication:
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
+@pytest.mark.parametrize("known", [True, False])
+def test_worker_transports_safe_failure_and_always_finishes(known):
+    failure = MapExtensionError("refused", "download", code=10061)
 
-
-def test_download_archive_uses_timeout_and_reports_stall(
-    monkeypatch: pytest.MonkeyPatch,
-    qapp: QApplication,
-    tmp_path: Path,
-) -> None:
-    del qapp
+    def execute(*args):
+        raise failure if known else RuntimeError("http://user:password@proxy")
 
     worker = MapExtensionDownloadWorker(
-        MapExtensionDownloadRequest(
-            package_root=tmp_path / "maps",
-            platform="linux",
-        )
+        MapExtensionDownloadRequest(Path("maps"), "win32"), SimpleNamespace(execute=execute)
     )
-    archive_path = tmp_path / "extension.tar.xz"
-    captured: dict[str, object] = {}
-
-    class _TimedOutResponse:
-        headers = {"Content-Length": "10"}
-
-        def __enter__(self) -> _TimedOutResponse:
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            return None
-
-        def read(self, _size: int) -> bytes:
-            raise socket.timeout("stalled")
-
-    def _fake_urlopen(url: str, *, timeout: int) -> _TimedOutResponse:
-        captured["url"] = url
-        captured["timeout"] = timeout
-        return _TimedOutResponse()
-
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.request.urlopen",
-        _fake_urlopen,
-    )
-
-    with pytest.raises(RuntimeError, match="timed out"):
-        worker._download_archive("https://example.invalid/extension.tar.xz", archive_path)
-
-    assert captured == {
-        "url": "https://example.invalid/extension.tar.xz",
-        "timeout": _DOWNLOAD_TIMEOUT_SECONDS,
-    }
-
-
-def test_install_and_verify_pending_root_raises_when_install_not_verified(
-    monkeypatch: pytest.MonkeyPatch,
-    qapp: QApplication,
-    tmp_path: Path,
-) -> None:
-    del qapp
-
-    worker = MapExtensionDownloadWorker(
-        MapExtensionDownloadRequest(
-            package_root=tmp_path / "maps",
-            platform="linux",
-        )
-    )
-
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.apply_pending_osmand_extension_install",
-        lambda _root: True,
-    )
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.verify_osmand_extension_install",
-        lambda _root, platform=None: False,
-    )
-
-    with pytest.raises(RuntimeError, match="stuck as '.pending'"):
-        worker._install_and_verify_pending_root()
-
-
-def test_cleanup_failure_does_not_invalidate_verified_install(
-    monkeypatch: pytest.MonkeyPatch,
-    qapp: QApplication,
-    tmp_path: Path,
-) -> None:
-    del qapp
-
-    worker = MapExtensionDownloadWorker(
-        MapExtensionDownloadRequest(
-            package_root=tmp_path / "maps",
-            platform="linux",
-        )
-    )
-    tmp_dir = tmp_path / "tmp"
-    tmp_dir.mkdir()
-    progress_messages: list[str] = []
-    worker.signals.progress.connect(lambda _current, _total, message: progress_messages.append(message))
-
-    def _raise_cleanup_error(_path: Path) -> None:
-        raise PermissionError("locked")
-
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.shutil.rmtree",
-        _raise_cleanup_error,
-    )
-
-    worker._cleanup_temporary_directory(tmp_dir)
-
-    assert progress_messages == ["Finalizing map extension install..."]
-
-
-def test_download_and_stage_returns_success_when_verified_cleanup_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    qapp: QApplication,
-    tmp_path: Path,
-) -> None:
-    del qapp
-
-    package_root = tmp_path / "maps"
-    worker = MapExtensionDownloadWorker(
-        MapExtensionDownloadRequest(
-            package_root=package_root,
-            platform="linux",
-        )
-    )
-
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.supports_map_extension_download",
-        lambda _platform: True,
-    )
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.default_osmand_download_url",
-        lambda _platform: "https://example.invalid/extension.tar.xz",
-    )
-    monkeypatch.setattr(
-        worker,
-        "_download_archive",
-        lambda _url, archive_path: archive_path.write_bytes(b"archive"),
-    )
-
-    def _extract_archive(_archive_path: Path, extracted_root: Path) -> None:
-        extension_root = extracted_root / "extension"
-        (extension_root / "rendering_styles").mkdir(parents=True)
-        (extension_root / "rendering_styles" / "snowmobile.render.xml").write_text(
-            "<renderingStyle />",
-            encoding="utf-8",
-        )
-        (extension_root / "search").mkdir()
-        _create_search_database(extension_root / "search" / "geonames.sqlite3")
-        (extension_root / "bin").mkdir()
-        (extension_root / "bin" / "osmand_render_helper").write_bytes(b"helper")
-        (extension_root / "World_basemap_2.obf").write_bytes(b"obf")
-
-    monkeypatch.setattr(worker, "_extract_archive", _extract_archive)
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.verify_osmand_extension_install",
-        lambda _root, platform=None: True,
-    )
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.shutil.rmtree",
-        lambda _path: (_ for _ in ()).throw(PermissionError("locked")),
-    )
-
-    result = worker._download_and_stage()
-
-    assert isinstance(result, MapExtensionDownloadResult)
-    assert result.pending_root.name == "extension.pending"
-    assert result.extension_root.name == "extension"
-
-
-def test_bundled_tar_is_installed_without_network(
-    monkeypatch: pytest.MonkeyPatch,
-    qapp: QApplication,
-    tmp_path: Path,
-) -> None:
-    del qapp
-    source_extension = tmp_path / "source" / "extension"
-    (source_extension / "rendering_styles").mkdir(parents=True)
-    (source_extension / "rendering_styles" / "snowmobile.render.xml").write_text(
-        "<renderingStyle />", encoding="utf-8"
-    )
-    (source_extension / "search").mkdir()
-    _create_search_database(source_extension / "search" / "geonames.sqlite3")
-    (source_extension / "bin").mkdir()
-    helper = source_extension / "bin" / "osmand_render_helper"
-    helper.write_bytes(b"helper")
-    helper.chmod(0o755)
-    (source_extension / "World_basemap_2.obf").write_bytes(b"obf")
-    archive_path = tmp_path / "extension.tar"
-    with tarfile.open(archive_path, "w") as archive:
-        archive.add(source_extension, arcname="extension")
-
-    package_root = tmp_path / "maps"
-    worker = MapExtensionDownloadWorker(
-        MapExtensionDownloadRequest(
-            package_root=package_root,
-            platform="darwin",
-            local_archive_path=archive_path,
-        )
-    )
-    monkeypatch.setattr(
-        "iPhoto.gui.ui.tasks.map_extension_download_worker.request.urlopen",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network used")),
-    )
-
-    result = worker._download_and_stage()
-
-    assert result.extension_root == package_root / "tiles" / "extension"
-    assert (result.extension_root / "World_basemap_2.obf").read_bytes() == b"obf"
+    errors, done = [], []
+    worker.signals.error.connect(errors.append)
+    worker.signals.finished.connect(lambda: done.append(True))
+    worker.run()
+    assert errors[0] is failure if known else errors[0].category == "installation"
+    assert "password" not in str(errors[0])
+    assert done == [True]

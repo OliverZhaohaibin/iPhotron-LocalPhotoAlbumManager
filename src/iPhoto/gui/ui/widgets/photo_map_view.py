@@ -19,7 +19,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPalette,
 )
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QStackedLayout, QWidget
 
 from ....application.ports import MapInteractionServicePort, MapRuntimePort
 from ....application.services.map_interaction_service import LibraryMapInteractionService
@@ -304,19 +304,22 @@ class PhotoMapView(QWidget):
     This enables O(1) gallery opening without additional database lookups.
     """
 
+    backendChanged = Signal()
+
     def __init__(
         self,
         parent: Optional[QWidget] = None,
         *,
         map_source: MapSourceSpec | None = None,
         map_runtime: MapRuntimePort | None = None,
+        defer_runtime: bool = False,
         map_interaction_service: MapInteractionServicePort | None = None,
     ) -> None:
         super().__init__(parent)
         _configure_opaque_map_container(self)
-        layout = QVBoxLayout(self)
+        layout = QStackedLayout(self)
+        layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
         self._layout = layout
         self._requested_map_source = map_source
         self._map_runtime = map_runtime
@@ -361,7 +364,8 @@ class PhotoMapView(QWidget):
                 filter_candidate.ignore_object(self._tooltip)
         self._last_tooltip_text = ""
         self._thumbnail_loader = ThumbnailLoader(self)
-        self._build_map_widget()
+        if not defer_runtime:
+            self._build_map_widget()
 
     def set_map_interaction_service(
         self,
@@ -401,10 +405,12 @@ class PhotoMapView(QWidget):
         )
         self._map_package_root = resolve_map_package_root(map_runtime)
         if (
-            self._map_runtime_capabilities != previous_capabilities
+            not hasattr(self, "_map_widget")
+            or self._map_runtime_capabilities != previous_capabilities
             or self._map_package_root != previous_package_root
         ):
             self._rebuild_map_widget()
+            self.backendChanged.emit()
 
     def uses_native_osmand_widget(self) -> bool:
         """Return ``True`` when the current backend is the native GL widget."""
@@ -423,7 +429,8 @@ class PhotoMapView(QWidget):
             return
         self._assets = list(assets)
         self._assets_library_root = library_root
-        self._marker_controller.set_assets(self._assets, library_root)
+        if hasattr(self, "_marker_controller"):
+            self._marker_controller.set_assets(self._assets, library_root)
 
     def clear(self) -> None:
         """Remove all markers from the map."""
@@ -435,7 +442,8 @@ class PhotoMapView(QWidget):
             self._last_tooltip_text = ""
         self._assets = []
         self._assets_library_root = None
-        self._marker_controller.clear()
+        if hasattr(self, "_marker_controller"):
+            self._marker_controller.clear()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -443,11 +451,6 @@ class PhotoMapView(QWidget):
             return
         if self._overlay_attachment.uses_post_render:
             self._overlay.update()
-        else:
-            self._overlay_attachment.sync_widget_overlay(
-                self._overlay,
-                geometry=self._map_widget.geometry(),
-            )
         self._marker_controller.handle_resize()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
@@ -613,13 +616,10 @@ class PhotoMapView(QWidget):
             )
         else:
             self._overlay = _MarkerLayer(self)
-            self._overlay_attachment.attach(
-                self._map_widget,
-                callback=None,
-                overlay=self._overlay,
-                overlay_geometry=self._map_widget.geometry(),
-                raise_overlay=True,
-            )
+            # The layout shows and sizes both widgets even when the map is
+            # attached after this page is already visible.
+            self._layout.addWidget(self._overlay)
+            self._layout.setCurrentWidget(self._overlay)
         self._marker_paint_callback = self._overlay_attachment.callback
 
         self._event_bridge.bind(self._map_widget)
@@ -668,6 +668,7 @@ class PhotoMapView(QWidget):
             self._marker_controller.deleteLater()
             del self._marker_controller
         if hasattr(self, "_overlay"):
+            self._layout.removeWidget(self._overlay)
             self._overlay.hide()
             self._overlay.deleteLater()
             del self._overlay

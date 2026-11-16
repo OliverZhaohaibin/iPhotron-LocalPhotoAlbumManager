@@ -159,6 +159,7 @@ archive_staged_map_extension() {
     -C "$staged_tiles_dir" extension
   rm -rf "$staged_tiles_dir"
   require_path "$archive_path"
+  /usr/bin/shasum -a 256 "$archive_path" | cut -d " " -f 1 > "$archive_path.sha256"
 }
 
 prune_packaged_development_files() {

@@ -65,20 +65,19 @@ def _configure_main_view_stack(view_stack: QStackedWidget, map_view: object) -> 
     """Keep the native map page alive across view switches when possible."""
 
     stack_layout = view_stack.layout()
-    if (
-        isinstance(stack_layout, QStackedLayout)
-        and hasattr(map_view, "uses_native_osmand_widget")
+    if not isinstance(stack_layout, QStackedLayout):
+        return
+    # Keeping the map visible avoids tearing down its packaged OpenGL context
+    # on each view switch. Some Qt builds warn when that page remains stacked
+    # beneath other views, so this is opt-in.
+    keep_alive = (
+        hasattr(map_view, "uses_native_osmand_widget")
         and map_view.uses_native_osmand_widget()
         and sys.platform != "darwin"
         and os.environ.get("IPHOTO_KEEP_NATIVE_MAP_PAGE_ALIVE", "").strip().lower()
         in {"1", "true", "yes", "on"}
-    ):
-        # Keeping the native map page visible underneath the active page
-        # avoids Qt tearing down the packaged QOpenGLWidget context every
-        # time the user leaves the Location section. This is opt-in because
-        # some packaged Qt builds emit QPainter/QGraphicsEffect warnings when
-        # a hidden OpenGL page remains stacked beneath the active page.
-        stack_layout.setStackingMode(QStackedLayout.StackAll)
+    )
+    stack_layout.setStackingMode(QStackedLayout.StackAll if keep_alive else QStackedLayout.StackOne)
 
 
 class Ui_MainWindow(QObject):
@@ -347,17 +346,12 @@ class Ui_MainWindow(QObject):
         return self.preview_window
 
     def _create_map_feature(self) -> object:
-        from maps.map_sources import apply_pending_osmand_extension_install
         from .widgets.photo_map_view import PhotoMapView
 
         assert self._main_window is not None
-        maps_root = Path(__file__).resolve().parents[3] / "maps"
-        try:
-            apply_pending_osmand_extension_install(maps_root)
-        except Exception:
-            _LOGGER.warning("Failed to apply pending map extension install", exc_info=True)
         self.map_view = PhotoMapView(
-            map_runtime=getattr(self._library, "map_runtime", None),
+            map_runtime=None,
+            defer_runtime=True,
             map_interaction_service=getattr(self._library, "map_interaction_service", None),
         )
         self.map_page = QWidget()
@@ -368,7 +362,9 @@ class Ui_MainWindow(QObject):
         layout.setSpacing(0)
         layout.addWidget(self.map_view)
         self.view_stack.addWidget(self.map_page)
-        _configure_main_view_stack(self.view_stack, self.map_view)
+        self.map_view.backendChanged.connect(
+            lambda: _configure_main_view_stack(self.view_stack, self.map_view)
+        )
         return self.map_page
 
     def _create_people_feature(self) -> object:

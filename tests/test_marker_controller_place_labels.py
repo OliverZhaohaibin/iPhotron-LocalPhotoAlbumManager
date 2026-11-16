@@ -37,18 +37,18 @@ class _DummyMapWidget:
     def __init__(self, zoom: float = 6.0) -> None:
         self.zoom = zoom
 
+    def width(self) -> int:
+        return 800
+
+    def height(self) -> int:
+        return 600
+
 
 class _ExactProjectionMapWidget(_DummyMapWidget):
     def __init__(self, projected_points: dict[tuple[float, float], QPointF], zoom: float = 6.0) -> None:
         super().__init__(zoom=zoom)
         self._projected_points = projected_points
         self.project_calls: list[tuple[float, float]] = []
-
-    def width(self) -> int:
-        return 800
-
-    def height(self) -> int:
-        return 600
 
     def prefers_exact_screen_projection(self) -> bool:
         return True
@@ -701,6 +701,29 @@ def test_marker_controller_ignores_thumbnails_from_old_viewport(
         controller.shutdown()
 
     assert updates == [first.library_relative, second.library_relative]
+
+
+def test_initial_map_clusters_skip_viewport_debounce(qapp: QApplication, tmp_path: Path) -> None:
+    asset = _asset(tmp_path)
+    controller = MarkerController(
+        _ExactProjectionMapWidget({(asset.longitude, asset.latitude): QPointF(100, 100)}),
+        _DummyThumbnailLoader(),
+        marker_size=72,
+        thumbnail_size=192,
+    )
+    published = []
+    controller.clustersUpdated.connect(published.append)
+    try:
+        controller.set_assets([asset], tmp_path)
+        assert controller._cluster_timer.interval() == 0
+        qapp.processEvents()
+        assert published[-1][0].representative == asset
+
+        controller.handle_view_changed(0.55, 0.5, 6.0)
+        assert controller._cluster_timer.interval() == 80
+    finally:
+        controller.clear()
+        controller.shutdown()
 
 
 def test_marker_controller_publishes_clusters_before_cached_thumbnails(

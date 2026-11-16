@@ -348,3 +348,10 @@ def test_close_library_unbinds_map_interaction_service(tmp_path: Path) -> None:
     context.close_library()
 
     assert library.bound_map_interaction_services[-1] is None
+
+
+def test_map_extension_service_is_lazy_and_process_scoped():
+    context = RuntimeContext.__new__(RuntimeContext)
+    assert not hasattr(context, "_map_extensions")
+    service = context.map_extensions
+    assert context.map_extensions is service

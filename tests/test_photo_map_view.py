@@ -919,13 +919,13 @@ def test_native_marker_overlay_precomposes_opaque_marker_buffer(
     assert sample.blue() == 255
 
 
-def test_photo_map_view_uses_widget_overlay_when_post_render_is_unsupported(
+@pytest.mark.parametrize("defer_runtime", [False, True])
+def test_photo_map_view_paints_widget_overlay_when_post_render_is_unsupported(
     qapp: QApplication,
     monkeypatch,
     tmp_path,
+    defer_runtime: bool,
 ) -> None:
-    del qapp
-
     source = MapSourceSpec(
         kind="osmand_obf",
         data_path=tmp_path / "world.obf",
@@ -953,10 +953,39 @@ def test_photo_map_view_uses_widget_overlay_when_post_render_is_unsupported(
     monkeypatch.setattr(photo_map_view_module, "ThumbnailLoader", _DummyThumbnailLoader)
     monkeypatch.setattr(photo_map_view_module, "MarkerController", _DummyMarkerController)
 
-    view = photo_map_view_module.PhotoMapView(map_source=source)
+    view = photo_map_view_module.PhotoMapView(map_source=source, defer_runtime=defer_runtime)
     try:
-        assert isinstance(view.map_widget(), _FakeNativeWithoutPostRender)
-        assert view._overlay.parent() is view
+        view.resize(340, 240)
+        view.show()
+        qapp.processEvents()
+        view.set_map_runtime(None)
+        qapp.processEvents()
+
+        map_widget = view.map_widget()
+        overlay = view._overlay
+        assert isinstance(map_widget, _FakeNativeWithoutPostRender)
+        assert overlay.parent() is view
+        assert overlay.isVisible()
+        assert overlay.geometry() == map_widget.geometry()
+
+        asset = SimpleNamespace(library_relative="album/photo.jpg", latitude=10.0, longitude=20.0)
+        overlay.set_clusters([
+            photo_map_view_module._MarkerCluster(
+                representative=asset, screen_pos=QPointF(100, 100)
+            ),
+        ])
+        thumbnail = QPixmap(64, 64)
+        thumbnail.fill(Qt.GlobalColor.magenta)
+        overlay.set_thumbnail(asset.library_relative, thumbnail)
+        view.resize(460, 300)
+        qapp.processEvents()
+
+        assert overlay.geometry() == map_widget.geometry()
+        marker_pixel = QPoint(100, 57)
+        assert view.childAt(marker_pixel) is map_widget
+        rendered = view.grab()
+        sample = marker_pixel * rendered.devicePixelRatio()
+        assert rendered.toImage().pixelColor(sample) == Qt.GlobalColor.magenta
     finally:
         view.close()
 
@@ -1566,8 +1595,6 @@ def test_photo_map_view_rebuilds_when_runtime_package_root_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    del qapp
-
     widget_instances: list["_RuntimeSwitchingMapWidget"] = []
     controller_instances: list["_RecordingMarkerController"] = []
 
@@ -1640,7 +1667,10 @@ def test_photo_map_view_rebuilds_when_runtime_package_root_changes(
 
     view = photo_map_view_module.PhotoMapView(map_runtime=first_runtime)
     try:
+        view.show()
+        qapp.processEvents()
         first_widget = cast(_RuntimeSwitchingMapWidget, view.map_widget())
+        first_overlay = view._overlay
         assert first_widget.received_map_source is not None
         assert Path(first_widget.received_map_source.data_path) == (
             first_root / "tiles" / "extension" / "World_basemap_2.obf"
@@ -1648,9 +1678,14 @@ def test_photo_map_view_rebuilds_when_runtime_package_root_changes(
 
         view.set_assets(assets, library_root)
         view.set_map_runtime(second_runtime)
+        assert first_overlay.isHidden()
+        qapp.processEvents()
 
         second_widget = cast(_RuntimeSwitchingMapWidget, view.map_widget())
         assert second_widget is not first_widget
+        assert view._layout.count() == 2
+        assert view._overlay.isVisible()
+        assert view._overlay.geometry() == second_widget.geometry()
         assert first_widget.shutdown_calls == 1
         assert second_widget.received_map_source is not None
         assert Path(second_widget.received_map_source.data_path) == (

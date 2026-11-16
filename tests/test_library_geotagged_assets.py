@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -18,6 +19,7 @@ pytest.importorskip(
 
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.bootstrap.library_location_service import LibraryLocationService
 from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 
@@ -140,6 +142,28 @@ def test_geotagged_assets_reuse_cached_rows_until_library_changes(
 
     assert repo.calls == 1
     assert first == second
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory resolution fast path")
+def test_geotagged_snapshot_preserves_symlink_deduplication(tmp_path: Path) -> None:
+    album = tmp_path / "album"
+    album.mkdir()
+    photo = album / "photo.jpg"
+    photo.touch()
+    (album / "linked-photo.jpg").symlink_to(photo)
+    alias = tmp_path / "alias"
+    alias.symlink_to(album, target_is_directory=True)
+    rows = [
+        {"rel": rel, "gps": {"lat": 10, "lon": 20}, "location": "Test City"}
+        for rel in ("album/photo.jpg", "album/linked-photo.jpg", "alias/photo.jpg", "alias/other.jpg")
+    ]
+    service = LibraryLocationService(
+        tmp_path, query_service=SimpleNamespace(read_geotagged_rows=lambda: iter(rows))
+    )
+
+    assets = service.list_geotagged_assets()
+    assert [asset.library_relative for asset in assets] == ["album/photo.jpg", "alias/other.jpg"]
+    assert [asset.absolute_path for asset in assets] == [photo.resolve(), album.resolve() / "other.jpg"]
 
 
 def test_geotagged_assets_delegate_to_bound_location_service(

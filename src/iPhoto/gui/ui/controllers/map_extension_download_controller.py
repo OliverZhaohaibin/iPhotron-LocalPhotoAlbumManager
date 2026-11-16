@@ -290,9 +290,8 @@ class MapExtensionDownloadController:
         self._active_generation = self._package_generation
         self._latest_result = None
         self._latest_error = None
-        self._hide_blocking_top_level_windows()
-        self._progress_dialog = _MapExtensionProgressDialog(self._parent)
-        self._progress_dialog.show()
+        if payload.operation == "install":
+            self._show_progress_dialog()
         worker = MapExtensionDownloadWorker(payload, self._context.map_extensions)
         worker.signals.progress.connect(self._handle_progress)
         worker.signals.ready.connect(self._handle_ready)
@@ -301,9 +300,19 @@ class MapExtensionDownloadController:
         self._active_worker = worker
         QThreadPool.globalInstance().start(worker, -1)
 
+    def _show_progress_dialog(self) -> None:
+        self._hide_blocking_top_level_windows()
+        self._progress_dialog = _MapExtensionProgressDialog(self._parent)
+        self._progress_dialog.show()
+
     def _handle_progress(self, current, total, message):
-        if self._progress_dialog is not None:
-            self._progress_dialog.update_progress(current, total, self._tr(message))
+        if not self._download_inflight or self._active_generation != self._package_generation:
+            return
+        # Ordinary preparation emits no progress. Bundled installs and pending
+        # activation request a dialog only when the installer starts work.
+        if self._progress_dialog is None:
+            self._show_progress_dialog()
+        self._progress_dialog.update_progress(current, total, self._tr(message))
 
     def _handle_ready(self, result):
         self._latest_result = result

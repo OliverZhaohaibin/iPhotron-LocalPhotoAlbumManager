@@ -19,7 +19,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPalette,
 )
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QStackedLayout, QWidget
 
 from ....application.ports import MapInteractionServicePort, MapRuntimePort
 from ....application.services.map_interaction_service import LibraryMapInteractionService
@@ -315,9 +315,9 @@ class PhotoMapView(QWidget):
     ) -> None:
         super().__init__(parent)
         _configure_opaque_map_container(self)
-        layout = QVBoxLayout(self)
+        layout = QStackedLayout(self)
+        layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
         self._layout = layout
         self._requested_map_source = map_source
         self._map_runtime = map_runtime
@@ -448,11 +448,6 @@ class PhotoMapView(QWidget):
             return
         if self._overlay_attachment.uses_post_render:
             self._overlay.update()
-        else:
-            self._overlay_attachment.sync_widget_overlay(
-                self._overlay,
-                geometry=self._map_widget.geometry(),
-            )
         self._marker_controller.handle_resize()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
@@ -618,13 +613,10 @@ class PhotoMapView(QWidget):
             )
         else:
             self._overlay = _MarkerLayer(self)
-            self._overlay_attachment.attach(
-                self._map_widget,
-                callback=None,
-                overlay=self._overlay,
-                overlay_geometry=self._map_widget.geometry(),
-                raise_overlay=True,
-            )
+            # The layout shows and sizes both widgets even when the map is
+            # attached after this page is already visible.
+            self._layout.addWidget(self._overlay)
+            self._layout.setCurrentWidget(self._overlay)
         self._marker_paint_callback = self._overlay_attachment.callback
 
         self._event_bridge.bind(self._map_widget)
@@ -673,6 +665,7 @@ class PhotoMapView(QWidget):
             self._marker_controller.deleteLater()
             del self._marker_controller
         if hasattr(self, "_overlay"):
+            self._layout.removeWidget(self._overlay)
             self._overlay.hide()
             self._overlay.deleteLater()
             del self._overlay

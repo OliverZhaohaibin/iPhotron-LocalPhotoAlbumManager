@@ -642,12 +642,24 @@ class AssetRepository:
                 conn.close()
 
     def read_geotagged(self) -> Iterator[Dict[str, Any]]:
-        """Yield only rows that contain GPS metadata."""
+        """Yield the fields needed to build location assets from GPS rows."""
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
 
         try:
-            query = "SELECT * FROM assets WHERE gps IS NOT NULL"
+            # Older indexes can contain optional location/media fields outside
+            # the current schema. Keep those without reading thumbnail blobs.
+            legacy = {"metadata", "live_photo_group_id", "type", "is_image", "is_video"}
+            columns = [
+                "rel", "id", "parent_album_path", "mime", "gps", "location",
+                "live_role", "live_partner_rel", "still_image_time", "dur",
+            ]
+            columns.extend(
+                row[1]
+                for row in conn.execute("PRAGMA table_info(assets)")
+                if row[1] in legacy
+            )
+            query = f"SELECT {', '.join(columns)} FROM assets WHERE gps IS NOT NULL"
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(query)

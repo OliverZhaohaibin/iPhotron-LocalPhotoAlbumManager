@@ -120,6 +120,7 @@ def test_start_download_keeps_worker_until_finished_and_passes_service(controlle
     assert worker is controller._active_worker
     assert worker._service is controller._context.map_extensions
     assert controller._download_inflight
+    assert controller._progress_dialog.isVisible()
     worker.signals.finished.emit()
     assert controller._active_worker is None
     assert not controller._download_inflight
@@ -135,6 +136,7 @@ def test_shared_preparation_defers_all_callbacks_until_finished(controller):
     pool.return_value.start.assert_called_once()
     worker = controller._active_worker
     assert worker._request.operation == "prepare"
+    assert controller._progress_dialog is None
     assert events == []
     worker.signals.ready.emit(
         MapExtensionDownloadResult(Path("pending"), Path("active"), "missing")
@@ -144,6 +146,25 @@ def test_shared_preparation_defers_all_callbacks_until_finished(controller):
     assert events == ["map", "info"]
     controller.prepare_runtime(lambda: events.append("ready"))
     assert events[-1] == "ready"
+
+
+def test_preparation_shows_progress_when_installation_actually_starts(controller):
+    with patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+    ):
+        controller.prepare_runtime(lambda: None)
+
+    worker = controller._active_worker
+    assert controller._progress_dialog is None
+    worker.signals.progress.emit(0, 0, "Extracting map extension...")
+    dialog = controller._progress_dialog
+    assert dialog.isVisible()
+    assert dialog._message_label.text() == "Extracting map extension..."
+    worker.signals.progress.emit(0, 0, "Installing map extension...")
+    assert controller._progress_dialog is dialog
+    worker.signals.ready.emit(MapExtensionDownloadResult(Path("pending"), Path("active")))
+    worker.signals.finished.emit()
+    assert controller._progress_dialog is None
 
 
 @pytest.mark.parametrize("operation", ["install", "prepare"])
@@ -390,6 +411,8 @@ def test_old_completion_never_releases_new_root_callbacks(
             controller.set_package_root(first_root)
         controller.prepare_runtime(lambda: calls.append("current"))
         assert pool.return_value.start.call_count == 1
+        old_worker.signals.progress.emit(0, 0, "Installing map extension...")
+        assert controller._progress_dialog is None
         if failed:
             old_worker.signals.error.emit(MapExtensionError("permission", "prepare"))
         else:
@@ -450,7 +473,7 @@ def test_installed_result_does_not_prompt_restart(controller, operation):
                 MapExtensionDownloadRequest(controller._package_root, "win32", operation=operation)
             )
             worker = controller._active_worker
-            assert floating.isHidden()
+            assert floating.isHidden() == (operation == "install")
             worker.signals.ready.emit(
                 MapExtensionDownloadResult(Path("pending"), Path("active"), "installed")
             )

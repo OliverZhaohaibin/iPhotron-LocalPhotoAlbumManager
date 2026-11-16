@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,15 +67,26 @@ class _Library:
 def test_location_assets_load_prefers_session_service(
     tmp_path: Path,
     qapp: QApplication,
+    monkeypatch,
 ) -> None:
     del qapp
     library = _Library(tmp_path)
     service = LocationTrashNavigationService(library_manager_getter=lambda: library)
+    queued = []
+    monkeypatch.setattr(service, "_thread_pool", SimpleNamespace(start=queued.append))
+    loaded = []
+    service.locationAssetsLoaded.connect(lambda *result: loaded.append(result))
+    old_location_service = library.location_service
+    library.library_session = SimpleNamespace(locations=old_location_service)
+    library.location_service = None
+    assert service.request_location_assets() == (1, tmp_path)
+    library.location_service = _LocationService()
+    library.library_session = SimpleNamespace(locations=library.location_service)
+    queued[0].run()
 
-    assets = service._load_location_assets(library)  # noqa: SLF001
-
-    assert assets == ["session-asset"]
-    assert library.location_service.calls == 1
+    assert loaded == [(1, tmp_path, ["session-asset"])]
+    assert old_location_service.calls == 1
+    assert library.location_service.calls == 0
     assert library.legacy_location_calls == 0
 
 

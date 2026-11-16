@@ -37,7 +37,7 @@ class _LocationAssetsWorker(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - background Qt task
         try:
-            assets = list(self._load_assets())
+            assets = self._load_assets()
         except Exception as exc:  # noqa: BLE001 - best-effort UI transport
             self._signals.error.emit(self._serial, self._root, str(exc))
             return
@@ -114,6 +114,11 @@ class LocationTrashNavigationService(QObject):
         root = library.root()
         if root is None:
             return None
+        session = getattr(library, "library_session", None)
+        location_service = session.locations if session is not None else library.location_service
+        if location_service is None:
+            self.errorRaised.emit("Active library session is unavailable for location queries.")
+            return None
 
         self._location_request_serial += 1
         serial = self._location_request_serial
@@ -125,7 +130,7 @@ class LocationTrashNavigationService(QObject):
             _LocationAssetsWorker(
                 serial=serial,
                 root=root,
-                load_assets=lambda: list(self._load_location_assets(library)),
+                load_assets=location_service.list_geotagged_assets,
                 signals=signals,
             )
         )
@@ -142,7 +147,7 @@ class LocationTrashNavigationService(QObject):
             signals.deleteLater()
         if int(serial) != self._location_request_serial:
             return
-        self.locationAssetsLoaded.emit(int(serial), Path(root), list(assets))
+        self.locationAssetsLoaded.emit(int(serial), Path(root), assets)
 
     def _handle_location_assets_error(
         self,
@@ -195,20 +200,6 @@ class LocationTrashNavigationService(QObject):
         return (
             time.monotonic() - self._last_trash_cleanup_at
         ) >= self._TRASH_CLEANUP_THROTTLE_SEC
-
-    def _load_location_assets(self, library: "LibraryRuntimeController") -> list:
-        location_service = getattr(library, "location_service", None)
-        list_geotagged_assets = getattr(
-            location_service,
-            "list_geotagged_assets",
-            None,
-        )
-        if callable(list_geotagged_assets):
-            return list(list_geotagged_assets())
-        raise RuntimeError(
-            "Active library session is unavailable; location queries require "
-            "a bound LibrarySession."
-        )
 
     def _cleanup_deleted_index(self, library: "LibraryRuntimeController", trash_root: Path) -> int:
         lifecycle_service = getattr(library, "asset_lifecycle_service", None)

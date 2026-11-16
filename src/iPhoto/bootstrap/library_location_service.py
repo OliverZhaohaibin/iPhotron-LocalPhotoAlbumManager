@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from pathlib import Path
 
 from ..application.dtos import GeotaggedAsset
@@ -37,8 +39,18 @@ class LibraryLocationService:
         except Exception:
             rows = ()
 
+        # Canonicalize common album prefixes once per snapshot. Resolve
+        # symlinked files individually so aliases still deduplicate.
+        resolve_directory = lru_cache(maxsize=1024)(Path.resolve)
+
+        def resolve_path(path: Path) -> Path:
+            if os.name == "nt" or not path.name or path.name == "..":
+                return path.resolve()
+            candidate = resolve_directory(path.parent) / path.name
+            return candidate.resolve() if candidate.is_symlink() else candidate
+
         for row in rows:
-            asset = self.asset_from_row(row)
+            asset = geotagged_asset_from_row(self.library_root, row, resolve_path=resolve_path)
             if asset is None or asset.absolute_path in seen:
                 continue
             seen.add(asset.absolute_path)

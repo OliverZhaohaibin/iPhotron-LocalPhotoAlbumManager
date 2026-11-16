@@ -15,8 +15,6 @@ class MapExtensionService:
     def execute(
         self, request: MapExtensionRequest, progress: MapExtensionProgress
     ) -> MapExtensionResult:
-        if request.network_mode not in {"system", "direct"}:
-            raise ValueError("Unsupported map download connection mode")
         if request.operation not in {"install", "prepare"}:
             raise ValueError("Unsupported map extension operation")
         return self._adapter.execute(request, progress)

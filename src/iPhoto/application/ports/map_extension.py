@@ -15,7 +15,6 @@ class MapExtensionRequest:
     package_root: Path
     platform: str
     local_archive_path: Path | None = None
-    network_mode: Literal["system", "direct"] = "system"
     operation: Literal["install", "prepare"] = "install"
     defer_activation: bool = False
 

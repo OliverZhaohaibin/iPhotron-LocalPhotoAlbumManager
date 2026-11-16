@@ -639,14 +639,17 @@ def _default_helper_candidates(package_root: Path) -> tuple[Path, ...]:
 
 def _default_native_widget_candidates(package_root: Path) -> tuple[Path, ...]:
     normalized_root = Path(package_root).resolve()
-    selected = default_osmand_extension_root(normalized_root)
-    if validate_osmand_extension_root(selected, platform=sys.platform):
-        return tuple(selected / "bin" / path.name for path in DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS)
     repo_root = _repo_root(normalized_root)
     sdk_roots = _sdk_roots(repo_root)
     sdk_candidates: tuple[Path, ...] = ()
     if sys.platform != "win32" and sdk_roots:
         sdk_candidates = _collect_candidate_paths(sdk_roots, SDK_NATIVE_WIDGET_RELATIVE_PATHS)
+    selected = default_osmand_extension_root(normalized_root)
+    if validate_osmand_extension_root(selected, platform=sys.platform):
+        selected_candidates = tuple(
+            selected / "bin" / path.name for path in DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS
+        )
+        return _dedupe_candidates(selected_candidates + sdk_candidates)
     local_candidates = _collect_candidate_paths(
         _default_osmand_search_roots(normalized_root),
         DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS,

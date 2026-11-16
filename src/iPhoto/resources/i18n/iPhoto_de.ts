@@ -405,8 +405,8 @@
             <translation>Die Kartenerweiterung konnte nicht von GitHub heruntergeladen werden.</translation>
         </message>
         <message>
-            <source>The download server name could not be resolved. Check your network or proxy settings and try again. If you use a VPN, try switching servers. If GitHub is reachable without the VPN, you can temporarily turn it off and retry.</source>
-            <translation>Der Name des Downloadservers konnte nicht aufgelöst werden. Prüfen Sie Ihre Netzwerk- oder Proxyeinstellungen und versuchen Sie es erneut. Wenn Sie ein VPN verwenden, wechseln Sie den Server. Falls GitHub ohne VPN erreichbar ist, können Sie das VPN vorübergehend deaktivieren und es erneut versuchen.</translation>
+            <source>Check your VPN or network proxy settings, or download the archive in your browser and install it from a file.</source>
+            <translation>Prüfen Sie Ihre VPN- oder Proxy-Einstellungen oder laden Sie das Archiv im Browser herunter und installieren Sie es aus der Datei.</translation>
         </message>
         <message>
             <source>Install Map Extension</source>
@@ -423,26 +423,6 @@
         <message>
             <source>Map extension is staged and waiting for restart. Restart now?</source>
             <translation>Die Kartenerweiterung ist vorgemerkt und wartet auf einen Neustart. Jetzt neu starten?</translation>
-        </message>
-        <message>
-            <source>The connection was refused. Check your system proxy or try another download method.</source>
-            <translation>Die Verbindung wurde abgelehnt. Prüfen Sie den Systemproxy oder versuchen Sie eine andere Downloadmethode.</translation>
-        </message>
-        <message>
-            <source>The map extension download timed out. Please try again.</source>
-            <translation>Zeitüberschreitung beim Herunterladen der Kartenerweiterung. Bitte erneut versuchen.</translation>
-        </message>
-        <message>
-            <source>The download server name could not be resolved.</source>
-            <translation>Der Name des Downloadservers konnte nicht aufgelöst werden.</translation>
-        </message>
-        <message>
-            <source>The download server certificate could not be verified.</source>
-            <translation>Das Zertifikat des Downloadservers konnte nicht überprüft werden.</translation>
-        </message>
-        <message>
-            <source>The download server returned an error.</source>
-            <translation>Der Downloadserver hat einen Fehler zurückgegeben.</translation>
         </message>
         <message>
             <source>The map extension folder is not writable or its files are in use. Check the folder shown in Details.</source>
@@ -487,10 +467,6 @@
         <message>
             <source>Retry</source>
             <translation>Erneut versuchen</translation>
-        </message>
-        <message>
-            <source>Try Direct Connection</source>
-            <translation>Direktverbindung versuchen</translation>
         </message>
         <message>
             <source>Downloading map extension...</source>

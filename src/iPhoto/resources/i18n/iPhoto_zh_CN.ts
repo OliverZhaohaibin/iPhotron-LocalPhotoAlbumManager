@@ -405,8 +405,8 @@
             <translation>无法从 GitHub 下载地图扩展。</translation>
         </message>
         <message>
-            <source>The download server name could not be resolved. Check your network or proxy settings and try again. If you use a VPN, try switching servers. If GitHub is reachable without the VPN, you can temporarily turn it off and retry.</source>
-            <translation>当前网络无法解析下载服务器的地址。请检查网络或代理设置后重试。如果正在使用 VPN，可尝试切换节点。若关闭 VPN 后仍能访问 GitHub，也可暂时关闭后重试。</translation>
+            <source>Check your VPN or network proxy settings, or download the archive in your browser and install it from a file.</source>
+            <translation>请检查 VPN 或网络代理设置，或使用浏览器下载压缩包后从文件安装。</translation>
         </message>
         <message>
             <source>Install Map Extension</source>
@@ -423,26 +423,6 @@
         <message>
             <source>Map extension is staged and waiting for restart. Restart now?</source>
             <translation>地图扩展已暂存，等待重启后完成安装。现在重启？</translation>
-        </message>
-        <message>
-            <source>The connection was refused. Check your system proxy or try another download method.</source>
-            <translation>连接被拒绝。请检查系统代理，或尝试其他下载方式。</translation>
-        </message>
-        <message>
-            <source>The map extension download timed out. Please try again.</source>
-            <translation>地图扩展下载超时，请重试。</translation>
-        </message>
-        <message>
-            <source>The download server name could not be resolved.</source>
-            <translation>无法解析下载服务器地址。</translation>
-        </message>
-        <message>
-            <source>The download server certificate could not be verified.</source>
-            <translation>无法验证下载服务器的证书。</translation>
-        </message>
-        <message>
-            <source>The download server returned an error.</source>
-            <translation>下载服务器返回错误。</translation>
         </message>
         <message>
             <source>The map extension folder is not writable or its files are in use. Check the folder shown in Details.</source>
@@ -487,10 +467,6 @@
         <message>
             <source>Retry</source>
             <translation>重试</translation>
-        </message>
-        <message>
-            <source>Try Direct Connection</source>
-            <translation>尝试直连</translation>
         </message>
         <message>
             <source>Downloading map extension...</source>

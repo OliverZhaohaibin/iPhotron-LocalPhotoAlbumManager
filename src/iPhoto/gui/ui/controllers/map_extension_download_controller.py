@@ -168,7 +168,7 @@ class MapExtensionDownloadController:
             if checkbox.isChecked():
                 self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
             if box.clickedButton() is download:
-                self.start_download(source="startup")
+                self.start_download()
             elif box.clickedButton() is local:
                 self.install_from_file()
             box.deleteLater()
@@ -199,7 +199,7 @@ class MapExtensionDownloadController:
         local.setEnabled(local_available)
         box.exec()
         if box.clickedButton() is online:
-            self.start_download(source="settings")
+            self.start_download()
         elif box.clickedButton() is browser:
             self.open_download_page()
         elif box.clickedButton() is local:
@@ -271,13 +271,11 @@ class MapExtensionDownloadController:
             QMessageBox.StandardButton.Close,
         )
 
-    def start_download(self, *, source: str, network_mode="system"):
-        del source
+    def start_download(self) -> None:
         self._start(
             MapExtensionDownloadRequest(
                 self._package_root,
                 sys.platform,
-                network_mode=network_mode,
                 defer_activation=self._runtime_prepared,
             )
         )
@@ -344,7 +342,13 @@ class MapExtensionDownloadController:
         preparing = payload.operation == "prepare"
         failure = self._latest_error
         result = self._latest_result
-        if preparing:
+        if failure is not None:
+            self._show_failure(failure)
+            if self._download_inflight:
+                return
+        if preparing and generation == self._package_generation:
+            # Keep capability probes queued until preparation succeeds or the
+            # user dismisses recovery and proceeds with the available runtime.
             self._runtime_prepared = True
             callbacks, self._prepare_callbacks = self._prepare_callbacks, []
             for callback in callbacks:
@@ -354,9 +358,7 @@ class MapExtensionDownloadController:
         if generation != self._package_generation:
             self._start_waiting_preparation()
             return
-        if failure is not None:
-            self._show_failure(failure)
-        elif result is not None and result.status == "pending_restart":
+        if failure is None and result is not None and result.status == "pending_restart":
             message = self._tr("Map extension is staged and waiting for restart. Restart now?")
             answer = QMessageBox.question(
                 self._parent,
@@ -378,16 +380,8 @@ class MapExtensionDownloadController:
 
     def _show_failure(self, failure):
         category = getattr(failure, "category", "")
-        stage = getattr(failure, "stage", "")
-        dns_failure = category == "dns" and stage == "download"
+        download_failed = getattr(failure, "stage", "") == "download"
         messages = {
-            "refused": self._tr(
-                "The connection was refused. Check your system proxy or try another download method."
-            ),
-            "timeout": self._tr("The map extension download timed out. Please try again."),
-            "dns": self._tr("The download server name could not be resolved."),
-            "tls": self._tr("The download server certificate could not be verified."),
-            "http": self._tr("The download server returned an error."),
             "permission": self._tr(
                 "The map extension folder is not writable or its files are in use. Check the folder shown in Details."
             ),
@@ -412,13 +406,12 @@ class MapExtensionDownloadController:
         }
         box = self._message_box()
         box.setIcon(QMessageBox.Icon.Warning)
-        if dns_failure:
+        if download_failed:
             box.setText(self._tr("Could not download the map extension from GitHub."))
             box.setInformativeText(
                 self._tr(
-                    "The download server name could not be resolved. Check your network or proxy "
-                    "settings and try again. If you use a VPN, try switching servers. If GitHub is "
-                    "reachable without the VPN, you can temporarily turn it off and retry."
+                    "Check your VPN or network proxy settings, or download the archive in your "
+                    "browser and install it from a file."
                 )
             )
         else:
@@ -432,32 +425,25 @@ class MapExtensionDownloadController:
             )
         if isinstance(failure, MapExtensionError):
             box.setDetailedText(str(failure))
-        retry = box.addButton(self._tr("Retry"), QMessageBox.ButtonRole.AcceptRole)
+        payload = self._last_request
+        generation = self._package_generation
+        retry = None
+        if not download_failed and payload is not None:
+            retry = box.addButton(self._tr("Retry"), QMessageBox.ButtonRole.AcceptRole)
         browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
         online = bool(self._context.map_extensions.download_url(sys.platform))
         browser.setEnabled(online)
-        direct = local = None
-        if not dns_failure:
-            direct = box.addButton(
-                self._tr("Try Direct Connection"), QMessageBox.ButtonRole.ActionRole
-            )
-            direct.setEnabled(online and stage == "download")
-            local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
-            local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
+        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
+        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
         cancel = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(retry)
+        box.setDefaultButton(retry or (browser if online else cancel))
         box.setEscapeButton(cancel)
-        payload = self._last_request
         box.exec()
         clicked = box.clickedButton()
-        if clicked is None:
+        if clicked is None or generation != self._package_generation:
             return
-        if clicked is retry and payload is not None:
-            from dataclasses import replace
-
-            self._start(replace(payload, defer_activation=self._runtime_prepared))
-        elif clicked is direct:
-            self.start_download(source="recovery", network_mode="direct")
+        if clicked is retry:
+            self._start(payload)
         elif clicked is browser:
             self.open_download_page()
         elif clicked is local:

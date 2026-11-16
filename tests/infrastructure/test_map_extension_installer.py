@@ -98,6 +98,23 @@ def test_offline_install_never_uses_network_and_returns_write_target(setup, monk
     assert not result.pending_root.exists()
 
 
+def test_offline_install_extracts_the_verified_private_copy(setup, monkeypatch):
+    adapter, payload, target, _ = setup
+    source = payload.local_archive_path
+    verify_archive = adapter._verify_archive
+
+    def verify_then_change_source(archive, platform):
+        verify_archive(archive, platform)
+        source.write_bytes(b"changed after verification")
+
+    monkeypatch.setattr(adapter, "_verify_archive", verify_then_change_source)
+    result = adapter.execute(payload, progress)
+
+    assert result.status == "installed"
+    assert (target / "World_basemap_2.obf").read_bytes() == b"new"
+    assert not list(target.parent.glob(".map-import-*"))
+
+
 def test_write_probe_happens_before_download(setup, monkeypatch):
     adapter, payload, target, _ = setup
     original = Path.write_bytes
@@ -272,34 +289,22 @@ class Response(io.BytesIO):
         self.headers = {"Content-Length": str(size)}
 
 
-def test_fresh_proxy_on_retry_and_cache_reused_after_install_failure(setup, monkeypatch):
-    adapter, payload, target, package = setup
+def test_verified_download_is_reused_after_install_failure(setup, monkeypatch):
+    adapter, payload, _, _ = setup
     data = payload.local_archive_path.read_bytes()
-    proxies = iter([{"https": "http://first:123"}, {"https": "http://second:456"}])
-    monkeypatch.setattr(module.request, "getproxies", lambda: next(proxies))
-    handlers = []
 
-    def build(handler, *_handlers):
-        handlers.append(handler.proxies)
+    class Opener:
+        def open(self, req, timeout):
+            assert timeout == 30
+            return Response(data, len(data))
 
-        class Opener:
-            def open(self, req, timeout):
-                assert timeout == 30
-                if len(handlers) == 1:
-                    raise URLError(socket.timeout())
-                return Response(data, len(data))
-
-        return Opener()
-
-    monkeypatch.setattr(module.request, "build_opener", build)
-    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(module.request, "build_opener", lambda *handlers: Opener())
     original = adapter._stage_archive
     monkeypatch.setattr(
         adapter, "_stage_archive", lambda *a: (_ for _ in ()).throw(PermissionError("locked"))
     )
     with pytest.raises(MapExtensionError):
         adapter.execute(replace(payload, local_archive_path=None), progress)
-    assert handlers == [{"https": "http://first:123"}, {"https": "http://second:456"}]
     monkeypatch.setattr(adapter, "_stage_archive", original)
     monkeypatch.setattr(
         module.request, "build_opener", lambda *a: pytest.fail("cached archive downloaded again")
@@ -309,38 +314,18 @@ def test_fresh_proxy_on_retry_and_cache_reused_after_install_failure(setup, monk
     )
 
 
-def test_direct_uses_empty_proxy_without_mutating_global_opener(setup, monkeypatch):
-    adapter, payload, target, package = setup
-    data = payload.local_archive_path.read_bytes()
-    global_opener = module.request._opener
-
-    def build(handler, *_handlers):
-        assert handler.proxies == {}
-
-        class Opener:
-            def open(self, *a, **k):
-                return Response(data, len(data))
-
-        return Opener()
-
-    monkeypatch.setattr(module.request, "build_opener", build)
-    monkeypatch.setattr(
-        module.request, "getproxies", lambda: pytest.fail("proxy read in direct mode")
-    )
-    adapter.execute(replace(payload, local_archive_path=None, network_mode="direct"), progress)
-    assert module.request._opener is global_opener
-
-
 @pytest.mark.parametrize(
     "reason,category",
     [
         (ConnectionRefusedError(10061, "refused"), "refused"),
         (socket.gaierror(-2, "name"), "dns"),
+        (socket.timeout(), "timeout"),
         (module.ssl.SSLCertVerificationError("certificate"), "tls"),
         (HTTPError("https://user:secret@host/path?token=secret", 403, "error", {}, None), "http"),
+        (HTTPError("https://host/path", 503, "error", {}, None), "http"),
     ],
 )
-def test_network_errors_do_not_leak_credentials_or_retry_nontransient(
+def test_network_errors_are_reported_after_one_attempt_without_leaking_credentials(
     setup, monkeypatch, reason, category
 ):
     adapter, payload, target, _ = setup
@@ -350,16 +335,18 @@ def test_network_errors_do_not_leak_credentials_or_retry_nontransient(
         lambda: {"https": "http://user:password@127.0.0.1:7890/?token=secret"},
     )
     monkeypatch.setattr(module.request, "proxy_bypass", lambda _: False)
+    attempts = []
 
     def https_open(handler, req):
+        attempts.append(req.host)
         raise reason if isinstance(reason, HTTPError) else URLError(reason)
 
     monkeypatch.setattr(module.request.HTTPSHandler, "https_open", https_open)
-    monkeypatch.setattr(module.time, "sleep", lambda _: pytest.fail("unexpected retry"))
     with pytest.raises(MapExtensionError) as caught:
         adapter.execute(replace(payload, local_archive_path=None), progress)
     assert caught.value.category == category
-    assert "127.0.0.1:7890" in str(caught.value)
+    assert attempts == ["127.0.0.1:7890"]
+    assert caught.value.detail == "host=github.com"
     assert "password" not in str(caught.value)
     assert "secret" not in str(caught.value)
     assert not list(target.parent.rglob("*.part"))
@@ -390,13 +377,12 @@ def test_dns_error_reports_the_actual_download_hop(setup, monkeypatch, redirect)
         adapter.execute(replace(payload, local_archive_path=None), progress)
     failure = caught.value
     assert (failure.category, failure.stage, failure.code) == ("dns", "download", 11001)
-    assert f"host={asset_host if redirect else 'github.com'};" in failure.detail
-    assert "proxy=none" in failure.detail
+    assert failure.detail == f"host={asset_host if redirect else 'github.com'}"
     assert "secret" not in failure.detail
     assert not list(target.parent.rglob("*.part"))
 
 
-def test_truncated_response_retries_at_most_three_times(setup, monkeypatch):
+def test_truncated_response_fails_after_one_attempt(setup, monkeypatch):
     adapter, payload, _, package = setup
     attempts = []
 
@@ -406,10 +392,9 @@ def test_truncated_response_retries_at_most_three_times(setup, monkeypatch):
             return Response(b"short", package.size)
 
     monkeypatch.setattr(module.request, "build_opener", lambda *a: Opener())
-    monkeypatch.setattr(module.time, "sleep", lambda _: None)
     with pytest.raises(MapExtensionError, match="interrupted"):
         adapter.execute(replace(payload, local_archive_path=None), progress)
-    assert len(attempts) == 3
+    assert len(attempts) == 1
 
 
 def test_macos_bundled_tar_is_verified_and_installed_offline(
@@ -493,18 +478,21 @@ def test_wrong_native_architecture_does_not_activate(tmp_path):
         MapExtensionInstaller()._validate(root, "win32")
 
 
-def test_mismatched_content_length_is_not_extracted(setup, monkeypatch):
+@pytest.mark.parametrize("match_length", [False, True], ids=["wrong-length", "wrong-checksum"])
+def test_invalid_download_is_reported_without_extraction(setup, monkeypatch, match_length):
     adapter, payload, target, package = setup
+    data = b"x" * package.size if match_length else b"wrong"
 
     class Opener:
         def open(self, *args, **kwargs):
-            return Response(b"wrong", 5)
+            return Response(data, len(data))
 
     monkeypatch.setattr(module.request, "build_opener", lambda *args: Opener())
-    monkeypatch.setattr(module.time, "sleep", lambda _: pytest.fail("integrity error retried"))
-    with pytest.raises(MapExtensionError, match="integrity"):
+    with pytest.raises(MapExtensionError) as caught:
         adapter.execute(replace(payload, local_archive_path=None), progress)
+    assert (caught.value.category, caught.value.stage) == ("integrity", "download")
     assert not target.exists()
+    assert not list(target.parent.rglob("*.part"))
 
 
 def test_disk_full_is_reported_before_network(setup, monkeypatch):
@@ -603,7 +591,7 @@ def test_download_selection_uses_same_compatibility_filter_as_local_install(setu
     assert service.download_url(payload.platform) == package.url
     packages = []
 
-    def download(selected, path, mode, progress):
+    def download(selected, path, progress):
         packages.append(selected)
         path.write_bytes(payload.local_archive_path.read_bytes())
 

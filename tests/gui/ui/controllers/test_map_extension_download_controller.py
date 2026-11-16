@@ -115,7 +115,7 @@ def test_start_download_keeps_worker_until_finished_and_passes_service(controlle
     with patch(
         "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
     ) as pool:
-        controller.start_download(source="test")
+        controller.start_download()
     worker = pool.return_value.start.call_args.args[0]
     assert worker is controller._active_worker
     assert worker._service is controller._context.map_extensions
@@ -196,14 +196,6 @@ def test_local_archive_selection_needs_no_failed_download(controller, tmp_path):
     assert start.call_args.args[0].operation == "install"
 
 
-def test_direct_connection_is_explicit_and_not_persisted(controller):
-    with patch.object(controller, "_start") as start:
-        controller.start_download(source="recovery", network_mode="direct")
-        assert start.call_args.args[0].network_mode == "direct"
-        controller.start_download(source="settings")
-        assert start.call_args.args[0].network_mode == "system"
-
-
 def test_failure_dialog_runs_after_worker_is_released(controller):
     from iPhoto.application.ports.map_extension import MapExtensionError
 
@@ -254,23 +246,24 @@ def test_browser_download_offers_local_install(controller, monkeypatch, tmp_path
     assert start.call_args.args[0].local_archive_path == archive
 
 
-@pytest.mark.parametrize("choice", ["Retry", "Download in Browser", "Cancel"])
-def test_dns_failure_shows_vpn_guidance_and_supported_actions(controller, monkeypatch, choice):
+@pytest.mark.parametrize("category", ["dns", "refused", "timeout", "tls", "http", "integrity"])
+@pytest.mark.parametrize("choice", ["Download in Browser", "Install from File...", "Cancel"])
+def test_download_failure_offers_manual_recovery(controller, monkeypatch, category, choice):
     from PySide6.QtWidgets import QMessageBox
 
     payload = MapExtensionDownloadRequest(controller._package_root, "win32")
     controller._last_request = payload
-    failure = MapExtensionError("dns", "download", code=11001, detail="host=github.com; proxy=none")
+    failure = MapExtensionError(category, "download", code=11001, detail="host=github.com")
 
     def select_action(box):
         assert box.styleSheet()
         assert box.text() == "Could not download the map extension from GitHub."
         assert "VPN" in box.informativeText()
+        assert "proxy" in box.informativeText()
         assert "11001" in box.detailedText()
         assert "host=github.com" in box.detailedText()
         buttons = {button.text(): button for button in box.buttons()}
-        assert "Install from File..." not in buttons
-        assert "Try Direct Connection" not in buttons
+        assert {"Retry", "Try Direct Connection"}.isdisjoint(buttons)
         button = box.button(QMessageBox.StandardButton.Cancel) if choice == "Cancel" else buttons[choice]
         button.click()
 
@@ -278,12 +271,12 @@ def test_dns_failure_shows_vpn_guidance_and_supported_actions(controller, monkey
     with (
         patch.object(controller, "_start") as start,
         patch.object(controller, "open_download_page") as browser,
+        patch.object(controller, "install_from_file") as local,
     ):
         controller._show_failure(failure)
-    assert start.call_count == (choice == "Retry")
+    start.assert_not_called()
     assert browser.call_count == (choice == "Download in Browser")
-    if choice == "Retry":
-        start.assert_called_once_with(payload)
+    assert local.call_count == (choice == "Install from File...")
 
 
 def test_cancel_file_picker_after_browser_download_does_not_install(controller, monkeypatch):
@@ -342,8 +335,8 @@ def test_settings_can_import_after_closing_the_browser_handoff(controller, monke
 @pytest.mark.parametrize(
     ("category", "stage", "message"),
     [
-        ("refused", "download", "The connection was refused."),
-        ("timeout", "download", "The map extension download timed out."),
+        ("busy", "prepare", "Another map extension installation is running."),
+        ("disk", "extract", "There is not enough disk space"),
         ("integrity", "verify", "The map extension package is damaged or incomplete."),
     ],
 )
@@ -387,6 +380,44 @@ def test_preparation_reuses_normalized_root_but_reprepares_changed_root(controll
         assert pool.return_value.start.call_count == 2
         controller._active_worker.signals.finished.emit()
         assert calls == ["first", "same", "other"]
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_failed_preparation_defers_runtime_probe_until_retry_or_cancel(
+    controller, monkeypatch, retry
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    callbacks = []
+
+    def select_action(box):
+        assert callbacks == []
+        assert not controller._runtime_prepared
+        if retry:
+            next(button for button in box.buttons() if button.text() == "Retry").click()
+        else:
+            box.button(QMessageBox.StandardButton.Cancel).click()
+
+    monkeypatch.setattr(QMessageBox, "exec", select_action)
+    with patch(
+        "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
+    ) as pool:
+        controller.prepare_runtime(lambda: callbacks.append("ready"))
+        worker = controller._active_worker
+        worker.signals.error.emit(MapExtensionError("busy", "prepare"))
+        worker.signals.finished.emit()
+        assert pool.return_value.start.call_count == (2 if retry else 1)
+        if retry:
+            assert callbacks == []
+            replacement = controller._active_worker
+            assert replacement._request.operation == "prepare"
+            assert not replacement._request.defer_activation
+            replacement.signals.ready.emit(
+                MapExtensionDownloadResult(Path("pending"), Path("active"), "installed")
+            )
+            replacement.signals.finished.emit()
+        assert callbacks == ["ready"]
+        assert controller._runtime_prepared
 
 
 @pytest.mark.parametrize("return_to_first_root", [False, True])
@@ -498,7 +529,7 @@ def test_installed_result_continues_waiting_preparation_without_restart(controll
             "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
         ) as question,
     ):
-        controller.start_download(source="settings")
+        controller.start_download()
         install_worker = controller._active_worker
         controller.prepare_runtime(lambda: callbacks.append("ready"))
         install_worker.signals.ready.emit(

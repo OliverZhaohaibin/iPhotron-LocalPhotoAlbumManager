@@ -3,10 +3,9 @@
 修复版的设置菜单提供地图扩展入口，无需先打开地图页面。
 Windows 和 Linux 支持以下手动安装方式：
 
-- **下载**：使用当前环境变量或系统代理配置。失败后“重试”会重新读取配置。
+- **下载**：使用当前网络配置。失败后请检查 VPN 或网络代理设置，或改用浏览器下载后从文件安装。
 - **在浏览器中下载**：打开官方安装包链接，应用随即显示“从文件安装…”。下载完成后，回到应用选择下载好的文件。若关闭了提示，也可以从设置菜单进入。
 - **从文件安装…**：选择官方 ZIP（Windows）或 tar.xz（Linux），无需联网。
-- **尝试直连**：仅在下载失败后由用户选择，只对这一次下载生效，不修改系统代理。
 
 macOS 的地图扩展随签名应用提供，首次使用地图或位置面板时自动准备，
 不提供手动导入 ZIP/tar.xz 的入口。设置菜单会显示这一说明。
@@ -67,8 +66,9 @@ signed app and prepared automatically on first use; manual archive import is
 not offered. An activated installation closes the progress window without a
 restart prompt.
 Windows uses `%LOCALAPPDATA%\iPhoto\extensions\maps\v1\tiles\extension`.
-Retry refreshes system proxy settings; Try Direct Connection affects only the
-current download. A staged extension still requires restart before activation.
+If the in-app download fails, check your VPN or network proxy settings, or download
+the archive in your browser and install it from a file. A staged extension still
+requires restart before activation.
 
 Report the app version, error category, host, OS error code and installation
 stage from Details. Diagnostics omit proxy

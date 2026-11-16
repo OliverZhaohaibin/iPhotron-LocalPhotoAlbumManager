@@ -277,6 +277,26 @@ def test_resolve_osmand_native_widget_library_prefers_extension_bin_output(tmp_p
     assert resolved == local_dll.resolve()
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_selected_extension_falls_back_to_sdk_if_widget_is_missing(
+    tmp_path, monkeypatch, map_platform, platform
+):
+    map_platform(platform)
+    package_root = tmp_path / "repo" / "src" / "maps"
+    extension = _create_extension_assets(package_root)
+    monkeypatch.setenv(ENV_OSMAND_EXTENSION_ROOT, str(extension))
+    monkeypatch.delenv(map_sources.ENV_OSMAND_NATIVE_WIDGET_LIBRARY, raising=False)
+    sdk = tmp_path / "PySide6-OsmAnd-SDK"
+    sdk_widget = sdk / map_sources.SDK_NATIVE_WIDGET_RELATIVE_PATHS[0]
+    sdk_widget.parent.mkdir(parents=True)
+    sdk_widget.write_bytes(b"sdk widget")
+    assert resolve_osmand_native_widget_library(package_root) == sdk_widget.resolve()
+
+    extension_widget = extension / "bin" / map_sources.DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS[0].name
+    extension_widget.write_bytes(b"extension widget")
+    assert resolve_osmand_native_widget_library(package_root) == extension_widget.resolve()
+
+
 def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "maps"
     tiles_dir = package_root / "tiles"

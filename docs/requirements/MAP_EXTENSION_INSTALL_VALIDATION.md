@@ -15,8 +15,8 @@ Attach the build manifest and completed matrix to release validation evidence.
 | Windows, offline official ZIP | No network; hash verification, installation, restart, map rendering and place search succeed |
 | Windows VPN/TUN, GitHub or release asset host fails to resolve | Details identify the failed host and DNS code. Download in Browser opens the official asset and offers Install from File. Import the archive and verify map rendering and search. |
 | Map download popups, light and dark themes, English, German and Simplified Chinese | Text and buttons fit, Details can be expanded, and keyboard dismissal leaves the settings import entry available. |
-| Windows, local proxy port closed | Classified connection refusal; Retry, Direct, Browser and local installation available |
-| Windows, proxy changed while app remains running | Retry uses updated configuration; Direct does not change system/app defaults |
+| Windows, local proxy port closed | Classified connection refusal after one download attempt. Dialog suggests checking VPN or proxy settings and offers browser download and local installation. |
+| Windows, another installer briefly holds the map installation lock | First-use preparation offers Retry before probing the runtime. Once the lock is released, Retry activates the staged extension. Cancel loads the available fallback. |
 | Windows, DLL in use / interrupted activation | Old installation retained or restored; validated pending survives; next launch activates before DLL load |
 | Windows, old Program Files extension.pending | Valid files copied into user location; old protected directory unchanged |
 | Windows, corrupt pending / ZIP / wrong platform | Clear error; valid current installation retained |

@@ -14,7 +14,6 @@ import stat
 import struct
 import tarfile
 import tempfile
-import time
 import zipfile
 from contextlib import contextmanager
 from dataclasses import replace
@@ -72,26 +71,15 @@ def _digest(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def _endpoint(value: str) -> str:
-    """Never include proxy passwords, URL queries or signed redirect tokens."""
-    try:
-        parsed = parse.urlsplit(value if "://" in value else "http://" + value)
-        return f"{parsed.hostname or 'unknown'}:{parsed.port or (443 if parsed.scheme == 'https' else 80)}"
-    except ValueError:
-        return "invalid"
-
-
 class _DownloadHTTPSHandler(request.HTTPSHandler):
-    """Observe each hop after urllib has selected the proxy."""
+    """Record the hostname of the current download hop for diagnostics."""
 
     def __init__(self):
         super().__init__()
         self.host = ""
-        self.proxy = "none"
 
     def https_open(self, req):
         self.host = parse.urlsplit(req.full_url).hostname or "unknown"
-        self.proxy = _endpoint(req.host) if req._tunnel_host or req.has_proxy() else "none"
         return super().https_open(req)
 
 
@@ -169,12 +157,26 @@ class MapExtensionInstaller:
             with _install_lock(target.parent / ".map-install.lock"):
                 if payload.operation == "prepare":
                     return self._prepare(payload, target, progress)
-                stage = "download" if payload.local_archive_path is None else "verify"
+                if payload.local_archive_path is not None:
+                    stage = "verify"
+                    source = Path(payload.local_archive_path)
+                    if not source.is_file():
+                        raise MapExtensionError("missing_file", stage)
+                    with tempfile.TemporaryDirectory(
+                        prefix=".map-import-", dir=target.parent, ignore_cleanup_errors=True
+                    ) as directory:
+                        archive = Path(directory) / "archive"
+                        progress(0, 0, "Validating map extension...")
+                        shutil.copyfile(source, archive)
+                        self._verify_archive(archive, payload.platform)
+                        stage = "extract"
+                        return self._stage_archive(payload, target, archive, progress)
+                stage = "download"
                 archive = self._obtain_archive(payload, target, progress)
                 stage = "extract"
                 result = self._stage_archive(payload, target, archive, progress)
                 # Retain a verified download on failure or deferred activation.
-                if result.status == "installed" and payload.local_archive_path is None:
+                if result.status == "installed":
                     self._cleanup(archive)
                 return result
         except MapExtensionError as failure:
@@ -186,10 +188,6 @@ class MapExtensionInstaller:
             raise failure from exc
 
     def _obtain_archive(self, payload, target, progress) -> Path:
-        if payload.local_archive_path is not None:
-            source = Path(payload.local_archive_path)
-            self._verify_archive(source, payload.platform)
-            return source
         package = next(iter(self._supported_packages(payload.platform)), None)
         if package is None:
             raise MapExtensionError("unsupported", "download")
@@ -204,73 +202,53 @@ class MapExtensionInstaller:
                 archive.unlink()
         partial = archive.with_name(archive.name + ".part")
         try:
-            self._download(package, partial, payload.network_mode, progress)
-            self._verify_archive(partial, payload.platform)
+            self._download(package, partial, progress)
+            self._verify_archive(partial, payload.platform, stage="download")
             partial.replace(archive)
         finally:
             partial.unlink(missing_ok=True)
         return archive
 
-    def _download(self, package, partial, mode, progress):
-        for attempt in range(3):
-            proxies = {} if mode == "direct" else request.getproxies()
-            source = (
-                "direct"
-                if mode == "direct"
-                else ("environment" if request.getproxies_environment() else "system")
-            )
-            route = _DownloadHTTPSHandler()
-            opener = request.build_opener(
-                request.ProxyHandler(proxies), route, _DownloadRedirectHandler()
-            )
+    def _download(self, package, partial, progress):
+        route = _DownloadHTTPSHandler()
+        host = parse.urlsplit(package.url).hostname
+        try:
+            opener = request.build_opener(route, _DownloadRedirectHandler())
             progress(0, 0, "Downloading map extension...")
-            try:
-                req = request.Request(
-                    package.url, headers={"User-Agent": "iPhotron-map-installer/1"}
-                )
-                with opener.open(req, timeout=_TIMEOUT) as response, partial.open("wb") as handle:
-                    length = response.headers.get("Content-Length")
-                    if length is not None and int(length) != package.size:
+            req = request.Request(
+                package.url, headers={"User-Agent": "iPhotron-map-installer/1"}
+            )
+            with opener.open(req, timeout=_TIMEOUT) as response, partial.open("wb") as handle:
+                length = response.headers.get("Content-Length")
+                if length is not None and int(length) != package.size:
+                    raise MapExtensionError("integrity", "download")
+                received = 0
+                while chunk := response.read(_CHUNK):
+                    received += len(chunk)
+                    if received > package.size:
                         raise MapExtensionError("integrity", "download")
-                    received = 0
-                    while chunk := response.read(_CHUNK):
-                        received += len(chunk)
-                        if received > package.size:
-                            raise MapExtensionError("integrity", "download")
-                        handle.write(chunk)
-                        progress(received, package.size, "Downloading map extension...")
-                    if received != package.size:
-                        raise http.client.IncompleteRead(b"", package.size - received)
-                return
-            except MapExtensionError:
-                raise
-            except Exception as exc:
-                host = route.host or parse.urlsplit(package.url).hostname
-                detail = (
-                    f"host={host}; proxy_source={source}; proxy={route.proxy}; "
-                    f"attempt={attempt + 1}"
-                )
-                failure = _failure(exc, "download", detail)
-                transient = failure.category in {"timeout", "interrupted"} or (
-                    failure.category == "http" and failure.code in {408, 429, 500, 502, 503, 504}
-                )
-                if not transient or attempt == 2:
-                    raise failure from exc
-                time.sleep((1, 3)[attempt])
+                    handle.write(chunk)
+                    progress(received, package.size, "Downloading map extension...")
+                if received != package.size:
+                    raise http.client.IncompleteRead(b"", package.size - received)
+        except MapExtensionError:
+            raise
+        except Exception as exc:
+            raise _failure(exc, "download", f"host={route.host or host}") from exc
 
-    def _verify_archive(self, archive: Path, platform: str) -> None:
+    def _verify_archive(self, archive: Path, platform: str, *, stage: str = "verify") -> None:
         if not archive.is_file():
-            raise MapExtensionError("missing_file", "verify")
+            raise MapExtensionError("missing_file", stage)
         size = archive.stat().st_size
         candidates = [p for p in self._packages if p.size == size]
         if not candidates:
-            raise MapExtensionError("unknown_package", "verify")
+            raise MapExtensionError("unknown_package", stage)
         digest = _digest(archive)
         match = next((p for p in candidates if p.sha256 == digest), None)
         if match is None:
-            raise MapExtensionError("integrity", "verify")
+            raise MapExtensionError("integrity", stage)
         if match not in self._supported_packages(platform):
-            raise MapExtensionError("unsupported", "verify")
+            raise MapExtensionError("unsupported", stage)
 
     def _validate(self, root: Path, platform: str) -> None:
         if root.is_symlink():

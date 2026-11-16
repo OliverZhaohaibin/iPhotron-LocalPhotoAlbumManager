@@ -37,18 +37,18 @@ class _DummyMapWidget:
     def __init__(self, zoom: float = 6.0) -> None:
         self.zoom = zoom
 
+    def width(self) -> int:
+        return 800
+
+    def height(self) -> int:
+        return 600
+
 
 class _ExactProjectionMapWidget(_DummyMapWidget):
     def __init__(self, projected_points: dict[tuple[float, float], QPointF], zoom: float = 6.0) -> None:
         super().__init__(zoom=zoom)
         self._projected_points = projected_points
         self.project_calls: list[tuple[float, float]] = []
-
-    def width(self) -> int:
-        return 800
-
-    def height(self) -> int:
-        return 600
 
     def prefers_exact_screen_projection(self) -> bool:
         return True

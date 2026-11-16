@@ -172,7 +172,7 @@ class PetClusterPipeline:
         model_root: Path,
         detector_model_name: str = "yolox_nano_coco.onnx",
         embedding_model_name: str = "dinov2_vits14",
-        allow_model_download: bool | None = None,
+        allow_model_download: bool = False,
         distance_threshold: float = DEFAULT_PET_DISTANCE_THRESHOLD,
         min_pet_size: int = 48,
         supported_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
@@ -185,11 +185,7 @@ class PetClusterPipeline:
         self._model_root = Path(model_root)
         self._detector_model_name = detector_model_name
         self._embedding_model_name = embedding_model_name
-        self._allow_model_download = (
-            pet_model_auto_download_enabled()
-            if allow_model_download is None
-            else bool(allow_model_download)
-        )
+        self._allow_model_download = allow_model_download
         self._distance_threshold = float(distance_threshold)
         self._min_pet_size = int(min_pet_size)
         self._supported_species = frozenset(supported_species)
@@ -1268,8 +1264,8 @@ class _DinoV2Embedder:
         else:
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: missing DINOv2 TorchScript model at "
-                f"{model_path}. Set IPHOTO_PET_MODEL_DIR or enable pet model downloads.",
-                reason="download_disabled",
+                f"{model_path}. Install the People & Pets extension or set IPHOTO_PET_MODEL_DIR.",
+                reason="missing",
             )
         self._model.eval()
 
@@ -1821,8 +1817,8 @@ def ensure_pet_detector_model(
     if not allow_model_download:
         raise PetModelUnavailableError(
             "Pet scanning unavailable: missing YOLOX model at "
-            f"{target}. Set IPHOTO_PET_MODEL_DIR or enable pet model downloads.",
-            reason="download_disabled",
+            f"{target}. Install the People & Pets extension or set IPHOTO_PET_MODEL_DIR.",
+            reason="missing",
         )
 
     url = str(custom_url or DEFAULT_PET_DETECTOR_MODEL_URL).strip()

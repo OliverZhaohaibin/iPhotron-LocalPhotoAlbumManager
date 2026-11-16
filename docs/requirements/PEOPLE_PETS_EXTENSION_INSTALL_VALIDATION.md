@@ -7,7 +7,7 @@ root, model archive SHA-256, and pass or fail for each scenario.
 | --- | --- |
 | Windows standard user, app in `Program Files` | The Settings action is available without a bound library. The ZIP installs to the LocalAppData user directory without elevation. |
 | Signed macOS app and Linux AppImage | A clean install can import the official ZIP offline. The user model directory receives both components. |
-| First use on all three platforms, with the optional AI runtime and empty caches | Opening People & Pets triggers the existing silent attempt. An unavailable model produces one app-themed prompt with browser download and file installation. Starting the app or rescanning metadata before People opens leaves recognition inactive. |
+| First use on all three platforms, with the optional AI runtime and empty caches | Opening People & Pets with pending work silently downloads the official ZIP and installs both model sets. A failed install produces one app-themed prompt with browser download and file installation. Starting the app or rescanning metadata before People opens leaves recognition inactive. |
 | Browser fallback | The default browser opens the official attachment. If it cannot open, the same URL can be copied. Returning to the app allows ZIP selection without network access. |
 | Valid ZIP while one or both workers are paused | The same library resumes affected scans after installation. Check recognition on at least one photo containing a face and one photo containing a cat or dog. Existing recognition state stays available. |
 | Offline import with a wrong or damaged ZIP | A themed error appears and the current model installation remains usable. |

@@ -21,6 +21,7 @@ from ...pets.pipeline import (
     PET_CLUSTERING_PIPELINE_VERSION,
     PET_DETECTOR_PIPELINE_VERSION,
     PetClusterPipeline,
+    pet_model_auto_download_enabled,
 )
 from ...pets.service import PetService, pet_library_paths
 from ...pets.status import (
@@ -181,7 +182,8 @@ class PetScanWorker(QThread):
         LOGGER.warning("Pet scanning unavailable: %s", failure)
         self.statusChanged.emit(str(failure))
         if isinstance(failure, PetModelUnavailableError) and failure.reason is not None:
-            self.modelUnavailable.emit(failure.reason)
+            reason = failure.reason if pet_model_auto_download_enabled() else "download_disabled"
+            self.modelUnavailable.emit(reason)
 
     def _prime_pending_rows(self) -> None:
         self._top_up_pending_rows()

@@ -78,8 +78,8 @@ def file_digest(path: Path) -> str:
 class _DownloadHTTPSHandler(request.HTTPSHandler):
     """Record the hostname of the current download hop for diagnostics."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, context: ssl.SSLContext):
+        super().__init__(context=context)
         self.host = ""
 
     def https_open(self, req):
@@ -126,10 +126,28 @@ def install_failure(exc: Exception, stage: str, detail: str = "") -> ExtensionIn
     return ExtensionInstallError(category, stage, code=code, detail=detail)
 
 
-def download_archive(package: ReleaseArchive, partial: Path, progress: ExtensionProgress, message: str, user_agent: str) -> None:
-    route = _DownloadHTTPSHandler()
+def _download_tls_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    paths = ssl.get_default_verify_paths()
+    if paths.cafile is None and paths.capath is None and context.cert_store_stats()["x509_ca"] == 0:
+        # Some Python distributions ship without a configured certificate store.
+        import certifi
+
+        context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+def download_archive(
+    package: ReleaseArchive,
+    partial: Path,
+    progress: ExtensionProgress,
+    message: str,
+    user_agent: str,
+) -> None:
     host = parse.urlsplit(package.url).hostname
+    route = None
     try:
+        route = _DownloadHTTPSHandler(_download_tls_context())
         opener = request.build_opener(route, _DownloadRedirectHandler())
         progress(0, 0, message)
         req = request.Request(
@@ -151,7 +169,8 @@ def download_archive(package: ReleaseArchive, partial: Path, progress: Extension
     except ExtensionInstallError:
         raise
     except Exception as exc:
-        raise install_failure(exc, "download", f"host={route.host or host}") from exc
+        failed_host = (route.host if route is not None else None) or host
+        raise install_failure(exc, "download", f"host={failed_host}") from exc
 
 
 

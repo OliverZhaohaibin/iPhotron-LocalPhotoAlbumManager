@@ -8,13 +8,14 @@ from PySide6.QtCore import QCoreApplication, QThreadPool, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMainWindow, QPushButton
 
+from iPhoto.application.ports.extension_install import ExtensionInstallError
 from iPhoto.application.ports.recognition_extension import (
     RecognitionExtensionRequest,
     RecognitionExtensionResult,
     RecognitionModelFailure,
 )
 from iPhoto.gui.ui.controllers import recognition_extension_controller as module
-from iPhoto.gui.ui.widgets.information_popup import InformationPopup
+from iPhoto.gui.ui.widgets.information_popup import InformationPopup, ProgressPopup
 from iPhoto.gui.ui.widgets.main_header import MainHeaderWidget
 
 
@@ -84,6 +85,7 @@ def test_background_install_notifies_library_on_success(desktop, monkeypatch, tm
     controller.show_options()
     label = "Install from File…" if local else "Download"
     _button(controller._popup, label).click()
+    assert isinstance(controller._progress_dialog, ProgressPopup)
 
     assert QThreadPool.globalInstance().waitForDone(5000)
     QCoreApplication.processEvents()
@@ -94,8 +96,27 @@ def test_background_install_notifies_library_on_success(desktop, monkeypatch, tm
     assert controller._progress_dialog is None
 
 
+@pytest.mark.parametrize("first_kind, second_kind", [("face", "pet"), ("pet", "face")])
+def test_missing_models_share_one_silent_package_install(desktop, tmp_path, first_kind, second_kind):
+    _, controller, context = desktop
+    context.library.recognition_model_failure_is_current.return_value = True
+    controller.model_unavailable(RecognitionModelFailure(tmp_path, 1, first_kind, "missing"))
+    controller.model_unavailable(RecognitionModelFailure(tmp_path, 1, second_kind, "missing"))
+    assert controller._popup is None
+    assert controller._progress_dialog is None
+
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    QCoreApplication.processEvents()
+
+    assert context.recognition_extensions.execute.call_count == 1
+    assert context.recognition_extensions.execute.call_args.args[0] == RecognitionExtensionRequest()
+    context.library.recognition_extension_installed.assert_called_once()
+    assert controller._popup is None
+
+
 def test_model_popup_is_once_per_process_and_discards_stale_results(desktop, tmp_path):
     _, controller, context = desktop
+    context.recognition_extensions.execute.side_effect = ExtensionInstallError("dns", "download")
     error = RecognitionModelFailure(tmp_path, 1, "face", "download_failed")
     context.library.recognition_model_failure_is_current.return_value = False
     controller.model_unavailable(error)
@@ -105,6 +126,12 @@ def test_model_popup_is_once_per_process_and_discards_stale_results(desktop, tmp
     controller.model_unavailable(RecognitionModelFailure(tmp_path, 2, "pet", "download_disabled"))
     assert controller._popup is None
     controller.model_unavailable(error)
+    assert controller._popup is None
+    assert controller._progress_dialog is None
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    QCoreApplication.processEvents()
+    context.recognition_extensions.execute.assert_called_once()
+    context.library.recognition_extension_installed.assert_not_called()
     popup = controller._popup
     assert "recognition models" in popup.message()
     controller.model_unavailable(RecognitionModelFailure(tmp_path, 1, "pet", "missing"))
@@ -117,8 +144,6 @@ def test_model_popup_is_once_per_process_and_discards_stale_results(desktop, tmp
 
 
 def test_failed_download_shows_recovery_and_does_not_resume_workers(desktop):
-    from iPhoto.application.ports.extension_install import ExtensionInstallError
-
     _, controller, context = desktop
     context.recognition_extensions.execute.side_effect = ExtensionInstallError("dns", "download")
     controller.show_options()

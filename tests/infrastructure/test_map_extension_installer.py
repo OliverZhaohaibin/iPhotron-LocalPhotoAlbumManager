@@ -317,6 +317,29 @@ def test_install_lock_excludes_other_installers(tmp_path):
                 pytest.fail("second writer acquired lock")
 
 
+@pytest.mark.parametrize("system_ca", [False, True])
+def test_extension_download_uses_bundle_only_when_no_trust_store(monkeypatch, system_ca):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import certifi
+
+    context = Mock()
+    context.cert_store_stats.return_value = {"x509_ca": 0}
+    monkeypatch.setattr(extension_archives.ssl, "create_default_context", lambda: context)
+    monkeypatch.setattr(
+        extension_archives.ssl,
+        "get_default_verify_paths",
+        lambda: SimpleNamespace(cafile=None, capath="/system/certs" if system_ca else None),
+    )
+
+    assert extension_archives._download_tls_context() is context
+    if system_ca:
+        context.load_verify_locations.assert_not_called()
+    else:
+        context.load_verify_locations.assert_called_once_with(cafile=certifi.where())
+
+
 class Response(io.BytesIO):
     def __init__(self, data, size):
         super().__init__(data)

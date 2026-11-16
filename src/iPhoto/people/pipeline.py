@@ -5,9 +5,7 @@ from __future__ import annotations
 import builtins
 import hashlib
 import logging
-import os
 import sys
-import tempfile
 import typing
 import uuid
 from collections import Counter, defaultdict, deque
@@ -32,7 +30,7 @@ from .image_utils import (
     pil_image_to_bgr,
     save_face_thumbnail,
 )
-from .model_paths import face_pack_available
+from .model_paths import BUFFALO_S_FILES, face_pack_available
 from .repository import (
     FaceRecord,
     FaceStateRepository,
@@ -281,71 +279,61 @@ class FaceClusterPipeline:
             _install_runtime_typing_compat()
             _install_insightface_mask_renderer_stubs()
             from insightface.app.face_analysis import FaceAnalysis
+            from insightface.model_zoo import get_model
         except (ImportError, OSError) as exc:
             raise FaceRuntimeUnavailableError(
                 "Face scanning unavailable: install the optional AI dependencies and rescan."
             ) from exc
 
         model_dir = self._model_root.resolve()
-        insightface_root = model_dir.parent
         pack_dir = model_dir / self._model_pack
-        was_cached = face_pack_available(model_dir, self._model_pack)
-        try:
-            model_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
+        if not face_pack_available(model_dir, self._model_pack):
             raise FaceModelUnavailableError(
-                f"Face scanning unavailable: cannot prepare model directory '{model_dir}'.",
-                "incomplete",
-            ) from exc
-        # Keep downloaded models in the shared extension cache instead of
-        # library-specific folders so they are reused across rescans.
-        os.environ["INSIGHTFACE_HOME"] = str(insightface_root)
+                f"Face scanning unavailable: model pack '{pack_dir}' is missing or incomplete. "
+                "Install the People & Pets extension.",
+                "incomplete" if pack_dir.is_dir() else "missing",
+            )
+
+        model_paths = (
+            [pack_dir / name for name in BUFFALO_S_FILES]
+            if self._model_pack == "buffalo_s"
+            else sorted(pack_dir.glob("*.onnx"))
+        )
         try:
             _patch_insightface_alignment_estimate()
             providers = _resolve_execution_providers()
-        except Exception as exc:
-            raise FaceRuntimeUnavailableError(
-                "Face scanning unavailable: could not initialize the optional AI runtime."
-            ) from exc
-        ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
-        try:
-            model_name = self._model_pack
-            if model_dir.name != "models":
-                # InsightFace resolves relative names below root/models. Use an
-                # absolute pack path for operators with a different directory name.
-                if not pack_dir.exists():
-                    from insightface.utils import ensure_available
+            models = {}
+            for path in model_paths:
+                model = get_model(str(path), download=False, providers=providers)
+                if model is not None and model.taskname in _REQUIRED_FACE_MODULES:
+                    models.setdefault(model.taskname, model)
 
-                    with tempfile.TemporaryDirectory(dir=model_dir) as download_root:
-                        downloaded = Path(ensure_available("models", model_name, root=download_root))
-                        if not pack_dir.exists():
-                            downloaded.replace(pack_dir)
-                model_name = str(pack_dir)
-            app = FaceAnalysis(
-                name=model_name,
-                root=str(insightface_root),
-                allowed_modules=list(_REQUIRED_FACE_MODULES),
-                providers=providers,
-            )
-            models = getattr(app, "models", None)
-            if (
-                not face_pack_available(model_dir, self._model_pack)
-                or (models is not None and not set(_REQUIRED_FACE_MODULES).issubset(models))
-            ):
+            if not set(_REQUIRED_FACE_MODULES).issubset(models):
                 raise FaceModelUnavailableError(
                     f"Face scanning unavailable: model pack '{pack_dir}' is incomplete.",
                     "incomplete",
                 )
-            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+
+            # The upstream constructor can download a pack. Attach local sessions
+            # directly and reuse its preparation and inference methods.
+            app = FaceAnalysis.__new__(FaceAnalysis)
+            app.model_dir = str(pack_dir)
+            app.models = models
+            app.det_model = models["detection"]
+            app.prepare(
+                ctx_id=0 if "CUDAExecutionProvider" in providers else -1, det_size=(640, 640)
+            )
         except FaceModelUnavailableError:
             raise
         except Exception as exc:
-            raise _build_face_analysis_init_error(
-                feature_name="Face scanning",
-                model_pack=self._model_pack,
-                model_dir=model_dir,
-                was_cached=was_cached,
-                exc=exc,
+            if not face_pack_available(model_dir, self._model_pack):
+                raise FaceModelUnavailableError(
+                    f"Face scanning unavailable: model files in '{pack_dir}' disappeared.",
+                    "incomplete",
+                ) from exc
+            raise FaceRuntimeUnavailableError(
+                f"Face scanning unavailable: failed to initialize InsightFace models "
+                f"from '{pack_dir}' ({exc})."
             ) from exc
         self._analysis_app = app
         return app
@@ -700,40 +688,6 @@ def _key_face_sort_key(face: FaceRecord) -> tuple[float, int]:
 
 def _quantize_value(value: float, step: int) -> int:
     return int(round(float(value) / float(step)) * step)
-
-
-def _build_face_analysis_init_error(
-    *,
-    feature_name: str,
-    model_pack: str,
-    model_dir: Path,
-    was_cached: bool,
-    exc: Exception,
-) -> RuntimeError:
-    reason = str(exc).strip() or exc.__class__.__name__
-    model_pack_dir = model_dir / model_pack
-    if not face_pack_available(model_dir, model_pack):
-        if model_pack_dir.exists():
-            return FaceModelUnavailableError(
-                f"{feature_name} unavailable: InsightFace model '{model_pack}' is incomplete "
-                f"at '{model_pack_dir}' ({reason}).",
-                "incomplete",
-            )
-        return FaceModelUnavailableError(
-            f"{feature_name} unavailable: InsightFace model '{model_pack}' is not cached at "
-            f"'{model_pack_dir}'. Initialization/download failed ({reason}). "
-            f"Allow one download from github.com or install the model extension.",
-            "download_failed",
-        )
-    if not was_cached and isinstance(exc, OSError):
-        return FaceModelUnavailableError(
-            f"{feature_name} unavailable: could not acquire '{model_pack}' ({reason}).",
-            "download_failed",
-        )
-    return FaceRuntimeUnavailableError(
-        f"{feature_name} unavailable: failed to initialize InsightFace model "
-        f"'{model_pack}' from '{model_pack_dir}' ({reason})."
-    )
 
 
 def _resolve_execution_providers() -> list[str]:

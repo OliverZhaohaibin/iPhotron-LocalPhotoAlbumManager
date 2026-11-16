@@ -223,11 +223,12 @@ Pets model lookup is independent from People and follows this order:
 
 ```text
 IPHOTO_PET_MODEL_DIR override
--> writable platform user cache
+-> installed People & Pets extension
+-> existing platform user cache
 -> optional packaged extension/models/pets fallback
 ```
 
-The default writable cache is `~/Library/Caches/iPhoto/models/pets` on macOS,
+The existing platform cache is `~/Library/Caches/iPhoto/models/pets` on macOS,
 `%LOCALAPPDATA%\iPhoto\models\pets` on Windows, and
 `${XDG_CACHE_HOME:-~/.cache}/iPhoto/models/pets` on Linux. The ignored
 `src/extension/models/pets/` directory is an optional local/release staging
@@ -239,25 +240,18 @@ pets/
   embedding/dinov2_vits14/dinov2_vits14.pt
 ```
 
-When the YOLOX detector is missing, iPhotron can download it from the configured
-HTTPS model URL into the writable cache and validates its hash and size. The
-default URL points to the upstream YOLOX release asset and can be overridden
-with:
+A missing People or Pets model can trigger one silent download of the official
+GitHub Release ZIP after the People view activates recognition. **Settings →
+Download People & Pets Extension…** uses the same archive for manual download or
+offline import. Each installation provisions both model sets.
 
-```bash
-export IPHOTO_PET_DETECTOR_MODEL_URL="https://example.invalid/yolox_nano.onnx"
-```
-
-Production never executes Torch Hub. It loads the DINOv2 TorchScript model only
-after validating the SHA-256 and exact byte size declared in
-`src/iPhoto/pets/model_manifest.json`. The current manifest has
-`torchscript_url: null`, so DINOv2 cannot currently be downloaded on first use;
-it must be supplied by the packaged staging directory or an explicit override.
+Production loads DINOv2 from the verified TorchScript artifact declared in
+`src/iPhoto/pets/model_manifest.json`. The ZIP includes its matching metadata.
 Release engineering may regenerate the artifact from the pinned source revision with
 `tools/convert_dinov2_torchscript.py`; that tool also checks eager/TorchScript
 numeric equivalence before publishing.
 
-For offline or packaged validation, disable first-use downloads with:
+To suppress silent installation triggered by the Pets worker:
 
 ```bash
 export IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0

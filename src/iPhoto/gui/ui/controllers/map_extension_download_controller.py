@@ -8,18 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QProcess, Qt, QThreadPool, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QDialog,
-    QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QProgressBar,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QApplication, QCheckBox, QFileDialog
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.application.ports.map_extension import MapExtensionError
@@ -27,66 +16,9 @@ from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadRequest,
     MapExtensionDownloadWorker,
 )
-from iPhoto.gui.ui.widgets.dialogs import apply_message_box_theme
+from iPhoto.gui.ui.widgets import dialogs
 
 _SHOW_STARTUP_PROMPT_KEY = "ui.show_map_extension_startup_prompt"
-
-
-class _MapExtensionProgressDialog(QDialog):
-    """Modal progress dialog used by every map-extension entry point."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setModal(True)
-        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
-        self.setMinimumWidth(420)
-        self._allow_close = False
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        self._message_label = QLabel(self._tr("Preparing map extension download..."), self)
-        self._message_label.setWordWrap(True)
-        layout.addWidget(self._message_label)
-
-        self._progress_bar = QProgressBar(self)
-        self._progress_bar.setRange(0, 0)
-        self._progress_bar.setValue(0)
-        layout.addWidget(self._progress_bar)
-
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        self._status_label = QLabel("", self)
-        footer.addWidget(self._status_label)
-        layout.addLayout(footer)
-        self.retranslate_ui()
-
-    def update_progress(self, current: int, total: int, message: str) -> None:
-        self._message_label.setText(message)
-        if total > 0:
-            self._progress_bar.setRange(0, total)
-            self._progress_bar.setValue(max(0, min(current, total)))
-            percent = int(round((current / total) * 100.0)) if total else 0
-            self._status_label.setText(f"{percent}%")
-        else:
-            self._progress_bar.setRange(0, 0)
-            self._status_label.clear()
-
-    def allow_close(self) -> None:
-        self._allow_close = True
-
-    def retranslate_ui(self) -> None:
-        self.setWindowTitle(self._tr("Map Extension"))
-
-    def _tr(self, source_text: str) -> str:
-        return QCoreApplication.translate("MapExtension", source_text, None)
-
-    def closeEvent(self, event) -> None:  # type: ignore[override]
-        if not self._allow_close:
-            event.ignore()
-            return
-        super().closeEvent(event)
 
 
 class MapExtensionDownloadController:
@@ -149,32 +81,36 @@ class MapExtensionDownloadController:
             or not self._context.settings.get(_SHOW_STARTUP_PROMPT_KEY, True)
         ):
             return False
-        box = self._message_box()
-        box.setText(self._tr("Download the offline map extension now?"))
-        download = box.addButton(self._tr("Download"), QMessageBox.ButtonRole.AcceptRole)
-        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
-        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
-        box.addButton(self._tr("Not Now"), QMessageBox.ButtonRole.RejectRole)
-        checkbox = QCheckBox(self._tr("Do not show again"), box)
-        box.setCheckBox(checkbox)
-        self._startup_prompt = box
         generation = self._package_generation
+        checkbox = QCheckBox(self._tr("Do not show again"))
+        local = self._tr("Install from File...")
+        local_available = self._context.map_extensions.supports_local_install(sys.platform)
 
-        def finished(_result):
+        def current(action):
+            if generation == self._package_generation:
+                action()
+
+        popup = dialogs.open_action_popup(
+            self._parent,
+            self._tr("Download the offline map extension now?"),
+            title=self._tr("Map Extension"),
+            actions=(
+                (self._tr("Download"), lambda: current(self.start_download)),
+                (local, lambda: current(self.install_from_file)),
+                (self._tr("Not Now"), None),
+            ),
+            disabled=() if local_available else (local,),
+            configure=lambda popup: popup.add_control(checkbox),
+            modal=True,
+        )
+        self._startup_prompt = popup
+
+        def finished():
             self._startup_prompt = None
-            if generation != self._package_generation:
-                box.deleteLater()
-                return
-            if checkbox.isChecked():
+            if generation == self._package_generation and checkbox.isChecked():
                 self._context.settings.set(_SHOW_STARTUP_PROMPT_KEY, False)
-            if box.clickedButton() is download:
-                self.start_download()
-            elif box.clickedButton() is local:
-                self.install_from_file()
-            box.deleteLater()
 
-        box.finished.connect(finished)
-        box.open()
+        popup.closed.connect(finished)
         return False
 
     def show_options(self) -> None:
@@ -187,52 +123,42 @@ class MapExtensionDownloadController:
         if not available and not local_available:
             self._show_manual_install_unavailable()
             return
-        box = self._message_box()
-        box.setText(self._tr("Choose how to install the map extension."))
-        online = box.addButton(self._tr("Download"), QMessageBox.ButtonRole.AcceptRole)
-        browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
-        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
-        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setEscapeButton(cancel)
-        online.setEnabled(available)
-        browser.setEnabled(available)
-        local.setEnabled(local_available)
-        box.exec()
-        if box.clickedButton() is online:
-            self.start_download()
-        elif box.clickedButton() is browser:
-            self.open_download_page()
-        elif box.clickedButton() is local:
-            self.install_from_file()
+        online = self._tr("Download")
+        browser = self._tr("Download in Browser")
+        local = self._tr("Install from File...")
+        disabled = (() if available else (online, browser)) + (() if local_available else (local,))
+        dialogs.run_action_popup(
+            self._parent,
+            self._tr("Choose how to install the map extension."),
+            title=self._tr("Map Extension"),
+            actions=(
+                (online, self.start_download),
+                (browser, self.open_download_page),
+                (local, self.install_from_file),
+                (self._tr("Cancel"), None),
+            ),
+            disabled=disabled,
+        )
 
     def open_download_page(self):
         url = self._context.map_extensions.download_url(sys.platform)
         if not url:
             return
 
-        opened = QDesktopServices.openUrl(QUrl(url))
-        box = self._message_box()
-        box.setIcon(QMessageBox.Icon.Information if opened else QMessageBox.Icon.Warning)
-        if opened:
-            box.setText(self._tr("Select the archive after the download finishes."))
+        if QDesktopServices.openUrl(QUrl(url)):
+            message = self._tr("Select the archive after the download finishes.")
         else:
-            box.setText(self._tr("Could not open the browser. Copy this link to download the archive."))
-            box.setInformativeText(url)
-            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.AcceptRole)
-        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
-        close = box.addButton(QMessageBox.StandardButton.Close)
-        box.setEscapeButton(close)
-        box.exec()
-        if box.clickedButton() is local and local.isEnabled():
-            self.install_from_file()
-
-    def _message_box(self) -> QMessageBox:
-        box = QMessageBox(self._parent)
-        box.setWindowTitle(self._tr("Map Extension"))
-        box.setTextFormat(Qt.TextFormat.PlainText)
-        apply_message_box_theme(box, self._parent)
-        return box
+            message = self._tr("Could not open the browser. Copy this link to download the archive.")
+            message = f"{message}\n\n{url}"
+        local = self._tr("Install from File...")
+        local_available = self._context.map_extensions.supports_local_install(sys.platform)
+        dialogs.run_action_popup(
+            self._parent,
+            message,
+            title=self._tr("Map Extension"),
+            actions=((local, self.install_from_file), (self._tr("Close"), None)),
+            disabled=() if local_available else (local,),
+        )
 
     def install_from_file(self):
         if not self._context.map_extensions.supports_local_install(sys.platform):
@@ -264,11 +190,9 @@ class MapExtensionDownloadController:
             message = self._tr(
                 "Manual map extension installation is not available on this platform."
             )
-        QMessageBox.information(
-            self._parent,
-            self._tr("Map Extension"),
-            message,
-            QMessageBox.StandardButton.Close,
+        dialogs.run_action_popup(
+            self._parent, message, title=self._tr("Map Extension"),
+            actions=((self._tr("Close"), None),),
         )
 
     def start_download(self) -> None:
@@ -300,8 +224,13 @@ class MapExtensionDownloadController:
 
     def _show_progress_dialog(self) -> None:
         self._hide_blocking_top_level_windows()
-        self._progress_dialog = _MapExtensionProgressDialog(self._parent)
-        self._progress_dialog.show()
+        self._progress_dialog = dialogs.open_progress_popup(
+            self._parent,
+            title=self._tr("Map Extension"),
+            message=self._tr("Preparing map extension download..."),
+            modal=True,
+            dismissible=False,
+        )
 
     def _handle_progress(self, current, total, message):
         if not self._download_inflight or self._active_generation != self._package_generation:
@@ -360,15 +289,15 @@ class MapExtensionDownloadController:
             return
         if failure is None and result is not None and result.status == "pending_restart":
             message = self._tr("Map extension is staged and waiting for restart. Restart now?")
-            answer = QMessageBox.question(
+            dialogs.run_action_popup(
                 self._parent,
-                self._tr("Restart Required"),
                 message,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                title=self._tr("Restart Required"),
+                actions=(
+                    (self._tr("Restart"), self._restart_application),
+                    (self._tr("Not Now"), None),
+                ),
             )
-            if answer == QMessageBox.StandardButton.Yes:
-                self._restart_application()
         # Map use may have been requested while installation was already busy.
         self._start_waiting_preparation()
 
@@ -404,50 +333,55 @@ class MapExtensionDownloadController:
             "unsafe_archive": self._tr("The map extension archive contains an unsafe path."),
             "missing_file": self._tr("The selected map extension archive could not be found."),
         }
-        box = self._message_box()
-        box.setIcon(QMessageBox.Icon.Warning)
         if download_failed:
-            box.setText(self._tr("Could not download the map extension from GitHub."))
-            box.setInformativeText(
-                self._tr(
-                    "Check your VPN or network proxy settings, or download the archive in your "
-                    "browser and install it from a file."
-                )
+            heading = self._tr("Could not download the map extension from GitHub.")
+            guidance = self._tr(
+                "Check your VPN or network proxy settings, or download the archive in your "
+                "browser and install it from a file."
             )
+            message = f"{heading}\n\n{guidance}"
         else:
-            box.setText(
-                messages.get(
-                    category,
-                    self._tr(
-                        "Map extension installation failed. Try again or install a downloaded archive."
-                    ),
-                )
+            message = messages.get(
+                category,
+                self._tr(
+                    "Map extension installation failed. Try again or install a downloaded archive."
+                ),
             )
-        if isinstance(failure, MapExtensionError):
-            box.setDetailedText(str(failure))
         payload = self._last_request
         generation = self._package_generation
-        retry = None
+
+        def current(action):
+            if generation == self._package_generation:
+                action()
+
+        actions = []
         if not download_failed and payload is not None:
-            retry = box.addButton(self._tr("Retry"), QMessageBox.ButtonRole.AcceptRole)
-        browser = box.addButton(self._tr("Download in Browser"), QMessageBox.ButtonRole.ActionRole)
-        online = bool(self._context.map_extensions.download_url(sys.platform))
-        browser.setEnabled(online)
-        local = box.addButton(self._tr("Install from File..."), QMessageBox.ButtonRole.ActionRole)
-        local.setEnabled(self._context.map_extensions.supports_local_install(sys.platform))
-        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(retry or (browser if online else cancel))
-        box.setEscapeButton(cancel)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is None or generation != self._package_generation:
-            return
-        if clicked is retry:
-            self._start(payload)
-        elif clicked is browser:
-            self.open_download_page()
-        elif clicked is local:
-            self.install_from_file()
+            actions.append((self._tr("Retry"), lambda: current(lambda: self._start(payload))))
+        browser = self._tr("Download in Browser")
+        local = self._tr("Install from File...")
+        actions.extend((
+            (browser, lambda: current(self.open_download_page)),
+            (local, lambda: current(self.install_from_file)),
+            (self._tr("Cancel"), None),
+        ))
+        disabled = []
+        if not self._context.map_extensions.download_url(sys.platform):
+            disabled.append(browser)
+        if not self._context.map_extensions.supports_local_install(sys.platform):
+            disabled.append(local)
+
+        def configure(popup):
+            if isinstance(failure, MapExtensionError):
+                popup.add_details(self._tr("Details"), str(failure))
+
+        dialogs.run_action_popup(
+            self._parent,
+            message,
+            title=self._tr("Map Extension"),
+            actions=tuple(actions),
+            disabled=tuple(disabled),
+            configure=configure,
+        )
 
     def _restart_application(self) -> None:
         app = QCoreApplication.instance()
@@ -456,14 +390,16 @@ class MapExtensionDownloadController:
             return
 
         program, arguments = self._restart_command(app)
-        if not QProcess.startDetached(program, arguments):
+        started, _pid = QProcess.startDetached(program, arguments)
+        if not started:
             self._restore_temporarily_hidden_windows()
-            QMessageBox.critical(
+            dialogs.run_action_popup(
                 self._parent,
-                self._tr("Restart Failed"),
                 self._tr(
                     "Failed to relaunch the application automatically. Please restart it manually."
                 ),
+                title=self._tr("Restart Failed"),
+                actions=((self._tr("Close"), None),),
             )
             return
 

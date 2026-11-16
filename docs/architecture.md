@@ -632,9 +632,10 @@ one must not block the other.
 installer for the official People & Pets ZIP. Settings can install the bundle
 before any library is bound. The map and recognition installers share archive
 verification, private copying, extraction checks, and filesystem locking.
-Recognition workers use their own model resolvers and retain `pending` /
-`retry` rows on availability failures. The desktop recovery prompt offers the
-browser and offline import. Successful installation resumes the affected
+Recognition workers resolve local models and retain `pending` / `retry` rows
+on availability failures. After activation, a missing model triggers one silent
+installation of the combined ZIP. If that fails, the desktop recovery prompt
+offers the browser and offline import. Successful installation resumes the affected
 workers only after the current library has passed the activation gate.
 See [Pets recognition runtime](misc/PETS_RECOGNITION_RUNTIME.md) for paths
 and [packaged validation](requirements/PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md)

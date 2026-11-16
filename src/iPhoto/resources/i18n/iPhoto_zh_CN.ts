@@ -496,6 +496,22 @@
             <source>Manual map extension installation is not available on this platform.</source>
             <translation>此平台不支持手动安装地图扩展。</translation>
         </message>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
+        </message>
+        <message>
+            <source>Details</source>
+            <translation>详细信息</translation>
+        </message>
+        <message>
+            <source>Restart</source>
+            <translation>重启</translation>
+        </message>
     </context>
     <context>
         <name>QMessageBox</name>

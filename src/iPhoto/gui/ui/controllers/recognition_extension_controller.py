@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QProgressDialog, QWidget
+from PySide6.QtWidgets import QFileDialog, QWidget
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.application.ports.extension_install import ExtensionInstallError
@@ -18,7 +18,7 @@ from iPhoto.application.ports.recognition_extension import (
 from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.tasks.recognition_extension_worker import RecognitionExtensionWorker
 from iPhoto.gui.ui.widgets import dialogs
-from iPhoto.gui.ui.widgets.information_popup import InformationPopup
+from iPhoto.gui.ui.widgets.information_popup import InformationPopup, ProgressPopup
 
 
 class RecognitionExtensionController(QObject):
@@ -30,7 +30,9 @@ class RecognitionExtensionController(QObject):
         self._visible_recovery: RecognitionModelFailure | None = None
         self._pending_recovery: RecognitionModelFailure | None = None
         self._recovery_shown = False
-        self._progress_dialog: QProgressDialog | None = None
+        self._automatic_attempted = False
+        self._silent_install = False
+        self._progress_dialog: ProgressPopup | None = None
         self._worker: RecognitionExtensionWorker | None = None
         self._closing = False
         self._choosing_archive = False
@@ -38,9 +40,8 @@ class RecognitionExtensionController(QObject):
     def show_options(self) -> None:
         if self._closing:
             return
-        if self._progress_dialog is not None:
-            self._progress_dialog.show()
-            self._progress_dialog.raise_()
+        if self._worker is not None:
+            self._show_progress()
             return
         self._show_popup(
             self._tr("Choose how to install the People & Pets extension."),
@@ -55,7 +56,7 @@ class RecognitionExtensionController(QObject):
             return
         if self._context.library.recognition_model_failure_is_current(failure):
             self._pending_recovery = failure
-            self._maybe_show_recovery()
+            self._resolve_pending_models()
 
     def library_changed(self) -> None:
         self._pending_recovery = None
@@ -68,7 +69,7 @@ class RecognitionExtensionController(QObject):
             self._popup.close()
         self._close_progress()
 
-    def _maybe_show_recovery(self) -> None:
+    def _resolve_pending_models(self) -> None:
         failure = self._pending_recovery
         if (
             failure is None
@@ -79,9 +80,14 @@ class RecognitionExtensionController(QObject):
             or self._worker is not None
         ):
             return
-        self._pending_recovery = None
         if not self._context.library.recognition_model_failure_is_current(failure):
+            self._pending_recovery = None
             return
+        if not self._automatic_attempted:
+            self._automatic_attempted = True
+            self._start(silent=True)
+            return
+        self._pending_recovery = None
         self._recovery_shown = True
         self._show_popup(
             self._tr(
@@ -112,7 +118,7 @@ class RecognitionExtensionController(QObject):
             if self._popup is popup:
                 self._popup = None
                 self._visible_recovery = None
-            QTimer.singleShot(0, self, self._maybe_show_recovery)
+            QTimer.singleShot(0, self, self._resolve_pending_models)
 
         popup.closed.connect(closed)
 
@@ -145,35 +151,37 @@ class RecognitionExtensionController(QObject):
         if path:
             self._start(Path(path))
         else:
-            self._maybe_show_recovery()
+            self._resolve_pending_models()
 
-    def _start(self, archive: Path | None = None) -> None:
+    def _start(self, archive: Path | None = None, *, silent: bool = False) -> None:
         if self._closing or self._worker is not None:
             return
-        progress = QProgressDialog(
-            self._tr("Preparing recognition extension…"), "", 0, 0, self._window
-        )
-        progress.setWindowTitle(self._tr("People & Pets Extension"))
-        progress.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
-        progress.setCancelButton(None)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        self._progress_dialog = progress
         worker = RecognitionExtensionWorker(
             RecognitionExtensionRequest(archive), self._context.recognition_extensions
         )
         worker.signals.progress.connect(self._update_progress, Qt.ConnectionType.QueuedConnection)
         worker.signals.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
         self._worker = worker
-        progress.show()
+        self._silent_install = silent
+        if not silent:
+            self._show_progress()
         QThreadPool.globalInstance().start(worker, -1)
 
-    def _update_progress(self, current: int, total: int, message: str) -> None:
+    def _show_progress(self) -> None:
         progress = self._progress_dialog
-        if progress is not None:
-            progress.setLabelText(self._tr(message))
-            progress.setRange(0, total)
-            progress.setValue(current)
+        if progress is None:
+            self._progress_dialog = dialogs.open_progress_popup(
+                self._window,
+                title=self._tr("People & Pets Extension"),
+                message=self._tr("Preparing recognition extension…"),
+            )
+        else:
+            progress.show()
+            progress.raise_()
+
+    def _update_progress(self, current: int, total: int, message: str) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.update_progress(current, total, self._tr(message))
 
     def _close_progress(self) -> None:
         progress = self._progress_dialog
@@ -183,15 +191,21 @@ class RecognitionExtensionController(QObject):
             progress.deleteLater()
 
     def _finished(self, result: RecognitionExtensionResult | ExtensionInstallError) -> None:
+        silent = self._silent_install
+        self._silent_install = False
         self._worker = None
         self._close_progress()
-        self._pending_recovery = None
         if self._closing:
             return
         if isinstance(result, RecognitionExtensionResult):
+            self._pending_recovery = None
             self._context.library.recognition_extension_installed()
             return
+        if silent:
+            self._resolve_pending_models()
+            return
 
+        self._pending_recovery = None
         if result.stage == "download":
             message = self._tr(
                 "Could not download the People & Pets extension. "

@@ -38,8 +38,8 @@ Install the optional runtime with:
 pip install -e ".[pets-ai]"
 ```
 
-The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Model lookup follows this order:
+The extra provides `onnxruntime`, `torch`, `torchvision`, and `usearch`.
+Model lookup follows this order:
 
 ```text
 IPHOTO_PET_MODEL_DIR override
@@ -65,11 +65,13 @@ Linux:  ${XDG_DATA_HOME:-~/.local/share}/iPhoto/extensions/recognition/v1/models
 
 People reads `buffalo_s/` from that directory and Pets reads `pets/`. The
 `IPHOTO_FACE_MODEL_DIR` and `IPHOTO_PET_MODEL_DIR` overrides take precedence.
-Face downloads use the Windows user Face extension cache or the user cache
-under `iPhoto/models` on macOS and Linux. Existing bundled models remain
-available for both workers.
+Existing Face caches and bundled models remain readable. When a worker with
+pending work first finds a missing model, the desktop silently attempts to
+download and install the official GitHub Release ZIP once. That install
+provisions both People and Pets, even when only one worker reports a missing
+model. Manual downloads use the same ZIP and installer.
 
-The automatic Pets download uses the platform user cache:
+Existing Pets caches are still discovered at:
 
 ```text
 macOS:  ~/Library/Caches/iPhoto/models/pets
@@ -89,16 +91,13 @@ extension/models/pets/
     └── dinov2_vits14.pt.metadata.json
 ```
 
-The YOLOX detector can be downloaded over HTTPS into the writable cache unless
-`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. Its default URL is the upstream YOLOX
-release and can be overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`; the download
-is hash- and size-validated. Production does not execute Torch Hub. DINOv2 must
-be supplied as the verified TorchScript artifact declared in
-`iPhoto/pets/model_manifest.json`: `torchscript_url` is currently `null`, so the
-tracked production manifest cannot download it as a standalone model. The
-combined extension and operator-managed model directories supply the artifact
-with the declared SHA-256 and byte size. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker
-without disabling the rest of the application.
+Desktop workers load local models. InsightFace uses local ONNX sessions, and
+the Pets worker obtains model files through the shared extension installation.
+DINOv2 stays bound to the size, checksum, and metadata declared in
+`iPhoto/pets/model_manifest.json`. `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`
+suppresses silent installation triggered by the Pets worker. The combined
+package installs both model sets whenever installed through People or Settings.
+`IPHOTO_PET_SCAN_DISABLED=1` disables the Pet worker.
 
 Offline packages that promise out-of-box Pets support must include the Python
 AI runtime and both model files under `extension/models/pets`. Other packages
@@ -192,8 +191,8 @@ desktop startup behavior.
 
 The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies and models pause recognition while preserving pending
-rows. Recoverable model failures after activation produce one browser and file
-installation prompt per app run. A successful install resumes the affected
+rows. A failed silent installation produces one browser and file installation
+prompt per app run. A successful install resumes the affected
 worker for the active library after that worker exits.
 
 ## Persistence And Mutation Safety

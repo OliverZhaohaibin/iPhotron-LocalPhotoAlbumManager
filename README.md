@@ -310,8 +310,8 @@ For deeper technical details, see the following docs:
 |------|----------|
 | **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata; writes GPS metadata for explicit Assign Location actions. |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info. |
-| **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning using a writable cache, explicit override, or staged/bundled models. |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optional Pets scanning using the platform user cache, an explicit override, or staged/bundled models. YOLOX can download with integrity checks; the current DINOv2 artifact must be pre-provisioned. |
+| **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning. The People & Pets extension supplies the verified models. |
+| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optional Pets scanning. The People & Pets extension includes both the YOLOX detector and DINOv2 embedder. |
 
 > Ensure FFmpeg/FFprobe are available in your system `PATH`; install ExifTool if
 > you want assigned GPS coordinates written back into original media files.

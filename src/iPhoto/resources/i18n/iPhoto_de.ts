@@ -496,6 +496,22 @@
             <source>Manual map extension installation is not available on this platform.</source>
             <translation>Auf dieser Plattform kann die Kartenerweiterung nicht manuell installiert werden.</translation>
         </message>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
+        </message>
+        <message>
+            <source>Details</source>
+            <translation>Details</translation>
+        </message>
+        <message>
+            <source>Restart</source>
+            <translation>Neu starten</translation>
+        </message>
     </context>
     <context>
         <name>QMessageBox</name>

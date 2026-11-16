@@ -507,15 +507,19 @@ def test_deferred_scan_waits_for_face_scan_to_finish(
     start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"], startup=False)
 
 
-def test_regular_scan_starts_ai_workers_immediately(
+@pytest.mark.parametrize("activated", [False, True])
+def test_regular_scan_starts_ai_workers_only_after_recognition_activation(
     tmp_path: Path,
     qapp: QApplication,
+    activated: bool,
 ) -> None:
     root = tmp_path / "Library"
     root.mkdir()
     manager = LibraryRuntimeController()
     manager.bind_path(root)
     manager.bind_scan_service(Mock())
+    if activated:
+        manager._recognition_scans_root = root
 
     with (
         patch.object(manager._scan_thread_pool, "start") as start_thread,
@@ -523,7 +527,10 @@ def test_regular_scan_starts_ai_workers_immediately(
     ):
         manager.start_scanning(root, ["*.jpg"], ["*.mov"])
 
-    start_ai.assert_called_once_with(root)
+    if activated:
+        start_ai.assert_called_once_with(root)
+    else:
+        start_ai.assert_not_called()
     start_thread.assert_called_once()
 
 
@@ -547,7 +554,6 @@ def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
 
         worker = manager._current_scanner_worker
         assert worker is not None
-        assert getattr(worker, "_defer_ai_workers_until_scan_finished") is True
         start_ai.assert_not_called()
         profile_mark.assert_called_once_with("startup_metadata_scan.started", root=root)
         start_thread.assert_called_once_with(worker)
@@ -606,7 +612,7 @@ def test_recognition_binding_does_not_start_ai_before_viewport_ready(
     start_ai.assert_called_once_with(root, startup=True)
 
 
-def test_upgraded_library_schedules_closed_input_pet_backfill_after_bind(
+def test_upgraded_library_schedules_pet_backfill_after_recognition_activation(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -631,6 +637,9 @@ def test_upgraded_library_schedules_closed_input_pet_backfill_after_bind(
         patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot,
         patch.object(manager, "_start_pet_backfill_worker") as start_backfill,
     ):
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_not_called()
+        manager._recognition_scans_root = root
         manager.bind_recognition_services(Mock(), pet_service)
         single_shot.assert_called_once()
         single_shot.call_args.args[1]()
@@ -668,7 +677,7 @@ def test_new_library_does_not_schedule_pet_backfill_until_feature_use(
     repository.set_scan_metadata.assert_not_called()
 
 
-def test_current_library_schedules_ordinary_pending_retry_drain_after_bind(
+def test_current_library_schedules_ordinary_pending_retry_drain_after_activation(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -693,6 +702,9 @@ def test_current_library_schedules_ordinary_pending_retry_drain_after_bind(
         patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot,
         patch.object(manager, "_start_pet_backfill_worker") as start_drain,
     ):
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_not_called()
+        manager._recognition_scans_root = root
         manager.bind_recognition_services(Mock(), pet_service)
         single_shot.assert_called_once()
         single_shot.call_args.args[1]()
@@ -772,15 +784,8 @@ def test_pet_backfill_event_does_not_block_face_activation(
         "iPhoto.library.workers.face_scan_worker",
         SimpleNamespace(FaceScanWorker=_FaceWorker),
     )
-    with patch.object(
-        manager,
-        "_start_pet_backfill_worker",
-        side_effect=lambda _root: setattr(manager, "_current_pet_scanner", backfill),
-    ):
-        manager.bind_recognition_services(people_service, pet_service)
-        qapp.processEvents()
-
-    assert manager._current_pet_scanner is backfill
+    manager.bind_recognition_services(people_service, pet_service)
+    manager._current_pet_scanner = backfill
     manager.activate_recognition_scans()
 
     assert len(created_faces) == 1
@@ -977,3 +982,53 @@ def test_startup_ai_workers_close_input_after_metadata_scan(
     assert len(created) == 2
     assert all(worker.input_closed for worker in created)
     assert all(worker.started for worker in created)
+
+
+@pytest.mark.parametrize("install_first", [False, True])
+def test_recognition_model_install_restarts_only_worker_that_failed(
+    tmp_path: Path, qapp, monkeypatch, install_first: bool
+) -> None:
+    from PySide6.QtCore import QThread, Signal
+
+    class Worker(QThread):
+        statusChanged = Signal(str)
+        modelUnavailable = Signal(str)
+
+        def cancel(self) -> None:
+            self.requestInterruption()
+
+        def run(self) -> None:
+            self.modelUnavailable.emit("missing")
+
+    manager = LibraryRuntimeController()
+    manager._root = manager._recognition_scans_root = tmp_path
+    face = Worker(manager)
+    pet = Worker(manager)
+    manager._current_face_scanner = face
+    manager._current_pet_scanner = pet
+    manager._connect_recognition_worker(face, "face")
+    def assert_main_thread(*_args, **_kwargs):
+        assert QThread.currentThread() == manager.thread()
+        return True
+
+    restart = Mock(side_effect=assert_main_thread)
+    monkeypatch.setattr(manager, "_start_ai_scan_workers", restart)
+    errors = QSignalSpy(manager.recognitionModelUnavailable)
+    if install_first:
+        manager.recognition_extension_installed()
+
+    face.start()
+    assert face.wait(5000)
+    qapp.processEvents()
+    assert manager._current_face_scanner is None
+    if install_first:
+        assert errors.count() == 0
+    else:
+        assert errors.count() == 1
+        assert manager.recognition_model_failure_is_current(errors.at(0)[0])
+        restart.assert_not_called()
+        manager.recognition_extension_installed()
+        assert not manager.recognition_model_failure_is_current(errors.at(0)[0])
+
+    restart.assert_called_once_with(tmp_path, startup=True, kinds=frozenset({"face"}))
+    assert manager._current_pet_scanner is pet

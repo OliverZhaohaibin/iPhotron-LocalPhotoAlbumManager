@@ -92,6 +92,7 @@ class MainHeaderWidget(QWidget):
         self.rebuild_links_action = QAction("", main_window)
         self.bind_library_action = QAction("", main_window)
         self.download_map_extension_action = QAction("", main_window)
+        self.download_recognition_extension_action = QAction("", main_window)
         self.toggle_filmstrip_action = QAction("", main_window, checkable=True)
         self.toggle_filmstrip_action.setChecked(True)
         self.toggle_face_names_action = QAction("", main_window, checkable=True)
@@ -190,6 +191,7 @@ class MainHeaderWidget(QWidget):
         self.settings_menu = self._add_menu()
         self.settings_menu.addAction(self.bind_library_action)
         self.settings_menu.addAction(self.download_map_extension_action)
+        self.settings_menu.addAction(self.download_recognition_extension_action)
         self.settings_menu.addSeparator()
 
         self.appearance_menu = self._add_submenu(self.settings_menu)
@@ -251,6 +253,9 @@ class MainHeaderWidget(QWidget):
         self.bind_library_action.setText(tr("MainWindow", "Set Basic Library…", None))
         self.download_map_extension_action.setText(
             tr("MainWindow", "Download Map Extension…", None)
+        )
+        self.download_recognition_extension_action.setText(
+            tr("MainWindow", "Download People & Pets Extension…", None)
         )
         self.toggle_filmstrip_action.setText(tr("MainWindow", "Show Filmstrip", None))
         self.toggle_face_names_action.setText(tr("MainHeader", "Show face names", None))

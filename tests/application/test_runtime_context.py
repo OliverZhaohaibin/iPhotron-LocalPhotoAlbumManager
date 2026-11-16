@@ -355,3 +355,11 @@ def test_map_extension_service_is_lazy_and_process_scoped():
     assert not hasattr(context, "_map_extensions")
     service = context.map_extensions
     assert context.map_extensions is service
+
+
+def test_recognition_extension_service_is_lazy_and_process_scoped():
+    context = RuntimeContext.__new__(RuntimeContext)
+    assert not hasattr(context, "_recognition_extensions")
+    service = context.recognition_extensions
+    assert context.recognition_extensions is service
+    assert service.download_url.endswith("/pet-models-v1/iphotron-recognition-models-v1.zip")

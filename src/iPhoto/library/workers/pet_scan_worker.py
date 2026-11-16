@@ -39,6 +39,7 @@ class PetScanWorker(QThread):
 
     petIndexUpdated = Signal()  # noqa: N815
     statusChanged = Signal(str)  # noqa: N815
+    modelUnavailable = Signal(str)
 
     BATCH_SIZE = 16
     QUEUE_TARGET_SIZE = 8
@@ -129,8 +130,7 @@ class PetScanWorker(QThread):
                                 self.statusChanged.emit(str(exc))
                                 return
                             except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
-                                LOGGER.warning("Pet scan consolidation unavailable: %s", exc)
-                                self.statusChanged.emit(str(exc))
+                                self._report_unavailable(exc)
                                 return
                             except Exception as exc:  # noqa: BLE001  # pragma: no cover
                                 LOGGER.warning(
@@ -161,10 +161,9 @@ class PetScanWorker(QThread):
                 self.statusChanged.emit(str(exc))
                 return
             except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
-                LOGGER.warning("Pet scanning unavailable: %s", exc)
                 for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
                     self._queued_ids.discard(asset_id)
-                self.statusChanged.emit(str(exc))
+                self._report_unavailable(exc)
                 return
             except Exception as exc:  # noqa: BLE001  # pragma: no cover
                 LOGGER.warning("Pet scan batch failed: %s", exc, exc_info=True)
@@ -173,6 +172,16 @@ class PetScanWorker(QThread):
                 reason = str(exc).strip() or exc.__class__.__name__
                 self.statusChanged.emit(f"Pet scanning paused: {reason}")
                 return
+
+    def _report_unavailable(
+        self, failure: PetRuntimeUnavailableError | PetModelUnavailableError
+    ) -> None:
+        if self._cancelled:
+            return
+        LOGGER.warning("Pet scanning unavailable: %s", failure)
+        self.statusChanged.emit(str(failure))
+        if isinstance(failure, PetModelUnavailableError) and failure.reason is not None:
+            self.modelUnavailable.emit(failure.reason)
 
     def _prime_pending_rows(self) -> None:
         self._top_up_pending_rows()

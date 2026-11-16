@@ -95,7 +95,8 @@ def _profile(
     )
 
 
-def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("folder", ["models", "custom-models"])
+def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path, folder: str) -> None:
     calls: dict[str, object] = {}
 
     class FakeFaceAnalysis:
@@ -111,6 +112,10 @@ def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> No
             calls["root"] = root
             calls["allowed_modules"] = allowed_modules
             calls["providers"] = providers
+            pack = Path(root) / "models" / name
+            pack.mkdir(exist_ok=True, parents=True)
+            for model in ("det_500m.onnx", "w600k_mbf.onnx"):
+                (pack / model).write_bytes(b"model")
 
         def prepare(self, *, ctx_id: int, det_size: tuple[int, int]) -> None:
             calls["ctx_id"] = ctx_id
@@ -134,7 +139,12 @@ def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> No
 
     monkeypatch.setenv("INSIGHTFACE_HOME", str(tmp_path / "legacy-cache"))
 
-    model_root = tmp_path / "extension" / "models"
+    model_root = tmp_path / "extension" / folder
+    pack = model_root / "buffalo_s"
+    if folder != "models":
+        pack.mkdir(parents=True)
+        for name in ("det_500m.onnx", "w600k_mbf.onnx"):
+            (pack / name).write_bytes(b"model")
     pipeline = FaceClusterPipeline(model_root=model_root)
 
     app = pipeline._ensure_face_analysis()
@@ -142,7 +152,7 @@ def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> No
     assert app is pipeline._ensure_face_analysis()
     assert model_root.is_dir()
     assert calls == {
-        "name": "buffalo_s",
+        "name": "buffalo_s" if folder == "models" else str(pack.resolve()),
         "root": str((tmp_path / "extension").resolve()),
         "allowed_modules": ["detection", "recognition"],
         "providers": ["CPUExecutionProvider"],

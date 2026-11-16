@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 from ..theme_manager import DARK_THEME, LIGHT_THEME, ThemeColors
+
+if TYPE_CHECKING:
+    from .information_popup import InformationPopup
 
 
 def select_directory(
@@ -129,6 +134,42 @@ def show_error(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
     box.exec()
 
 
+def _present_information_popup(popup: "InformationPopup", parent: QWidget) -> None:
+    popup.setPalette(_resolve_popup_palette_source(parent))
+    popup.setBackgroundRole(QPalette.ColorRole.Window)
+    popup.center_on(parent)
+    popup.show()
+    popup.setPalette(_resolve_popup_palette_source(parent))
+    popup.center_on(parent)
+    popup.raise_()
+
+
+def open_action_popup(
+    parent: QWidget,
+    message: str,
+    *,
+    title: str,
+    actions: tuple[tuple[str, Callable[[], None] | None], ...],
+) -> "InformationPopup":
+    """Show a non-blocking project popup and close it before invoking a choice."""
+    from .information_popup import InformationPopup
+
+    popup = InformationPopup(parent, title=title, message=message)
+    popup.closed.connect(popup.deleteLater)
+
+    def choose(callback: Callable[[], None] | None) -> None:
+        popup.close()
+        if callback is not None:
+            callback()
+
+    for label, callback in actions:
+        popup.add_action(label).clicked.connect(
+            lambda _checked=False, action=callback: choose(action)
+        )
+    _present_information_popup(popup, parent)
+    return popup
+
+
 def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
     """Display a blocking informational popup using :class:`InformationPopup`.
 
@@ -148,9 +189,6 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     # event loop.  Qt's offscreen platform can otherwise destroy the native
     # object from inside ``closeEvent`` and crash before ``loop.exec`` returns.
     popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
-    popup.setPalette(_resolve_popup_palette_source(parent))
-    popup.setBackgroundRole(QPalette.ColorRole.Window)
-    popup.center_on(parent)
 
     close_state = {"closed": False}
 
@@ -159,10 +197,7 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
 
     popup.closed.connect(_mark_closed)
     popup.destroyed.connect(_mark_closed)
-    popup.show()
-    popup.setPalette(_resolve_popup_palette_source(parent))
-    popup.center_on(parent)
-    popup.raise_()
+    _present_information_popup(popup, parent)
     process_flags = (
         QEventLoop.ProcessEventsFlag.AllEvents
         | QEventLoop.ProcessEventsFlag.WaitForMoreEvents

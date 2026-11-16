@@ -337,6 +337,7 @@ def test_connect_signals_wires_location_scan_updates_from_library_and_service() 
     coordinator._window = MagicMock()
     coordinator._window.ui = MagicMock()
     coordinator._context = MagicMock()
+    coordinator._recognition_extension = MagicMock()
     coordinator._facade = MagicMock()
     coordinator._gallery_store = MagicMock()
     coordinator._gallery_vm = MagicMock()
@@ -363,6 +364,14 @@ def test_connect_signals_wires_location_scan_updates_from_library_and_service() 
     coordinator._handle_wheel_action_changed = MagicMock()
 
     coordinator._connect_signals()
+
+    ui = coordinator._window.ui
+    ui.download_recognition_extension_action.triggered.connect.assert_called_once_with(
+        coordinator._recognition_extension.show_options
+    )
+    coordinator._context.library.recognitionModelUnavailable.connect.assert_called_once_with(
+        coordinator._recognition_extension.model_unavailable
+    )
 
     coordinator._context.library.scanBatchCommitted.connect.assert_any_call(
         coordinator._asset_list_vm.handle_scan_batch

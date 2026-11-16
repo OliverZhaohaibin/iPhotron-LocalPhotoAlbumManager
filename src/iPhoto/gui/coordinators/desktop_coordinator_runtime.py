@@ -38,6 +38,7 @@ from iPhoto.gui.ui.controllers.map_extension_download_controller import (
     MapExtensionDownloadController,
 )
 from iPhoto.gui.ui.controllers.preview_controller import PreviewController
+from iPhoto.gui.ui.controllers.recognition_extension_controller import RecognitionExtensionController
 from iPhoto.gui.ui.controllers.selection_controller import SelectionController
 from iPhoto.gui.ui.controllers.share_controller import ShareController
 from iPhoto.gui.ui.controllers.status_bar_controller import StatusBarController
@@ -89,6 +90,8 @@ class DesktopCoordinatorRuntime(QObject):
         )
         if hasattr(window.ui, "download_map_extension_action"):
             window.ui.download_map_extension_action.setEnabled(True)
+
+        self._recognition_extension = RecognitionExtensionController(window, context)
 
         self._event_bus = context.event_bus
         edit_service_getter = self._edit_service
@@ -497,6 +500,9 @@ class DesktopCoordinatorRuntime(QObject):
 
         location_info = getattr(self, "_location_info", None)
         try:
+            recognition_extension = getattr(self, "_recognition_extension", None)
+            if recognition_extension is not None:
+                recognition_extension.shutdown()
             if location_info is not None:
                 location_info.drain()
 
@@ -637,6 +643,12 @@ class DesktopCoordinatorRuntime(QObject):
         ui.download_map_extension_action.triggered.connect(
             lambda: self._map_extension_download.show_options()
         )
+        recognition_action = getattr(ui, "download_recognition_extension_action", None)
+        if recognition_action is not None:
+            recognition_action.triggered.connect(self._recognition_extension.show_options)
+            self._context.library.recognitionModelUnavailable.connect(
+                self._recognition_extension.model_unavailable
+            )
         ui.edit_button.clicked.connect(self._detail_vm.request_edit)
         # ui.edit_rotate_left_button is handled by EditCoordinator in Edit Mode
         ui.rotate_left_button.clicked.connect(self._playback.rotate_current_asset)
@@ -863,6 +875,9 @@ class DesktopCoordinatorRuntime(QObject):
         session_changed = library_epoch != previous_epoch
         self._observed_library_epoch = library_epoch
         if session_changed:
+            recognition_extension = getattr(self, "_recognition_extension", None)
+            if recognition_extension is not None:
+                recognition_extension.library_changed()
             edit = getattr(self, "_edit", None)
             invalidate = getattr(edit, "invalidate_library_binding", None)
             if callable(invalidate):

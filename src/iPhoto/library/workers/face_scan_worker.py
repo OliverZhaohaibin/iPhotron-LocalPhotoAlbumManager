@@ -8,10 +8,12 @@ from typing import Iterable
 
 from PySide6.QtCore import QThread, Signal
 
+from ...people.errors import FaceModelUnavailableError, FaceRuntimeUnavailableError
 from ...people.index_coordinator import (
     PeopleIndexCoordinator,
     PeopleSnapshotCommittedError,
 )
+from ...people.model_paths import resolve_face_model_dir
 from ...people.pipeline import FaceClusterPipeline
 from ...people.service import PeopleService, face_library_paths
 from ...people.status import (
@@ -31,6 +33,7 @@ class FaceScanWorker(QThread):
 
     peopleIndexUpdated = Signal()
     statusChanged = Signal(str)
+    modelUnavailable = Signal(str)
 
     BATCH_SIZE = 4
     QUEUE_TARGET_SIZE = 16
@@ -80,7 +83,7 @@ class FaceScanWorker(QThread):
             return
 
         paths = face_library_paths(self._library_root)
-        pipeline = FaceClusterPipeline(model_root=paths.model_dir)
+        pipeline = FaceClusterPipeline(model_root=resolve_face_model_dir(paths.model_dir))
         coordinator = self._people_service.coordinator
         if coordinator is None:
             self.statusChanged.emit("Face scanning is unavailable for this library.")
@@ -112,6 +115,15 @@ class FaceScanWorker(QThread):
                 for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
                     self._queued_ids.discard(asset_id)
                 self.statusChanged.emit(str(exc))
+                return
+            except FaceModelUnavailableError as exc:
+                if not self._cancelled:
+                    self.statusChanged.emit(str(exc))
+                    self.modelUnavailable.emit(exc.reason)
+                return
+            except FaceRuntimeUnavailableError as exc:
+                if not self._cancelled:
+                    self.statusChanged.emit(str(exc))
                 return
             except RuntimeError as exc:
                 self._mark_remaining_failed(batch)

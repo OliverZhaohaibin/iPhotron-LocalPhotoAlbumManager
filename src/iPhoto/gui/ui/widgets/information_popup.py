@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -65,6 +66,7 @@ class InformationPopup(QWidget):
         self._drag_active = False
         self._drag_offset = None
         self._uses_default_title = title == "Information"
+        self._actions_layout: QVBoxLayout | None = None
 
         # -- root layout ---------------------------------------------------
         root_layout = QVBoxLayout(self)
@@ -154,6 +156,27 @@ class InformationPopup(QWidget):
         """Return the current information message."""
 
         return self._message_label.text()
+
+    def add_action(self, label: str) -> QPushButton:
+        """Add a keyboard-accessible action to the popup."""
+        if self._actions_layout is None:
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self._message_label.setTextFormat(Qt.TextFormat.PlainText)
+            self._actions_layout = QVBoxLayout()
+            self._actions_layout.setContentsMargins(16, 0, 16, 16)
+            self._actions_layout.setSpacing(6)
+            self.layout().addLayout(self._actions_layout)
+        button = QPushButton(label, self)
+        self._actions_layout.addWidget(button)
+        return button
+
+    def keyPressEvent(self, event) -> None:
+        if self._actions_layout is not None and event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def retranslate_ui(self) -> None:
         if self._uses_default_title:

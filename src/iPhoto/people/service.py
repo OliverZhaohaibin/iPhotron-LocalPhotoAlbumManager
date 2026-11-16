@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,6 +31,7 @@ from .repository import (
     PeopleGroupSummary,
     PersonSummary,
 )
+from .model_paths import default_face_model_dir
 from .state_repository import FaceStateRepository
 from .status import FACE_STATUS_RETRY, FACE_STATUS_SKIPPED, normalize_face_status
 
@@ -39,25 +39,6 @@ if TYPE_CHECKING:
     from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
 
     from .index_coordinator import PeopleIndexCoordinator
-
-
-def _default_shared_face_model_dir() -> Path:
-    override = os.environ.get("IPHOTO_FACE_MODEL_DIR")
-    if override:
-        return Path(override).expanduser()
-
-    if os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        # InsightFace expects ``root/models/<pack>``. Keeping the cache outside
-        # Program Files makes on-demand model installation work for a standard
-        # non-administrator account and keeps models out of the base bundle.
-        return base / "iPhoto" / "extensions" / "faces" / "v1" / "models"
-
-    package_root = Path(__file__).resolve().parents[2]
-    return package_root / "extension" / "models"
-
-
-_SHARED_FACE_MODEL_DIR = _default_shared_face_model_dir()
 
 
 @dataclass(frozen=True)
@@ -89,7 +70,7 @@ class IdentityMergeResult:
 
 def shared_face_model_dir() -> Path:
     """Return the shared cache directory for downloaded face models."""
-    return _SHARED_FACE_MODEL_DIR
+    return default_face_model_dir()
 
 
 def face_library_paths(library_root: Path) -> FaceLibraryPaths:

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-MapExtensionProgress = Callable[[int, int, str], None]
+from .extension_install import ExtensionInstallError as MapExtensionError
+from .extension_install import ExtensionProgress as MapExtensionProgress
+
+__all__ = [
+    "MapExtensionError",
+    "MapExtensionPort",
+    "MapExtensionProgress",
+    "MapExtensionRequest",
+    "MapExtensionResult",
+]
 
 
 @dataclass(frozen=True)
@@ -24,17 +32,6 @@ class MapExtensionResult:
     pending_root: Path
     extension_root: Path
     status: Literal["installed", "pending_restart", "missing"] = "installed"
-
-
-class MapExtensionError(Exception):
-    """Stable error category plus diagnostics safe to display or copy."""
-
-    def __init__(self, category: str, stage: str, *, code: int | None = None, detail: str = ""):
-        self.category = category
-        self.stage = stage
-        self.code = code
-        self.detail = detail
-        super().__init__(f"stage={stage}; category={category}; code={code}; {detail}")
 
 
 class MapExtensionPort(Protocol):

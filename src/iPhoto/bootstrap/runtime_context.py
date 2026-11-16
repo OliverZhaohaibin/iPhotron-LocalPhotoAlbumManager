@@ -103,6 +103,18 @@ class RuntimeContext:
             self._map_extensions = service
         return service
 
+    @property
+    def recognition_extensions(self):
+        """Construct the shared model installer only when needed."""
+        service = getattr(self, "_recognition_extensions", None)
+        if service is None:
+            from ..application.services.recognition_extension_service import RecognitionExtensionService
+            from ..infrastructure.services.recognition_extension_installer import RecognitionExtensionInstaller
+
+            service = RecognitionExtensionService(RecognitionExtensionInstaller())
+            self._recognition_extensions = service
+        return service
+
     def __post_init__(self) -> None:
         self.translation = _create_translation_manager(self.settings)
         self.theme = _create_theme_manager(self.settings)

@@ -87,11 +87,14 @@ class DesktopCoordinatorRuntime(QObject):
             window,
             context,
             package_root=self._resolve_map_package_root(None),
+            notification_toast=window.ui.notification_toast,
         )
         if hasattr(window.ui, "download_map_extension_action"):
             window.ui.download_map_extension_action.setEnabled(True)
 
-        self._recognition_extension = RecognitionExtensionController(window, context)
+        self._recognition_extension = RecognitionExtensionController(
+            window, context, notification_toast=window.ui.notification_toast
+        )
 
         self._event_bus = context.event_bus
         edit_service_getter = self._edit_service

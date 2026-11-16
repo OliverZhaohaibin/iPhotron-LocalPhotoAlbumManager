@@ -81,7 +81,9 @@ def test_controller_temporarily_hides_stays_on_top_child_windows(
     floating.show()
 
     context = SimpleNamespace(settings=SimpleNamespace(get=lambda *_args, **_kwargs: True))
-    controller = MapExtensionDownloadController(owner, context, package_root=tmp_path / "maps")
+    controller = MapExtensionDownloadController(
+        owner, context, package_root=tmp_path / "maps", notification_toast=Mock()
+    )
 
     controller._hide_blocking_top_level_windows()
 
@@ -106,7 +108,9 @@ def test_restart_failure_restores_hidden_windows(qapp: QApplication, tmp_path: P
     floating.show()
 
     context = SimpleNamespace(settings=SimpleNamespace(get=lambda *_args, **_kwargs: True))
-    controller = MapExtensionDownloadController(owner, context, package_root=tmp_path / "maps")
+    controller = MapExtensionDownloadController(
+        owner, context, package_root=tmp_path / "maps", notification_toast=Mock()
+    )
 
     controller._hide_blocking_top_level_windows()
     assert floating.isHidden()
@@ -137,7 +141,9 @@ def controller(qapp, tmp_path):
     )
     owner = QWidget()
     owner.show()
-    value = MapExtensionDownloadController(owner, context, package_root=tmp_path / "maps")
+    value = MapExtensionDownloadController(
+        owner, context, package_root=tmp_path / "maps", notification_toast=Mock()
+    )
     yield value
     if value._progress_dialog is not None:
         value._progress_dialog.allow_close()
@@ -226,6 +232,7 @@ def test_pending_result_prompts_restart_without_claiming_installed(
     restart.assert_called_once()
     assert "staged" in messages[0]
     assert "waiting for restart" in messages[0]
+    controller._toast.show_toast.assert_not_called()
 
 
 def test_local_archive_selection_needs_no_failed_download(controller, tmp_path):
@@ -521,9 +528,8 @@ def test_callback_root_change_stops_remaining_stale_callbacks(controller, tmp_pa
         assert calls == ["new"]
 
 
-@pytest.mark.parametrize("operation", ["install", "prepare"])
-def test_installed_result_does_not_prompt_restart(controller, operation):
-    from iPhoto.gui.ui.tasks.map_extension_download_worker import MapExtensionDownloadRequest
+@pytest.mark.parametrize("operation, local", [("install", False), ("install", True), ("prepare", False)])
+def test_installed_result_only_confirms_manual_install(controller, tmp_path, operation, local):
 
     owner = controller._parent
     owner.show()
@@ -537,7 +543,12 @@ def test_installed_result_does_not_prompt_restart(controller, operation):
             patch.object(dialogs, "run_action_popup") as popup,
         ):
             controller._start(
-                MapExtensionDownloadRequest(controller._package_root, "win32", operation=operation)
+                MapExtensionDownloadRequest(
+                    controller._package_root,
+                    "win32",
+                    local_archive_path=tmp_path / "extension.zip" if local else None,
+                    operation=operation,
+                )
             )
             worker = controller._active_worker
             assert floating.isHidden() == (operation == "install")
@@ -546,6 +557,10 @@ def test_installed_result_does_not_prompt_restart(controller, operation):
             )
             worker.signals.finished.emit()
         popup.assert_not_called()
+        if operation == "install":
+            controller._toast.show_toast.assert_called_once_with("Installed")
+        else:
+            controller._toast.show_toast.assert_not_called()
         assert floating.isVisible()
         assert controller._progress_dialog is None
         assert controller._active_worker is None
@@ -595,6 +610,7 @@ def test_error_takes_precedence_over_installed_result(controller):
         controller._handle_finished()
     show_failure.assert_called_once_with(failure)
     popup.assert_not_called()
+    controller._toast.show_toast.assert_not_called()
 
 
 @pytest.fixture
@@ -756,5 +772,5 @@ def test_controller_constructor_does_not_resolve_install_capabilities(qapp, tmp_
             raise AssertionError("install service resolved during startup")
 
     owner = QWidget()
-    MapExtensionDownloadController(owner, Context(), package_root=tmp_path)
+    MapExtensionDownloadController(owner, Context(), package_root=tmp_path, notification_toast=Mock())
     owner.close()

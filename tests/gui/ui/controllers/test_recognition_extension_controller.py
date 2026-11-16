@@ -38,7 +38,7 @@ def desktop(qtbot, tmp_path):
             execute=Mock(return_value=RecognitionExtensionResult(tmp_path / "models")),
         ),
     )
-    controller = module.RecognitionExtensionController(window, context)
+    controller = module.RecognitionExtensionController(window, context, notification_toast=Mock())
     yield window, controller, context
     controller.shutdown()
 
@@ -96,6 +96,7 @@ def test_background_install_notifies_library_on_success(desktop, monkeypatch, tm
         RecognitionExtensionRequest(path if local else None)
     )
     assert controller._progress_dialog is None
+    controller._toast.show_toast.assert_called_once_with("Installed")
 
 
 @pytest.mark.parametrize("first_kind, second_kind", [("face", "pet"), ("pet", "face")])
@@ -113,6 +114,7 @@ def test_missing_models_share_one_silent_package_install(desktop, tmp_path, firs
     assert context.recognition_extensions.execute.call_count == 1
     assert context.recognition_extensions.execute.call_args.args[0] == RecognitionExtensionRequest()
     context.library.recognition_extension_installed.assert_called_once()
+    controller._toast.show_toast.assert_not_called()
     assert controller._popup is None
 
 
@@ -159,6 +161,7 @@ def test_failed_download_shows_recovery_and_does_not_resume_workers(desktop):
     assert _button(popup, "Download in Browser")
     assert _button(popup, "Install from File…")
     context.library.recognition_extension_installed.assert_not_called()
+    controller._toast.show_toast.assert_not_called()
 
 
 def test_shutdown_cancels_silent_install_without_dispatching_result(desktop, tmp_path):

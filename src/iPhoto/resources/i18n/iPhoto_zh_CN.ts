@@ -2199,4 +2199,11 @@ Select a tile directory to switch back to the legacy backend.</source>
             <translation>IPHOTO_FACE_MODEL_DIR 指定的目录中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
         </message>
     </context>
+    <context>
+        <name>NotificationToast</name>
+        <message>
+            <source>Installed</source>
+            <translation>已安装</translation>
+        </message>
+    </context>
 </TS>

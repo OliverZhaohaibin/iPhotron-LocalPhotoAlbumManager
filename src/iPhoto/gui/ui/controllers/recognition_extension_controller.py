@@ -19,13 +19,17 @@ from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.tasks.recognition_extension_worker import RecognitionExtensionWorker
 from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.gui.ui.widgets.information_popup import InformationPopup, ProgressPopup
+from iPhoto.gui.ui.widgets.notification_toast import NotificationToast
 
 
 class RecognitionExtensionController(QObject):
-    def __init__(self, window: QWidget, context: RuntimeEntryContract):
+    def __init__(
+        self, window: QWidget, context: RuntimeEntryContract, *, notification_toast: NotificationToast
+    ):
         super().__init__(window)
         self._window = window
         self._context = context
+        self._toast = notification_toast
         self._popup: InformationPopup | None = None
         self._visible_recovery: RecognitionModelFailure | None = None
         self._pending_recovery: RecognitionModelFailure | None = None
@@ -232,6 +236,8 @@ class RecognitionExtensionController(QObject):
         if isinstance(result, RecognitionExtensionResult):
             self._pending_recovery = None
             self._context.library.recognition_extension_installed()
+            if not silent:
+                self._toast.show_toast(tr("NotificationToast", "Installed"))
             self._resolve_pending_models()
             return
         if silent:

@@ -2199,4 +2199,11 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
             <translation>Im Verzeichnis aus IPHOTO_FACE_MODEL_DIR fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
         </message>
     </context>
+    <context>
+        <name>NotificationToast</name>
+        <message>
+            <source>Installed</source>
+            <translation>Installiert</translation>
+        </message>
+    </context>
 </TS>

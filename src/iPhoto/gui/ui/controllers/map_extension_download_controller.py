@@ -12,11 +12,13 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QFileDialog
 
 from iPhoto.application.contracts.runtime_entry_contract import RuntimeEntryContract
 from iPhoto.application.ports.map_extension import MapExtensionError
+from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadRequest,
     MapExtensionDownloadWorker,
 )
 from iPhoto.gui.ui.widgets import dialogs
+from iPhoto.gui.ui.widgets.notification_toast import NotificationToast
 
 _SHOW_STARTUP_PROMPT_KEY = "ui.show_map_extension_startup_prompt"
 
@@ -24,9 +26,17 @@ _SHOW_STARTUP_PROMPT_KEY = "ui.show_map_extension_startup_prompt"
 class MapExtensionDownloadController:
     """Own UI choices and serialize preparation before map surfaces are created."""
 
-    def __init__(self, parent, context: RuntimeEntryContract, *, package_root: Path):
+    def __init__(
+        self,
+        parent,
+        context: RuntimeEntryContract,
+        *,
+        package_root: Path,
+        notification_toast: NotificationToast,
+    ):
         self._parent = parent
         self._context = context
+        self._toast = notification_toast
         self._package_root = Path(package_root).resolve()
         self._progress_dialog = None
         self._download_inflight = False
@@ -287,17 +297,20 @@ class MapExtensionDownloadController:
         if generation != self._package_generation:
             self._start_waiting_preparation()
             return
-        if failure is None and result is not None and result.status == "pending_restart":
-            message = self._tr("Map extension is staged and waiting for restart. Restart now?")
-            dialogs.run_action_popup(
-                self._parent,
-                message,
-                title=self._tr("Restart Required"),
-                actions=(
-                    (self._tr("Restart"), self._restart_application),
-                    (self._tr("Not Now"), None),
-                ),
-            )
+        if failure is None and result is not None:
+            if result.status == "pending_restart":
+                message = self._tr("Map extension is staged and waiting for restart. Restart now?")
+                dialogs.run_action_popup(
+                    self._parent,
+                    message,
+                    title=self._tr("Restart Required"),
+                    actions=(
+                        (self._tr("Restart"), self._restart_application),
+                        (self._tr("Not Now"), None),
+                    ),
+                )
+            elif payload.operation == "install" and result.status == "installed":
+                self._toast.show_toast(tr("NotificationToast", "Installed"))
         # Map use may have been requested while installation was already busy.
         self._start_waiting_preparation()
 

@@ -133,7 +133,7 @@ class LibraryRuntimeController(
         self._scan_thread_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
-        self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool]] = []
+        self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool, bool]] = []
         self._scan_buffer_lock = QMutex()
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None

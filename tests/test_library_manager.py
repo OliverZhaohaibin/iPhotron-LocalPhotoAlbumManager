@@ -445,9 +445,11 @@ def test_scan_finished_reports_failure_when_finalization_fails(
     assert spy.at(0)[1] is False
 
 
+@pytest.mark.parametrize("retry_recognition", [False, True])
 def test_scan_request_is_queued_until_active_scan_finishes(
     tmp_path: Path,
     qapp: QApplication,
+    retry_recognition: bool,
 ) -> None:
     root = tmp_path / "Library"
     first = root / "First"
@@ -463,14 +465,20 @@ def test_scan_request_is_queued_until_active_scan_finishes(
     manager._live_scan_root = first
 
     manager.start_scanning(second, ["*.jpg"], ["*.mov"])
-    assert manager._deferred_scan_queue == [(second, ["*.jpg"], ["*.mov"], False)]
+    if retry_recognition:
+        manager.start_session_scan(
+            second, include=["*.jpg"], exclude=["*.mov"], retry_recognition=True
+        )
+    assert manager._deferred_scan_queue == [(second, ["*.jpg"], ["*.mov"], False, retry_recognition)]
 
     with patch.object(manager, "start_scanning") as start_mock:
         manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
         qapp.processEvents()
 
     scan_service.finalize_scan_result.assert_called_once()
-    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"], startup=False)
+    start_mock.assert_called_once_with(
+        second, ["*.jpg"], ["*.mov"], startup=False, retry_recognition=retry_recognition
+    )
 
 
 def test_deferred_scan_waits_for_face_scan_to_finish(
@@ -504,14 +512,17 @@ def test_deferred_scan_waits_for_face_scan_to_finish(
         face_scanner.isRunning.return_value = False
         manager._on_face_scan_finished(face_scanner)
 
-    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"], startup=False)
+    start_mock.assert_called_once_with(
+        second, ["*.jpg"], ["*.mov"], startup=False, retry_recognition=False
+    )
 
 
-@pytest.mark.parametrize("activated", [False, True])
+@pytest.mark.parametrize("activated,retry_recognition", [(False, True), (True, False), (True, True)])
 def test_regular_scan_starts_ai_workers_only_after_recognition_activation(
     tmp_path: Path,
     qapp: QApplication,
     activated: bool,
+    retry_recognition: bool,
 ) -> None:
     root = tmp_path / "Library"
     root.mkdir()
@@ -520,17 +531,21 @@ def test_regular_scan_starts_ai_workers_only_after_recognition_activation(
     manager.bind_scan_service(Mock())
     if activated:
         manager._recognition_scans_root = root
+        manager._recognition_blocked_models["face"] = manager._recognition_model_revision
 
     with (
         patch.object(manager._scan_thread_pool, "start") as start_thread,
         patch.object(manager, "_start_ai_scan_workers") as start_ai,
     ):
-        manager.start_scanning(root, ["*.jpg"], ["*.mov"])
+        manager.start_session_scan(
+            root, include=["*.jpg"], exclude=["*.mov"], retry_recognition=retry_recognition
+        )
 
     if activated:
         start_ai.assert_called_once_with(root)
     else:
         start_ai.assert_not_called()
+    assert ("face" in manager._recognition_blocked_models) == (activated and not retry_recognition)
     start_thread.assert_called_once()
 
 

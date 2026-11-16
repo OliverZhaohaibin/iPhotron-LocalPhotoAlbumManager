@@ -142,11 +142,13 @@ class LibraryUpdateService(QObject):
         self.linksUpdated.emit(album.root)
         return rows
 
-    def rescan_album_async(self, album: "Album") -> None:
+    def rescan_album_async(self, album: "Album", *, retry_recognition: bool = False) -> None:
         """Start an asynchronous rescan for *album* using the background pool."""
 
         include, exclude = self._scan_filters(album)
-        self.scan_root_async(album.root, include=include, exclude=exclude)
+        self.scan_root_async(
+            album.root, include=include, exclude=exclude, retry_recognition=retry_recognition
+        )
 
     def scan_root_async(
         self,
@@ -155,6 +157,7 @@ class LibraryUpdateService(QObject):
         include: Iterable[str],
         exclude: Iterable[str],
         startup: bool = False,
+        retry_recognition: bool = False,
     ) -> None:
         """Start an asynchronous scan for *root* through the bound session."""
 
@@ -181,6 +184,7 @@ class LibraryUpdateService(QObject):
                     include=include,
                     exclude=exclude,
                     startup=startup,
+                    retry_recognition=retry_recognition,
                 )
                 return
 

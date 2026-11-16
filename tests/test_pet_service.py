@@ -2446,6 +2446,44 @@ def test_pet_detector_model_downloads_when_missing(tmp_path: Path, monkeypatch) 
     assert not temporary_directories[0].exists()
 
 
+@pytest.mark.parametrize("previous_installation", [False, True])
+def test_installed_pet_detector_uses_official_digest(tmp_path, monkeypatch, previous_installation):
+    target_root = tmp_path / "models"
+    previous_root = tmp_path / ".backup" / "models"
+    installed_root = previous_root if previous_installation else target_root
+    monkeypatch.setattr(
+        pet_pipeline, "installed_recognition_model_roots", lambda: (target_root, previous_root)
+    )
+    relative = Path("detector/yolox_nano_coco.onnx")
+    official = installed_root / "pets" / relative
+    override = tmp_path / "override" / relative
+    official.parent.mkdir(parents=True)
+    override.parent.mkdir(parents=True)
+    official.write_bytes(b"official detector")
+    override.write_bytes(b"custom detector")
+    monkeypatch.setattr(
+        pet_pipeline,
+        "DEFAULT_PET_DETECTOR_MODEL_SHA256",
+        hashlib.sha256(official.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setenv("IPHOTO_PET_MODEL_DIR", str(tmp_path / "override"))
+    monkeypatch.setenv("IPHOTO_PET_DETECTOR_MODEL_URL", "https://models.example/custom.onnx")
+    monkeypatch.setenv(
+        "IPHOTO_PET_DETECTOR_MODEL_SHA256", hashlib.sha256(override.read_bytes()).hexdigest()
+    )
+
+    assert pet_pipeline.resolve_pet_model_path(relative) == override
+    assert ensure_pet_detector_model(override, allow_model_download=False) == override
+
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR")
+
+    assert pet_pipeline.resolve_pet_model_path(relative) == official
+    assert ensure_pet_detector_model(official, allow_model_download=False) == official
+    official.write_bytes(override.read_bytes())
+    with pytest.raises(RuntimeError, match="failed SHA-256 verification"):
+        ensure_pet_detector_model(official, allow_model_download=False)
+
+
 def test_dinov2_runtime_downloads_only_the_fixed_torchscript_artifact(
     tmp_path: Path,
     monkeypatch,

@@ -222,7 +222,7 @@ def open_progress_popup(
 def _wait_for_popup(popup: "InformationPopup") -> None:
     from PySide6.QtCore import QCoreApplication, QEventLoop
 
-    closed = not popup.isVisible()
+    closed = False
 
     def mark_closed(*_args: object) -> None:
         nonlocal closed
@@ -230,10 +230,20 @@ def _wait_for_popup(popup: "InformationPopup") -> None:
 
     popup.closed.connect(mark_closed)
     popup.destroyed.connect(mark_closed)
+    app = QCoreApplication.instance()
+    app.aboutToQuit.connect(mark_closed)
     flags = QEventLoop.ProcessEventsFlag.AllEvents | QEventLoop.ProcessEventsFlag.WaitForMoreEvents
-    while not closed:
-        # A nested QEventLoop.exec() can crash after large offscreen widget test runs.
-        QCoreApplication.processEvents(flags)
+    try:
+        while not closed and popup.isVisible():
+            # A nested QEventLoop.exec() can crash after large offscreen widget test runs.
+            QCoreApplication.processEvents(flags)
+    finally:
+        app.aboutToQuit.disconnect(mark_closed)
+        try:
+            popup.deleteLater()
+        except RuntimeError:
+            # The parent may have been destroyed while the local loop was active.
+            pass
 
 
 def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
@@ -251,11 +261,6 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     popup = InformationPopup(parent, title=title, message=message)
     _present_information_popup(popup, parent)
     _wait_for_popup(popup)
-    try:
-        popup.deleteLater()
-    except RuntimeError:
-        # The parent may have been destroyed while the local loop was active.
-        pass
 
 
 def show_warning(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:

@@ -65,10 +65,13 @@ class ScanCoordinatorMixin:
         include: Iterable[str],
         exclude: Iterable[str],
         startup: bool = False,
+        retry_recognition: bool = False,
     ) -> None:
         """Start a scan through the session-facing runtime controller surface."""
 
-        self.start_scanning(root, include, exclude, startup=startup)
+        self.start_scanning(
+            root, include, exclude, startup=startup, retry_recognition=retry_recognition
+        )
 
     def start_scanning(
         self,
@@ -77,6 +80,7 @@ class ScanCoordinatorMixin:
         exclude: Iterable[str],
         *,
         startup: bool = False,
+        retry_recognition: bool = False,
     ) -> None:
         """Start a background scan for the given root directory.
         
@@ -94,18 +98,24 @@ class ScanCoordinatorMixin:
         if self._current_scanner_worker is not None:
             if self._live_scan_root and self._paths_equal(self._live_scan_root, root):
                 return
-            self._queue_deferred_scan(root, include, exclude, startup=startup)
+            self._queue_deferred_scan(
+                root, include, exclude, startup=startup, retry_recognition=retry_recognition
+            )
             return
         if self._current_face_scanner is not None:
             is_running = getattr(self._current_face_scanner, "isRunning", None)
             if callable(is_running) and is_running():
-                self._queue_deferred_scan(root, include, exclude, startup=startup)
+                self._queue_deferred_scan(
+                    root, include, exclude, startup=startup, retry_recognition=retry_recognition
+                )
                 return
             self._current_face_scanner = None
         if self._current_pet_scanner is not None:
             is_running = getattr(self._current_pet_scanner, "isRunning", None)
             if callable(is_running) and is_running():
-                self._queue_deferred_scan(root, include, exclude, startup=startup)
+                self._queue_deferred_scan(
+                    root, include, exclude, startup=startup, retry_recognition=retry_recognition
+                )
                 return
             self._current_pet_scanner = None
 
@@ -139,14 +149,16 @@ class ScanCoordinatorMixin:
             )
         )
         signals.batchFailed.connect(self._on_scan_batch_failed)
-        if "face" not in self._recognition_blocked_models:
-            self._on_face_scan_status_changed("")
-        if "pet" not in self._recognition_blocked_models:
-            self._on_pet_scan_status_changed("")
         ai_scan_root = self._root
         start_ai_scan_root = (
             ai_scan_root if not startup and ai_scan_root == self._recognition_scans_root else None
         )
+        if retry_recognition and start_ai_scan_root is not None:
+            self._recognition_blocked_models.clear()
+        if "face" not in self._recognition_blocked_models:
+            self._on_face_scan_status_changed("")
+        if "pet" not in self._recognition_blocked_models:
+            self._on_pet_scan_status_changed("")
         # Release lock before starting the worker
         del _locker
 
@@ -676,15 +688,18 @@ class ScanCoordinatorMixin:
         exclude: Iterable[str],
         *,
         startup: bool = False,
+        retry_recognition: bool = False,
     ) -> None:
         queue = getattr(self, "_deferred_scan_queue", None)
         if queue is None:
             queue = []
             setattr(self, "_deferred_scan_queue", queue)
-        for queued_root, _queued_include, _queued_exclude, _queued_startup in queue:
+        for index, (queued_root, queued_include, queued_exclude, _, queued_retry) in enumerate(queue):
             if self._paths_equal(queued_root, root):
+                if retry_recognition and not startup and not queued_retry:
+                    queue[index] = (queued_root, queued_include, queued_exclude, False, True)
                 return
-        queue.append((Path(root), list(include), list(exclude), bool(startup)))
+        queue.append((Path(root), list(include), list(exclude), startup, retry_recognition))
 
     def _start_next_deferred_scan(self) -> None:
         queue = getattr(self, "_deferred_scan_queue", None)
@@ -704,8 +719,10 @@ class ScanCoordinatorMixin:
             if not callable(is_running) or is_running():
                 return
             self._current_pet_scanner = None
-        root, include, exclude, startup = queue.pop(0)
-        self.start_scanning(root, include, exclude, startup=startup)
+        root, include, exclude, startup, retry_recognition = queue.pop(0)
+        self.start_scanning(
+            root, include, exclude, startup=startup, retry_recognition=retry_recognition
+        )
 
     def _on_face_scan_status_changed(self, message: str) -> None:
         self._face_scan_status_message = message or None

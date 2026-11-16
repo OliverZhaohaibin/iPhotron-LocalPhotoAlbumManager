@@ -1788,6 +1788,36 @@ def pet_model_auto_download_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _is_installed_pet_detector(path: Path) -> bool:
+    return any(
+        path == root / "pets" / _DETECTOR_MANIFEST["filename"]
+        for root in installed_recognition_model_roots()
+    )
+
+
+def _pet_detector_digest(custom_url: str) -> str:
+    custom_digest = os.environ.get(PET_DETECTOR_MODEL_SHA256_ENV, "").strip().lower()
+    if custom_url and not custom_digest:
+        raise RuntimeError(
+            "Pet scanning unavailable: a custom detector URL requires "
+            f"{PET_DETECTOR_MODEL_SHA256_ENV}."
+        )
+    return custom_digest or DEFAULT_PET_DETECTOR_MODEL_SHA256
+
+
+def _validate_pet_detector_model(path: Path, custom_url: str) -> None:
+    _validate_downloaded_file(
+        path,
+        label="YOLOX pet detector model",
+        expected_sha256=(
+            DEFAULT_PET_DETECTOR_MODEL_SHA256
+            if _is_installed_pet_detector(path)
+            else _pet_detector_digest(custom_url)
+        ),
+        max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+    )
+
+
 def ensure_pet_detector_model(
     model_path: Path,
     *,
@@ -1796,25 +1826,10 @@ def ensure_pet_detector_model(
 ) -> Path:
     target = Path(model_path)
     custom_url = str(model_url or os.environ.get(PET_DETECTOR_MODEL_URL_ENV) or "").strip()
-    expected_sha256 = (
-        str(os.environ.get(PET_DETECTOR_MODEL_SHA256_ENV) or "").strip().lower()
-        if custom_url
-        else DEFAULT_PET_DETECTOR_MODEL_SHA256
-    )
-    if custom_url and not expected_sha256:
-        raise RuntimeError(
-            "Pet scanning unavailable: a custom detector URL requires "
-            f"{PET_DETECTOR_MODEL_SHA256_ENV}."
-        )
     if target.is_file():
-        _validate_downloaded_file(
-            target,
-            label="YOLOX pet detector model",
-            expected_sha256=expected_sha256,
-            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-        )
+        _validate_pet_detector_model(target, custom_url)
         return target
-    if not allow_model_download:
+    if not allow_model_download or _is_installed_pet_detector(target):
         raise PetModelUnavailableError(
             "Pet scanning unavailable: missing YOLOX model at "
             f"{target}. Install the People & Pets extension or set IPHOTO_PET_MODEL_DIR.",
@@ -1822,6 +1837,9 @@ def ensure_pet_detector_model(
         )
 
     url = str(custom_url or DEFAULT_PET_DETECTOR_MODEL_URL).strip()
+    expected_sha256 = (
+        _pet_detector_digest(custom_url) if custom_url else DEFAULT_PET_DETECTOR_MODEL_SHA256
+    )
     if not url:
         raise RuntimeError(
             "Pet scanning unavailable: missing YOLOX model at "
@@ -1874,6 +1892,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Pet model path must be relative to a configured model root.")
     override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
+    custom_url = os.environ.get(PET_DETECTOR_MODEL_URL_ENV, "").strip()
     user_cache = user_pet_model_cache_dir()
     for root in pet_model_search_roots():
         candidate = root / relative
@@ -1888,17 +1907,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                     raise RuntimeError("DINOv2 model file is missing")
                 _validate_dinov2_cache_metadata(model_path, model_name=model_name)
             else:
-                _validate_downloaded_file(
-                    candidate,
-                    label="YOLOX pet detector model",
-                    expected_sha256=(
-                        str(
-                            os.environ.get(PET_DETECTOR_MODEL_SHA256_ENV)
-                            or DEFAULT_PET_DETECTOR_MODEL_SHA256
-                        ).lower()
-                    ),
-                    max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-                )
+                _validate_pet_detector_model(candidate, custom_url)
             return candidate
         except (OSError, RuntimeError) as exc:
             if override and root == Path(override).expanduser():

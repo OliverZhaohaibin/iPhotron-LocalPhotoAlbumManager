@@ -550,6 +550,7 @@ class GalleryViewModel(BaseViewModel):
             library_root,
             include=DEFAULT_INCLUDE,
             exclude=DEFAULT_EXCLUDE,
+            retry_recognition=True,
         )
 
     def path_for_row(self, row: int) -> Optional[Path]:

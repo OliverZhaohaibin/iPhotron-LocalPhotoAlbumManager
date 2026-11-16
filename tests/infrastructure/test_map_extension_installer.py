@@ -133,6 +133,22 @@ def test_write_probe_happens_before_download(setup, monkeypatch):
     assert str(target) in caught.value.detail
 
 
+@pytest.mark.parametrize("bundled_installed", [True, False])
+def test_preparation_without_installation_work_leaves_write_target_untouched(
+    setup, bundled_installed
+):
+    adapter, payload, target, _ = setup
+    bundled = payload.package_root / "tiles" / "extension"
+    if bundled_installed:
+        extension(bundled)
+
+    result = adapter.execute(replace(payload, operation="prepare"), progress)
+
+    assert result.status == ("installed" if bundled_installed else "missing")
+    assert result.extension_root == (bundled if bundled_installed else target)
+    assert not target.parent.exists()
+
+
 def test_pending_is_not_reported_as_installed_and_preparation_activates(setup):
     adapter, payload, target, _ = setup
     extension(target, marker=b"old")
@@ -169,6 +185,21 @@ def test_recovers_backup_after_process_exit(setup):
     # Explicit platform keeps this fixture independent of the host OS.
     adapter.execute(replace(payload, operation="prepare"), progress)
     assert (target / "World_basemap_2.obf").read_bytes() == b"old"
+
+
+def test_recovers_valid_pending_after_corrupt_active_install_was_moved_to_backup(setup):
+    adapter, payload, target, _ = setup
+    backup = target.with_name("extension.backup")
+    backup.mkdir(parents=True)
+    pending = target.with_name("extension.pending")
+    extension(pending)
+
+    result = adapter.execute(replace(payload, operation="prepare"), progress)
+
+    assert result.status == "installed"
+    assert (target / "World_basemap_2.obf").read_bytes() == b"new"
+    assert not pending.exists()
+    assert not backup.exists()
 
 
 def test_activation_failure_restores_previous_install(setup, monkeypatch):

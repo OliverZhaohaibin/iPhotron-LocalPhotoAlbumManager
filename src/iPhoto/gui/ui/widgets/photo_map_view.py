@@ -304,6 +304,8 @@ class PhotoMapView(QWidget):
     This enables O(1) gallery opening without additional database lookups.
     """
 
+    backendChanged = Signal()
+
     def __init__(
         self,
         parent: Optional[QWidget] = None,
@@ -408,6 +410,7 @@ class PhotoMapView(QWidget):
             or self._map_package_root != previous_package_root
         ):
             self._rebuild_map_widget()
+            self.backendChanged.emit()
 
     def uses_native_osmand_widget(self) -> bool:
         """Return ``True`` when the current backend is the native GL widget."""

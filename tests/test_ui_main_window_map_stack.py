@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -71,6 +72,39 @@ def test_configure_main_view_stack_leaves_python_backends_unchanged(qapp: QAppli
 
     assert isinstance(stack.layout(), QStackedLayout)
     assert stack.layout().stackingMode() == QStackedLayout.StackOne
+
+
+def test_deferred_map_backend_updates_main_view_stacking(qapp: QApplication, monkeypatch) -> None:
+    from iPhoto.gui.ui import ui_main_window
+    from iPhoto.gui.ui.widgets import photo_map_view
+
+    class NativeWidget(QWidget):
+        pass
+
+    def build_map(view):
+        widget_type = NativeWidget if view._map_runtime is None else QWidget
+        view._map_widget = widget_type(view)
+
+    monkeypatch.setattr(ui_main_window, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setenv("IPHOTO_KEEP_NATIVE_MAP_PAGE_ALIVE", "1")
+    monkeypatch.setattr(photo_map_view, "NativeOsmAndWidget", NativeWidget)
+    monkeypatch.setattr(photo_map_view.PhotoMapView, "_build_map_widget", build_map)
+    main_window = QMainWindow()
+    ui = Ui_MainWindow()
+    ui._main_window = main_window
+    ui._library = None
+    ui.view_stack = QStackedWidget(main_window)
+    ui.ensure_feature("map")
+    layout = ui.view_stack.layout()
+
+    try:
+        assert layout.stackingMode() == QStackedLayout.StackOne
+        ui.map_view.set_map_runtime(None)
+        assert layout.stackingMode() == QStackedLayout.StackAll
+        ui.map_view.set_map_runtime(SimpleNamespace(capabilities=lambda: object()))
+        assert layout.stackingMode() == QStackedLayout.StackOne
+    finally:
+        ui.map_view.shutdown()
 
 
 def test_detail_prepare_and_feature_publication_are_idempotent(

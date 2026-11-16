@@ -148,6 +148,10 @@ class MapExtensionInstaller:
             target,
         )
         try:
+            if payload.operation == "prepare":
+                result = self._prepare_read_only(payload, target)
+                if result is not None:
+                    return result
             target.parent.mkdir(parents=True, exist_ok=True)
             # A real write/rename probe also catches ACLs that os.access misses.
             with tempfile.TemporaryDirectory(prefix=".probe-", dir=target.parent) as probe:
@@ -359,23 +363,58 @@ class MapExtensionInstaller:
         self._validate(target, payload.platform)
         return MapExtensionResult(pending, target)
 
+    def _prepare_read_only(
+        self, payload: MapExtensionRequest, target: Path
+    ) -> MapExtensionResult | None:
+        """Return a runtime status when there is no installation work to do."""
+        pending = target.with_name(target.name + ".pending")
+        previous = target.with_name(target.name + ".pending.previous")
+        backup = target.with_name(target.name + ".backup")
+        if (
+            pending.exists()
+            or previous.exists()
+            or (not target.exists() and backup.exists())
+            or self._legacy_pending_root(payload, target, pending) is not None
+        ):
+            return None
+        if map_sources.has_installed_osmand_extension(payload.package_root):
+            return MapExtensionResult(
+                pending, map_sources.default_osmand_extension_root(payload.package_root)
+            )
+        if map_sources.bundled_osmand_extension_archive(payload.package_root) is None:
+            return MapExtensionResult(pending, target, "missing")
+        return None
+
+    @staticmethod
+    def _legacy_pending_root(
+        payload: MapExtensionRequest, target: Path, pending: Path
+    ) -> Path | None:
+        legacy = Path(payload.package_root) / "tiles" / "extension.pending"
+        if (
+            legacy != pending
+            and legacy.is_dir()
+            and not map_sources.validate_osmand_extension_root(target, platform=payload.platform)
+        ):
+            return legacy
+        return None
+
     def _prepare(self, payload, target, progress):
         pending = target.with_name(target.name + ".pending")
-        backup = target.with_name(target.name + ".backup")
-        if not target.exists() and backup.exists():
-            # Recover a process exit between the two directory renames.
-            self._validate(backup, payload.platform)
-            backup.replace(target)
         previous = target.with_name(target.name + ".pending.previous")
         if not pending.exists() and previous.exists():
             previous.replace(pending)
-        legacy = Path(payload.package_root) / "tiles" / "extension.pending"
-        if (
-            not pending.exists()
-            and not map_sources.validate_osmand_extension_root(target, platform=payload.platform)
-            and legacy != pending
-            and legacy.is_dir()
-        ):
+        backup = target.with_name(target.name + ".backup")
+        if not target.exists() and backup.exists():
+            # Recover a process exit between the two directory renames.
+            try:
+                self._validate(backup, payload.platform)
+            except MapExtensionError:
+                if not pending.exists():
+                    raise
+            else:
+                backup.replace(target)
+        legacy = self._legacy_pending_root(payload, target, pending) if not pending.exists() else None
+        if legacy is not None:
             self._validate(legacy, payload.platform)
             staging = Path(tempfile.mkdtemp(prefix=".map-recover-", dir=target.parent))
             try:

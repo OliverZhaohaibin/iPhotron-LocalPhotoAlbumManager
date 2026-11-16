@@ -94,7 +94,9 @@ extension/models/pets/
 Desktop workers load local models. InsightFace uses local ONNX sessions, and
 the Pets worker obtains model files through the shared extension installation.
 DINOv2 stays bound to the size, checksum, and metadata declared in
-`iPhoto/pets/model_manifest.json`. `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`
+`iPhoto/pets/model_manifest.json`. The manifest's `torchscript_url` is currently `null`.
+The People & Pets ZIP supplies the verified TorchScript file and its metadata.
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`
 suppresses silent installation triggered by the Pets worker. The combined
 package installs both model sets whenever installed through People or Settings.
 `IPHOTO_PET_SCAN_DISABLED=1` disables the Pet worker.

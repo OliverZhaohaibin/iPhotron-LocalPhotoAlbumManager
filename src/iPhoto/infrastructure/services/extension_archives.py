@@ -70,9 +70,16 @@ def install_lock(path: Path):
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def file_digest(path: Path) -> str:
+def file_digest(path: Path, *, check_cancelled: Callable[[], None] | None = None) -> str:
     with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+        if check_cancelled is None:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+        digest = hashlib.sha256()
+        check_cancelled()
+        while chunk := handle.read(_CHUNK):
+            check_cancelled()
+            digest.update(chunk)
+        return digest.hexdigest()
 
 
 class _DownloadHTTPSHandler(request.HTTPSHandler):
@@ -175,7 +182,11 @@ def download_archive(
 
 
 def match_archive(
-    archive: Path, packages: Iterable[_Package], *, stage: str = "verify"
+    archive: Path,
+    packages: Iterable[_Package],
+    *,
+    stage: str = "verify",
+    check_cancelled: Callable[[], None] | None = None,
 ) -> _Package:
     if not archive.is_file():
         raise ExtensionInstallError("missing_file", stage)
@@ -183,7 +194,7 @@ def match_archive(
     candidates = [package for package in packages if package.size == size]
     if not candidates:
         raise ExtensionInstallError("unknown_package", stage)
-    digest = file_digest(archive)
+    digest = file_digest(archive, check_cancelled=check_cancelled)
     for package in candidates:
         if package.sha256 == digest:
             return package
@@ -191,14 +202,20 @@ def match_archive(
 
 
 @contextmanager
-def copied_archive(source: Path, target_dir: Path, *, prefix: str):
+def copied_archive(
+    source: Path, target_dir: Path, *, prefix: str, check_cancelled: Callable[[], None] | None = None
+):
     if not source.is_file():
         raise ExtensionInstallError("missing_file", "verify")
     with tempfile.TemporaryDirectory(
         prefix=prefix, dir=target_dir, ignore_cleanup_errors=True
     ) as directory:
         archive = Path(directory) / "archive"
-        shutil.copyfile(source, archive)
+        if check_cancelled is None:
+            shutil.copyfile(source, archive)
+        else:
+            with source.open("rb") as input_file, archive.open("wb") as output_file:
+                _copy_chunks(input_file, output_file, check_cancelled)
         yield archive
 
 
@@ -254,10 +271,34 @@ def check_member_path(name: str, *, root: str | None = None) -> None:
         raise ExtensionInstallError("unsafe_archive", "extract")
 
 
-def extract_zip(archive: Path, directory: Path, *, root: str | None = None) -> None:
+def _copy_chunks(source, destination, check_cancelled: Callable[[], None]) -> None:
+    check_cancelled()
+    while chunk := source.read(_CHUNK):
+        check_cancelled()
+        destination.write(chunk)
+
+
+def extract_zip(
+    archive: Path,
+    directory: Path,
+    *,
+    root: str | None = None,
+    check_cancelled: Callable[[], None] | None = None,
+) -> None:
     with zipfile.ZipFile(archive) as zipped:
         for member in zipped.infolist():
             check_member_path(member.filename, root=root)
             if stat.S_IFMT(member.external_attr >> 16) not in {0, stat.S_IFREG, stat.S_IFDIR}:
                 raise ExtensionInstallError("unsafe_archive", "extract")
-        zipped.extractall(directory)
+        if check_cancelled is None:
+            zipped.extractall(directory)
+            return
+        for member in zipped.infolist():
+            check_cancelled()
+            destination = directory / PurePosixPath(member.filename)
+            if member.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with zipped.open(member) as source, destination.open("wb") as output:
+                _copy_chunks(source, output, check_cancelled)

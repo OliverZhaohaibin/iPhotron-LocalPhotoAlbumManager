@@ -678,7 +678,11 @@ class LibraryRuntimeController(
         return (
             failure.library_root == self._root == self._recognition_scans_root
             and failure.generation == self._recognition_generation
-            and self._recognition_blocked_models.get(failure.kind) == self._recognition_model_revision
+            and (
+                failure.reason == "invalid_override"
+                or self._recognition_blocked_models.get(failure.kind)
+                == self._recognition_model_revision
+            )
         )
 
     def recognition_extension_installed(self) -> None:

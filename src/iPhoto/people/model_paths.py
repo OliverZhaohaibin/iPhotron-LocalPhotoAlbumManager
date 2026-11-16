@@ -13,10 +13,15 @@ def bundled_face_model_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "extension" / "models"
 
 
-def default_face_model_dir() -> Path:
+def face_model_override_dir() -> Path | None:
     override = os.environ.get("IPHOTO_FACE_MODEL_DIR")
-    if override:
-        return Path(override).expanduser()
+    return Path(override).expanduser() if override else None
+
+
+def default_face_model_dir() -> Path:
+    override = face_model_override_dir()
+    if override is not None:
+        return override
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         return base / "iPhoto" / "extensions" / "faces" / "v1" / "models"
@@ -39,8 +44,6 @@ def face_pack_available(model_dir: Path, pack: str) -> bool:
 
 
 def resolve_face_model_dir(cache: Path) -> Path:
-    if os.environ.get("IPHOTO_FACE_MODEL_DIR"):
-        return cache
     for root in (*installed_recognition_model_roots(), cache, bundled_face_model_dir()):
         if face_pack_available(root, "buffalo_s"):
             return root

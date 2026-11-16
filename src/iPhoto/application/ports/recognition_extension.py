@@ -1,5 +1,6 @@
 """Process-scoped installation and library-scoped model availability events."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -7,7 +8,9 @@ from typing import Literal, Protocol
 from .extension_install import ExtensionProgress
 
 RecognitionKind = Literal["face", "pet"]
-ModelFailureReason = Literal["missing", "download_failed", "incomplete", "download_disabled"]
+ModelFailureReason = Literal[
+    "missing", "download_failed", "incomplete", "download_disabled", "invalid_override"
+]
 
 
 @dataclass(frozen=True)
@@ -33,5 +36,9 @@ class RecognitionExtensionPort(Protocol):
     def download_url(self) -> str: ...
 
     def execute(
-        self, request: RecognitionExtensionRequest, progress: ExtensionProgress
+        self,
+        request: RecognitionExtensionRequest,
+        progress: ExtensionProgress,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> RecognitionExtensionResult: ...

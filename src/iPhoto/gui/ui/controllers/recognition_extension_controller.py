@@ -29,7 +29,9 @@ class RecognitionExtensionController(QObject):
         self._popup: InformationPopup | None = None
         self._visible_recovery: RecognitionModelFailure | None = None
         self._pending_recovery: RecognitionModelFailure | None = None
+        self._pending_override: RecognitionModelFailure | None = None
         self._recovery_shown = False
+        self._override_warning_shown = False
         self._automatic_attempted = False
         self._silent_install = False
         self._progress_dialog: ProgressPopup | None = None
@@ -52,40 +54,53 @@ class RecognitionExtensionController(QObject):
         )
 
     def model_unavailable(self, failure: RecognitionModelFailure) -> None:
-        if self._closing or self._recovery_shown or failure.reason == "download_disabled":
+        if self._closing or failure.reason == "download_disabled":
             return
-        if self._context.library.recognition_model_failure_is_current(failure):
+        if not self._context.library.recognition_model_failure_is_current(failure):
+            return
+        if failure.reason == "invalid_override":
+            if not self._override_warning_shown:
+                self._pending_override = failure
+        elif not self._recovery_shown:
             self._pending_recovery = failure
-            self._resolve_pending_models()
+        self._resolve_pending_models()
 
     def library_changed(self) -> None:
         self._pending_recovery = None
+        self._pending_override = None
         if self._visible_recovery is not None and self._popup is not None:
             self._popup.close()
 
     def shutdown(self) -> None:
         self._closing = True
+        if self._worker is not None:
+            self._worker.cancel()
         if self._popup is not None:
             self._popup.close()
         self._close_progress()
 
     def _resolve_pending_models(self) -> None:
+        if self._closing or self._choosing_archive or self._worker is not None:
+            return
         failure = self._pending_recovery
         if (
-            failure is None
-            or self._closing
-            or self._recovery_shown
-            or self._choosing_archive
-            or self._popup is not None
-            or self._worker is not None
+            failure is not None
+            and not self._context.library.recognition_model_failure_is_current(failure)
         ):
-            return
-        if not self._context.library.recognition_model_failure_is_current(failure):
             self._pending_recovery = None
+            failure = None
+        if failure is None:
+            self._show_override_warning()
+            return
+        if self._popup is not None and (
+            self._visible_recovery is None or self._visible_recovery.reason != "invalid_override"
+        ):
             return
         if not self._automatic_attempted:
             self._automatic_attempted = True
             self._start(silent=True)
+            return
+        if self._popup is not None:
             return
         self._pending_recovery = None
         self._recovery_shown = True
@@ -95,6 +110,23 @@ class RecognitionExtensionController(QObject):
                 "Download the package in your browser, then install it from a file."
             ),
             self._recovery_actions(self._tr("Later")),
+            recovery=failure,
+        )
+
+    def _show_override_warning(self) -> None:
+        failure = self._pending_override
+        if failure is None or self._popup is not None:
+            return
+        self._pending_override = None
+        if not self._context.library.recognition_model_failure_is_current(failure):
+            return
+        self._override_warning_shown = True
+        self._show_popup(
+            self._tr(
+                "The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. "
+                "Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan."
+            ),
+            ((self._tr("Close"), None),),
             recovery=failure,
         )
 
@@ -200,6 +232,7 @@ class RecognitionExtensionController(QObject):
         if isinstance(result, RecognitionExtensionResult):
             self._pending_recovery = None
             self._context.library.recognition_extension_installed()
+            self._resolve_pending_models()
             return
         if silent:
             self._resolve_pending_models()

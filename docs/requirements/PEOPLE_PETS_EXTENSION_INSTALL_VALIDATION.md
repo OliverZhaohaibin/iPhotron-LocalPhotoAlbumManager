@@ -10,6 +10,9 @@ root, model archive SHA-256, and pass or fail for each scenario.
 | First use on all three platforms, with the optional AI runtime and empty caches | Opening People & Pets with pending work silently downloads the official ZIP and installs both model sets. A failed install produces one app-themed prompt with browser download and file installation. Starting the app or rescanning metadata before People opens leaves recognition inactive. |
 | Browser fallback | The default browser opens the official attachment. If it cannot open, the same URL can be copied. Returning to the app allows ZIP selection without network access. |
 | Valid ZIP while one or both workers are paused | The same library resumes affected scans after installation. Check recognition on at least one photo containing a face and one photo containing a cat or dog. Existing recognition state stays available. |
+| Nonempty but damaged Face ONNX file | The worker keeps pending photos and enters model recovery. A successful verified install resumes the Face worker. |
+| Invalid `IPHOTO_FACE_MODEL_DIR` | The app prompts the user to fix or unset the override without downloading the ZIP. Repairing the directory and rescanning resumes Face recognition. |
+| Quit during a stalled silent download | The reply is cancelled and the app exits promptly. A subsequent install can retry without a leftover partial archive or held lock. |
 | Offline import with a wrong or damaged ZIP | A themed error appears and the current model installation remains usable. |
 | English, German, and Simplified Chinese with light and dark app themes | Menu labels and prompts are translated, buttons fit, and popups center over the main window. |
 

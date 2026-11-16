@@ -998,7 +998,7 @@ def test_recognition_model_install_restarts_only_worker_that_failed(
             self.requestInterruption()
 
         def run(self) -> None:
-            self.modelUnavailable.emit("missing")
+            self.modelUnavailable.emit("incomplete")
 
     manager = LibraryRuntimeController()
     manager._root = manager._recognition_scans_root = tmp_path
@@ -1032,3 +1032,20 @@ def test_recognition_model_install_restarts_only_worker_that_failed(
 
     restart.assert_called_once_with(tmp_path, startup=True, kinds=frozenset({"face"}))
     assert manager._current_pet_scanner is pet
+
+
+def test_invalid_face_override_can_retry_without_install(tmp_path, qapp):
+    manager = LibraryRuntimeController()
+    manager._root = manager._recognition_scans_root = tmp_path
+    face = Mock(
+        _recognition_generation_token=manager._recognition_generation,
+        _recognition_model_revision=manager._recognition_model_revision,
+    )
+    manager._current_face_scanner = face
+    failures = QSignalSpy(manager.recognitionModelUnavailable)
+
+    manager._on_recognition_model_failure(face, "face", "invalid_override")
+
+    assert failures.count() == 1
+    assert manager.recognition_model_failure_is_current(failures.at(0)[0])
+    assert "face" not in manager._recognition_blocked_models

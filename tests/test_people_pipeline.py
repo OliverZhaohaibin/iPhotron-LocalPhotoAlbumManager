@@ -120,7 +120,10 @@ def local_insightface(monkeypatch):
     face_analysis.FaceAnalysis = FakeFaceAnalysis
     model_zoo = ModuleType("insightface.model_zoo")
     model_zoo.get_model = get_model
-    for module in (insightface, app, face_analysis, model_zoo):
+    onnx_state = ModuleType("onnxruntime.capi.onnxruntime_pybind11_state")
+    for name in ("InvalidGraph", "InvalidProtobuf", "NoSuchFile"):
+        setattr(onnx_state, name, type(name, (Exception,), {}))
+    for module in (insightface, app, face_analysis, model_zoo, onnx_state):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
     monkeypatch.setattr(
@@ -165,6 +168,30 @@ def test_face_pipeline_reports_missing_pack_without_using_insightface_downloader
 
     assert exc.value.reason == reason
     assert not local_insightface
+
+
+@pytest.mark.parametrize("error_name", ["InvalidProtobuf", "RuntimeError"])
+def test_face_pipeline_distinguishes_damaged_models_from_runtime_errors(
+    local_insightface, monkeypatch, tmp_path, error_name
+):
+    from iPhoto.people.errors import FaceModelUnavailableError, FaceRuntimeUnavailableError
+
+    pack = tmp_path / "buffalo_s"
+    pack.mkdir()
+    for name in ("det_500m.onnx", "w600k_mbf.onnx"):
+        (pack / name).write_bytes(b"nonempty")
+    onnx_state = sys.modules["onnxruntime.capi.onnxruntime_pybind11_state"]
+    error_type = getattr(onnx_state, error_name, RuntimeError)
+
+    def broken_model(*args, **kwargs):
+        raise error_type("could not load")
+
+    monkeypatch.setattr(sys.modules["insightface.model_zoo"], "get_model", broken_model)
+    expected = FaceRuntimeUnavailableError if error_type is RuntimeError else FaceModelUnavailableError
+    with pytest.raises(expected) as failed:
+        FaceClusterPipeline(model_root=tmp_path)._ensure_face_analysis()
+    if expected is FaceModelUnavailableError:
+        assert failed.value.reason == "incomplete"
 
 
 def test_face_pipeline_installs_lightweight_albumentations_stub(

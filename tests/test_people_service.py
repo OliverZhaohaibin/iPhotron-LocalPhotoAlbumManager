@@ -2347,8 +2347,8 @@ def test_face_scan_worker_skips_commit_when_cancelled_mid_batch(tmp_path: Path) 
     assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
 
 
-@pytest.mark.parametrize("missing_model", [False, True])
-def test_face_scan_availability_error_preserves_all_pending_rows(tmp_path, missing_model):
+@pytest.mark.parametrize("reason", ["runtime", "incomplete", "invalid_override"])
+def test_face_scan_availability_error_preserves_all_pending_rows(tmp_path, monkeypatch, reason):
     repository = get_global_repository(tmp_path)
     repository.write_rows(
         [
@@ -2358,11 +2358,16 @@ def test_face_scan_availability_error_preserves_all_pending_rows(tmp_path, missi
     )
     worker = FaceScanWorker(tmp_path)
     failures = []
+    statuses = []
     worker.modelUnavailable.connect(failures.append)
+    worker.statusChanged.connect(statuses.append)
+    monkeypatch.delenv("IPHOTO_FACE_MODEL_DIR", raising=False)
+    if reason == "invalid_override":
+        monkeypatch.setenv("IPHOTO_FACE_MODEL_DIR", str(tmp_path / "operator-models"))
     error = (
-        FaceModelUnavailableError("incomplete model", "incomplete")
-        if missing_model
-        else FaceRuntimeUnavailableError("missing optional dependency")
+        FaceRuntimeUnavailableError("missing optional dependency")
+        if reason == "runtime"
+        else FaceModelUnavailableError("incomplete model", "incomplete")
     )
     with patch.object(worker, "_process_batch", side_effect=error):
         worker.run()
@@ -2370,7 +2375,10 @@ def test_face_scan_availability_error_preserves_all_pending_rows(tmp_path, missi
     rows = repository.get_rows_by_ids(["asset-a", "asset-b"])
     assert rows["asset-a"]["face_status"] == "pending"
     assert rows["asset-b"]["face_status"] == "retry"
-    assert failures == (["incomplete"] if missing_model else [])
+    assert failures == ([] if reason == "runtime" else [reason])
+    if reason == "invalid_override":
+        assert "operator-models" in statuses[-1]
+        assert "Fix or unset IPHOTO_FACE_MODEL_DIR" in statuses[-1]
 
 
 def test_face_scan_worker_marks_retry_error_failed_on_second_attempt(tmp_path: Path) -> None:

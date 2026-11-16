@@ -2190,5 +2190,13 @@ Select a tile directory to switch back to the legacy backend.</source>
             <source>Could not install the People &amp; Pets extension.</source>
             <translation>无法安装 People &amp; Pets 扩展。</translation>
         </message>
+        <message>
+            <source>Face scanning unavailable: '{path}' is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>无法扫描人脸：“{path}”中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
+        </message>
+        <message>
+            <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>IPHOTO_FACE_MODEL_DIR 指定的目录中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
+        </message>
     </context>
 </TS>

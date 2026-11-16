@@ -1,3 +1,5 @@
+from threading import Event
+from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -157,3 +159,44 @@ def test_failed_download_shows_recovery_and_does_not_resume_workers(desktop):
     assert _button(popup, "Download in Browser")
     assert _button(popup, "Install from File…")
     context.library.recognition_extension_installed.assert_not_called()
+
+
+def test_shutdown_cancels_silent_install_without_dispatching_result(desktop, tmp_path):
+    _, controller, context = desktop
+    installing = Event()
+    observed_cancel = Event()
+
+    def install(_request, _progress, *, is_cancelled):
+        installing.set()
+        deadline = monotonic() + 1
+        while not is_cancelled() and monotonic() < deadline:
+            sleep(0.005)
+        if is_cancelled():
+            observed_cancel.set()
+        return RecognitionExtensionResult(tmp_path / "models")
+
+    context.recognition_extensions.execute.side_effect = install
+    controller.model_unavailable(RecognitionModelFailure(tmp_path, 1, "face", "missing"))
+    assert installing.wait(1)
+    controller.shutdown()
+
+    assert QThreadPool.globalInstance().waitForDone(1000)
+    assert observed_cancel.is_set()
+    QCoreApplication.processEvents()
+    context.library.recognition_extension_installed.assert_not_called()
+
+
+def test_invalid_face_override_does_not_consume_pet_install_attempt(desktop, tmp_path):
+    _, controller, context = desktop
+    controller.model_unavailable(RecognitionModelFailure(tmp_path, 1, "face", "invalid_override"))
+    popup = controller._popup
+    assert "Fix or unset IPHOTO_FACE_MODEL_DIR" in popup.message()
+    assert [button.text() for button in popup.findChildren(QPushButton)] == ["Close"]
+    context.recognition_extensions.execute.assert_not_called()
+
+    controller.model_unavailable(RecognitionModelFailure(tmp_path, 1, "pet", "missing"))
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    QCoreApplication.processEvents()
+    context.recognition_extensions.execute.assert_called_once()
+    context.library.recognition_extension_installed.assert_called_once()
+    assert controller._popup is popup

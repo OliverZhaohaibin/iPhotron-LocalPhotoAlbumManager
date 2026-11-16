@@ -760,8 +760,10 @@ class ScanCoordinatorMixin:
         ):
             return
         revision = worker._recognition_model_revision
-        self._recognition_blocked_models[kind] = revision
-        if revision == self._recognition_model_revision:
+        # An install cannot repair an explicit override. Let future scans retry it.
+        if reason != "invalid_override":
+            self._recognition_blocked_models[kind] = revision
+        if reason == "invalid_override" or revision == self._recognition_model_revision:
             self.recognitionModelUnavailable.emit(
                 RecognitionModelFailure(root, self._recognition_generation, kind, reason)
             )

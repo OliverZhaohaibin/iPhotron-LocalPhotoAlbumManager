@@ -7,6 +7,8 @@ import logging
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Callable
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +28,6 @@ from .extension_archives import (
     cached_download,
     check_member_path,
     copied_archive,
-    download_archive,
     extract_zip,
     file_digest,
     install_failure,
@@ -34,6 +35,7 @@ from .extension_archives import (
     match_archive,
     probe_target,
 )
+from .recognition_download import download_archive
 
 _LOG = logging.getLogger(__name__)
 
@@ -61,13 +63,27 @@ class RecognitionExtensionInstaller:
         return self._package.url
 
     def execute(
-        self, request: RecognitionExtensionRequest, progress: ExtensionProgress
+        self,
+        request: RecognitionExtensionRequest,
+        progress: ExtensionProgress,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> RecognitionExtensionResult:
         target = installed_recognition_model_root()
         stage = "prepare"
+
+        def check_cancelled() -> None:
+            if is_cancelled is not None and is_cancelled():
+                raise CancelledError()
+
+        def verify_download(path: Path) -> None:
+            match_archive(path, (self._package,), stage="download", check_cancelled=check_cancelled)
+
         try:
+            check_cancelled()
             probe_target(target.parent)
             with install_lock(target.parent / ".recognition-install.lock"):
+                check_cancelled()
                 backup = previous_recognition_model_root(target)
                 if not target.exists() and backup.exists():
                     backup.replace(target)
@@ -76,11 +92,14 @@ class RecognitionExtensionInstaller:
                     stage = "verify"
                     progress(0, 0, "Validating recognition extension…")
                     with copied_archive(
-                        request.local_archive_path, target.parent, prefix=".recognition-import-"
+                        request.local_archive_path,
+                        target.parent,
+                        prefix=".recognition-import-",
+                        check_cancelled=check_cancelled,
                     ) as archive:
-                        match_archive(archive, (self._package,))
+                        match_archive(archive, (self._package,), check_cancelled=check_cancelled)
                         stage = "extract"
-                        self._install_archive(archive, target, backup, progress)
+                        self._install_archive(archive, target, backup, progress, check_cancelled)
                 else:
                     stage = "download"
                     archive = cached_download(
@@ -92,11 +111,12 @@ class RecognitionExtensionInstaller:
                             progress,
                             "Downloading recognition extension…",
                             "iPhotron-recognition-installer/1",
+                            check_cancelled=check_cancelled,
                         ),
-                        lambda path: match_archive(path, (self._package,), stage="download"),
+                        verify_download,
                     )
                     stage = "extract"
-                    self._install_archive(archive, target, backup, progress)
+                    self._install_archive(archive, target, backup, progress, check_cancelled)
                     try:
                         archive.unlink(missing_ok=True)
                     except OSError:
@@ -108,29 +128,36 @@ class RecognitionExtensionInstaller:
             raise install_failure(exc, stage, f"install_root={target}") from exc
 
     def _install_archive(
-        self, archive: Path, target: Path, backup: Path, progress: ExtensionProgress
+        self,
+        archive: Path,
+        target: Path,
+        backup: Path,
+        progress: ExtensionProgress,
+        check_cancelled: Callable[[], None],
     ) -> None:
+        check_cancelled()
         with tempfile.TemporaryDirectory(
             prefix=".recognition-stage-", dir=target.parent, ignore_cleanup_errors=True
         ) as staging:
             models = Path(staging) / "models"
             models.mkdir()
             progress(0, 0, "Extracting recognition extension…")
-            extract_zip(archive, models)
+            extract_zip(archive, models, check_cancelled=check_cancelled)
             progress(0, 0, "Validating recognition extension…")
-            self._validate_models(models)
+            self._validate_models(models, check_cancelled)
 
             if target.exists():
                 try:
                     if file_digest(target / "manifest.json") != file_digest(models / "manifest.json"):
                         raise ExtensionInstallError("integrity", "verify")
-                    self._validate_models(target)
+                    self._validate_models(target, check_cancelled)
                 except (OSError, ExtensionInstallError):
                     pass
                 else:
                     return  # The same complete version is already installed.
 
             progress(0, 0, "Installing recognition extension…")
+            check_cancelled()
             try:
                 backup.parent.mkdir(exist_ok=True)
                 if target.exists():
@@ -151,7 +178,7 @@ class RecognitionExtensionInstaller:
                 shutil.rmtree(backup, ignore_errors=True)
 
     @staticmethod
-    def _validate_models(root: Path) -> None:
+    def _validate_models(root: Path, check_cancelled: Callable[[], None]) -> None:
         detector = PET_MODEL_MANIFEST["detector"]
         embedder = PET_MODEL_MANIFEST["embedder"]
         detector_path = f"pets/{detector['filename']}"
@@ -174,11 +201,14 @@ class RecognitionExtensionInstaller:
                 raise ExtensionInstallError("incomplete", "verify")
 
             for name, identity in files.items():
+                check_cancelled()
                 check_member_path(name)
                 path = root / name
                 if not path.is_file():
                     raise ExtensionInstallError("incomplete", "verify")
-                if path.stat().st_size != identity["size"] or file_digest(path) != identity["sha256"]:
+                if path.stat().st_size != identity["size"] or (
+                    file_digest(path, check_cancelled=check_cancelled) != identity["sha256"]
+                ):
                     raise ExtensionInstallError("integrity", "verify")
 
             metadata = json.loads((root / metadata_path).read_text(encoding="utf-8"))

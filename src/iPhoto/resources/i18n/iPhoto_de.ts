@@ -2190,5 +2190,13 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
             <source>Could not install the People &amp; Pets extension.</source>
             <translation>Die People-&amp;-Pets-Erweiterung konnte nicht installiert werden.</translation>
         </message>
+        <message>
+            <source>Face scanning unavailable: '{path}' is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>Gesichtsscan nicht verfügbar: In „{path}“ fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
+        </message>
+        <message>
+            <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>Im Verzeichnis aus IPHOTO_FACE_MODEL_DIR fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
+        </message>
     </context>
 </TS>

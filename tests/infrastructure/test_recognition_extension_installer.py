@@ -2,8 +2,10 @@ import hashlib
 import json
 import shutil
 import zipfile
+from concurrent.futures import CancelledError
 from copy import deepcopy
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -64,9 +66,9 @@ def test_local_install_uses_verified_private_copy_without_network(package, monke
     monkeypatch.setattr(module, "download_archive", lambda *_: pytest.fail("unexpected download"))
     match_archive = module.match_archive
 
-    def verify_private_copy(archive, packages):
+    def verify_private_copy(archive, packages, **kwargs):
         assert archive.is_relative_to(target.parent)
-        match_archive(archive, packages)
+        match_archive(archive, packages, **kwargs)
         path.write_bytes(b"changed after verification")
 
     monkeypatch.setattr(module, "match_archive", verify_private_copy)
@@ -106,7 +108,7 @@ def test_failed_activation_restores_previous_directory_and_keeps_download(packag
     (target / "previous").write_bytes(b"older installation")
     downloads = []
 
-    def download(_package, partial, *_args):
+    def download(_package, partial, *_args, **_kwargs):
         downloads.append(partial)
         shutil.copyfile(path, partial)
 
@@ -147,3 +149,23 @@ def test_install_is_serialized_and_recovers_when_previous_directory_was_renamed(
 
     installer.execute(request, lambda *_: None)
     assert target.is_dir() and not backup.exists()
+
+
+def test_cancelled_download_removes_partial_and_releases_lock(package, monkeypatch):
+    path, target, files = package
+    installer = module.RecognitionExtensionInstaller(_archive(path, files))
+    cancel = Event()
+
+    def download(_package, partial, *_args, check_cancelled):
+        partial.write_bytes(b"partial")
+        cancel.set()
+        check_cancelled()
+
+    monkeypatch.setattr(module, "download_archive", download)
+    with pytest.raises(CancelledError):
+        installer.execute(RecognitionExtensionRequest(), lambda *_: None, is_cancelled=cancel.is_set)
+
+    assert not list((target.parent / ".downloads").iterdir())
+    assert not target.exists()
+    installer.execute(RecognitionExtensionRequest(path), lambda *_: None)
+    assert target.is_dir()

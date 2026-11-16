@@ -280,6 +280,11 @@ class FaceClusterPipeline:
             _install_insightface_mask_renderer_stubs()
             from insightface.app.face_analysis import FaceAnalysis
             from insightface.model_zoo import get_model
+            from onnxruntime.capi.onnxruntime_pybind11_state import (
+                InvalidGraph,
+                InvalidProtobuf,
+                NoSuchFile,
+            )
         except (ImportError, OSError) as exc:
             raise FaceRuntimeUnavailableError(
                 "Face scanning unavailable: install the optional AI dependencies and rescan."
@@ -304,7 +309,13 @@ class FaceClusterPipeline:
             providers = _resolve_execution_providers()
             models = {}
             for path in model_paths:
-                model = get_model(str(path), download=False, providers=providers)
+                try:
+                    model = get_model(str(path), download=False, providers=providers)
+                except (InvalidGraph, InvalidProtobuf, NoSuchFile, OSError) as exc:
+                    raise FaceModelUnavailableError(
+                        f"Face scanning unavailable: model file '{path}' is damaged or unreadable.",
+                        "incomplete",
+                    ) from exc
                 if model is not None and model.taskname in _REQUIRED_FACE_MODULES:
                     models.setdefault(model.taskname, model)
 

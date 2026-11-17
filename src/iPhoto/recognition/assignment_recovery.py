@@ -22,6 +22,7 @@ def apply_detection_assignment_with_group_refresh(
     succeeded = face_state_repository.set_annotation_identity_assignment(
         source_kind=str(payload.get("source_kind") or ""),
         source_annotation_id=str(payload.get("source_annotation_id") or ""),
+        source_annotation_key=str(payload.get("source_annotation_key") or "") or None,
         target_kind=str(payload.get("target_kind") or ""),
         target_id=str(payload.get("target_id") or ""),
     )

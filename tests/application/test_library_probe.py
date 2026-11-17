@@ -1055,6 +1055,49 @@ def test_controller_real_helper_round_trip(qapp, tmp_path: Path, legacy_schema: 
     assert controller._process is None
 
 
+@pytest.mark.parametrize(
+    ("library_name", "album_name"),
+    [("fotos_ä", "Urlaub_ä"), ("照片", "旅行_照片")],
+)
+def test_controller_preserves_unicode_with_legacy_helper_stdout_encoding(
+    qapp,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    library_name: str,
+    album_name: str,
+) -> None:
+    # Exercise the real helper with the redirected-stream encoding common on
+    # Windows, including characters that cp1252 corrupts or cannot encode.
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    library = tmp_path / library_name
+    album = library / album_name
+    album.mkdir(parents=True)
+    request = LibraryProbeRequest.create(library)
+    controller = LibraryProbeController()
+    ready = []
+    failures = []
+    controller.ready.connect(ready.append)
+    controller.failed.connect(failures.append)
+
+    try:
+        controller.start(request)
+        deadline = time.monotonic() + 5
+        while not ready and not failures and time.monotonic() < deadline:
+            QTest.qWait(10)
+
+        assert failures == []
+        assert len(ready) == 1
+        assert ready[0].request_id == request.request_id
+        assert ready[0].root == library.resolve()
+        assert [(item.path, item.title) for item in ready[0].albums] == [
+            (str(album.resolve()), album.name)
+        ]
+        assert controller._process is None
+    finally:
+        controller.cancel()
+
+
 def test_probe_process_command_uses_checkout_entrypoint_for_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

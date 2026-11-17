@@ -63,6 +63,7 @@ class ScannerWorker(QRunnable):
         self._failed_count = 0
         self._scan_job_id: str | None = None
         self._scan_started_at_ms: int | None = None
+        self.reconciled_missing_scope = False
 
     @property
     def root(self) -> Path:
@@ -125,6 +126,14 @@ class ScannerWorker(QRunnable):
 
         rows: List[dict] = []
         try:
+            if self._finalize_scan:
+                reconcile = getattr(self.scan_service, "reconcile_missing_album_scope", None)
+                if callable(reconcile) and reconcile(
+                    self._root,
+                    is_cancelled=lambda: self._is_cancelled,
+                ) is True:
+                    self.reconciled_missing_scope = True
+                    return
             ensure_work_dir(self._root)
 
             # Emit an initial indeterminate update

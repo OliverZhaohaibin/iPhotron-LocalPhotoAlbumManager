@@ -151,6 +151,7 @@ class PetRepository:
         self._match_contexts: dict[EmbeddingContract, _ProfileMatchContext] = {}
         self._last_mutation_failure: PetMutationFailure | None = None
         self._same_asset_manual_conflicts = 0
+        self._annotation_identity_keys_backfilled = False
 
     @property
     def db_path(self) -> Path:
@@ -249,6 +250,7 @@ class PetRepository:
         operation_kind: str = "pet_replace_all",
     ) -> tuple[str, ...]:
         self.initialize()
+        self._backfill_annotation_identity_keys()
         if self._state_repo is not None and detections:
             rejected = self._state_repo.get_rejected_pet_keys(
                 detection.pet_key for detection in detections
@@ -361,6 +363,7 @@ class PetRepository:
         """Replace detections for a bounded asset set without rewriting the index."""
 
         self.initialize()
+        self._backfill_annotation_identity_keys()
         replaced_asset_ids = tuple(dict.fromkeys(str(value) for value in asset_ids if value))
         retry_ids = tuple(
             value
@@ -959,7 +962,9 @@ class PetRepository:
             detection_id = str(payload.get("detection_id") or "")
             if face_state_path.exists() and detection_id:
                 FaceStateRepository(face_state_path).clear_annotation_identity_assignment(
-                    "pet", detection_id
+                    "pet",
+                    detection_id,
+                    source_annotation_key=str(payload.get("pet_key") or "") or None,
                 )
                 if face_index_path.exists():
                     face_repository = FaceRepository(face_index_path, face_state_path)
@@ -2948,6 +2953,14 @@ class PetRepository:
         """Refresh cross-kind group caches after a committed Pet mutation."""
 
         self._refresh_people_group_assets_for_pets(pet_ids)
+
+    def _backfill_annotation_identity_keys(self) -> None:
+        if self._annotation_identity_keys_backfilled:
+            return
+        face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"
+        if face_state_path.exists():
+            FaceStateRepository(face_state_path).backfill_annotation_identity_keys("pet")
+            self._annotation_identity_keys_backfilled = True
 
     def _annotation_assignment_target(self, detection_id: str) -> str | None:
         face_state_path = self._db_path.parent.parent / "faces" / "face_state.db"

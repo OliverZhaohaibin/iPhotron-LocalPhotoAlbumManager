@@ -656,7 +656,7 @@ class ScanCoordinatorMixin:
         self._start_next_deferred_scan()
 
         # Root media pairing completed in the scan worker with the scoped rows.
-        if not worker.root_only:
+        if not worker.root_only and not getattr(worker, "reconciled_missing_scope", False):
             self._scan_thread_pool.start(_PairingWorker(root, worker.scan_service))
 
     def _on_scan_error(self, worker: ScannerWorker, root: Path, message: str) -> None:

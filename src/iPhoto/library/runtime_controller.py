@@ -391,6 +391,14 @@ class LibraryRuntimeController(
             self.treeUpdated.emit()
         changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
+        removed = previous_paths - nodes.keys()
+        removed_scopes = sorted(
+            path for path in removed if not any(parent in removed for parent in path.parents)
+        )
+        # Missing scopes cannot pass the normal existing-directory deduplication.
+        # The scan worker revalidates them before applying scoped reconciliation.
+        if removed_scopes:
+            self._queue_watcher_scan_roots(removed_scopes, rescan_after_active=True)
         self._start_watcher_scans(changed)
 
     def face_scan_status_message(self) -> str | None:

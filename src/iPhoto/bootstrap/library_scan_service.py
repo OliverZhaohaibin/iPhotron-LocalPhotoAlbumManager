@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+import stat
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -420,6 +421,56 @@ class LibraryScanService:
 
         self._mark_scan_job_finalized(scan_root, current_scan_job_id, scope=scan_scope)
         return materialized_rows
+
+    def reconcile_missing_album_scope(
+        self,
+        root: Path,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Return whether a disappeared album was handled without a rescan."""
+
+        scan_root = Path(root)
+        album_path = self._album_path(scan_root)
+        if not album_path or RECENTLY_DELETED_DIR_NAME in Path(album_path).parts:
+            return False
+
+        def scope_is_missing() -> bool:
+            try:
+                info = scan_root.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                return True
+            return not stat.S_ISDIR(info.st_mode)
+
+        if not scope_is_missing():
+            return False
+        # A disconnected library is not evidence that its albums were deleted.
+        if not self.library_root.is_dir():
+            raise AlbumNotFoundError(f"Library directory is unavailable: {self.library_root}")
+        if is_cancelled is not None and is_cancelled():
+            return True
+        repository = self._repository()
+        rels = [
+            str(row["rel"])
+            for row in repository.read_album_assets(
+                album_path,
+                include_subalbums=True,
+                sort_by_date=False,
+                filter_hidden=False,
+            )
+            if row.get("rel")
+        ]
+        # Recheck after the read: a queued notification may outlive a rename or
+        # temporary disappearance. A recreated scope must follow a normal scan.
+        if not scope_is_missing():
+            return False
+        if not self.library_root.is_dir():
+            raise AlbumNotFoundError(f"Library directory is unavailable: {self.library_root}")
+        if is_cancelled is not None and is_cancelled():
+            return True
+        if rels:
+            repository.remove_rows(rels, clear_live_partners=True)
+        return True
 
     def refresh_restored_album(
         self,

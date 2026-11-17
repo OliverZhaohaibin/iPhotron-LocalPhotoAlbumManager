@@ -1758,6 +1758,7 @@ class FaceStateRepository:
         source_annotation_id: str,
         target_kind: str,
         target_id: str,
+        source_annotation_key: str | None = None,
     ) -> bool:
         if (
             source_kind not in {"person", "pet"}
@@ -1767,14 +1768,30 @@ class FaceStateRepository:
         ):
             return False
         self.initialize()
+        stable_key = source_annotation_key or self.annotation_identity_key(
+            source_kind, source_annotation_id
+        )
         with closing(self._connect()) as conn:
+            if stable_key:
+                conn.execute(
+                    """
+                    DELETE FROM annotation_identity_assignments
+                    WHERE source_kind = ? AND source_annotation_key = ?
+                      AND source_annotation_id != ?
+                    """,
+                    (source_kind, stable_key, source_annotation_id),
+                )
             conn.execute(
                 """
                 INSERT INTO annotation_identity_assignments (
-                    source_kind, source_annotation_id,
+                    source_kind, source_annotation_id, source_annotation_key,
                     target_kind, target_id, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_kind, source_annotation_id) DO UPDATE SET
+                    source_annotation_key = COALESCE(
+                        excluded.source_annotation_key,
+                        annotation_identity_assignments.source_annotation_key
+                    ),
                     target_kind = excluded.target_kind,
                     target_id = excluded.target_id,
                     updated_at = excluded.updated_at
@@ -1782,6 +1799,7 @@ class FaceStateRepository:
                 (
                     source_kind,
                     source_annotation_id,
+                    stable_key,
                     target_kind,
                     target_id,
                     _utc_now_iso(),
@@ -1791,18 +1809,26 @@ class FaceStateRepository:
         return True
 
     def clear_annotation_identity_assignment(
-        self, source_kind: str, source_annotation_id: str
+        self,
+        source_kind: str,
+        source_annotation_id: str,
+        *,
+        source_annotation_key: str | None = None,
     ) -> bool:
         if source_kind not in {"person", "pet"} or not source_annotation_id:
             return False
         self.initialize()
+        stable_key = source_annotation_key or self.annotation_identity_key(
+            source_kind, source_annotation_id
+        )
         with closing(self._connect()) as conn:
             cursor = conn.execute(
                 """
                 DELETE FROM annotation_identity_assignments
-                WHERE source_kind = ? AND source_annotation_id = ?
+                WHERE source_kind = ?
+                  AND (source_annotation_id = ? OR source_annotation_key = ?)
                 """,
-                (source_kind, source_annotation_id),
+                (source_kind, source_annotation_id, stable_key),
             )
             conn.commit()
         return int(cursor.rowcount or 0) > 0
@@ -1820,6 +1846,15 @@ class FaceStateRepository:
         if not normalized:
             return {}
         self.initialize()
+        requested = set(normalized)
+        refs_by_key: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for kind in ("person", "pet"):
+            bindings = self._runtime_annotation_bindings(
+                kind,
+                annotation_ids=(ref[1] for ref in normalized if ref[0] == kind),
+            )
+            for annotation_id, stable_key in bindings.items():
+                refs_by_key.setdefault((kind, stable_key), []).append((kind, annotation_id))
         rows: list[sqlite3.Row] = []
         with closing(self._connect()) as conn:
             for start in range(0, len(normalized), 400):
@@ -1829,20 +1864,40 @@ class FaceStateRepository:
                 rows.extend(
                     conn.execute(
                         f"""
-                        SELECT source_kind, source_annotation_id, target_kind, target_id
+                        SELECT source_kind, source_annotation_id, source_annotation_key,
+                               target_kind, target_id
                         FROM annotation_identity_assignments
                         WHERE (source_kind, source_annotation_id) IN ({placeholders})
                         """,
                         parameters,
                     ).fetchall()
                 )
-        return {
-            (str(row["source_kind"]), str(row["source_annotation_id"])): (
-                str(row["target_kind"]),
-                str(row["target_id"]),
-            )
-            for row in rows
-        }
+            stable_refs = tuple(refs_by_key)
+            for start in range(0, len(stable_refs), 400):
+                chunk = stable_refs[start : start + 400]
+                placeholders = ", ".join("(?, ?)" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT source_kind, source_annotation_id, source_annotation_key,
+                               target_kind, target_id
+                        FROM annotation_identity_assignments
+                        WHERE (source_kind, source_annotation_key) IN ({placeholders})
+                        """,
+                        tuple(value for ref in chunk for value in ref),
+                    ).fetchall()
+                )
+        assignments = {}
+        for row in rows:
+            ref = (str(row["source_kind"]), str(row["source_annotation_id"]))
+            target = (str(row["target_kind"]), str(row["target_id"]))
+            if ref in requested:
+                assignments[ref] = target
+            for current_ref in refs_by_key.get(
+                (str(row["source_kind"]), str(row["source_annotation_key"])), ()
+            ):
+                assignments[current_ref] = target
+        return assignments
 
     def get_annotation_identity_assignments_for_targets(
         self, targets: Iterable[tuple[str, str]]
@@ -1868,20 +1923,109 @@ class FaceStateRepository:
                 rows.extend(
                     conn.execute(
                         f"""
-                        SELECT source_kind, source_annotation_id, target_kind, target_id
+                        SELECT source_kind, source_annotation_id, source_annotation_key,
+                               target_kind, target_id
                         FROM annotation_identity_assignments
                         WHERE (target_kind, target_id) IN ({placeholders})
                         """,
                         parameters,
                     ).fetchall()
                 )
-        return {
-            (str(row["source_kind"]), str(row["source_annotation_id"])): (
-                str(row["target_kind"]),
-                str(row["target_id"]),
+        refs_by_key: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for kind in ("person", "pet"):
+            bindings = self._runtime_annotation_bindings(
+                kind,
+                annotation_keys=(
+                    str(row["source_annotation_key"])
+                    for row in rows
+                    if row["source_kind"] == kind and row["source_annotation_key"]
+                ),
             )
-            for row in rows
-        }
+            for annotation_id, stable_key in bindings.items():
+                refs_by_key.setdefault((kind, stable_key), []).append((kind, annotation_id))
+        assignments = {}
+        for row in rows:
+            kind = str(row["source_kind"])
+            refs = refs_by_key.get(
+                (kind, str(row["source_annotation_key"])),
+                ((kind, str(row["source_annotation_id"])),),
+            )
+            for ref in refs:
+                assignments[ref] = (str(row["target_kind"]), str(row["target_id"]))
+        return assignments
+
+    def annotation_identity_key(self, source_kind: str, annotation_id: str) -> str | None:
+        """Resolve an automatic detection's durable key; manual faces keep their ID."""
+
+        return self._runtime_annotation_bindings(
+            source_kind, annotation_ids=(annotation_id,)
+        ).get(annotation_id)
+
+    def backfill_annotation_identity_keys(self, source_kind: str) -> None:
+        """Capture legacy UUID assignments before replacing their runtime snapshot."""
+
+        self.initialize()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT source_annotation_id FROM annotation_identity_assignments
+                WHERE source_kind = ? AND source_annotation_key IS NULL
+                """,
+                (source_kind,),
+            ).fetchall()
+            bindings = self._runtime_annotation_bindings(
+                source_kind,
+                annotation_ids=(str(row["source_annotation_id"]) for row in rows),
+            )
+            conn.executemany(
+                """
+                UPDATE annotation_identity_assignments SET source_annotation_key = ?
+                WHERE source_kind = ? AND source_annotation_id = ?
+                  AND source_annotation_key IS NULL
+                """,
+                [(key, source_kind, annotation_id) for annotation_id, key in bindings.items()],
+            )
+            conn.commit()
+
+    def _runtime_annotation_bindings(
+        self,
+        source_kind: str,
+        *,
+        annotation_ids: Iterable[str] = (),
+        annotation_keys: Iterable[str] = (),
+    ) -> dict[str, str]:
+        ids = tuple(dict.fromkeys(value for value in annotation_ids if value))
+        keys = tuple(dict.fromkeys(value for value in annotation_keys if value))
+        if not ids and not keys:
+            return {}
+        if source_kind == "person":
+            db_path = self._db_path.parent / "face_index.db"
+            table, id_column, key_column = "faces", "face_id", "face_key"
+        elif source_kind == "pet":
+            db_path = self._db_path.parent.parent / "pets" / "pet_index.db"
+            table, id_column, key_column = "pet_detections", "detection_id", "pet_key"
+        else:
+            return {}
+        if not db_path.exists():
+            return {}
+        bindings = {}
+        with closing(connect_sqlite(db_path)) as conn:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+            ).fetchone() is None:
+                return {}
+            for column, values in ((id_column, ids), (key_column, keys)):
+                for start in range(0, len(values), 900):
+                    chunk = values[start : start + 900]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    for annotation_id, stable_key in conn.execute(
+                        f"SELECT {id_column}, {key_column} FROM {table} "
+                        f"WHERE {column} IN ({placeholders})",
+                        chunk,
+                    ):
+                        if stable_key:
+                            bindings[str(annotation_id)] = str(stable_key)
+        return bindings
 
     def remap_identity_redirect_targets(
         self,
@@ -2753,12 +2897,20 @@ class FaceStateRepository:
             CREATE TABLE IF NOT EXISTS annotation_identity_assignments (
                 source_kind TEXT NOT NULL,
                 source_annotation_id TEXT NOT NULL,
+                source_annotation_key TEXT,
                 target_kind TEXT NOT NULL,
                 target_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (source_kind, source_annotation_id)
             )
             """
+        )
+        FaceStateRepository._ensure_column(
+            conn, "annotation_identity_assignments", "source_annotation_key", "TEXT"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_annotation_identity_assignment_key "
+            "ON annotation_identity_assignments(source_kind, source_annotation_key)"
         )
         conn.execute(
             """

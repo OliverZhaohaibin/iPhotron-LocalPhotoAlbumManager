@@ -65,7 +65,11 @@ class FileSystemWatcherMixin:
         self._queue_watcher_scan_roots(scan_roots)
 
     def _queue_watcher_scan_roots(
-        self, scan_roots: list[Path], *, root_only: bool = False
+        self,
+        scan_roots: list[Path],
+        *,
+        root_only: bool = False,
+        rescan_after_active: bool = False,
     ) -> None:
         """Queue watcher-triggered scan scopes without collapsing album filters."""
 
@@ -83,6 +87,7 @@ class FileSystemWatcherMixin:
                 continue
             if (
                 not root_only
+                and not rescan_after_active
                 and active_root is not None
                 and self._paths_equal(active_root, scan_root)
             ):
@@ -98,6 +103,8 @@ class FileSystemWatcherMixin:
             return
         if getattr(self, "_current_scanner_worker", None) is not None:
             return
+        if not self._root.is_dir():
+            return
 
         scan_service = getattr(self, "scan_service", None)
         if scan_service is None:
@@ -107,7 +114,9 @@ class FileSystemWatcherMixin:
 
         while self._watch_scan_queue:
             scan_root, root_only = self._watch_scan_queue.pop(0)
-            if not scan_root.exists() or not scan_root.is_dir():
+            if (
+                root_only or self._paths_equal(scan_root, self._root)
+            ) and not scan_root.is_dir():
                 continue
             try:
                 include, exclude = scan_service.scan_filters(scan_root)

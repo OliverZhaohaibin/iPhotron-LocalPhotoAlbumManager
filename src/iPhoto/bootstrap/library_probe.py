@@ -989,8 +989,9 @@ def _main(arguments: list[str]) -> int:
             "ok": False,
             "failure": failure.to_payload(),
         }
-    sys.stdout.write(json.dumps(envelope, ensure_ascii=False))
-    sys.stdout.flush()
+    # Windows pipes may use a legacy code page; the parent always reads UTF-8.
+    sys.stdout.buffer.write(json.dumps(envelope, ensure_ascii=False).encode("utf-8"))
+    sys.stdout.buffer.flush()
     return 0 if envelope["ok"] else 2
 
 

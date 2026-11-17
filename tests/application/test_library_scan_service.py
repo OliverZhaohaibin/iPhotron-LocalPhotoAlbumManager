@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import time
+from unittest.mock import patch
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 import iPhoto.bootstrap.library_scan_service as scan_service_module
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 
 
 class _Scanner:
@@ -83,6 +85,71 @@ def clean_global_repository():
     reset_global_repository()
     yield
     reset_global_repository()
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["missing", "replaced-by-file"])
+def test_missing_album_reconciliation_clears_peers_and_preserves_other_state(
+    tmp_path: Path, replacement: bool
+) -> None:
+    if replacement:
+        (tmp_path / "Gone").write_bytes(b"an album is now a file")
+    trash_rel = f"{RECENTLY_DELETED_DIR_NAME}/kept.jpg"
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "Gone/motion.mov", "id": "motion", "live_role": 1,
+         "live_partner_rel": "photo.jpg"},
+        {"rel": "photo.jpg", "id": "still", "live_partner_rel": "Gone/motion.mov",
+         "is_favorite": True},
+        {"rel": trash_rel, "id": "trashed", "is_deleted": True,
+         "original_rel_path": "Original/kept.jpg", "is_favorite": True},
+    ])
+    trashed = store.get_rows_by_rels([trash_rel])
+
+    assert LibraryScanService(tmp_path).reconcile_missing_album_scope(tmp_path / "Gone")
+
+    rows = store.get_rows_by_rels(["Gone/motion.mov", "photo.jpg"])
+    assert set(rows) == {"photo.jpg"}
+    assert rows["photo.jpg"]["live_partner_rel"] is None
+    assert rows["photo.jpg"]["is_favorite"]
+    assert store.get_rows_by_rels([trash_rel]) == trashed
+
+
+@pytest.mark.parametrize("change", ["recreated", "inaccessible", "cancelled", "disconnected"])
+def test_missing_album_reconciliation_rechecks_before_removing_rows(
+    tmp_path: Path, change: str
+) -> None:
+    album = tmp_path / "Gone"
+    store = get_global_repository(tmp_path)
+    store.write_rows([{"rel": "Gone/photo.jpg", "id": "kept", "is_favorite": True}])
+    before = store.get_rows_by_rels(["Gone/photo.jpg"])
+    service = LibraryScanService(tmp_path)
+    real_stat = Path.stat
+    stat_calls = 0
+
+    def changed_stat(path: Path, *args, **kwargs):
+        nonlocal stat_calls
+        if change == "disconnected" and path == tmp_path and stat_calls > 1:
+            raise FileNotFoundError(2, "library disconnected during reconciliation", str(path))
+        if path == album:
+            stat_calls += 1
+            if stat_calls > 1:
+                if change == "inaccessible":
+                    raise PermissionError("temporarily inaccessible")
+                if change == "recreated":
+                    album.mkdir()
+        return real_stat(path, *args, **kwargs)
+
+    with patch.object(Path, "stat", changed_stat):
+        if change in {"inaccessible", "disconnected"}:
+            error = PermissionError if change == "inaccessible" else scan_service_module.AlbumNotFoundError
+            with pytest.raises(error):
+                service.reconcile_missing_album_scope(album)
+        else:
+            assert service.reconcile_missing_album_scope(
+                album, is_cancelled=lambda: change == "cancelled"
+            ) is (change == "cancelled")
+
+    assert store.get_rows_by_rels(["Gone/photo.jpg"]) == before
 
 
 def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:

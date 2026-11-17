@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from unicodedata import normalize
 from unittest.mock import Mock, patch
 
@@ -344,5 +346,114 @@ def test_root_watcher_scan_preserves_child_album_assets(qapp, tmp_path: Path) ->
         assert set(rows) == {"Custom/saved.tiff"}
         assert rows["Custom/saved.tiff"]["is_favorite"]
         assert not scan_service.is_scan_scope_complete(root)
+    finally:
+        controller.shutdown()
+
+
+@pytest.mark.parametrize("rename", [False, True], ids=["deleted", "renamed"])
+def test_background_snapshot_reconciles_disappeared_album_without_scanning_siblings(
+    qapp, tmp_path: Path, rename: bool
+) -> None:
+    root = tmp_path.resolve()
+    old_album = root / "Old"
+    nested = old_album / "Nested"
+    nested.mkdir(parents=True)
+    sibling = root / "Custom"
+    sibling.mkdir()
+    (sibling / ".iphoto.album.json").write_text(
+        '{"schema":"iPhoto/album@1","title":"Custom","filters":{"include":["**/*.tiff"]}}',
+        encoding="utf-8",
+    )
+    image = Image.new("RGB", (16, 16), "red")
+    image.save(old_album / "photo.jpg")
+    image.save(nested / "photo.jpg")
+    image.save(sibling / "kept.tiff")
+    image.save(sibling / "excluded.jpg")
+    controller = LibraryRuntimeController()
+    worker = _LibraryWatchWorker()
+    worker._watcher = _FakeWatcher()  # type: ignore[assignment]
+    worker._batch_timer = _FakeTimer()  # type: ignore[assignment]
+    worker._poll_timer = _FakeTimer()  # type: ignore[assignment]
+    try:
+        controller.bind_path(root)
+        repository = get_global_repository(root)
+        repository.write_rows([
+            {"rel": rel, "id": rel, "is_favorite": True,
+             "thumbnail_state": "ready", "thumb_cache_key": rel}
+            for rel in ("Old/photo.jpg", "Old/Nested/photo.jpg", "Custom/kept.tiff")
+        ])
+        preserved = repository.get_rows_by_rels(["Custom/kept.tiff"])
+        controller._background_watch_generation = 1
+        worker.resultReady.connect(controller._on_background_watch_result)
+        worker.configure(LibraryWatchRequest(1, root, (root, old_album, nested, sibling), False))
+        if rename:
+            old_album.rename(root / "New")
+        else:
+            shutil.rmtree(old_album)
+
+        with (
+            patch.object(controller._scan_thread_pool, "start", side_effect=lambda task: task.run()),
+            patch.object(controller, "start_scanning", wraps=controller.start_scanning) as scans,
+            patch.object(repository, "read_all", wraps=repository.read_all) as read_all,
+        ):
+            worker._on_directory_changed(str(root))
+
+        assert not old_album.exists()
+        assert not repository.get_rows_by_rels(["Old/photo.jpg", "Old/Nested/photo.jpg"])
+        assert repository.get_rows_by_rels(["Custom/kept.tiff"]) == preserved
+        assert not repository.get_rows_by_rels(["Custom/excluded.jpg"])
+        assert all(call.args[0] != root for call in scans.call_args_list)
+        assert sum(call.args[0] == old_album for call in scans.call_args_list) == 1
+        # A renamed destination may use the existing scan snapshot helper; the
+        # missing old scope itself never requires a whole-library read.
+        if not rename:
+            read_all.assert_not_called()
+        if rename:
+            expected = {"New/photo.jpg", "New/Nested/photo.jpg"}
+            assert set(repository.get_rows_by_rels(expected)) == expected
+    finally:
+        controller.shutdown()
+
+
+def test_removed_album_reconciliation_waits_for_its_active_scan(qapp, tmp_path: Path) -> None:
+    album = tmp_path / "Removed"
+    album.mkdir()
+    controller = LibraryRuntimeController()
+    try:
+        controller.bind_path(tmp_path)
+        repository = get_global_repository(tmp_path)
+        repository.write_rows([{"rel": "Removed/photo.jpg", "id": "old"}])
+        controller._background_watch_generation = 1
+        active_worker = SimpleNamespace(cancelled=False, failed=True, root_only=False)
+        controller._current_scanner_worker = active_worker
+        controller._live_scan_root = album
+        album.rmdir()
+
+        with patch.object(controller._scan_thread_pool, "start", side_effect=lambda task: task.run()):
+            controller._on_background_watch_result(LibraryWatchResult(1, (tmp_path,), ()))
+            assert controller._watch_scan_queue == [(album, False)]
+            assert repository.get_rows_by_rels(["Removed/photo.jpg"])
+            # A scan whose directory vanished may fail before finalization.
+            controller._on_scan_finished(active_worker, album, [])
+
+        assert not repository.get_rows_by_rels(["Removed/photo.jpg"])
+        assert not album.exists()
+    finally:
+        controller.shutdown()
+
+
+@pytest.mark.parametrize("root_only", [False, True])
+def test_queued_root_scan_does_not_recreate_an_unavailable_library(
+    qapp, tmp_path: Path, root_only: bool
+) -> None:
+    root = tmp_path / "Disconnected"
+    controller = LibraryRuntimeController()
+    try:
+        controller._root = root
+        controller._watch_scan_queue = [(root, root_only)]
+        with patch.object(controller, "start_scanning") as scans:
+            controller._start_next_watcher_scan()
+        scans.assert_not_called()
+        assert not root.exists()
     finally:
         controller.shutdown()

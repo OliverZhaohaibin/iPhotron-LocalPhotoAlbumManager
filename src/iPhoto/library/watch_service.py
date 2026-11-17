@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import mimetypes
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,10 +20,13 @@ from PySide6.QtCore import (
 from ..config import (
     ALBUM_MANIFEST_NAMES,
     ALL_WORK_DIR_NAMES,
+    DEFAULT_EXCLUDE,
     EXPORT_DIR_NAME,
     RECENTLY_DELETED_DIR_NAME,
 )
+from ..media_classifier import classify_media
 from ..utils.jsonio import read_json
+from ..utils.pathutils import is_excluded
 from .tree import AlbumNode
 
 
@@ -45,6 +50,7 @@ class LibraryWatchResult:
     changed_paths: tuple[Path, ...]
     albums: tuple[AlbumNode, ...]
     warning: str | None = None
+    root_media_changed: bool = False
 
 
 def _describe_album(path: Path) -> tuple[str, bool]:
@@ -61,9 +67,8 @@ def _describe_album(path: Path) -> tuple[str, bool]:
     return path.name, marker.exists()
 
 
-def _tree_snapshot(root: Path) -> tuple[AlbumNode, ...]:
+def _tree_snapshot(entries: list[Path]) -> tuple[AlbumNode, ...]:
     nodes: list[AlbumNode] = []
-    entries = sorted(root.iterdir(), key=lambda item: item.name.casefold())
     for entry in entries:
         if not entry.is_dir() or entry.name.casefold() in _RESERVED_NAMES:
             continue
@@ -78,6 +83,27 @@ def _tree_snapshot(root: Path) -> tuple[AlbumNode, ...]:
     return tuple(nodes)
 
 
+def _root_media_signature(
+    root: Path, entries: list[Path]
+) -> dict[str, tuple[int, int, int]]:
+    """Track direct media independently of internal directory writes."""
+
+    signature: dict[str, tuple[int, int, int]] = {}
+    for entry in entries:
+        mime, _ = mimetypes.guess_type(entry.name)
+        if not any(classify_media({"rel": entry, "mime": mime})):
+            continue
+        if is_excluded(entry, DEFAULT_EXCLUDE, root=root):
+            continue
+        try:
+            info = entry.stat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            signature[entry.name] = (info.st_ino, info.st_size, info.st_mtime_ns)
+    return signature
+
+
 class _LibraryWatchWorker(QObject):
     resultReady = Signal(object)
 
@@ -89,6 +115,7 @@ class _LibraryWatchWorker(QObject):
         self._request: LibraryWatchRequest | None = None
         self._pending_adds: list[str] = []
         self._poll_signature: tuple[tuple[str, int, int], ...] | None = None
+        self._root_media: dict[str, tuple[int, int, int]] | None = None
 
     @Slot()
     def initialize(self) -> None:
@@ -108,6 +135,7 @@ class _LibraryWatchWorker(QObject):
         self._request = request
         self._pending_adds.clear()
         self._poll_signature = None
+        self._root_media = None
         if self._batch_timer is not None:
             self._batch_timer.stop()
         if self._poll_timer is not None:
@@ -177,8 +205,16 @@ class _LibraryWatchWorker(QObject):
         request = self._request
         if request is None:
             return
+        root_media_changed = False
         try:
-            albums = _tree_snapshot(request.root)
+            entries = sorted(request.root.iterdir(), key=lambda item: item.name.casefold())
+            albums = _tree_snapshot(entries)
+            if self._root_media is None or request.root in changed_paths:
+                root_media = _root_media_signature(request.root, entries)
+                root_media_changed = (
+                    self._root_media is not None and root_media != self._root_media
+                )
+                self._root_media = root_media
             warning = None
         except OSError as exc:
             albums = ()
@@ -187,7 +223,9 @@ class _LibraryWatchWorker(QObject):
         if current is None or current.generation != request.generation:
             return
         self.resultReady.emit(
-            LibraryWatchResult(request.generation, changed_paths, albums, warning)
+            LibraryWatchResult(
+                request.generation, changed_paths, albums, warning, root_media_changed
+            )
         )
         desired = (request.root, *(node.path for node in albums))
         if warning is None and desired != request.paths:

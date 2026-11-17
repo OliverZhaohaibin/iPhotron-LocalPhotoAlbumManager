@@ -35,7 +35,7 @@ from ...infrastructure.services.performance_events import (
 from ...people.status import normalize_face_status
 from ...pets.status import normalize_pet_status
 from ...utils.logging import get_logger
-from ...utils.pathutils import ensure_work_dir
+from ...utils.pathutils import LibraryAssetPathError, ensure_work_dir, resolve_library_asset_path
 from .engine import DatabaseManager
 from .migrations import SchemaMigrator
 from .queries import QueryBuilder
@@ -307,11 +307,27 @@ class AssetRepository:
                             existing_rows_by_rel[str(rel_value)] = d
                 conn.row_factory = None
 
-            merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)
+            merged_rows = merge_scan_rows_payload(
+                materialized_rows,
+                existing_rows_by_rel,
+                is_current_thumbnail_revision=self._is_current_thumbnail_revision,
+            )
             self._insert_rows(conn, merged_rows)
 
         self._clear_collection_anchor_cache()
         return merged_rows
+
+    def _is_current_thumbnail_revision(self, rel: str, expected: str) -> bool:
+        from ...infrastructure.services.thumbnail_artifact import thumbnail_revision
+
+        try:
+            resolve_library_asset_path(self.library_root, rel)
+        except (LibraryAssetPathError, OSError, RuntimeError):
+            return False
+        # Keep the lexical path used by the scanner in the revision digest.
+        # The write transaction also orders this check before any later edit
+        # that has saved its sidecar and is waiting to mark the row stale.
+        return thumbnail_revision(self.library_root / rel) == expected
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""

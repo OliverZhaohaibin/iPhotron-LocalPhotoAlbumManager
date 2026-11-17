@@ -64,7 +64,9 @@ class FileSystemWatcherMixin:
         scan_roots = self._dedupe_watch_scan_roots(paths)
         self._queue_watcher_scan_roots(scan_roots)
 
-    def _queue_watcher_scan_roots(self, scan_roots: list[Path]) -> None:
+    def _queue_watcher_scan_roots(
+        self, scan_roots: list[Path], *, requeue_active: bool = False
+    ) -> None:
         """Queue watcher-triggered scan scopes without collapsing album filters."""
 
         if not scan_roots:
@@ -79,7 +81,11 @@ class FileSystemWatcherMixin:
             key = self._watch_scan_key(scan_root)
             if key in queued:
                 continue
-            if active_root is not None and self._paths_equal(active_root, scan_root):
+            if (
+                not requeue_active
+                and active_root is not None
+                and self._paths_equal(active_root, scan_root)
+            ):
                 continue
             self._watch_scan_queue.append(scan_root)
             queued.add(key)

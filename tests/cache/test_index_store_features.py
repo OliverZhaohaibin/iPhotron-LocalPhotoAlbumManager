@@ -15,6 +15,7 @@ from iPhoto.domain.models.query import (
     PageCursor,
     SortDirection,
 )
+from iPhoto.infrastructure.services.thumbnail_artifact import thumbnail_revision
 
 
 @pytest.fixture
@@ -1009,3 +1010,56 @@ def test_scan_merge_preserves_newer_stale_thumbnail_revision(store: IndexStore) 
     persisted = store.get_rows_by_rels(["edited.jpg"])["edited.jpg"]
     assert persisted["thumbnail_state"] == "stale"
     assert persisted["thumb_revision"] == "revision-2"
+
+
+def test_late_scan_keeps_ready_thumbnail_for_committed_edit(store: IndexStore) -> None:
+    source = store.library_root / "photo.jpg"
+    source.write_bytes(b"source")
+    old_scan = {
+        "rel": source.name,
+        "thumbnail_state": "ready",
+        "thumb_cache_key": "stable-key",
+        "thumb_revision": thumbnail_revision(source),
+        "micro_thumbnail": b"original",
+    }
+    store.write_rows([old_scan])
+
+    source.with_suffix(".ipo").write_bytes(b"edited")
+    edit_revision = thumbnail_revision(source)
+    assert store.mark_thumbnail_stale(source.name, desired_revision=edit_revision)
+    assert store.update_thumbnail_ready(
+        source.name,
+        expected_revision=edit_revision,
+        thumb_cache_key="stable-key",
+        micro_thumbnail=b"edited",
+    )
+
+    [merged] = store.merge_scan_rows([old_scan])
+    assert merged["thumb_revision"] == edit_revision
+    assert merged["micro_thumbnail"] == b"edited"
+
+
+def test_scan_accepts_replaced_source_while_edit_thumbnail_is_stale(store: IndexStore) -> None:
+    source = store.library_root / "photo.jpg"
+    source.write_bytes(b"source")
+    original_revision = thumbnail_revision(source)
+    store.write_rows([{
+        "rel": source.name,
+        "thumbnail_state": "stale",
+        "thumb_cache_key": "stable-key",
+        "thumb_revision": original_revision,
+    }])
+
+    source.write_bytes(b"replacement source")
+    replacement_revision = thumbnail_revision(source)
+    [merged] = store.merge_scan_rows([{
+        "rel": source.name,
+        "thumbnail_state": "ready",
+        "thumb_cache_key": "stable-key",
+        "thumb_revision": replacement_revision,
+        "micro_thumbnail": b"replacement thumbnail",
+    }])
+
+    assert replacement_revision != original_revision
+    assert merged["thumb_revision"] == replacement_revision
+    assert merged["thumbnail_state"] == "ready"

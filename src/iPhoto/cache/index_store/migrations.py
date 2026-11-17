@@ -10,7 +10,7 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -587,7 +587,11 @@ class SchemaMigrator:
         SchemaMigrator._create_indexes(conn)
 
     @staticmethod
-    def prepare_database(database_path: Path) -> tuple[int, tuple[str, ...]]:
+    def prepare_database(
+        database_path: Path,
+        *,
+        on_migration_started: Callable[[], None] | None = None,
+    ) -> tuple[int, tuple[str, ...]]:
         """Recover an interrupted migration and synchronously prepare the schema."""
 
         database_path = Path(database_path)
@@ -608,6 +612,8 @@ class SchemaMigrator:
                 raise SchemaPreparationError(
                     "migration_recovery_failed", "Migration state targets another database"
                 )
+            if on_migration_started is not None:
+                on_migration_started()
             backup_path = database_path.parent / state.backup_name
             current_ok = _integrity_ok(database_path)
             current_version = -1
@@ -662,6 +668,14 @@ class SchemaMigrator:
             raise SchemaPreparationError(
                 "future_schema", "Library index uses a newer schema version"
             )
+
+        if (
+            state is None
+            and existed
+            and source_version < CURRENT_SCHEMA_VERSION
+            and on_migration_started is not None
+        ):
+            on_migration_started()
 
         if can_adopt_v1:
             try:

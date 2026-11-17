@@ -385,10 +385,8 @@ class LibraryRuntimeController(
             self._geotagged_assets_cache = None
             self._geotagged_assets_cache_root = None
             self.treeUpdated.emit()
-        # Root watcher events include internal links/index maintenance.  Never
-        # turn an unchanged root snapshot into a self-sustaining rescan loop;
-        # new albums are still scanned, while direct-root changes remain an
-        # explicit/manual refresh scope.
+        if result.root_media_changed:
+            self._queue_watcher_scan_roots([self._root], requeue_active=True)
         changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
         self._start_watcher_scans(changed)

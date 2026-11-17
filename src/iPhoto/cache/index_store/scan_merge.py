@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from ...people import (
@@ -41,11 +41,17 @@ _THUMBNAIL_STATE_FIELDS = (
 def merge_scan_rows(
     scanned_rows: Iterable[dict[str, Any]],
     existing_rows_by_rel: Mapping[str, dict[str, Any]],
+    *,
+    is_current_thumbnail_revision: Callable[[str, str], bool],
 ) -> list[dict[str, Any]]:
     """Merge freshly scanned rows with persisted library-managed state."""
 
     return [
-        merge_scan_row(row, existing_rows_by_rel.get(str(row.get("rel") or "")))
+        merge_scan_row(
+            row,
+            existing_rows_by_rel.get(str(row.get("rel") or "")),
+            is_current_thumbnail_revision=is_current_thumbnail_revision,
+        )
         for row in scanned_rows
     ]
 
@@ -53,6 +59,8 @@ def merge_scan_rows(
 def merge_scan_row(
     scanned_row: dict[str, Any],
     existing_row: dict[str, Any] | None,
+    *,
+    is_current_thumbnail_revision: Callable[[str, str], bool],
 ) -> dict[str, Any]:
     """Merge one scanned row with an existing persisted row."""
 
@@ -63,7 +71,9 @@ def merge_scan_row(
             if field in existing_row and (field not in merged or merged.get(field) in (None, "")):
                 merged[field] = existing_row.get(field)
         _preserve_location_state(merged, existing_row)
-        _preserve_newer_thumbnail_revision(merged, existing_row)
+        _preserve_current_thumbnail_revision(
+            merged, existing_row, is_current_thumbnail_revision
+        )
 
     identity_unchanged = (
         existing_row is not None and _asset_identity_unchanged(existing_row, merged)
@@ -105,19 +115,18 @@ def merge_scan_row(
     return merged
 
 
-def _preserve_newer_thumbnail_revision(
+def _preserve_current_thumbnail_revision(
     merged: dict[str, Any],
     existing_row: dict[str, Any],
+    is_current_thumbnail_revision: Callable[[str, str], bool],
 ) -> None:
-    """Reject scan thumbnail state superseded by a newer edit revision."""
+    """Resolve conflicting versions against the current render inputs."""
 
     existing_revision = str(existing_row.get("thumb_revision") or "").strip()
     incoming_revision = str(merged.get("thumb_revision") or "").strip()
-    if (
-        existing_row.get("thumbnail_state") != "stale"
-        or not existing_revision
-        or existing_revision == incoming_revision
-    ):
+    if not existing_revision or existing_revision == incoming_revision:
+        return
+    if incoming_revision and is_current_thumbnail_revision(merged["rel"], incoming_revision):
         return
     for field in _THUMBNAIL_STATE_FIELDS:
         if field in existing_row:

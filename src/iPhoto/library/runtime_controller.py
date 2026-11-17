@@ -26,6 +26,7 @@ from PySide6.QtCore import (
     Signal,
 )
 
+from ..application.ports.recognition_extension import RecognitionKind, RecognitionModelFailure
 from ..errors import LibraryUnavailableError
 from ..utils.logging import get_logger
 
@@ -95,6 +96,7 @@ class LibraryRuntimeController(
     petIndexUpdated = Signal()
     petSnapshotCommitted = Signal(object)
     petScanStatusChanged = Signal(str)
+    recognitionModelUnavailable = Signal(object)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -131,7 +133,7 @@ class LibraryRuntimeController(
         self._scan_thread_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
-        self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool]] = []
+        self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool, bool]] = []
         self._scan_buffer_lock = QMutex()
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
@@ -142,6 +144,8 @@ class LibraryRuntimeController(
         self._recognition_services_root: Path | None = None
         self._recognition_scans_root: Path | None = None
         self._recognition_generation = 0
+        self._recognition_model_revision = 0
+        self._recognition_blocked_models: dict[RecognitionKind, int] = {}
         self._delivered_recognition_event_ids: set[str] = set()
         self._retiring_recognition_workers: set[QThread] = set()
         self._library_session: "LibrarySession | None" = None
@@ -593,7 +597,7 @@ class LibraryRuntimeController(
         self._recognition_services_root = root
         if root != self._recognition_scans_root:
             self._recognition_scans_root = None
-        if root is not None and pet_service is not None:
+        if root is not None and root == self._recognition_scans_root and pet_service is not None:
             from ..pets.pipeline import PET_DETECTOR_PIPELINE_VERSION
 
             repository = pet_service.repository()
@@ -669,6 +673,22 @@ class LibraryRuntimeController(
         self.bind_pet_service(self._pet_service)
         if self._start_ai_scan_workers(root, startup=True):
             self._recognition_scans_root = root
+
+    def recognition_model_failure_is_current(self, failure: RecognitionModelFailure) -> bool:
+        return (
+            failure.library_root == self._root == self._recognition_scans_root
+            and failure.generation == self._recognition_generation
+            and (
+                failure.reason == "invalid_override"
+                or self._recognition_blocked_models.get(failure.kind)
+                == self._recognition_model_revision
+            )
+        )
+
+    def recognition_extension_installed(self) -> None:
+        """Resume workers paused on models after the verified package is committed."""
+        self._recognition_model_revision += 1
+        self._resume_recognition_model_workers()
 
     def activate_recognition_services(
         self,

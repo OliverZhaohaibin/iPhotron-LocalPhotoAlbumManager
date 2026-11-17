@@ -16,6 +16,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ...settings.manager import SettingsManager
     from ...bootstrap.library_session import LibrarySession
     from ..services.map_extension_service import MapExtensionService
+    from ..services.recognition_extension_service import RecognitionExtensionService
 
 
 @runtime_checkable
@@ -36,6 +37,9 @@ class RuntimeEntryContract(Protocol):
 
     @property
     def map_extensions(self) -> "MapExtensionService": ...
+
+    @property
+    def recognition_extensions(self) -> "RecognitionExtensionService": ...
 
     def open_library(self, root: Path) -> "LibrarySession":
         """Bind and return the active library session."""

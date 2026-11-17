@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.domain.models.core import MediaType
 from iPhoto.people.index_coordinator import PeopleSnapshotEvent, reset_people_index_coordinators
@@ -970,3 +970,14 @@ def test_rescan_current_uses_async_scan_for_open_album(tmp_path: Path) -> None:
 
     facade.rescan_current_async.assert_called_once_with()
     facade.scan_root_async.assert_not_called()
+
+
+def test_rescan_current_retries_recognition_for_library_root(tmp_path: Path) -> None:
+    vm, _store, _context, facade, _asset_service = _make_vm(library_root=tmp_path)
+    facade.current_album = None
+
+    vm.rescan_current()
+
+    facade.scan_root_async.assert_called_once_with(
+        tmp_path, include=DEFAULT_INCLUDE, exclude=DEFAULT_EXCLUDE, retry_recognition=True
+    )

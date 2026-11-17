@@ -38,16 +38,40 @@ Install the optional runtime with:
 pip install -e ".[pets-ai]"
 ```
 
-The extra provides `onnxruntime`, `torch`, `torchvision`, `usearch`, and
-`certifi`. Model lookup follows this order:
+The extra provides `onnxruntime`, `torch`, `torchvision`, and `usearch`.
+Model lookup follows this order:
 
 ```text
 IPHOTO_PET_MODEL_DIR override
+-> installed People & Pets extension
 -> platform user cache
 -> optional bundled extension/models/pets fallback
 ```
 
-The writable platform user cache is:
+Install the combined model package from **Settings → Download People & Pets
+Extension…**. The app can download it directly, open the browser, or import the
+official ZIP offline through **Install from File…**. The installer checks the
+Release archive and its contents before publishing the model directories for
+both workers. The ZIP includes the DINOv2 metadata alongside the TorchScript
+file. [Official People & Pets ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/pet-models-v1/iphotron-recognition-models-v1.zip)
+
+The combined extension is installed into:
+
+```text
+macOS:  ~/Library/Application Support/iPhoto/extensions/recognition/v1/models
+Windows: %LOCALAPPDATA%/iPhoto/extensions/recognition/v1/models
+Linux:  ${XDG_DATA_HOME:-~/.local/share}/iPhoto/extensions/recognition/v1/models
+```
+
+People reads `buffalo_s/` from that directory and Pets reads `pets/`. The
+`IPHOTO_FACE_MODEL_DIR` and `IPHOTO_PET_MODEL_DIR` overrides take precedence.
+Existing Face caches and bundled models remain readable. When a worker with
+pending work first finds a missing model, the desktop silently attempts to
+download and install the official GitHub Release ZIP once. That install
+provisions both People and Pets, even when only one worker reports a missing
+model. Manual downloads use the same ZIP and installer.
+
+Existing Pets caches are still discovered at:
 
 ```text
 macOS:  ~/Library/Caches/iPhoto/models/pets
@@ -62,24 +86,24 @@ fallback with this layout:
 ```text
 extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
-└── embedding/dinov2_vits14/dinov2_vits14.pt
+└── embedding/dinov2_vits14/
+    ├── dinov2_vits14.pt
+    └── dinov2_vits14.pt.metadata.json
 ```
 
-The YOLOX detector can be downloaded over HTTPS into the writable cache unless
-`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`. Its default URL is the upstream YOLOX
-release and can be overridden with `IPHOTO_PET_DETECTOR_MODEL_URL`; the download
-is hash- and size-validated. Production does not execute Torch Hub. DINOv2 must
-be supplied as the verified TorchScript artifact declared in
-`iPhoto/pets/model_manifest.json`: `torchscript_url` is currently `null`, so the
-tracked production manifest cannot download it. A release, operator,
-or `IPHOTO_PET_MODEL_DIR` override must provision the artifact with the exact
-declared SHA-256 and byte size. `IPHOTO_PET_SCAN_DISABLED=1` disables the worker
-without disabling the rest of the application.
+Desktop workers load local models. InsightFace uses local ONNX sessions, and
+the Pets worker obtains model files through the shared extension installation.
+DINOv2 stays bound to the size, checksum, and metadata declared in
+`iPhoto/pets/model_manifest.json`. The manifest's `torchscript_url` is currently `null`.
+The People & Pets ZIP supplies the verified TorchScript file and its metadata.
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`
+suppresses silent installation triggered by the Pets worker. The combined
+package installs both model sets whenever installed through People or Settings.
+`IPHOTO_PET_SCAN_DISABLED=1` disables the Pet worker.
 
 Offline packages that promise out-of-box Pets support must include the Python
 AI runtime and both model files under `extension/models/pets`. Other packages
-may rely on an operator-managed override, but cannot claim Pets is immediately
-available while DINOv2 is absent. A build that omits the runtime or models must
+can provision models through the extension or a user-managed directory. A build that omits the runtime or models must
 preserve graceful degradation: core browsing, People, Maps, editing, and
 library state remain usable.
 
@@ -168,9 +192,10 @@ controller/test integration surface; it must not be presented as automatic
 desktop startup behavior.
 
 The Pet worker uses small batches and queue top-up from the asset repository.
-Missing dependencies/models are runtime-availability failures: pending rows are
-left intact so installing the optional runtime can resume without rebuilding
-the library index.
+Missing dependencies and models pause recognition while preserving pending
+rows. A failed silent installation produces one browser and file installation
+prompt per app run. A successful install resumes the affected
+worker for the active library after that worker exits.
 
 ## Persistence And Mutation Safety
 

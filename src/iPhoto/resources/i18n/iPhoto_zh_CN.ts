@@ -297,6 +297,10 @@
             <source>Dismiss</source>
             <translation>关闭</translation>
         </message>
+        <message>
+            <source>Download People &amp; Pets Extension…</source>
+            <translation>下载 People &amp; Pets 扩展…</translation>
+        </message>
     </context>
     <context>
         <name>MapExtension</name>
@@ -491,6 +495,22 @@
         <message>
             <source>Manual map extension installation is not available on this platform.</source>
             <translation>此平台不支持手动安装地图扩展。</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
+        </message>
+        <message>
+            <source>Details</source>
+            <translation>详细信息</translation>
+        </message>
+        <message>
+            <source>Restart</source>
+            <translation>重启</translation>
         </message>
     </context>
     <context>
@@ -2078,6 +2098,112 @@ Select a tile directory to switch back to the legacy backend.</source>
         <message>
             <source>Unconfirmed</source>
             <translation>未确认</translation>
+        </message>
+    </context>
+    <context>
+        <name>RecognitionExtension</name>
+        <message>
+            <source>People &amp; Pets Extension</source>
+            <translation>People &amp; Pets 扩展</translation>
+        </message>
+        <message>
+            <source>Choose how to install the People &amp; Pets extension.</source>
+            <translation>请选择 People &amp; Pets 扩展的安装方式。</translation>
+        </message>
+        <message>
+            <source>Download</source>
+            <translation>下载</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>在浏览器中下载</translation>
+        </message>
+        <message>
+            <source>Install from File…</source>
+            <translation>从文件安装…</translation>
+        </message>
+        <message>
+            <source>Later</source>
+            <translation>稍后</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Could not automatically get all People &amp; Pets recognition models. Download the package in your browser, then install it from a file.</source>
+            <translation>未能自动获取完整的 People &amp; Pets 识别模型。请在浏览器中下载安装包，然后从文件安装。</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>下载完成后，请选择安装包。</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>无法打开浏览器。请复制此链接下载安装包。</translation>
+        </message>
+        <message>
+            <source>Install People &amp; Pets Extension</source>
+            <translation>安装 People &amp; Pets 扩展</translation>
+        </message>
+        <message>
+            <source>Recognition extension archives (*.zip)</source>
+            <translation>识别扩展安装包 (*.zip)</translation>
+        </message>
+        <message>
+            <source>Preparing recognition extension…</source>
+            <translation>正在准备识别扩展…</translation>
+        </message>
+        <message>
+            <source>Downloading recognition extension…</source>
+            <translation>正在下载识别扩展…</translation>
+        </message>
+        <message>
+            <source>Validating recognition extension…</source>
+            <translation>正在验证识别扩展…</translation>
+        </message>
+        <message>
+            <source>Extracting recognition extension…</source>
+            <translation>正在解压识别扩展…</translation>
+        </message>
+        <message>
+            <source>Installing recognition extension…</source>
+            <translation>正在安装识别扩展…</translation>
+        </message>
+        <message>
+            <source>Could not download the People &amp; Pets extension. Download it in your browser and install it from a file.</source>
+            <translation>无法下载 People &amp; Pets 扩展。请在浏览器中下载，然后从文件安装。</translation>
+        </message>
+        <message>
+            <source>The selected archive is missing, damaged, or unsupported.</source>
+            <translation>所选安装包不存在、已损坏或不受支持。</translation>
+        </message>
+        <message>
+            <source>Another People &amp; Pets extension installation is running.</source>
+            <translation>另一项 People &amp; Pets 扩展安装正在进行。</translation>
+        </message>
+        <message>
+            <source>Could not install the People &amp; Pets extension.</source>
+            <translation>无法安装 People &amp; Pets 扩展。</translation>
+        </message>
+        <message>
+            <source>Face scanning unavailable: '{path}' is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>无法扫描人脸：“{path}”中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
+        </message>
+        <message>
+            <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>IPHOTO_FACE_MODEL_DIR 指定的目录中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
+        </message>
+    </context>
+    <context>
+        <name>NotificationToast</name>
+        <message>
+            <source>Installed</source>
+            <translation>已安装</translation>
         </message>
     </context>
 </TS>

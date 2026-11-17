@@ -132,7 +132,7 @@ def test_facade_open_album_aborts_when_preparation_fails(tmp_path: Path) -> None
     assert load_finished == []
 
 
-def test_facade_rescan_current_async_keeps_public_forwarding_shape(
+def test_facade_rescan_current_async_requests_recognition_retry(
     tmp_path: Path,
 ) -> None:
     album_root = tmp_path / "album"
@@ -142,17 +142,17 @@ def test_facade_rescan_current_async_keeps_public_forwarding_shape(
 
     class _FakeUpdateService:
         def __init__(self) -> None:
-            self.requested: list[Path] = []
+            self.requested: list[tuple[Path, bool]] = []
 
-        def rescan_album_async(self, album) -> None:
-            self.requested.append(album.root)
+        def rescan_album_async(self, album, *, retry_recognition: bool = False) -> None:
+            self.requested.append((album.root, retry_recognition))
 
     update_service = _FakeUpdateService()
     facade._inject_scan_dependencies_for_tests(library_update_service=update_service)
 
     facade.rescan_current_async()
 
-    assert update_service.requested == [album_root]
+    assert update_service.requested == [(album_root, True)]
 
 
 def test_facade_relays_scan_batch_failures_from_library_updates(

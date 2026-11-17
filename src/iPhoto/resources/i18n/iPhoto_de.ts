@@ -297,6 +297,10 @@
             <source>Dismiss</source>
             <translation>Schließen</translation>
         </message>
+        <message>
+            <source>Download People &amp; Pets Extension…</source>
+            <translation>People-&amp;-Pets-Erweiterung herunterladen…</translation>
+        </message>
     </context>
     <context>
         <name>MapExtension</name>
@@ -491,6 +495,22 @@
         <message>
             <source>Manual map extension installation is not available on this platform.</source>
             <translation>Auf dieser Plattform kann die Kartenerweiterung nicht manuell installiert werden.</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
+        </message>
+        <message>
+            <source>Details</source>
+            <translation>Details</translation>
+        </message>
+        <message>
+            <source>Restart</source>
+            <translation>Neu starten</translation>
         </message>
     </context>
     <context>
@@ -2078,6 +2098,112 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
         <message>
             <source>Unconfirmed</source>
             <translation>Unbestätigt</translation>
+        </message>
+    </context>
+    <context>
+        <name>RecognitionExtension</name>
+        <message>
+            <source>People &amp; Pets Extension</source>
+            <translation>People-&amp;-Pets-Erweiterung</translation>
+        </message>
+        <message>
+            <source>Choose how to install the People &amp; Pets extension.</source>
+            <translation>Wählen Sie, wie die People-&amp;-Pets-Erweiterung installiert werden soll.</translation>
+        </message>
+        <message>
+            <source>Download</source>
+            <translation>Herunterladen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>Im Browser herunterladen</translation>
+        </message>
+        <message>
+            <source>Install from File…</source>
+            <translation>Aus Datei installieren…</translation>
+        </message>
+        <message>
+            <source>Later</source>
+            <translation>Später</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Could not automatically get all People &amp; Pets recognition models. Download the package in your browser, then install it from a file.</source>
+            <translation>Die Erkennungsmodelle für People &amp; Pets konnten nicht vollständig automatisch heruntergeladen werden. Laden Sie das Paket im Browser herunter und installieren Sie es aus der Datei.</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>Wählen Sie das Archiv aus, sobald der Download abgeschlossen ist.</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>Der Browser konnte nicht geöffnet werden. Kopieren Sie diesen Link, um das Archiv herunterzuladen.</translation>
+        </message>
+        <message>
+            <source>Install People &amp; Pets Extension</source>
+            <translation>People-&amp;-Pets-Erweiterung installieren</translation>
+        </message>
+        <message>
+            <source>Recognition extension archives (*.zip)</source>
+            <translation>Archive der Erkennungserweiterung (*.zip)</translation>
+        </message>
+        <message>
+            <source>Preparing recognition extension…</source>
+            <translation>Erkennungserweiterung wird vorbereitet…</translation>
+        </message>
+        <message>
+            <source>Downloading recognition extension…</source>
+            <translation>Erkennungserweiterung wird heruntergeladen…</translation>
+        </message>
+        <message>
+            <source>Validating recognition extension…</source>
+            <translation>Erkennungserweiterung wird überprüft…</translation>
+        </message>
+        <message>
+            <source>Extracting recognition extension…</source>
+            <translation>Erkennungserweiterung wird entpackt…</translation>
+        </message>
+        <message>
+            <source>Installing recognition extension…</source>
+            <translation>Erkennungserweiterung wird installiert…</translation>
+        </message>
+        <message>
+            <source>Could not download the People &amp; Pets extension. Download it in your browser and install it from a file.</source>
+            <translation>Die People-&amp;-Pets-Erweiterung konnte nicht heruntergeladen werden. Laden Sie sie im Browser herunter und installieren Sie sie aus der Datei.</translation>
+        </message>
+        <message>
+            <source>The selected archive is missing, damaged, or unsupported.</source>
+            <translation>Das ausgewählte Archiv fehlt, ist beschädigt oder wird nicht unterstützt.</translation>
+        </message>
+        <message>
+            <source>Another People &amp; Pets extension installation is running.</source>
+            <translation>Die People-&amp;-Pets-Erweiterung wird bereits installiert.</translation>
+        </message>
+        <message>
+            <source>Could not install the People &amp; Pets extension.</source>
+            <translation>Die People-&amp;-Pets-Erweiterung konnte nicht installiert werden.</translation>
+        </message>
+        <message>
+            <source>Face scanning unavailable: '{path}' is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>Gesichtsscan nicht verfügbar: In „{path}“ fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
+        </message>
+        <message>
+            <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>Im Verzeichnis aus IPHOTO_FACE_MODEL_DIR fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
+        </message>
+    </context>
+    <context>
+        <name>NotificationToast</name>
+        <message>
+            <source>Installed</source>
+            <translation>Installiert</translation>
         </message>
     </context>
 </TS>

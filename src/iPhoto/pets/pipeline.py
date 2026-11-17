@@ -23,6 +23,7 @@ import numpy as np
 from PIL import Image
 
 from iPhoto.utils.pathutils import LibraryAssetPathError, resolve_library_asset_path
+from iPhoto.utils.recognition_model_paths import installed_recognition_model_roots
 
 from .errors import (
     PetInferenceError,
@@ -37,6 +38,7 @@ from .image_utils import (
     load_image_rgb,
     save_pet_thumbnail,
 )
+from .model_contract import PET_MODEL_MANIFEST, dinov2_metadata
 from .records import PetDetectionRecord, PetProfile, PetRecord
 from .repository_utils import (
     compute_cluster_center,
@@ -50,39 +52,6 @@ from .repository_utils import (
 from .state_repository import PetStateRepository
 
 
-def _load_pet_model_manifest() -> dict:
-    manifest_path = Path(__file__).with_name("model_manifest.json")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        detector = manifest["detector"]
-        embedder = manifest["embedder"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise PetPipelineInvariantError(f"Invalid Pets model manifest: {manifest_path}") from exc
-    if int(manifest.get("schema_version") or 0) != 1:
-        raise PetPipelineInvariantError(f"Unsupported Pets model manifest: {manifest_path}")
-    if urlparse(str(detector.get("url") or "")).scheme.lower() != "https":
-        raise PetPipelineInvariantError("Pets detector manifest URL must use HTTPS.")
-    if detector.get("input") != {
-        "layout": "NCHW",
-        "channel_order": "BGR",
-        "dtype": "float32",
-        "range": [0, 255],
-        "shape": [1, 3, 416, 416],
-    }:
-        raise PetPipelineInvariantError("Pets detector manifest input contract is invalid.")
-    if embedder.get("input_shape") != [1, 3, 224, 224]:
-        raise PetPipelineInvariantError("Pets embedder manifest input contract is invalid.")
-    torchscript_url = str(embedder.get("torchscript_url") or "").strip()
-    if torchscript_url and urlparse(torchscript_url).scheme.lower() != "https":
-        raise PetPipelineInvariantError("Pets embedder TorchScript URL must use HTTPS.")
-    if len(str(embedder.get("torchscript_sha256") or "")) != 64:
-        raise PetPipelineInvariantError("Pets embedder TorchScript SHA-256 is invalid.")
-    if int(embedder.get("torchscript_size") or 0) <= 0:
-        raise PetPipelineInvariantError("Pets embedder TorchScript size is invalid.")
-    return manifest
-
-
-PET_MODEL_MANIFEST = _load_pet_model_manifest()
 _DETECTOR_MANIFEST = PET_MODEL_MANIFEST["detector"]
 _EMBEDDER_MANIFEST = PET_MODEL_MANIFEST["embedder"]
 SUPPORTED_DEFAULT_SPECIES = frozenset({"cat", "dog"})
@@ -110,9 +79,6 @@ PET_DETECTOR_MODEL_URL_ENV = "IPHOTO_PET_DETECTOR_MODEL_URL"
 PET_DETECTOR_MODEL_SHA256_ENV = "IPHOTO_PET_DETECTOR_MODEL_SHA256"
 DEFAULT_PET_DETECTOR_MODEL_SHA256 = str(_DETECTOR_MANIFEST["sha256"])
 DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES = int(_DETECTOR_MANIFEST["max_bytes"])
-# The development conversion tool uses this immutable source revision. The
-# production runtime only loads the fixed, hash-verified TorchScript artifact.
-_DINO_SOURCE_REVISION = str(_EMBEDDER_MANIFEST["source_revision"])
 _DOWNLOAD_TIMEOUT_SECONDS = 60
 _DOWNLOAD_CHUNK_SIZE = 1024 * 256
 _YOLOX_STRIDES = (8, 16, 32)
@@ -206,7 +172,7 @@ class PetClusterPipeline:
         model_root: Path,
         detector_model_name: str = "yolox_nano_coco.onnx",
         embedding_model_name: str = "dinov2_vits14",
-        allow_model_download: bool | None = None,
+        allow_model_download: bool = False,
         distance_threshold: float = DEFAULT_PET_DISTANCE_THRESHOLD,
         min_pet_size: int = 48,
         supported_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
@@ -219,11 +185,7 @@ class PetClusterPipeline:
         self._model_root = Path(model_root)
         self._detector_model_name = detector_model_name
         self._embedding_model_name = embedding_model_name
-        self._allow_model_download = (
-            pet_model_auto_download_enabled()
-            if allow_model_download is None
-            else bool(allow_model_download)
-        )
+        self._allow_model_download = allow_model_download
         self._distance_threshold = float(distance_threshold)
         self._min_pet_size = int(min_pet_size)
         self._supported_species = frozenset(supported_species)
@@ -1292,14 +1254,18 @@ class _DinoV2Embedder:
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model_path = self._model_dir / f"{model_name}.pt"
         if model_path.is_file():
-            _validate_dinov2_cache_metadata(model_path, model_name=model_name)
+            try:
+                _validate_dinov2_cache_metadata(model_path, model_name=model_name)
+            except (OSError, RuntimeError) as exc:
+                raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
             self._model = torch.jit.load(str(model_path), map_location=self._device)
         elif allow_model_download:
             self._model = self._download_dinov2_model(model_path)
         else:
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: missing DINOv2 TorchScript model at "
-                f"{model_path}. Set IPHOTO_PET_MODEL_DIR or enable pet model downloads."
+                f"{model_path}. Install the People & Pets extension or set IPHOTO_PET_MODEL_DIR.",
+                reason="missing",
             )
         self._model.eval()
 
@@ -1331,7 +1297,8 @@ class _DinoV2Embedder:
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: the fixed DINOv2 TorchScript release "
                 "artifact has not been configured. Install a package containing the "
-                "verified model or set IPHOTO_PET_MODEL_DIR."
+                "verified model or set IPHOTO_PET_MODEL_DIR.",
+                reason="missing",
             )
         try:
             _install_certifi_environment()
@@ -1344,15 +1311,7 @@ class _DinoV2Embedder:
             )
             _dinov2_metadata_path(model_path).write_text(
                 json.dumps(
-                    {
-                        "model_name": self._model_name,
-                        "source_repository": _EMBEDDER_MANIFEST["source_repository"],
-                        "source_revision": _DINO_SOURCE_REVISION,
-                        "torchscript_sha256": _EMBEDDER_MANIFEST["torchscript_sha256"],
-                        "torchscript_size": _EMBEDDER_MANIFEST["torchscript_size"],
-                        "input_shape": _EMBEDDER_MANIFEST["input_shape"],
-                        "output_shape": _EMBEDDER_MANIFEST["output_shape"],
-                    },
+                    dinov2_metadata(_EMBEDDER_MANIFEST, self._model_name),
                     indent=2,
                     sort_keys=True,
                 )
@@ -1369,7 +1328,8 @@ class _DinoV2Embedder:
             _dinov2_metadata_path(model_path).unlink(missing_ok=True)
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: failed to download the verified DINOv2 "
-                f"TorchScript model ({_error_reason(exc)})."
+                f"TorchScript model ({_error_reason(exc)}).",
+                reason="download_failed",
             ) from exc
 
         model.eval()
@@ -1828,6 +1788,36 @@ def pet_model_auto_download_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _is_installed_pet_detector(path: Path) -> bool:
+    return any(
+        path == root / "pets" / _DETECTOR_MANIFEST["filename"]
+        for root in installed_recognition_model_roots()
+    )
+
+
+def _pet_detector_digest(custom_url: str) -> str:
+    custom_digest = os.environ.get(PET_DETECTOR_MODEL_SHA256_ENV, "").strip().lower()
+    if custom_url and not custom_digest:
+        raise RuntimeError(
+            "Pet scanning unavailable: a custom detector URL requires "
+            f"{PET_DETECTOR_MODEL_SHA256_ENV}."
+        )
+    return custom_digest or DEFAULT_PET_DETECTOR_MODEL_SHA256
+
+
+def _validate_pet_detector_model(path: Path, custom_url: str) -> None:
+    _validate_downloaded_file(
+        path,
+        label="YOLOX pet detector model",
+        expected_sha256=(
+            DEFAULT_PET_DETECTOR_MODEL_SHA256
+            if _is_installed_pet_detector(path)
+            else _pet_detector_digest(custom_url)
+        ),
+        max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+    )
+
+
 def ensure_pet_detector_model(
     model_path: Path,
     *,
@@ -1836,43 +1826,35 @@ def ensure_pet_detector_model(
 ) -> Path:
     target = Path(model_path)
     custom_url = str(model_url or os.environ.get(PET_DETECTOR_MODEL_URL_ENV) or "").strip()
-    expected_sha256 = (
-        str(os.environ.get(PET_DETECTOR_MODEL_SHA256_ENV) or "").strip().lower()
-        if custom_url
-        else DEFAULT_PET_DETECTOR_MODEL_SHA256
-    )
-    if custom_url and not expected_sha256:
-        raise RuntimeError(
-            "Pet scanning unavailable: a custom detector URL requires "
-            f"{PET_DETECTOR_MODEL_SHA256_ENV}."
-        )
     if target.is_file():
-        _validate_downloaded_file(
-            target,
-            label="YOLOX pet detector model",
-            expected_sha256=expected_sha256,
-            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-        )
+        _validate_pet_detector_model(target, custom_url)
         return target
-    if not allow_model_download:
-        raise RuntimeError(
+    if not allow_model_download or _is_installed_pet_detector(target):
+        raise PetModelUnavailableError(
             "Pet scanning unavailable: missing YOLOX model at "
-            f"{target}. Set IPHOTO_PET_MODEL_DIR or enable pet model downloads."
+            f"{target}. Install the People & Pets extension or set IPHOTO_PET_MODEL_DIR.",
+            reason="missing",
         )
 
     url = str(custom_url or DEFAULT_PET_DETECTOR_MODEL_URL).strip()
+    expected_sha256 = (
+        _pet_detector_digest(custom_url) if custom_url else DEFAULT_PET_DETECTOR_MODEL_SHA256
+    )
     if not url:
         raise RuntimeError(
             "Pet scanning unavailable: missing YOLOX model at "
             f"{target} and no pet detector download URL is configured."
         )
-    _download_file(
-        url,
-        target,
-        label="YOLOX pet detector model",
-        expected_sha256=expected_sha256,
-        max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-    )
+    try:
+        _download_file(
+            url,
+            target,
+            label="YOLOX pet detector model",
+            expected_sha256=expected_sha256,
+            max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise PetModelUnavailableError(str(exc), reason="download_failed") from exc
     return target
 
 
@@ -1900,6 +1882,7 @@ def pet_model_search_roots() -> tuple[Path, ...]:
     override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
     if override:
         roots.append(Path(override).expanduser())
+    roots.extend(root / "pets" for root in installed_recognition_model_roots())
     roots.extend((user_pet_model_cache_dir(), bundled_pet_model_dir()))
     return tuple(dict.fromkeys(roots))
 
@@ -1909,6 +1892,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Pet model path must be relative to a configured model root.")
     override = str(os.environ.get("IPHOTO_PET_MODEL_DIR") or "").strip()
+    custom_url = os.environ.get(PET_DETECTOR_MODEL_URL_ENV, "").strip()
     user_cache = user_pet_model_cache_dir()
     for root in pet_model_search_roots():
         candidate = root / relative
@@ -1923,21 +1907,11 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                     raise RuntimeError("DINOv2 model file is missing")
                 _validate_dinov2_cache_metadata(model_path, model_name=model_name)
             else:
-                _validate_downloaded_file(
-                    candidate,
-                    label="YOLOX pet detector model",
-                    expected_sha256=(
-                        str(
-                            os.environ.get(PET_DETECTOR_MODEL_SHA256_ENV)
-                            or DEFAULT_PET_DETECTOR_MODEL_SHA256
-                        ).lower()
-                    ),
-                    max_bytes=DEFAULT_PET_DETECTOR_MODEL_MAX_BYTES,
-                )
+                _validate_pet_detector_model(candidate, custom_url)
             return candidate
         except (OSError, RuntimeError) as exc:
             if override and root == Path(override).expanduser():
-                raise RuntimeError(
+                raise PetModelUnavailableError(
                     f"Pet scanning unavailable: invalid model override artifact at {candidate}."
                 ) from exc
             if root == user_cache:
@@ -2057,15 +2031,7 @@ def _validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> Non
         raise RuntimeError(
             f"Pet scanning unavailable: invalid DINOv2 metadata at {metadata_path}."
         ) from exc
-    expected = {
-        "model_name": model_name,
-        "source_repository": _EMBEDDER_MANIFEST["source_repository"],
-        "source_revision": _DINO_SOURCE_REVISION,
-        "torchscript_sha256": _EMBEDDER_MANIFEST["torchscript_sha256"],
-        "torchscript_size": _EMBEDDER_MANIFEST["torchscript_size"],
-        "input_shape": _EMBEDDER_MANIFEST["input_shape"],
-        "output_shape": _EMBEDDER_MANIFEST["output_shape"],
-    }
+    expected = dinov2_metadata(_EMBEDDER_MANIFEST, model_name)
     if any(metadata.get(key) != value for key, value in expected.items()):
         raise RuntimeError(
             f"Pet scanning unavailable: DINOv2 metadata contract mismatch at {metadata_path}."

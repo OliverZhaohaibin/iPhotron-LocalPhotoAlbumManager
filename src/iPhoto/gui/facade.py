@@ -241,7 +241,7 @@ class AppFacade(QObject):
         if album is None:
             return
 
-        self._library_update_service.rescan_album_async(album)
+        self._library_update_service.rescan_album_async(album, retry_recognition=True)
 
     def scan_root_async(
         self,
@@ -250,6 +250,7 @@ class AppFacade(QObject):
         include: Iterable[str],
         exclude: Iterable[str],
         startup: bool = False,
+        retry_recognition: bool = False,
     ) -> None:
         """Start a background scan for *root* through the bound session surface."""
 
@@ -258,6 +259,7 @@ class AppFacade(QObject):
             include=include,
             exclude=exclude,
             startup=startup,
+            retry_recognition=retry_recognition,
         )
 
     def _inject_scan_dependencies_for_tests(

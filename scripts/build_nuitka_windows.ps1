@@ -229,7 +229,7 @@ $arguments = @(
     '--follow-imports',
     '--python-flag=no_site',
     '--enable-plugin=pyside6',
-    '--include-qt-plugins=qml,multimedia,platforms',
+    '--include-qt-plugins=qml,multimedia,platforms,tls',
     "--windows-console-mode=$ConsoleMode",
     '--assume-yes-for-downloads',
     "--report=$compilationReport",

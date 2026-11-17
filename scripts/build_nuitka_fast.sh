@@ -16,7 +16,7 @@ python -m nuitka \
   --lto=yes \
   --clang \
   --enable-plugin=pyside6 \
-  --include-qt-plugins=qml,multimedia,xcbglintegrations,platforms \
+  --include-qt-plugins=qml,multimedia,xcbglintegrations,platforms,tls \
   --follow-imports \
   --nofollow-import-to=numba \
   --nofollow-import-to=llvmlite \

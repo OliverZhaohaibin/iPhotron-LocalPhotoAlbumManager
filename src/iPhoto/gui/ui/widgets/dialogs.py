@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QWidget
 
 from ..theme_manager import DARK_THEME, LIGHT_THEME, ThemeColors
+
+if TYPE_CHECKING:
+    from .information_popup import InformationPopup, ProgressPopup
 
 
 def select_directory(
@@ -129,6 +134,118 @@ def show_error(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
     box.exec()
 
 
+def _present_information_popup(popup: "InformationPopup", parent: QWidget) -> None:
+    popup.setPalette(_resolve_popup_palette_source(parent))
+    popup.setBackgroundRole(QPalette.ColorRole.Window)
+    popup.center_on(parent)
+    popup.show()
+    popup.setPalette(_resolve_popup_palette_source(parent))
+    popup.center_on(parent)
+    popup.raise_()
+
+
+def open_action_popup(
+    parent: QWidget,
+    message: str,
+    *,
+    title: str,
+    actions: tuple[tuple[str, Callable[[], None] | None], ...],
+    disabled: tuple[str, ...] = (),
+    configure: Callable[["InformationPopup"], None] | None = None,
+    modal: bool = False,
+) -> "InformationPopup":
+    """Show a project popup and close it before invoking a choice."""
+    from .information_popup import InformationPopup
+
+    popup = InformationPopup(parent, title=title, message=message)
+    popup.closed.connect(popup.deleteLater)
+    if modal:
+        popup.setWindowModality(Qt.WindowModality.WindowModal)
+    if configure is not None:
+        configure(popup)
+
+    def choose(callback: Callable[[], None] | None) -> None:
+        popup.close()
+        if callback is not None:
+            callback()
+
+    for label, callback in actions:
+        button = popup.add_action(label)
+        button.setEnabled(label not in disabled)
+        button.clicked.connect(lambda _checked=False, action=callback: choose(action))
+    _present_information_popup(popup, parent)
+    return popup
+
+
+def run_action_popup(
+    parent: QWidget,
+    message: str,
+    *,
+    title: str,
+    actions: tuple[tuple[str, Callable[[], None] | None], ...],
+    disabled: tuple[str, ...] = (),
+    configure: Callable[["InformationPopup"], None] | None = None,
+) -> None:
+    """Wait for a choice before continuing a modal operation."""
+    selected = None
+
+    def select(callback: Callable[[], None] | None) -> None:
+        nonlocal selected
+        selected = callback
+
+    popup = open_action_popup(
+        parent,
+        message,
+        title=title,
+        actions=tuple((label, lambda cb=callback: select(cb)) for label, callback in actions),
+        disabled=disabled,
+        configure=configure,
+        modal=True,
+    )
+    _wait_for_popup(popup)
+    if selected is not None:
+        selected()
+
+
+def open_progress_popup(
+    parent: QWidget, *, title: str, message: str, modal: bool = False, dismissible: bool = True
+) -> "ProgressPopup":
+    from .information_popup import ProgressPopup
+
+    popup = ProgressPopup(parent, title=title, message=message, dismissible=dismissible)
+    if modal:
+        popup.setWindowModality(Qt.WindowModality.WindowModal)
+    _present_information_popup(popup, parent)
+    return popup
+
+
+def _wait_for_popup(popup: "InformationPopup") -> None:
+    from PySide6.QtCore import QCoreApplication, QEventLoop
+
+    closed = False
+
+    def mark_closed(*_args: object) -> None:
+        nonlocal closed
+        closed = True
+
+    popup.closed.connect(mark_closed)
+    popup.destroyed.connect(mark_closed)
+    app = QCoreApplication.instance()
+    app.aboutToQuit.connect(mark_closed)
+    flags = QEventLoop.ProcessEventsFlag.AllEvents | QEventLoop.ProcessEventsFlag.WaitForMoreEvents
+    try:
+        while not closed and popup.isVisible():
+            # A nested QEventLoop.exec() can crash after large offscreen widget test runs.
+            QCoreApplication.processEvents(flags)
+    finally:
+        app.aboutToQuit.disconnect(mark_closed)
+        try:
+            popup.deleteLater()
+        except RuntimeError:
+            # The parent may have been destroyed while the local loop was active.
+            pass
+
+
 def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:
     """Display a blocking informational popup using :class:`InformationPopup`.
 
@@ -139,44 +256,11 @@ def show_information(parent: QWidget, message: str, *, title: str = "iPhoto") ->
     expected.
     """
 
-    from PySide6.QtCore import QCoreApplication, QEventLoop
-
     from .information_popup import InformationPopup
 
     popup = InformationPopup(parent, title=title, message=message)
-    # Do not delete the QWidget while its signal is unwinding through a nested
-    # event loop.  Qt's offscreen platform can otherwise destroy the native
-    # object from inside ``closeEvent`` and crash before ``loop.exec`` returns.
-    popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
-    popup.setPalette(_resolve_popup_palette_source(parent))
-    popup.setBackgroundRole(QPalette.ColorRole.Window)
-    popup.center_on(parent)
-
-    close_state = {"closed": False}
-
-    def _mark_closed(*_args: object) -> None:
-        close_state["closed"] = True
-
-    popup.closed.connect(_mark_closed)
-    popup.destroyed.connect(_mark_closed)
-    popup.show()
-    popup.setPalette(_resolve_popup_palette_source(parent))
-    popup.center_on(parent)
-    popup.raise_()
-    process_flags = (
-        QEventLoop.ProcessEventsFlag.AllEvents
-        | QEventLoop.ProcessEventsFlag.WaitForMoreEvents
-    )
-    while not close_state["closed"]:
-        # ``QEventLoop.exec`` can crash in Qt's offscreen platform after a
-        # large widget test run.  Pumping the application dispatcher retains
-        # this helper's blocking contract without creating a nested loop.
-        QCoreApplication.processEvents(process_flags)
-    try:
-        popup.deleteLater()
-    except RuntimeError:
-        # The parent may have been destroyed while the local loop was active.
-        pass
+    _present_information_popup(popup, parent)
+    _wait_for_popup(popup)
 
 
 def show_warning(parent: QWidget, message: str, *, title: str = "iPhoto") -> None:

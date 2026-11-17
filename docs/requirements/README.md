@@ -15,6 +15,8 @@ architecture.
 
 Current entries:
 
+- [`PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md`](PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md):
+  packaged validation for first-use recovery and offline recognition model installation.
 - [`ocr/OCR_REQUIREMENTS.md`](ocr/OCR_REQUIREMENTS.md): future, product-level
   local OCR and text-search requirements.
 - [`MOVE_DELETE_OPTIMIZATION_PLAN.md`](MOVE_DELETE_OPTIMIZATION_PLAN.md): future

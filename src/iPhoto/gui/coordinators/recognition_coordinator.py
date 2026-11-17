@@ -372,10 +372,16 @@ class RecognitionCoordinator(QObject):
         self._recognition_scans_requested = True
         # Give cover delivery and the first paint a quiet window before model
         # inference starts competing for CPU and disk bandwidth.
-        QTimer.singleShot(350, self._activate_recognition_scans)
+        root = self._library_root_getter()
+        epoch = getattr(self._context, "library_epoch", None)
+        QTimer.singleShot(350, lambda: self._activate_recognition_scans(root, epoch))
 
-    def _activate_recognition_scans(self) -> None:
-        if self._is_shutting_down:
+    def _activate_recognition_scans(self, root: Path | None, epoch: int | None) -> None:
+        if (
+            self._is_shutting_down
+            or root != self._library_root_getter()
+            or epoch != getattr(self._context, "library_epoch", None)
+        ):
             return
         activate = getattr(self._context.library, "activate_recognition_scans", None)
         if callable(activate):

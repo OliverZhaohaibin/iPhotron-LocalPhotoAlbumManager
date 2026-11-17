@@ -5,6 +5,8 @@ import hashlib
 import io
 from pathlib import Path
 import socket
+import ssl
+import errno
 import sqlite3
 import sys
 from contextlib import closing
@@ -17,10 +19,11 @@ import pytest
 
 from iPhoto.application.ports.map_extension import MapExtensionError, MapExtensionRequest
 from iPhoto.application.services.map_extension_service import MapExtensionService
+from iPhoto.infrastructure.services import extension_archives
 from iPhoto.infrastructure.services import map_extension_installer as module
+from iPhoto.infrastructure.services.extension_archives import install_lock
 from iPhoto.infrastructure.services.map_extension_installer import (
     MapExtensionInstaller,
-    _install_lock,
 )
 from iPhoto.infrastructure.services.map_extension_packages import MapExtensionPackage
 from maps import map_sources
@@ -89,7 +92,7 @@ def setup(tmp_path, monkeypatch, map_platform):
 def test_offline_install_never_uses_network_and_returns_write_target(setup, monkeypatch):
     adapter, payload, target, _ = setup
     extension(payload.package_root / "tiles" / "extension", marker=b"bundled")
-    monkeypatch.setattr(module.request, "build_opener", lambda *a: pytest.fail("network used"))
+    monkeypatch.setattr(extension_archives.request, "build_opener", lambda *a: pytest.fail("network used"))
     result = MapExtensionService(adapter).execute(payload, progress)
     assert result.status == "installed"
     assert result.extension_root == target
@@ -308,10 +311,33 @@ def test_tar_escaping_link_rejected(tmp_path):
 
 
 def test_install_lock_excludes_other_installers(tmp_path):
-    with _install_lock(tmp_path / "lock"):
+    with install_lock(tmp_path / "lock"):
         with pytest.raises(MapExtensionError, match="busy"):
-            with _install_lock(tmp_path / "lock"):
+            with install_lock(tmp_path / "lock"):
                 pytest.fail("second writer acquired lock")
+
+
+@pytest.mark.parametrize("system_ca", [False, True])
+def test_extension_download_uses_bundle_only_when_no_trust_store(monkeypatch, system_ca):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import certifi
+
+    context = Mock()
+    context.cert_store_stats.return_value = {"x509_ca": 0}
+    monkeypatch.setattr(extension_archives.ssl, "create_default_context", lambda: context)
+    monkeypatch.setattr(
+        extension_archives.ssl,
+        "get_default_verify_paths",
+        lambda: SimpleNamespace(cafile=None, capath="/system/certs" if system_ca else None),
+    )
+
+    assert extension_archives._download_tls_context() is context
+    if system_ca:
+        context.load_verify_locations.assert_not_called()
+    else:
+        context.load_verify_locations.assert_called_once_with(cafile=certifi.where())
 
 
 class Response(io.BytesIO):
@@ -329,7 +355,7 @@ def test_verified_download_is_reused_after_install_failure(setup, monkeypatch):
             assert timeout == 30
             return Response(data, len(data))
 
-    monkeypatch.setattr(module.request, "build_opener", lambda *handlers: Opener())
+    monkeypatch.setattr(extension_archives.request, "build_opener", lambda *handlers: Opener())
     original = adapter._stage_archive
     monkeypatch.setattr(
         adapter, "_stage_archive", lambda *a: (_ for _ in ()).throw(PermissionError("locked"))
@@ -338,7 +364,7 @@ def test_verified_download_is_reused_after_install_failure(setup, monkeypatch):
         adapter.execute(replace(payload, local_archive_path=None), progress)
     monkeypatch.setattr(adapter, "_stage_archive", original)
     monkeypatch.setattr(
-        module.request, "build_opener", lambda *a: pytest.fail("cached archive downloaded again")
+        extension_archives.request, "build_opener", lambda *a: pytest.fail("cached archive downloaded again")
     )
     assert (
         adapter.execute(replace(payload, local_archive_path=None), progress).status == "installed"
@@ -351,7 +377,7 @@ def test_verified_download_is_reused_after_install_failure(setup, monkeypatch):
         (ConnectionRefusedError(10061, "refused"), "refused"),
         (socket.gaierror(-2, "name"), "dns"),
         (socket.timeout(), "timeout"),
-        (module.ssl.SSLCertVerificationError("certificate"), "tls"),
+        (ssl.SSLCertVerificationError("certificate"), "tls"),
         (HTTPError("https://user:secret@host/path?token=secret", 403, "error", {}, None), "http"),
         (HTTPError("https://host/path", 503, "error", {}, None), "http"),
     ],
@@ -361,18 +387,18 @@ def test_network_errors_are_reported_after_one_attempt_without_leaking_credentia
 ):
     adapter, payload, target, _ = setup
     monkeypatch.setattr(
-        module.request,
+        extension_archives.request,
         "getproxies",
         lambda: {"https": "http://user:password@127.0.0.1:7890/?token=secret"},
     )
-    monkeypatch.setattr(module.request, "proxy_bypass", lambda _: False)
+    monkeypatch.setattr(extension_archives.request, "proxy_bypass", lambda _: False)
     attempts = []
 
     def https_open(handler, req):
         attempts.append(req.host)
         raise reason if isinstance(reason, HTTPError) else URLError(reason)
 
-    monkeypatch.setattr(module.request.HTTPSHandler, "https_open", https_open)
+    monkeypatch.setattr(extension_archives.request.HTTPSHandler, "https_open", https_open)
     with pytest.raises(MapExtensionError) as caught:
         adapter.execute(replace(payload, local_archive_path=None), progress)
     assert caught.value.category == category
@@ -390,7 +416,7 @@ def test_dns_error_reports_the_actual_download_hop(setup, monkeypatch, redirect)
     adapter, payload, target, _ = setup
     asset_host = "release-assets.githubusercontent.com"
     asset_url = f"https://{asset_host}/payload?signature=secret"
-    monkeypatch.setattr(module.request, "getproxies", lambda: {})
+    monkeypatch.setattr(extension_archives.request, "getproxies", lambda: {})
 
     def https_open(handler, req):
         if redirect and req.host == "github.com":
@@ -403,7 +429,7 @@ def test_dns_error_reports_the_actual_download_hop(setup, monkeypatch, redirect)
             return response
         raise URLError(socket.gaierror(11001, "host not found"))
 
-    monkeypatch.setattr(module.request.HTTPSHandler, "https_open", https_open)
+    monkeypatch.setattr(extension_archives.request.HTTPSHandler, "https_open", https_open)
     with pytest.raises(MapExtensionError) as caught:
         adapter.execute(replace(payload, local_archive_path=None), progress)
     failure = caught.value
@@ -422,7 +448,7 @@ def test_truncated_response_fails_after_one_attempt(setup, monkeypatch):
             attempts.append(1)
             return Response(b"short", package.size)
 
-    monkeypatch.setattr(module.request, "build_opener", lambda *a: Opener())
+    monkeypatch.setattr(extension_archives.request, "build_opener", lambda *a: Opener())
     with pytest.raises(MapExtensionError, match="interrupted"):
         adapter.execute(replace(payload, local_archive_path=None), progress)
     assert len(attempts) == 1
@@ -440,7 +466,7 @@ def test_macos_bundled_tar_is_verified_and_installed_offline(
         tar.add(source, arcname="extension")
     archive.with_suffix(".tar.sha256").write_text(hashlib.sha256(archive.read_bytes()).hexdigest())
     monkeypatch.setattr(map_sources, "bundled_osmand_extension_archive", lambda _: archive)
-    monkeypatch.setattr(module.request, "build_opener", lambda *a: pytest.fail("network used"))
+    monkeypatch.setattr(extension_archives.request, "build_opener", lambda *a: pytest.fail("network used"))
     assert (
         adapter.execute(replace(payload, operation="prepare", platform="darwin"), progress).status
         == "installed"
@@ -518,7 +544,7 @@ def test_invalid_download_is_reported_without_extraction(setup, monkeypatch, mat
         def open(self, *args, **kwargs):
             return Response(data, len(data))
 
-    monkeypatch.setattr(module.request, "build_opener", lambda *args: Opener())
+    monkeypatch.setattr(extension_archives.request, "build_opener", lambda *args: Opener())
     with pytest.raises(MapExtensionError) as caught:
         adapter.execute(replace(payload, local_archive_path=None), progress)
     assert (caught.value.category, caught.value.stage) == ("integrity", "download")
@@ -532,7 +558,7 @@ def test_disk_full_is_reported_before_network(setup, monkeypatch):
 
     def full(path, data):
         if path.name == "write":
-            raise OSError(module.errno.ENOSPC, "disk full")
+            raise OSError(errno.ENOSPC, "disk full")
         return original(path, data)
 
     monkeypatch.setattr(Path, "write_bytes", full)

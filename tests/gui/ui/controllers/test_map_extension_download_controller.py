@@ -3,20 +3,22 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import QApplication, QCheckBox, QPlainTextEdit, QPushButton, QWidget
 
 from iPhoto.application.ports.map_extension import MapExtensionError
 from iPhoto.gui.ui.controllers.map_extension_download_controller import (
     MapExtensionDownloadController,
 )
+from iPhoto.gui.ui.widgets import dialogs
+from iPhoto.gui.ui.widgets.information_popup import InformationPopup, ProgressPopup
 from iPhoto.gui.ui.tasks.map_extension_download_worker import (
     MapExtensionDownloadRequest,
     MapExtensionDownloadResult,
@@ -30,6 +32,39 @@ def qapp() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _button(popup, label):
+    return next(button for button in popup.findChildren(QPushButton) if button.text() == label)
+
+
+@pytest.fixture
+def observe_popup(monkeypatch):
+    original = dialogs.open_action_popup
+    failures = []
+
+    def set_observer(observer):
+        def open_popup(*args, **kwargs):
+            popup = original(*args, **kwargs)
+
+            def interact():
+                try:
+                    assert isinstance(popup, InformationPopup)
+                    observer(popup)
+                except BaseException as exc:
+                    failures.append(exc)
+                finally:
+                    if popup.isVisible():
+                        popup.close()
+
+            QTimer.singleShot(0, popup, interact)
+            return popup
+
+        monkeypatch.setattr(dialogs, "open_action_popup", open_popup)
+
+    yield set_observer
+    if failures:
+        raise failures[0]
 
 
 def test_controller_temporarily_hides_stays_on_top_child_windows(
@@ -46,7 +81,9 @@ def test_controller_temporarily_hides_stays_on_top_child_windows(
     floating.show()
 
     context = SimpleNamespace(settings=SimpleNamespace(get=lambda *_args, **_kwargs: True))
-    controller = MapExtensionDownloadController(owner, context, package_root=tmp_path / "maps")
+    controller = MapExtensionDownloadController(
+        owner, context, package_root=tmp_path / "maps", notification_toast=Mock()
+    )
 
     controller._hide_blocking_top_level_windows()
 
@@ -71,7 +108,9 @@ def test_restart_failure_restores_hidden_windows(qapp: QApplication, tmp_path: P
     floating.show()
 
     context = SimpleNamespace(settings=SimpleNamespace(get=lambda *_args, **_kwargs: True))
-    controller = MapExtensionDownloadController(owner, context, package_root=tmp_path / "maps")
+    controller = MapExtensionDownloadController(
+        owner, context, package_root=tmp_path / "maps", notification_toast=Mock()
+    )
 
     controller._hide_blocking_top_level_windows()
     assert floating.isHidden()
@@ -79,15 +118,13 @@ def test_restart_failure_restores_hidden_windows(qapp: QApplication, tmp_path: P
     with (
         patch(
             "iPhoto.gui.ui.controllers.map_extension_download_controller.QProcess.startDetached",
-            return_value=False,
+            return_value=(False, 0),
         ),
-        patch(
-            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.critical",
-            return_value=0,
-        ),
+        patch.object(dialogs, "run_action_popup") as warning,
     ):
         controller._restart_application()
 
+    assert warning.call_args.kwargs["title"] == "Restart Failed"
     assert floating.isVisible()
     floating.close()
     owner.close()
@@ -103,7 +140,10 @@ def controller(qapp, tmp_path):
         map_extensions=service, settings=SimpleNamespace(get=lambda *a: False)
     )
     owner = QWidget()
-    value = MapExtensionDownloadController(owner, context, package_root=tmp_path / "maps")
+    owner.show()
+    value = MapExtensionDownloadController(
+        owner, context, package_root=tmp_path / "maps", notification_toast=Mock()
+    )
     yield value
     if value._progress_dialog is not None:
         value._progress_dialog.allow_close()
@@ -158,8 +198,12 @@ def test_preparation_shows_progress_when_installation_actually_starts(controller
     assert controller._progress_dialog is None
     worker.signals.progress.emit(0, 0, "Extracting map extension...")
     dialog = controller._progress_dialog
+    assert isinstance(dialog, ProgressPopup)
     assert dialog.isVisible()
-    assert dialog._message_label.text() == "Extracting map extension..."
+    assert dialog.windowModality() == Qt.WindowModality.WindowModal
+    assert dialog.message() == "Extracting map extension..."
+    worker.signals.progress.emit(50, 100, "Downloading map extension...")
+    assert dialog._percent_label.text() == "50%"
     worker.signals.progress.emit(0, 0, "Installing map extension...")
     assert controller._progress_dialog is dialog
     worker.signals.ready.emit(MapExtensionDownloadResult(Path("pending"), Path("active")))
@@ -168,18 +212,27 @@ def test_preparation_shows_progress_when_installation_actually_starts(controller
 
 
 @pytest.mark.parametrize("operation", ["install", "prepare"])
-def test_pending_result_prompts_restart_without_claiming_installed(controller, operation):
+def test_pending_result_prompts_restart_without_claiming_installed(
+    controller, observe_popup, operation
+):
     controller._last_request = SimpleNamespace(operation=operation)
     controller._handle_ready(
         MapExtensionDownloadResult(Path("pending"), Path("active"), "pending_restart")
     )
-    with patch(
-        "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
-    ) as question:
+    messages = []
+
+    def accept(popup):
+        messages.append(popup.message())
+        assert popup.title() == "Restart Required"
+        _button(popup, "Restart").click()
+
+    observe_popup(accept)
+    with patch.object(controller, "_restart_application") as restart:
         controller._handle_finished()
-    question.assert_called_once()
-    assert "staged" in question.call_args.args[2]
-    assert "waiting for restart" in question.call_args.args[2]
+    restart.assert_called_once()
+    assert "staged" in messages[0]
+    assert "waiting for restart" in messages[0]
+    controller._toast.show_toast.assert_not_called()
 
 
 def test_local_archive_selection_needs_no_failed_download(controller, tmp_path):
@@ -214,21 +267,19 @@ def test_failure_dialog_runs_after_worker_is_released(controller):
 
 
 @pytest.mark.parametrize("browser_opened", [True, False])
-def test_browser_download_offers_local_install(controller, monkeypatch, tmp_path, browser_opened):
-    from PySide6.QtWidgets import QMessageBox
+def test_browser_download_offers_local_install(controller, observe_popup, tmp_path, browser_opened):
 
     archive = tmp_path / "extension.zip"
 
     def select_install(box):
-        assert box.styleSheet()
         if browser_opened:
-            assert box.text() == "Select the archive after the download finishes."
+            assert box.message() == "Select the archive after the download finishes."
         else:
-            assert box.informativeText() == "https://example.invalid/extension.zip"
-            assert box.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
-        next(b for b in box.buttons() if b.text() == "Install from File...").click()
+            assert "https://example.invalid/extension.zip" in box.message()
+            assert box._message_label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+        _button(box, "Install from File...").click()
 
-    monkeypatch.setattr(QMessageBox, "exec", select_install)
+    observe_popup(select_install)
     with (
         patch(
             "iPhoto.gui.ui.controllers.map_extension_download_controller.QDesktopServices.openUrl",
@@ -248,26 +299,27 @@ def test_browser_download_offers_local_install(controller, monkeypatch, tmp_path
 
 @pytest.mark.parametrize("category", ["dns", "refused", "timeout", "tls", "http", "integrity"])
 @pytest.mark.parametrize("choice", ["Download in Browser", "Install from File...", "Cancel"])
-def test_download_failure_offers_manual_recovery(controller, monkeypatch, category, choice):
-    from PySide6.QtWidgets import QMessageBox
+def test_download_failure_offers_manual_recovery(controller, observe_popup, category, choice):
 
     payload = MapExtensionDownloadRequest(controller._package_root, "win32")
     controller._last_request = payload
     failure = MapExtensionError(category, "download", code=11001, detail="host=github.com")
 
     def select_action(box):
-        assert box.styleSheet()
-        assert box.text() == "Could not download the map extension from GitHub."
-        assert "VPN" in box.informativeText()
-        assert "proxy" in box.informativeText()
-        assert "11001" in box.detailedText()
-        assert "host=github.com" in box.detailedText()
-        buttons = {button.text(): button for button in box.buttons()}
+        assert box.message().startswith("Could not download the map extension from GitHub.")
+        assert "VPN" in box.message()
+        assert "proxy" in box.message()
+        details = box.findChild(QPlainTextEdit)
+        assert details.isHidden()
+        _button(box, "Details").click()
+        assert details.isVisible() and details.isReadOnly()
+        assert "11001" in details.toPlainText()
+        assert "host=github.com" in details.toPlainText()
+        buttons = {button.text() for button in box.findChildren(QPushButton)}
         assert {"Retry", "Try Direct Connection"}.isdisjoint(buttons)
-        button = box.button(QMessageBox.StandardButton.Cancel) if choice == "Cancel" else buttons[choice]
-        button.click()
+        _button(box, choice).click()
 
-    monkeypatch.setattr(QMessageBox, "exec", select_action)
+    observe_popup(select_action)
     with (
         patch.object(controller, "_start") as start,
         patch.object(controller, "open_download_page") as browser,
@@ -279,13 +331,12 @@ def test_download_failure_offers_manual_recovery(controller, monkeypatch, catego
     assert local.call_count == (choice == "Install from File...")
 
 
-def test_cancel_file_picker_after_browser_download_does_not_install(controller, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+def test_cancel_file_picker_after_browser_download_does_not_install(controller, observe_popup):
 
     def select_install(box):
-        next(b for b in box.buttons() if b.text() == "Install from File...").click()
+        _button(box, "Install from File...").click()
 
-    monkeypatch.setattr(QMessageBox, "exec", select_install)
+    observe_popup(select_install)
     with (
         patch(
             "iPhoto.gui.ui.controllers.map_extension_download_controller.QDesktopServices.openUrl",
@@ -301,19 +352,18 @@ def test_cancel_file_picker_after_browser_download_does_not_install(controller, 
     start.assert_not_called()
 
 
-def test_settings_can_import_after_closing_the_browser_handoff(controller, monkeypatch, tmp_path):
-    from PySide6.QtWidgets import QMessageBox
+def test_settings_can_import_after_closing_the_browser_handoff(controller, observe_popup, tmp_path):
 
     archive = tmp_path / "extension.zip"
 
     def select_close_or_install(box):
-        close = box.button(QMessageBox.StandardButton.Close)
+        close = next((b for b in box.findChildren(QPushButton) if b.text() == "Close"), None)
         if close is not None:
             close.click()
         else:
-            next(b for b in box.buttons() if b.text() == "Install from File...").click()
+            _button(box, "Install from File...").click()
 
-    monkeypatch.setattr(QMessageBox, "exec", select_close_or_install)
+    observe_popup(select_close_or_install)
     with (
         patch(
             "iPhoto.gui.ui.controllers.map_extension_download_controller.QDesktopServices.openUrl",
@@ -340,15 +390,14 @@ def test_settings_can_import_after_closing_the_browser_handoff(controller, monke
         ("integrity", "verify", "The map extension package is damaged or incomplete."),
     ],
 )
-def test_other_failures_keep_their_own_message(controller, monkeypatch, category, stage, message):
-    from PySide6.QtWidgets import QMessageBox
+def test_other_failures_keep_their_own_message(controller, observe_popup, category, stage, message):
 
     def observe(box):
-        assert box.text().startswith(message)
-        assert "VPN" not in box.informativeText()
-        box.button(QMessageBox.StandardButton.Cancel).click()
+        assert box.message().startswith(message)
+        assert "VPN" not in box.message()
+        _button(box, "Cancel").click()
 
-    monkeypatch.setattr(QMessageBox, "exec", observe)
+    observe_popup(observe)
     controller._show_failure(MapExtensionError(category, stage))
 
 
@@ -384,9 +433,8 @@ def test_preparation_reuses_normalized_root_but_reprepares_changed_root(controll
 
 @pytest.mark.parametrize("retry", [False, True])
 def test_failed_preparation_defers_runtime_probe_until_retry_or_cancel(
-    controller, monkeypatch, retry
+    controller, observe_popup, retry
 ):
-    from PySide6.QtWidgets import QMessageBox
 
     callbacks = []
 
@@ -394,11 +442,11 @@ def test_failed_preparation_defers_runtime_probe_until_retry_or_cancel(
         assert callbacks == []
         assert not controller._runtime_prepared
         if retry:
-            next(button for button in box.buttons() if button.text() == "Retry").click()
+            _button(box, "Retry").click()
         else:
-            box.button(QMessageBox.StandardButton.Cancel).click()
+            _button(box, "Cancel").click()
 
-    monkeypatch.setattr(QMessageBox, "exec", select_action)
+    observe_popup(select_action)
     with patch(
         "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
     ) as pool:
@@ -480,9 +528,8 @@ def test_callback_root_change_stops_remaining_stale_callbacks(controller, tmp_pa
         assert calls == ["new"]
 
 
-@pytest.mark.parametrize("operation", ["install", "prepare"])
-def test_installed_result_does_not_prompt_restart(controller, operation):
-    from iPhoto.gui.ui.tasks.map_extension_download_worker import MapExtensionDownloadRequest
+@pytest.mark.parametrize("operation, local", [("install", False), ("install", True), ("prepare", False)])
+def test_installed_result_only_confirms_manual_install(controller, tmp_path, operation, local):
 
     owner = controller._parent
     owner.show()
@@ -493,15 +540,15 @@ def test_installed_result_does_not_prompt_restart(controller, operation):
             patch(
                 "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
             ),
-            patch(
-                "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
-            ) as question,
-            patch(
-                "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.information"
-            ) as information,
+            patch.object(dialogs, "run_action_popup") as popup,
         ):
             controller._start(
-                MapExtensionDownloadRequest(controller._package_root, "win32", operation=operation)
+                MapExtensionDownloadRequest(
+                    controller._package_root,
+                    "win32",
+                    local_archive_path=tmp_path / "extension.zip" if local else None,
+                    operation=operation,
+                )
             )
             worker = controller._active_worker
             assert floating.isHidden() == (operation == "install")
@@ -509,8 +556,11 @@ def test_installed_result_does_not_prompt_restart(controller, operation):
                 MapExtensionDownloadResult(Path("pending"), Path("active"), "installed")
             )
             worker.signals.finished.emit()
-        question.assert_not_called()
-        information.assert_not_called()
+        popup.assert_not_called()
+        if operation == "install":
+            controller._toast.show_toast.assert_called_once_with("Installed")
+        else:
+            controller._toast.show_toast.assert_not_called()
         assert floating.isVisible()
         assert controller._progress_dialog is None
         assert controller._active_worker is None
@@ -525,9 +575,7 @@ def test_installed_result_continues_waiting_preparation_without_restart(controll
         patch(
             "iPhoto.gui.ui.controllers.map_extension_download_controller.QThreadPool.globalInstance"
         ) as pool,
-        patch(
-            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
-        ) as question,
+        patch.object(dialogs, "run_action_popup") as popup,
     ):
         controller.start_download()
         install_worker = controller._active_worker
@@ -544,7 +592,7 @@ def test_installed_result_continues_waiting_preparation_without_restart(controll
             MapExtensionDownloadResult(Path("pending"), Path("active"))
         )
         prepare_worker.signals.finished.emit()
-    question.assert_not_called()
+    popup.assert_not_called()
     assert callbacks == ["ready"]
 
 
@@ -557,17 +605,12 @@ def test_error_takes_precedence_over_installed_result(controller):
     controller._handle_error(failure)
     with (
         patch.object(controller, "_show_failure") as show_failure,
-        patch(
-            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.question"
-        ) as question,
-        patch(
-            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.information"
-        ) as information,
+        patch.object(dialogs, "run_action_popup") as popup,
     ):
         controller._handle_finished()
     show_failure.assert_called_once_with(failure)
-    question.assert_not_called()
-    information.assert_not_called()
+    popup.assert_not_called()
+    controller._toast.show_toast.assert_not_called()
 
 
 @pytest.fixture
@@ -594,12 +637,9 @@ def test_unsupported_manual_install_shows_information_without_chooser(
     platform_controller, platform, entry
 ):
     controller = platform_controller(platform)
-    from PySide6.QtWidgets import QMessageBox
 
     with (
-        patch(
-            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.information"
-        ) as information,
+        patch.object(dialogs, "run_action_popup") as information,
         patch(
             "iPhoto.gui.ui.controllers.map_extension_download_controller.QFileDialog.getOpenFileName"
         ) as chooser,
@@ -609,8 +649,8 @@ def test_unsupported_manual_install_shows_information_without_chooser(
     chooser.assert_not_called()
     start.assert_not_called()
     information.assert_called_once()
-    assert information.call_args.args[3] == QMessageBox.StandardButton.Close
-    text = information.call_args.args[2]
+    assert information.call_args.kwargs["actions"] == (("Close", None),)
+    text = information.call_args.args[1]
     if platform == "darwin":
         assert "included with the app" in text
         assert "automatically" in text
@@ -639,9 +679,8 @@ def test_supported_platform_imports_local_archive(platform_controller, platform,
 @pytest.mark.parametrize("entry", ["show_options", "maybe_prompt_on_startup", "_show_failure"])
 @pytest.mark.parametrize("supported", [False, True])
 def test_manual_install_buttons_follow_service_capability(
-    controller, monkeypatch, entry, supported
+    controller, observe_popup, entry, supported
 ):
-    from PySide6.QtWidgets import QMessageBox
     from iPhoto.application.ports.map_extension import MapExtensionError
 
     controller._context.map_extensions.supports_local_install = lambda _: supported
@@ -653,20 +692,44 @@ def test_manual_install_buttons_follow_service_capability(
     states = []
 
     def observe(box):
-        local = next(button for button in box.buttons() if button.text() == "Install from File...")
+        local = _button(box, "Install from File...")
         states.append(local.isEnabled())
         return 0
 
-    monkeypatch.setattr(QMessageBox, "exec", observe)
-    monkeypatch.setattr(QMessageBox, "open", observe)
+    observe_popup(observe)
     if entry == "_show_failure":
         controller._show_failure(MapExtensionError("refused", "download"))
     else:
         getattr(controller, entry)()
+    QApplication.processEvents()
     assert states == [supported]
-    if controller._startup_prompt is not None:
-        controller._startup_prompt.deleteLater()
-        controller._startup_prompt = None
+    assert controller._startup_prompt is None
+
+
+def test_startup_popup_saves_opt_out_on_dismissal(controller, observe_popup):
+    controller._context.settings.get = lambda *args: True
+    controller._context.settings.set = Mock()
+    controller._runtime_prepared = True
+    controller._latest_result = MapExtensionDownloadResult(
+        Path("pending"), Path("active"), "missing"
+    )
+
+    def opt_out(popup):
+        assert popup.title() == "Map Extension"
+        assert popup.frameGeometry().center() == controller._parent.frameGeometry().center()
+        checkbox = popup.findChild(QCheckBox)
+        assert checkbox.text() == "Do not show again"
+        checkbox.setChecked(True)
+        _button(popup, "Not Now").click()
+
+    observe_popup(opt_out)
+    controller.maybe_prompt_on_startup()
+    QApplication.processEvents()
+
+    assert controller._startup_prompt is None
+    controller._context.settings.set.assert_called_once_with(
+        "ui.show_map_extension_startup_prompt", False
+    )
 
 
 def test_macos_has_no_manual_startup_prompt(platform_controller):
@@ -676,9 +739,7 @@ def test_macos_has_no_manual_startup_prompt(platform_controller):
         Path("pending"), Path("active"), "missing"
     )
     with (
-        patch(
-            "iPhoto.gui.ui.controllers.map_extension_download_controller.QMessageBox.open"
-        ) as opened,
+        patch.object(dialogs, "open_action_popup") as opened,
         patch.object(controller, "_start") as start,
     ):
         assert controller.maybe_prompt_on_startup() is False
@@ -686,18 +747,17 @@ def test_macos_has_no_manual_startup_prompt(platform_controller):
     start.assert_not_called()
 
 
-def test_macos_recovery_disables_local_install(platform_controller, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+def test_macos_recovery_disables_local_install(platform_controller, observe_popup):
     from iPhoto.application.ports.map_extension import MapExtensionError
 
     controller = platform_controller("darwin")
     states = []
 
     def observe(box):
-        states.append({b.text(): b.isEnabled() for b in box.buttons()})
+        states.append({b.text(): b.isEnabled() for b in box.findChildren(QPushButton)})
         return 0
 
-    monkeypatch.setattr(QMessageBox, "exec", observe)
+    observe_popup(observe)
     with patch.object(controller, "_start") as start:
         controller._show_failure(MapExtensionError("permission", "prepare"))
     assert states[0]["Install from File..."] is False
@@ -712,5 +772,5 @@ def test_controller_constructor_does_not_resolve_install_capabilities(qapp, tmp_
             raise AssertionError("install service resolved during startup")
 
     owner = QWidget()
-    MapExtensionDownloadController(owner, Context(), package_root=tmp_path)
+    MapExtensionDownloadController(owner, Context(), package_root=tmp_path, notification_toast=Mock())
     owner.close()

@@ -119,19 +119,14 @@ Install them into the build environment before running Nuitka:
 python -m pip install -e ".[ai-demo]"
 ```
 
-InsightFace may populate missing models when its selected model root is
-writable. An offline build may instead bundle an optional local/release staging
-cache. `src/extension/models/` is ignored by Git and is not guaranteed in a
-fresh clone. The expected staging layout is:
+People loads local ONNX models. The official People & Pets ZIP supplies both
+recognition model sets on first use or through Settings. An offline build can
+bundle models from the ignored `src/extension/models/` staging directory, with
+the People ONNX files under `src/extension/models/buffalo_s/`.
 
-| Path | Purpose |
-|---|---|
-| `src/extension/models/buffalo_s/` | InsightFace `buffalo_s` ONNX model files |
-| `src/extension/models/buffalo_s.zip` | Optional upstream model pack archive |
-
-On Windows the default writable model root is
-`%LOCALAPPDATA%\iPhoto\extensions\faces\v1\models`; InsightFace downloads into
-that versioned component directory. It can be overridden for debugging with:
+On Windows the extension is installed into
+`%LOCALAPPDATA%\iPhoto\extensions\recognition\v1\models`. The Face model
+directory can be overridden for debugging:
 
 ```powershell
 $env:IPHOTO_FACE_MODEL_DIR = "D:\path\to\models"
@@ -205,12 +200,9 @@ build must not be advertised as Pets-enabled merely because the model directory
 was copied; add the flags above (or update the script) and perform the Pets smoke
 test before release.
 
-If models are intentionally omitted, the YOLOX detector may download into the
-platform user cache (or an explicit writable `IPHOTO_PET_MODEL_DIR`). The
-current `model_manifest.json` sets DINOv2 `torchscript_url` to `null`, so the
-embedder must be pre-provisioned through staging, a bundled fallback, or an
-override. Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` for controlled offline
-deployments. See
+If models are intentionally omitted, the official ZIP installs YOLOX and DINOv2
+together with the People models. Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` to suppress
+silent installation triggered by the Pets worker. See
 [`PETS_RECOGNITION_RUNTIME.md`](PETS_RECOGNITION_RUNTIME.md) for the runtime and
 persistence contract.
 
@@ -569,5 +561,5 @@ as `extension` so the install script lands the files in the correct location.
 | Installer downloads the optional package but the map is still unavailable | The ZIP root does not contain `extension\...` or the expected OBF file is missing | Recreate the archive with the `extension` root and verify `extension\World_basemap_2.obf` exists before publishing |
 | `Face scanning paused: name 'Literal' is not defined` | A third-party annotation was evaluated at runtime inside the packaged app | Rebuild with the current People pipeline, which installs runtime typing compatibility before importing InsightFace |
 | `Face scanning paused: name 'NDArray' is not defined` | Same runtime annotation issue, usually from numpy typing annotations | Rebuild with the current People pipeline; do not remove the runtime typing compatibility helper |
-| `Some assets could not be face scanned and will be retried after a rescan` | Asset-level face detection failed twice; check `%LOCALAPPDATA%\iPhoto\iPhoto.log` for the real traceback | Confirm the packaged build uses `allowed_modules=["detection", "recognition"]`, then rescan. Full library rescan resets `retry`/`failed` face statuses |
-| Packaged People scan downloads models but never clusters faces | The downloaded model cache is incomplete, unwritable, or an InsightFace dependency failed during scan | Ensure Nuitka includes `insightface` and `onnxruntime`; verify `%LOCALAPPDATA%\iPhoto\extensions\faces\v1\models` is writable and complete, or rebuild with `-IncludeOptionalAssets`; exclude unused albumentations/pydantic packages and keep InsightFace limited to detection and recognition |
+| `Some assets could not be face scanned and will be retried after a rescan` | Asset-level face detection failed twice; check `%LOCALAPPDATA%\iPhoto\iPhoto.log` for the real traceback | Confirm the packaged build loads the detection and recognition ONNX models, then rescan. Full library rescan resets `retry`/`failed` face statuses |
+| Packaged People scan downloads models but never clusters faces | The downloaded model cache is incomplete, unwritable, or an InsightFace dependency failed during scan | Ensure Nuitka includes `insightface` and `onnxruntime`; verify `%LOCALAPPDATA%\iPhoto\extensions\recognition\v1\models` is writable and complete, or rebuild with `-IncludeOptionalAssets`; exclude unused albumentations/pydantic packages and keep InsightFace limited to detection and recognition |

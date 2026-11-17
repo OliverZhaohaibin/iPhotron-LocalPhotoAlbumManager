@@ -14,7 +14,7 @@ Attach the build manifest and completed matrix to release validation evidence.
 | Windows, Chinese user path and TEMP on another volume | Extraction/staging uses target volume; no rename across volumes or path-length failure |
 | Windows, offline official ZIP | No network; hash verification, installation, restart, map rendering and place search succeed |
 | Windows VPN/TUN, GitHub or release asset host fails to resolve | Details identify the failed host and DNS code. Download in Browser opens the official asset and offers Install from File. Import the archive and verify map rendering and search. |
-| Map download popups, light and dark themes, English, German and Simplified Chinese | Text and buttons fit, Details can be expanded, and keyboard dismissal leaves the settings import entry available. |
+| Map and People & Pets download popups, light and dark themes, English, German and Simplified Chinese | Both extensions use matching popup and progress styles. Map Details expand and can be copied. Keyboard dismissal leaves the Settings import entry available. |
 | Windows, local proxy port closed | Classified connection refusal after one download attempt. Dialog suggests checking VPN or proxy settings and offers browser download and local installation. |
 | Windows, another installer briefly holds the map installation lock | First-use preparation offers Retry before probing the runtime. Once the lock is released, Retry activates the staged extension. Cancel loads the available fallback. |
 | Windows, DLL in use / interrupted activation | Old installation retained or restored; validated pending survives; next launch activates before DLL load |

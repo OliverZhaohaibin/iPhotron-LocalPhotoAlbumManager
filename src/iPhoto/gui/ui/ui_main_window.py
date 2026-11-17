@@ -7,7 +7,6 @@ import sys
 import logging
 import time
 from enum import StrEnum
-from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QMetaObject, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
@@ -195,6 +194,9 @@ class Ui_MainWindow(QObject):
         self.rebuild_links_action = self.main_header.rebuild_links_action
         self.bind_library_action = self.main_header.bind_library_action
         self.download_map_extension_action = self.main_header.download_map_extension_action
+        self.download_recognition_extension_action = (
+            self.main_header.download_recognition_extension_action
+        )
         self.toggle_filmstrip_action = self.main_header.toggle_filmstrip_action
         self.toggle_face_names_action = self.main_header.toggle_face_names_action
         self.toggle_hidden_people_action = self.main_header.toggle_hidden_people_action

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -144,6 +148,37 @@ def test_show_information_uses_information_popup(qapp: QApplication) -> None:
     assert captured[0]["message"] == "Test message"
     assert captured[0]["delete_on_close"] is False
     parent.close()
+
+
+def test_action_popup_stops_waiting_when_application_quits() -> None:
+    # Use a separate QApplication so quitting cannot affect the rest of the suite.
+    script = textwrap.dedent("""\
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        from iPhoto.gui.ui.widgets import dialogs
+
+        app = QApplication([])
+        parent = QWidget()
+        parent.show()
+        completed = []
+
+        def show_popup():
+            QTimer.singleShot(0, app.quit)
+            dialogs.run_action_popup(parent, "Message", title="Test", actions=(("Close", None),))
+            completed.append(True)
+
+        QTimer.singleShot(0, show_popup)
+        assert app.exec() == 0
+        assert completed == [True]
+        """)
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1] / "src",
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+        check=True,
+        timeout=10,
+    )
 
 
 def test_show_warning_uses_information_popup(qapp: QApplication) -> None:

@@ -385,7 +385,7 @@ nuitka_args=(
   "--lto=$LTO_MODE"
   "--clang"
   "--enable-plugin=pyside6"
-  "--include-qt-plugins=qml,multimedia,platforms"
+  "--include-qt-plugins=qml,multimedia,platforms,tls"
   "--follow-imports"
   "--nofollow-import-to=numba"
   "--nofollow-import-to=llvmlite"

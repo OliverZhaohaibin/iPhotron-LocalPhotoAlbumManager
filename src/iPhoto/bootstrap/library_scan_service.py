@@ -410,7 +410,10 @@ class LibraryScanService:
                 root_only=root_only,
             )
             if pair_live:
-                self.pair_album(scan_root)
+                if root_only:
+                    self.pair_album(scan_root, root_only=True)
+                else:
+                    self.pair_album(scan_root)
         except Exception:
             self._mark_scan_job_failed(current_scan_job_id)
             raise
@@ -516,13 +519,18 @@ class LibraryScanService:
             self._repository().merge_scan_rows(transformed)
         return transformed
 
-    def pair_album(self, root: Path) -> "list[LiveGroup]":
+    def pair_album(self, root: Path, *, root_only: bool = False) -> list[LiveGroup]:
         """Rebuild Live Photo roles and derived links for *root*."""
 
         scan_root = Path(root)
         album_path = self._album_path(scan_root)
         repository = self._repository()
-        if album_path:
+        if root_only:
+            self._scan_scope(scan_root, root_only=True)
+            rows = list(
+                repository.read_album_assets("", include_subalbums=False, filter_hidden=False)
+            )
+        elif album_path:
             rows = list(
                 repository.read_album_assets(
                     album_path,
@@ -538,6 +546,7 @@ class LibraryScanService:
             rows,
             library_root=self.library_root,
             repository=repository,
+            root_only=root_only,
         )
 
     def report_album(self, root: Path) -> AlbumReport:
@@ -685,7 +694,6 @@ class LibraryScanService:
         if not root.exists():
             raise AlbumNotFoundError(f"Album directory does not exist: {root}")
 
-        ensure_work_dir(root)
         for name in ALBUM_MANIFEST_NAMES:
             candidate = root / name
             if not candidate.exists():

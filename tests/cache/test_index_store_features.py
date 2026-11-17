@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 import pytest
@@ -1063,3 +1065,74 @@ def test_scan_accepts_replaced_source_while_edit_thumbnail_is_stale(store: Index
     assert replacement_revision != original_revision
     assert merged["thumb_revision"] == replacement_revision
     assert merged["thumbnail_state"] == "ready"
+
+
+def test_scan_marks_thumbnail_stale_when_neither_revision_is_current(store: IndexStore) -> None:
+    source = store.library_root / "photo.jpg"
+    source.write_bytes(b"first source")
+    previous = {
+        "rel": source.name,
+        "thumbnail_state": "ready",
+        "thumb_cache_key": "stable-key",
+        "thumb_revision": thumbnail_revision(source),
+        "micro_thumbnail": b"first thumbnail",
+    }
+    store.write_rows([previous])
+    source.write_bytes(b"second longer source")
+    incoming = {
+        **previous,
+        "thumb_revision": thumbnail_revision(source),
+        "micro_thumbnail": b"second thumbnail",
+    }
+    source.write_bytes(b"third and even longer source")
+
+    [merged] = store.merge_scan_rows([incoming])
+
+    assert merged["thumbnail_state"] == "stale"
+    assert merged["thumb_revision"] == thumbnail_revision(source)
+    assert merged["thumb_cache_key"] == "stable-key"
+    assert merged["micro_thumbnail"] is None
+
+
+def test_scan_revalidates_after_an_edit_commits_during_revision_read(
+    store: IndexStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = store.library_root / "photo.jpg"
+    source.write_bytes(b"original")
+    previous = {
+        "rel": source.name,
+        "thumbnail_state": "ready",
+        "thumb_cache_key": "stable-key",
+        "thumb_revision": thumbnail_revision(source),
+    }
+    store.write_rows([previous])
+    source.write_bytes(b"replacement")
+    incoming = {**previous, "thumb_revision": thumbnail_revision(source)}
+    sampled = Event()
+    resume = Event()
+    read_revision = store._current_thumbnail_revision
+
+    def interleaved_revision(rel: str) -> str | None:
+        revision = read_revision(rel)
+        if not sampled.is_set():
+            sampled.set()
+            assert resume.wait(5)
+        return revision
+
+    monkeypatch.setattr(store, "_current_thumbnail_revision", interleaved_revision)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        merge = workers.submit(store.merge_scan_rows, [incoming])
+        try:
+            assert sampled.wait(5)
+            source.with_suffix(".ipo").write_bytes(b"new edit")
+            edit_revision = thumbnail_revision(source)
+            mark_edit = workers.submit(
+                store.mark_thumbnail_stale, source.name, desired_revision=edit_revision
+            )
+            assert mark_edit.result(timeout=3)
+        finally:
+            resume.set()
+        [merged] = merge.result(timeout=5)
+
+    assert merged["thumbnail_state"] == "stale"
+    assert merged["thumb_revision"] == edit_revision

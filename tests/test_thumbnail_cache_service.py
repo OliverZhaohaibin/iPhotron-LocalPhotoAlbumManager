@@ -284,6 +284,33 @@ def test_lagging_stale_hint_does_not_invalidate_same_published_revision(
     assert service._queued_tasks[key].thumbnail_state == "ready"
 
 
+def test_ready_revision_change_replaces_resident_thumbnail(tmp_path: Path, qapp) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    service._max_active_jobs = 0
+    path = tmp_path / "photo.jpg"
+    size = QSize(512, 512)
+    key = service._cache_key(path, size)
+    previous = QImage(size, QImage.Format.Format_RGBA8888)
+    previous.fill(QColor("red"))
+    assert service._store_image_in_l1(key, previous)
+    service._desired_revisions[key] = "old-revision"
+    service._pinned_keys.add(key)
+
+    service.request_many(
+        [
+            ThumbnailRequest(
+                path, size, ThumbnailRequestKind.VISIBLE, 1, thumb_revision="new-revision"
+            )
+        ],
+        generation=1,
+    )
+
+    assert service.peek_full_thumbnail(path, size) is None
+    assert service._queued_tasks[key].thumbnail_state == "ready"
+    assert service._queued_tasks[key].thumb_revision == "new-revision"
+    assert key in service._pinned_keys
+
+
 def test_invalidation_prevents_old_worker_from_restoring_stale_disk_thumbnail(
     tmp_path: Path,
 ) -> None:

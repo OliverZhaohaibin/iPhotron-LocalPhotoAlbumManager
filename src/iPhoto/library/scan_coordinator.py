@@ -151,6 +151,7 @@ class ScanCoordinatorMixin:
             library_root=self._root,
             scan_service=getattr(self, "_scan_service", None),
             root_only=root_only,
+            finalize_scan=True,
         )
         self._current_scanner_worker = worker
         signals.progressUpdated.connect(self.scanProgress)
@@ -608,7 +609,7 @@ class ScanCoordinatorMixin:
         self,
         worker: ScannerWorker,
         root: Path,
-        rows: List[dict],
+        _rows: List[dict],
     ) -> None:
         # Clear worker reference before downstream listeners react so a completed
         # scan does not still appear in-flight while final post-processing runs.
@@ -643,24 +644,6 @@ class ScanCoordinatorMixin:
             self._start_next_deferred_scan()
             return
 
-        # Persist Live Photo pairings once a scan completes so the database and
-        # links.json reflect the latest scan results.
-        scan_service = worker.scan_service
-        try:
-            scan_service.finalize_scan_result(
-                root,
-                rows,
-                pair_live=False,
-                preserve_modified_after_ms=worker.scan_started_at_ms,
-                current_scan_job_id=worker.scan_job_id,
-                root_only=worker.root_only,
-            )
-        except Exception as exc:
-            LOGGER.warning("Failed to persist scan finalization for %s: %s", root, exc)
-            self.scanFinished.emit(root, False)
-            self._start_next_deferred_scan()
-            return
-
         # A startup metadata scan only prepares the Gallery index.  People and
         # Pets are feature-scoped services and their model workers are started
         # by ``activate_recognition_services`` on first use.  Starting them here
@@ -672,9 +655,9 @@ class ScanCoordinatorMixin:
         self.scanFinished.emit(root, True)
         self._start_next_deferred_scan()
 
-        # Persist live-photo pairings in the background to avoid blocking the
-        # main thread while downstream listeners start refreshing.
-        self._scan_thread_pool.start(_PairingWorker(root, scan_service))
+        # Root media pairing completed in the scan worker with the scoped rows.
+        if not worker.root_only:
+            self._scan_thread_pool.start(_PairingWorker(root, worker.scan_service))
 
     def _on_scan_error(self, worker: ScannerWorker, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

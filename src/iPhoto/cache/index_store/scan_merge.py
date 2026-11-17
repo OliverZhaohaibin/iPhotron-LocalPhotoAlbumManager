@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ...people import (
@@ -42,7 +42,7 @@ def merge_scan_rows(
     scanned_rows: Iterable[dict[str, Any]],
     existing_rows_by_rel: Mapping[str, dict[str, Any]],
     *,
-    is_current_thumbnail_revision: Callable[[str, str], bool],
+    current_thumbnail_revisions: Mapping[str, str | None],
 ) -> list[dict[str, Any]]:
     """Merge freshly scanned rows with persisted library-managed state."""
 
@@ -50,7 +50,7 @@ def merge_scan_rows(
         merge_scan_row(
             row,
             existing_rows_by_rel.get(str(row.get("rel") or "")),
-            is_current_thumbnail_revision=is_current_thumbnail_revision,
+            current_thumbnail_revision=current_thumbnail_revisions.get(str(row.get("rel") or "")),
         )
         for row in scanned_rows
     ]
@@ -60,7 +60,7 @@ def merge_scan_row(
     scanned_row: dict[str, Any],
     existing_row: dict[str, Any] | None,
     *,
-    is_current_thumbnail_revision: Callable[[str, str], bool],
+    current_thumbnail_revision: str | None,
 ) -> dict[str, Any]:
     """Merge one scanned row with an existing persisted row."""
 
@@ -72,7 +72,7 @@ def merge_scan_row(
                 merged[field] = existing_row.get(field)
         _preserve_location_state(merged, existing_row)
         _preserve_current_thumbnail_revision(
-            merged, existing_row, is_current_thumbnail_revision
+            merged, existing_row, current_thumbnail_revision
         )
 
     identity_unchanged = (
@@ -115,19 +115,53 @@ def merge_scan_row(
     return merged
 
 
+def conflicting_thumbnail_revisions(
+    rows: Iterable[dict[str, Any]],
+    existing_rows: Mapping[str, dict[str, Any]],
+) -> dict[str, tuple[str, int]]:
+    """Identify rows that need input validation and the DB versions read for them."""
+
+    conflicts = {}
+    for row in rows:
+        rel = str(row.get("rel") or "")
+        existing = existing_rows.get(rel)
+        if existing is None:
+            continue
+        revision = _thumbnail_revision(existing)
+        if revision and revision != _thumbnail_revision(row):
+            conflicts[rel] = revision, int(existing.get("index_revision") or 0)
+    return conflicts
+
+
+def _thumbnail_revision(row: Mapping[str, Any]) -> str:
+    return str(row.get("thumb_revision") or "").strip()
+
+
 def _preserve_current_thumbnail_revision(
     merged: dict[str, Any],
     existing_row: dict[str, Any],
-    is_current_thumbnail_revision: Callable[[str, str], bool],
+    current_revision: str | None,
 ) -> None:
     """Resolve conflicting versions against the current render inputs."""
 
-    existing_revision = str(existing_row.get("thumb_revision") or "").strip()
-    incoming_revision = str(merged.get("thumb_revision") or "").strip()
+    existing_revision = _thumbnail_revision(existing_row)
+    incoming_revision = _thumbnail_revision(merged)
     if not existing_revision or existing_revision == incoming_revision:
         return
-    if incoming_revision and is_current_thumbnail_revision(merged["rel"], incoming_revision):
-        return
+    if current_revision is not None:
+        if current_revision == incoming_revision:
+            return
+        if current_revision != existing_revision:
+            merged.update(
+                thumb_revision=current_revision,
+                thumbnail_state="stale",
+                micro_thumbnail=None,
+                thumb_cache_key=(
+                    merged.get("thumb_cache_key") or existing_row.get("thumb_cache_key")
+                ),
+                thumb_error=None,
+            )
+            return
     for field in _THUMBNAIL_STATE_FIELDS:
         if field in existing_row:
             merged[field] = existing_row[field]

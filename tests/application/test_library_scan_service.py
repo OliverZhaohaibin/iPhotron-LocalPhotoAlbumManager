@@ -103,6 +103,44 @@ def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:
     }
 
 
+def test_root_media_pairing_updates_only_affected_roles_and_links(tmp_path: Path) -> None:
+    root = tmp_path
+    service = LibraryScanService(root)
+    store = get_global_repository(root)
+    nested = ("Album/image.jpg", "Album/motion.mov")
+    cross = ("cross.jpg", "Album/cross.mov")
+    direct = ("new.jpg", "new.mov")
+
+    def pair_rows(paths: tuple[str, str], content_id: str) -> list[dict[str, Any]]:
+        return [
+            {"rel": paths[0], "mime": "image/jpeg", "content_id": content_id},
+            {"rel": paths[1], "mime": "video/quicktime", "content_id": content_id},
+        ]
+
+    (root / "Album").mkdir()
+    for rel in (*nested, *cross, *direct):
+        (root / rel).touch()
+    store.write_rows([*pair_rows(nested, "nested"), *pair_rows(cross, "cross")])
+    service.pair_album(root)
+    old_roles = store.get_rows_by_rels(nested)
+
+    service.finalize_scan_result(root, pair_rows(direct, "direct"), root_only=True)
+    roles = store.get_rows_by_rels((*nested, *cross, *direct))
+    assert all(roles[rel] == old_roles[rel] for rel in nested)
+    assert roles[direct[1]]["live_partner_rel"] == direct[0]
+    assert roles[cross[1]]["live_partner_rel"] == cross[0]
+
+    (root / cross[0]).unlink()
+    service.finalize_scan_result(root, pair_rows(direct, "direct"), root_only=True)
+    [former_motion] = store.get_rows_by_rels([cross[1]]).values()
+    assert former_motion["live_role"] == 0
+    assert former_motion["live_partner_rel"] is None
+    links = json.loads((root / ".iPhoto" / "links.json").read_text(encoding="utf-8"))
+    assert {(group["still"], group["motion"]) for group in links["live_groups"]} == {
+        nested, direct,
+    }
+
+
 def test_subalbum_scan_prefixes_library_relative_rows(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     album_root = library_root / "album"

@@ -230,10 +230,12 @@ class LibraryRuntimeController(
         storage_kind = getattr(storage_profile, "kind", prepared.storage_kind)
         polling = storage_kind in {"network", "removable"} or prepared.storage_kind == "slow"
         watch_paths = (self._root, *(node.path for node in self._nodes.values()))
+        scan_service = self.scan_service
         self._background_watch_generation = self._watch_service.configure(
             self._root,
             watch_paths,
             polling=polling,
+            scan_filters=scan_service.scan_filters if scan_service is not None else None,
         )
         LOGGER.info(
             "bind_prepared_library: root=%s albums=%d storage=%s",
@@ -363,6 +365,8 @@ class LibraryRuntimeController(
             return
         if result.generation != self._background_watch_generation or self._root is None:
             return
+        if result.root_media_changed:
+            self._queue_watcher_scan_roots([self._root], root_only=True)
         if result.warning:
             LOGGER.warning("Library watcher refresh failed: %s", result.warning)
             return
@@ -385,8 +389,6 @@ class LibraryRuntimeController(
             self._geotagged_assets_cache = None
             self._geotagged_assets_cache_root = None
             self.treeUpdated.emit()
-        if result.root_media_changed:
-            self._queue_watcher_scan_roots([self._root], root_only=True)
         changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
         self._start_watcher_scans(changed)

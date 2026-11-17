@@ -648,12 +648,10 @@ class ThumbnailCacheService(QObject):
                         size=size,
                         desired_revision=request.thumb_revision,
                     )
-            self._thumbnail_states[key] = request.thumbnail_state
-            if request.thumb_revision:
-                self._desired_revisions[key] = request.thumb_revision
             if request.kind is not ThumbnailRequestKind.VISIBLE:
                 self._queue_prefetch(request)
                 continue
+            self._record_thumbnail_request(key, request)
             if key in self._memory_cache:
                 continue
             if self._promote_staged_result(request):
@@ -998,11 +996,25 @@ class ThumbnailCacheService(QObject):
             return key, spec.path, spec.size, spec.generation
         return None
 
-    def _queue_prefetch(self, request: ThumbnailRequest) -> None:
-        key = self._cache_key(request.path, request.size)
-        self._thumbnail_states[key] = request.thumbnail_state
+    def _record_thumbnail_request(self, key: str, request: ThumbnailRequest) -> None:
+        previous_revision = self._desired_revisions.get(key)
         if request.thumb_revision:
+            if previous_revision is not None and previous_revision != request.thumb_revision:
+                # A scan can replace the ready disk artifact at the same path.
+                pinned = key in self._pinned_keys
+                self.invalidate(
+                    request.path, size=request.size, desired_revision=request.thumb_revision
+                )
+                if pinned:
+                    self._pinned_keys.add(key)
             self._desired_revisions[key] = request.thumb_revision
+        self._thumbnail_states[key] = request.thumbnail_state
+
+    def _queue_prefetch(self, request: ThumbnailRequest) -> None:
+        if request.generation < self._current_generation:
+            return
+        key = self._cache_key(request.path, request.size)
+        self._record_thumbnail_request(key, request)
         miss_until = self._prefetch_l2_miss_until.get(key, 0.0)
         if miss_until and miss_until <= time.monotonic():
             self._prefetch_l2_miss_until.pop(key, None)
@@ -1012,7 +1024,6 @@ class ThumbnailCacheService(QObject):
             key in self._memory_cache
             or key in self._pending_tasks
             or miss_until > time.monotonic()
-            or request.generation < self._current_generation
             or self._motion_blocks_prefetch(
                 self._current_phase,
                 self._current_intent,

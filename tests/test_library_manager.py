@@ -16,6 +16,7 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.application.use_cases.scan_library import ScanLibraryResult
 from iPhoto.bootstrap.library_session import LibrarySession
 from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.runtime_controller import LibraryRuntimeController
@@ -428,19 +429,20 @@ def test_scan_finished_reports_failure_when_finalization_fails(
     manager = LibraryRuntimeController()
     manager.bind_path(root)
     scan_service = Mock()
+    scan_service.scan_album.return_value = ScanLibraryResult(rows=[{"rel": "a.jpg"}])
     scan_service.finalize_scan_result.side_effect = RuntimeError("finalize failed")
+    manager.bind_scan_service(scan_service)
 
-    worker = Mock(cancelled=False, failed=False, scan_service=scan_service)
     spy = QSignalSpy(manager.scanFinished)
-    manager._current_scanner_worker = worker
-    manager._live_scan_root = root
 
-    with patch.object(manager._scan_thread_pool, "start") as start_mock:
-        manager._on_scan_finished(worker, root, [{"rel": "a.jpg"}])
+    with patch.object(
+        manager._scan_thread_pool, "start", side_effect=lambda task: task.run()
+    ) as start_mock:
+        manager.start_scanning(root, ["*.jpg"], ["*.mov"])
         qapp.processEvents()
 
     scan_service.finalize_scan_result.assert_called_once()
-    start_mock.assert_not_called()
+    assert start_mock.call_count == 1
     assert spy.count() == 1
     assert spy.at(0)[1] is False
 
@@ -469,27 +471,35 @@ def test_scan_request_is_queued_until_active_scan_finishes(
         manager.start_session_scan(
             second, include=["*.jpg"], exclude=["*.mov"], retry_recognition=True
         )
-    assert manager._deferred_scan_queue == [(second, ["*.jpg"], ["*.mov"], False, retry_recognition)]
+    assert manager._deferred_scan_queue == [
+        (second, ["*.jpg"], ["*.mov"], False, retry_recognition, False)
+    ]
 
     with patch.object(manager, "start_scanning") as start_mock:
         manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
         qapp.processEvents()
 
-    scan_service.finalize_scan_result.assert_called_once()
     start_mock.assert_called_once_with(
-        second, ["*.jpg"], ["*.mov"], startup=False, retry_recognition=retry_recognition
+        second,
+        ["*.jpg"],
+        ["*.mov"],
+        startup=False,
+        retry_recognition=retry_recognition,
+        root_only=False,
     )
 
 
+@pytest.mark.parametrize("root_only", [False, True])
 def test_deferred_scan_waits_for_face_scan_to_finish(
     tmp_path: Path,
     qapp: QApplication,
+    root_only: bool,
 ) -> None:
     root = tmp_path / "Library"
     first = root / "First"
-    second = root / "Second"
+    second = root if root_only else root / "Second"
     first.mkdir(parents=True)
-    second.mkdir(parents=True)
+    second.mkdir(parents=True, exist_ok=True)
     manager = LibraryRuntimeController()
     manager.bind_path(root)
     scan_service = Mock()
@@ -501,7 +511,7 @@ def test_deferred_scan_waits_for_face_scan_to_finish(
     manager._current_face_scanner = face_scanner
     manager._live_scan_root = first
 
-    manager.start_scanning(second, ["*.jpg"], ["*.mov"])
+    manager.start_scanning(second, ["*.jpg"], ["*.mov"], root_only=root_only)
 
     with patch.object(manager, "start_scanning") as start_mock:
         manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
@@ -513,7 +523,12 @@ def test_deferred_scan_waits_for_face_scan_to_finish(
         manager._on_face_scan_finished(face_scanner)
 
     start_mock.assert_called_once_with(
-        second, ["*.jpg"], ["*.mov"], startup=False, retry_recognition=False
+        second,
+        ["*.jpg"],
+        ["*.mov"],
+        startup=False,
+        retry_recognition=False,
+        root_only=root_only,
     )
 
 
@@ -558,6 +573,8 @@ def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
     manager = LibraryRuntimeController()
     manager.bind_path(root)
     scan_service = Mock()
+    scan_service.scan_album.return_value = ScanLibraryResult(rows=[])
+    scan_service.finalize_scan_result.return_value = []
     manager.bind_scan_service(scan_service)
 
     with (
@@ -573,7 +590,7 @@ def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
         profile_mark.assert_called_once_with("startup_metadata_scan.started", root=root)
         start_thread.assert_called_once_with(worker)
 
-        manager._on_scan_finished(worker, root, [])
+        worker.run()
 
     scan_service.finalize_scan_result.assert_called_once_with(
         root,
@@ -581,6 +598,7 @@ def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
         pair_live=False,
         preserve_modified_after_ms=None,
         current_scan_job_id=None,
+        root_only=False,
     )
     start_ai.assert_not_called()
 

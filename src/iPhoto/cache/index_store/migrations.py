@@ -10,12 +10,13 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from ...config import RECENTLY_DELETED_DIR_NAME
+from ...domain.models.core import normalise_content_id
 from ...utils.logging import get_logger
 
 logger = get_logger()
@@ -24,7 +25,7 @@ logger = get_logger()
 # Version 2 adds cached video presentation metadata used by Gallery/Detail reads.
 # Opening an already migrated database must be O(1); in particular it must not
 # revisit every asset row on each desktop launch.
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
 
@@ -45,6 +46,7 @@ _ASSET_COLUMN_MIGRATIONS = {
     "h": "ALTER TABLE assets ADD COLUMN h INTEGER",
     "gps": "ALTER TABLE assets ADD COLUMN gps TEXT",
     "content_id": "ALTER TABLE assets ADD COLUMN content_id TEXT",
+    "content_id_key": "ALTER TABLE assets ADD COLUMN content_id_key TEXT",
     "frame_rate": "ALTER TABLE assets ADD COLUMN frame_rate REAL",
     "codec": "ALTER TABLE assets ADD COLUMN codec TEXT",
     "still_image_time": "ALTER TABLE assets ADD COLUMN still_image_time REAL",
@@ -587,7 +589,27 @@ class SchemaMigrator:
         SchemaMigrator._create_indexes(conn)
 
     @staticmethod
-    def prepare_database(database_path: Path) -> tuple[int, tuple[str, ...]]:
+    def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+        """Index normalized Live Photo identifiers, including existing scan rows."""
+
+        existing_columns = {str(row[1]) for row in _table_info(conn, "assets")}
+        for name in ("content_id", "content_id_key"):
+            if name not in existing_columns:
+                conn.execute(_ASSET_COLUMN_MIGRATIONS[name])
+        cursor = conn.execute("SELECT rel, content_id FROM assets WHERE content_id IS NOT NULL")
+        while rows := cursor.fetchmany(900):
+            conn.executemany(
+                "UPDATE assets SET content_id_key = ? WHERE rel = ?",
+                [(normalise_content_id(content_id), rel) for rel, content_id in rows],
+            )
+        SchemaMigrator._create_indexes(conn)
+
+    @staticmethod
+    def prepare_database(
+        database_path: Path,
+        *,
+        on_migration_started: Callable[[], None] | None = None,
+    ) -> tuple[int, tuple[str, ...]]:
         """Recover an interrupted migration and synchronously prepare the schema."""
 
         database_path = Path(database_path)
@@ -608,6 +630,8 @@ class SchemaMigrator:
                 raise SchemaPreparationError(
                     "migration_recovery_failed", "Migration state targets another database"
                 )
+            if on_migration_started is not None:
+                on_migration_started()
             backup_path = database_path.parent / state.backup_name
             current_ok = _integrity_ok(database_path)
             current_version = -1
@@ -663,6 +687,14 @@ class SchemaMigrator:
                 "future_schema", "Library index uses a newer schema version"
             )
 
+        if (
+            state is None
+            and existed
+            and source_version < CURRENT_SCHEMA_VERSION
+            and on_migration_started is not None
+        ):
+            on_migration_started()
+
         if can_adopt_v1:
             try:
                 with _managed_connection(database_path) as connection:
@@ -673,7 +705,7 @@ class SchemaMigrator:
                         can_adopt_v1 = False
                     else:
                         SchemaMigrator._migrate_columns(connection)
-                        SchemaMigrator._create_indexes(connection)
+                        SchemaMigrator._migrate_to_v5(connection)
                         connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             except sqlite3.OperationalError as exc:
                 code = _classify_sqlite_operational_error(
@@ -980,6 +1012,7 @@ class SchemaMigrator:
              "ON assets (has_gps, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
             "CREATE INDEX IF NOT EXISTS idx_assets_rel_lookup ON assets (rel)",
             "CREATE INDEX IF NOT EXISTS idx_assets_id_lookup ON assets (id)",
+            "CREATE INDEX IF NOT EXISTS idx_assets_live_content_id ON assets (content_id_key)",
             "CREATE INDEX IF NOT EXISTS idx_assets_revision ON assets (index_revision)",
             "CREATE INDEX IF NOT EXISTS idx_assets_updated_at ON assets (index_updated_at_ms)",
             "CREATE INDEX IF NOT EXISTS idx_scan_jobs_root_scope ON scan_jobs (root, scope, updated_at)",

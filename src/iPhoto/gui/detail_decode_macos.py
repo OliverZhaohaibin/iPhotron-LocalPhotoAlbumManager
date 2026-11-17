@@ -82,7 +82,7 @@ class MacOSImageIOStillDecodeBackend:
             width,
             height,
             stride,
-            QImage.Format.Format_RGBA8888,
+            QImage.Format.Format_RGBA8888_Premultiplied,
         ).copy()
         surface = _normalise_surface(image, target)
         _check_cancelled(cancellation)

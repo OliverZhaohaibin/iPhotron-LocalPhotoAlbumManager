@@ -103,6 +103,87 @@ def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:
     }
 
 
+def test_root_media_pairing_updates_only_affected_roles_and_links(tmp_path: Path) -> None:
+    root = tmp_path
+    service = LibraryScanService(root)
+    store = get_global_repository(root)
+    nested = ("Album/image.jpg", "Album/motion.mov")
+    cross = ("cross.jpg", "Album/cross.mov")
+    direct = ("new.jpg", "new.mov")
+
+    def pair_rows(paths: tuple[str, str], content_id: str) -> list[dict[str, Any]]:
+        return [
+            {"rel": paths[0], "mime": "image/jpeg", "content_id": content_id},
+            {"rel": paths[1], "mime": "video/quicktime", "content_id": content_id},
+        ]
+
+    (root / "Album").mkdir()
+    for rel in (*nested, *cross, *direct):
+        (root / rel).touch()
+    store.write_rows([*pair_rows(nested, "nested"), *pair_rows(cross, "cross")])
+    service.pair_album(root)
+    old_roles = store.get_rows_by_rels(nested)
+
+    service.finalize_scan_result(root, pair_rows(direct, "direct"), root_only=True)
+    roles = store.get_rows_by_rels((*nested, *cross, *direct))
+    assert all(roles[rel] == old_roles[rel] for rel in nested)
+    assert roles[direct[1]]["live_partner_rel"] == direct[0]
+    assert roles[cross[1]]["live_partner_rel"] == cross[0]
+
+    (root / cross[0]).unlink()
+    service.finalize_scan_result(root, pair_rows(direct, "direct"), root_only=True)
+    [former_motion] = store.get_rows_by_rels([cross[1]]).values()
+    assert former_motion["live_role"] == 0
+    assert former_motion["live_partner_rel"] is None
+    links = json.loads((root / ".iPhoto" / "links.json").read_text(encoding="utf-8"))
+    assert {(group["still"], group["motion"]) for group in links["live_groups"]} == {
+        nested, direct,
+    }
+
+
+@pytest.mark.parametrize("root_is_still", [False, True])
+def test_root_scan_discovers_unpaired_cross_album_content_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_is_still: bool
+) -> None:
+    service = LibraryScanService(tmp_path)
+    store = get_global_repository(tmp_path)
+    (tmp_path / "Album").mkdir()
+    root_rel = "new.jpg" if root_is_still else "new.mov"
+    peer_rel = "Album/motion.mov" if root_is_still else "Album/still.jpg"
+    root_mime = "image/jpeg" if root_is_still else "video/quicktime"
+    peer_mime = "video/quicktime" if root_is_still else "image/jpeg"
+    for rel in (root_rel, peer_rel, "Album/saved.jpg", "Album/saved.mov"):
+        (tmp_path / rel).touch()
+    store.write_rows([
+        {"rel": peer_rel, "mime": peer_mime, "content_id": "  ABc-ß\t"},
+        {"rel": "Album/saved.jpg", "mime": "image/jpeg", "content_id": "abc-ss",
+         "live_partner_rel": "Album/saved.mov"},
+        {"rel": "Album/saved.mov", "mime": "video/quicktime", "content_id": "abc-ss",
+         "live_role": 1, "live_partner_rel": "Album/saved.jpg"},
+    ])
+    saved = store.get_rows_by_rels(["Album/saved.jpg", "Album/saved.mov"])
+    # Start with a complete snapshot so its root-only refresh is also exercised.
+    links = tmp_path / ".iPhoto" / "links.json"
+    links.write_text(json.dumps({"schema": "iPhoto/links@1", "live_groups": []}))
+    monkeypatch.setattr(store, "read_all", lambda **_kw: pytest.fail("full library read"))
+
+    service.finalize_scan_result(
+        tmp_path,
+        [{"rel": root_rel, "mime": root_mime, "content_id": "abc-ss"}],
+        root_only=True,
+    )
+
+    rows = store.get_rows_by_rels([root_rel, peer_rel])
+    assert rows[root_rel]["live_partner_rel"] == peer_rel
+    assert rows[peer_rel]["live_partner_rel"] == root_rel
+    assert rows[root_rel]["live_role"] == int(not root_is_still)
+    assert rows[peer_rel]["live_role"] == int(root_is_still)
+    assert store.get_rows_by_rels(saved) == saved
+    groups = json.loads(links.read_text())["live_groups"]
+    assert len(groups) == 1
+    assert {groups[0]["still"], groups[0]["motion"]} == {root_rel, peer_rel}
+
+
 def test_subalbum_scan_prefixes_library_relative_rows(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     album_root = library_root / "album"

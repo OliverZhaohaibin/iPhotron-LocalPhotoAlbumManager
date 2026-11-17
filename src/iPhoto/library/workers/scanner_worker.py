@@ -43,6 +43,9 @@ class ScannerWorker(QRunnable):
         signals: ScannerSignals,
         library_root: Optional[Path] = None,
         scan_service: Optional[LibraryScanService] = None,
+        *,
+        root_only: bool = False,
+        finalize_scan: bool = False,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -53,6 +56,8 @@ class ScannerWorker(QRunnable):
         # Use library_root for database if provided, otherwise use root
         self._library_root = library_root if library_root else root
         self._scan_service = scan_service
+        self.root_only = root_only
+        self._finalize_scan = finalize_scan
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
@@ -143,11 +148,27 @@ class ScannerWorker(QRunnable):
                 chunk_size=self.SCAN_CHUNK_SIZE,
                 max_chunk_interval_ms=self.SCAN_CHUNK_MAX_INTERVAL_MS,
                 persist_chunks=True,
+                root_only=self.root_only,
             )
             rows = result.rows
             self._failed_count += result.failed_count
             self._scan_job_id = result.scan_job_id
             self._scan_started_at_ms = result.scan_started_at_ms
+            if self._finalize_scan and not self._is_cancelled:
+                try:
+                    rows = self.scan_service.finalize_scan_result(
+                        self._root,
+                        rows,
+                        pair_live=self.root_only,
+                        preserve_modified_after_ms=self._scan_started_at_ms,
+                        current_scan_job_id=self._scan_job_id,
+                        root_only=self.root_only,
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Failed to persist scan finalization for %s: %s", self._root, exc
+                    )
+                    self._had_error = True
 
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:
@@ -156,8 +177,7 @@ class ScannerWorker(QRunnable):
         finally:
             if not self._is_cancelled and not self._had_error:
                 # Consumers should use `batchCommitted` for progressive UI updates.
-                # The `finished` signal provides the complete dataset for
-                # authoritative operations (e.g. writing the index file).
+                # The `finished` signal carries the final scan result.
                 self._signals.finished.emit(self._root, rows)
             else:
                 self._signals.finished.emit(self._root, [])

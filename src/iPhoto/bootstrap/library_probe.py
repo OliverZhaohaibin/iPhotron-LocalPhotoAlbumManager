@@ -46,7 +46,11 @@ _RESERVED_NAMES = frozenset(
     name.casefold()
     for name in (*ALL_WORK_DIR_NAMES, RECENTLY_DELETED_DIR_NAME, EXPORT_DIR_NAME)
 )
-PROBE_PROTOCOL_VERSION = 2
+PROBE_PROTOCOL_VERSION = 3
+MIGRATION_TIMEOUT_MS = 30 * 60 * 1000
+# The helper sends these frames before the final JSON envelope.
+_MIGRATION_STARTED = b"migration-started\n"
+_MIGRATION_FINISHED = b"migration-finished\n"
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_STDERR_BYTES = 16 * 1024
 MAX_ALBUMS = 10_000
@@ -92,6 +96,7 @@ _FAILURE_MESSAGES = {
     "process_failed_to_start": "The library helper could not be started.",
     "process_crashed": "The library helper stopped unexpectedly.",
     "timeout": "The photo library did not respond in time.",
+    "migration_timeout": "The photo library index update did not complete in time.",
     "output_too_large": "The library helper returned too much data.",
     "invalid_protocol": "The library helper returned an incompatible response.",
     "root_mismatch": "The library helper returned a result for another library.",
@@ -472,14 +477,28 @@ def _snapshot_albums(root: Path) -> tuple[tuple[PreparedAlbum, ...], tuple[str, 
     return tuple(result), tuple(warnings)
 
 
-def _database_snapshot(root: Path) -> tuple[Path, int, bool, tuple[str, ...]]:
+def _database_snapshot(
+    root: Path, on_migration_changed: Callable[[bool], None] | None
+) -> tuple[Path, int, bool, tuple[str, ...]]:
     database_path = root / WORK_DIR_NAME / "global_index.db"
     # Schema creation/migration is intentionally performed in this killable
     # helper, never on the GUI thread.  Versioned migrations make the common
     # already-current path a constant-time PRAGMA check.
     from ..cache.index_store.migrations import SchemaMigrator
 
-    schema_version, warnings = SchemaMigrator.prepare_database(database_path)
+    migration_started = False
+
+    def start_migration() -> None:
+        nonlocal migration_started
+        migration_started = True
+        if on_migration_changed is not None:
+            on_migration_changed(True)
+
+    schema_version, warnings = SchemaMigrator.prepare_database(
+        database_path, on_migration_started=start_migration
+    )
+    if migration_started and on_migration_changed is not None:
+        on_migration_changed(False)
     with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
         try:
             row = connection.execute(
@@ -593,7 +612,11 @@ def _storage_profile(path: Path, elapsed_ms: float) -> StorageProfile:
     return StorageProfile("local", "normal", "elapsed")
 
 
-def probe_library(request: LibraryProbeRequest) -> PreparedLibrary:
+def probe_library(
+    request: LibraryProbeRequest,
+    *,
+    on_migration_changed: Callable[[bool], None] | None = None,
+) -> PreparedLibrary:
     """Synchronously inspect one library; callers should isolate this in a process."""
 
     if request.protocol_version != PROBE_PROTOCOL_VERSION:
@@ -602,7 +625,9 @@ def probe_library(request: LibraryProbeRequest) -> PreparedLibrary:
     root = Path(request.path).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(f"Library path is not a directory: {request.path}")
-    database_path, schema_version, scan_complete, warnings = _database_snapshot(root)
+    database_path, schema_version, scan_complete, warnings = _database_snapshot(
+        root, on_migration_changed
+    )
     albums, snapshot_warnings = _snapshot_albums(root)
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
     storage_profile = _storage_profile(root, elapsed_ms)
@@ -639,6 +664,7 @@ class LibraryProbeController(QObject):
         self._request: LibraryProbeRequest | None = None
         self._stdout = bytearray()
         self._stderr = bytearray()
+        self._migrating = False
         self._timeout = QTimer(self)
         self._timeout.setSingleShot(True)
         self._timeout.timeout.connect(self._on_timeout)
@@ -656,6 +682,7 @@ class LibraryProbeController(QObject):
         self._process = process
         self._stdout.clear()
         self._stderr.clear()
+        self._migrating = False
         payload = json.dumps(asdict(request), ensure_ascii=False)
         program, arguments = _probe_process_command()
         process.start(program, arguments)
@@ -707,8 +734,21 @@ class LibraryProbeController(QObject):
             process.readAllStandardOutput()
             return
         self._stdout.extend(bytes(process.readAllStandardOutput()))
-        if len(self._stdout) > MAX_STDOUT_BYTES and self._request is not None:
-            self._emit_failure(_failure(self._request.request_id, "output_too_large"))
+        request = self._request
+        if request is None:
+            return
+        if not self._migrating and self._stdout.startswith(_MIGRATION_STARTED):
+            del self._stdout[: len(_MIGRATION_STARTED)]
+            self._migrating = True
+            self._timeout.start(MIGRATION_TIMEOUT_MS)
+            _LOGGER.info("Library index migration started")
+        if self._migrating and self._stdout.startswith(_MIGRATION_FINISHED):
+            del self._stdout[: len(_MIGRATION_FINISHED)]
+            self._migrating = False
+            self._timeout.start(request.timeout_ms)
+            _LOGGER.info("Library index migration finished")
+        if len(self._stdout) > MAX_STDOUT_BYTES:
+            self._emit_failure(_failure(request.request_id, "output_too_large"))
 
     def _read_stdout_from_sender(self) -> None:
         process = self.sender()
@@ -749,7 +789,7 @@ class LibraryProbeController(QObject):
             return
         failure = _failure(
             request.request_id,
-            "timeout",
+            "migration_timeout" if self._migrating else "timeout",
             exception_type="TimeoutError",
             timed_out=True,
         )
@@ -765,11 +805,11 @@ class LibraryProbeController(QObject):
         if process is not self._process or request is None:
             process.deleteLater()
             return
-        self._timeout.stop()
         self._read_stdout(process)
         self._read_stderr(process)
         if process is not self._process:
             return
+        self._timeout.stop()
         stdout = bytes(self._stdout).decode("utf-8", errors="replace")
         self._process = None
         self._request = None
@@ -914,6 +954,12 @@ def _exception_failure(request_id: str, exc: Exception) -> LibraryProbeFailure:
     )
 
 
+def _report_migration(active: bool) -> None:
+    marker = _MIGRATION_STARTED if active else _MIGRATION_FINISHED
+    sys.stdout.buffer.write(marker)
+    sys.stdout.buffer.flush()
+
+
 def _main(arguments: list[str]) -> int:
     request_id = "unknown"
     request_path = ""
@@ -928,7 +974,7 @@ def _main(arguments: list[str]) -> int:
         request = LibraryProbeRequest(**payload)
         request_id = request.request_id
         request_path = request.path
-        prepared = probe_library(request)
+        prepared = probe_library(request, on_migration_changed=_report_migration)
         envelope = {
             "protocol_version": PROBE_PROTOCOL_VERSION,
             "request_path": request.path,

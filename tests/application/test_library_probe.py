@@ -947,6 +947,28 @@ def test_controller_timeout_uses_stable_failure_and_terminates(qapp, tmp_path: P
     QTest.qWait(300)
 
 
+def test_controller_switches_timeout_for_migration_frames(qapp, tmp_path: Path) -> None:
+    request = LibraryProbeRequest.create(tmp_path)
+    process = _FakeProcess(b"migration-started")
+    controller = LibraryProbeController()
+    controller._request = request
+    controller._process = process  # type: ignore[assignment]
+    controller._timeout.start(request.timeout_ms)
+
+    controller._read_stdout(process)  # type: ignore[arg-type]
+    assert controller._timeout.interval() == request.timeout_ms
+
+    process.stdout = b"\nmigration-fin"
+    controller._read_stdout(process)  # type: ignore[arg-type]
+    assert controller._timeout.interval() == probe_module.MIGRATION_TIMEOUT_MS
+
+    process.stdout = b"ished\n{}"
+    controller._read_stdout(process)  # type: ignore[arg-type]
+    assert controller._timeout.interval() == request.timeout_ms
+    assert controller._stdout == b"{}"
+    controller.cancel()
+
+
 @pytest.mark.parametrize(
     ("process_error", "expected_code"),
     [
@@ -1008,9 +1030,12 @@ def test_controller_ignores_late_result_after_cancel(qapp, tmp_path: Path) -> No
     assert failures == []
 
 
-def test_controller_real_helper_round_trip(qapp, tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_schema", [False, True])
+def test_controller_real_helper_round_trip(qapp, tmp_path: Path, legacy_schema: bool) -> None:
     library = tmp_path / "library"
     library.mkdir()
+    if legacy_schema:
+        _create_legacy_database(library / ".iPhoto" / "global_index.db")
     request = LibraryProbeRequest.create(library)
     controller = LibraryProbeController()
     ready = []
@@ -1026,6 +1051,7 @@ def test_controller_real_helper_round_trip(qapp, tmp_path: Path) -> None:
 
     assert failures == []
     assert ready[0].request_id == request.request_id
+    assert ready[0].schema_version == CURRENT_SCHEMA_VERSION
     assert controller._process is None
 
 

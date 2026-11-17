@@ -19,6 +19,7 @@ class MediaScannerPort(Protocol):
         *,
         existing_index: dict[str, dict[str, Any]] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
+        recursive: bool = True,
     ) -> Iterator[dict[str, Any]]:
         """Yield normalized scan rows."""
 

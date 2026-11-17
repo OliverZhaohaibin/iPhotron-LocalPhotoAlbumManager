@@ -55,6 +55,8 @@ Silicon 本轮由工程任务执行；Intel 保持 `pending_manual_validation`�
 - 断开的移动盘和盘符复用
 - 延迟/离线 UNC 或 SMB
 - SQLite lock/corrupt 与 helper timeout
+- 用已有大图库验证索引升级。普通探测使用 3 秒时限，helper 进入迁移或恢复后使用独立的
+  30 分钟时限。验证迁移期间关窗仍会终止 helper，重新打开后可完成恢复。
 - 启动中关闭、连续重试、切库
 - 单顶层窗口、统一 pre-show final-parent QRhi hierarchy，且结束后无
   probe/helper 子进程

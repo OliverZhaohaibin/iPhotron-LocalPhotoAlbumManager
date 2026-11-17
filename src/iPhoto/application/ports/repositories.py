@@ -64,11 +64,16 @@ class AssetRepositoryPort(Protocol):
     def append_rows(self, rows: Iterable[dict[str, Any]]) -> None:
         """Append or replace already-materialized asset rows."""
 
-    def remove_rows(self, rels: Iterable[str]) -> None:
+    def remove_rows(self, rels: Iterable[str], *, clear_live_partners: bool = False) -> None:
         """Remove rows identified by library-relative paths."""
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
         """Return existing rows keyed by library-relative path."""
+
+    def get_unpaired_live_candidates(
+        self, content_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Find active, unpaired rows sharing the supplied Live Photo identifiers."""
 
     def read_all(
         self,
@@ -225,6 +230,9 @@ class AssetRepositoryPort(Protocol):
         updates: Iterable[tuple[str, int, str | None]],
     ) -> None:
         """Replace Live Photo role state only inside a library-relative prefix."""
+
+    def update_live_roles(self, updates: Iterable[tuple[str, int, str | None]]) -> None:
+        """Update the Live Photo roles of the supplied rows."""
 
 
 class AlbumRepositoryPort(Protocol):

@@ -166,6 +166,7 @@ class LibraryScanService:
         visible_publish_size: int = 100,
         max_chunk_interval_ms: float | None = None,
         persist_chunks: bool = False,
+        root_only: bool = False,
     ) -> ScanLibraryResult:
         """Scan *root* using the shared application use case."""
 
@@ -183,7 +184,7 @@ class LibraryScanService:
         create_scan_job = getattr(repository, "create_scan_job", None)
         update_scan_job_stage = getattr(repository, "update_scan_job_stage", None)
         append_scan_event = getattr(repository, "append_scan_event", None)
-        scan_scope = "album" if self._album_path(scan_root) else "library"
+        scan_scope = self._scan_scope(scan_root, root_only=root_only)
         if callable(create_scan_job):
             create_scan_job(
                 job_id=scan_job_id,
@@ -207,6 +208,7 @@ class LibraryScanService:
             scan_root,
             library_root=self.library_root,
             repository=repository,
+            root_only=root_only,
         )
         stage_elapsed_ms[ScanStage.STAT_CACHE.value] = round(
             _monotonic_ms() - stat_cache_started_ms,
@@ -256,6 +258,7 @@ class LibraryScanService:
                     scan_job_id=scan_job_id,
                     scan_started_at_ms=scan_started_at_ms,
                     scan_stage_elapsed_ms=stage_elapsed_ms,
+                    recursive=not root_only,
                 )
             )
             stage_elapsed_ms[ScanStage.METADATA.value] = round(
@@ -363,6 +366,7 @@ class LibraryScanService:
         exclude: Iterable[str] | None = None,
         preserve_modified_after_ms: int | None = None,
         current_scan_job_id: str | None = None,
+        root_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Persist scan completion side effects for one scope.
 
@@ -375,6 +379,7 @@ class LibraryScanService:
         from .library_asset_lifecycle_service import LibraryAssetLifecycleService
 
         scan_root = Path(root)
+        scan_scope = self._scan_scope(scan_root, root_only=root_only)
         resolved_exclude = tuple(
             exclude if exclude is not None else self.scan_filters(scan_root)[1]
         )
@@ -391,21 +396,29 @@ class LibraryScanService:
             )
 
         try:
-            self.finalize_scan(scan_root, materialized_rows)
+            if root_only:
+                # A partial snapshot cannot replace the library index or links.
+                self._repository().merge_scan_rows(materialized_rows)
+            else:
+                self.finalize_scan(scan_root, materialized_rows)
             lifecycle_service.reconcile_missing_scan_rows(
                 scan_root,
                 materialized_rows,
                 exclude_globs=resolved_exclude,
                 preserve_modified_after_ms=preserve_modified_after_ms,
                 current_scan_job_id=current_scan_job_id,
+                root_only=root_only,
             )
             if pair_live:
-                self.pair_album(scan_root)
+                if root_only:
+                    self.pair_album(scan_root, root_only=True)
+                else:
+                    self.pair_album(scan_root)
         except Exception:
             self._mark_scan_job_failed(current_scan_job_id)
             raise
 
-        self._mark_scan_job_finalized(scan_root, current_scan_job_id)
+        self._mark_scan_job_finalized(scan_root, current_scan_job_id, scope=scan_scope)
         return materialized_rows
 
     def refresh_restored_album(
@@ -506,13 +519,18 @@ class LibraryScanService:
             self._repository().merge_scan_rows(transformed)
         return transformed
 
-    def pair_album(self, root: Path) -> "list[LiveGroup]":
+    def pair_album(self, root: Path, *, root_only: bool = False) -> list[LiveGroup]:
         """Rebuild Live Photo roles and derived links for *root*."""
 
         scan_root = Path(root)
         album_path = self._album_path(scan_root)
         repository = self._repository()
-        if album_path:
+        if root_only:
+            self._scan_scope(scan_root, root_only=True)
+            rows = list(
+                repository.read_album_assets("", include_subalbums=False, filter_hidden=False)
+            )
+        elif album_path:
             rows = list(
                 repository.read_album_assets(
                     album_path,
@@ -528,6 +546,7 @@ class LibraryScanService:
             rows,
             library_root=self.library_root,
             repository=repository,
+            root_only=root_only,
         )
 
     def report_album(self, root: Path) -> AlbumReport:
@@ -675,7 +694,6 @@ class LibraryScanService:
         if not root.exists():
             raise AlbumNotFoundError(f"Album directory does not exist: {root}")
 
-        ensure_work_dir(root)
         for name in ALBUM_MANIFEST_NAMES:
             candidate = root / name
             if not candidate.exists():
@@ -749,13 +767,21 @@ class LibraryScanService:
             materialized.append(row_data)
         return materialized
 
-    def _mark_scan_job_finalized(self, scan_root: Path, scan_job_id: str | None) -> None:
+    def _scan_scope(self, root: Path, *, root_only: bool = False) -> str:
+        if root_only:
+            if not self._paths_equal(root, self.library_root):
+                raise ValueError("A root media scan must use the library root")
+            return "root_media"
+        return "album" if self._album_path(root) else "library"
+
+    def _mark_scan_job_finalized(
+        self, scan_root: Path, scan_job_id: str | None, *, scope: str
+    ) -> None:
         if not scan_job_id:
             return
         repository = self._repository()
         latest_scan_job = getattr(repository, "latest_scan_job", None)
         if callable(latest_scan_job):
-            scope = "album" if self._album_path(scan_root) else "library"
             job = latest_scan_job(root=scan_root.as_posix(), scope=scope)
             if job is not None and job.get("job_id") == scan_job_id:
                 status = str(job.get("status") or "")

@@ -64,24 +64,30 @@ class FileSystemWatcherMixin:
         scan_roots = self._dedupe_watch_scan_roots(paths)
         self._queue_watcher_scan_roots(scan_roots)
 
-    def _queue_watcher_scan_roots(self, scan_roots: list[Path]) -> None:
+    def _queue_watcher_scan_roots(
+        self, scan_roots: list[Path], *, root_only: bool = False
+    ) -> None:
         """Queue watcher-triggered scan scopes without collapsing album filters."""
 
         if not scan_roots:
             return
 
         queued = {
-            self._watch_scan_key(scan_root)
-            for scan_root in self._watch_scan_queue
+            (self._watch_scan_key(scan_root), queued_root_only)
+            for scan_root, queued_root_only in self._watch_scan_queue
         }
         active_root = getattr(self, "_live_scan_root", None)
         for scan_root in scan_roots:
-            key = self._watch_scan_key(scan_root)
+            key = (self._watch_scan_key(scan_root), root_only)
             if key in queued:
                 continue
-            if active_root is not None and self._paths_equal(active_root, scan_root):
+            if (
+                not root_only
+                and active_root is not None
+                and self._paths_equal(active_root, scan_root)
+            ):
                 continue
-            self._watch_scan_queue.append(scan_root)
+            self._watch_scan_queue.append((scan_root, root_only))
             queued.add(key)
 
         self._start_next_watcher_scan()
@@ -100,14 +106,17 @@ class FileSystemWatcherMixin:
             scan_service = LibraryScanService(self._root)
 
         while self._watch_scan_queue:
-            scan_root = self._watch_scan_queue.pop(0)
+            scan_root, root_only = self._watch_scan_queue.pop(0)
             if not scan_root.exists() or not scan_root.is_dir():
                 continue
             try:
                 include, exclude = scan_service.scan_filters(scan_root)
             except Exception:
                 include, exclude = list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE)
-            self.start_scanning(scan_root, include, exclude)
+            if root_only:
+                self.start_scanning(scan_root, include, exclude, root_only=True)
+            else:
+                self.start_scanning(scan_root, include, exclude)
             return
 
     def _on_watcher_scan_finished(self, _root: Path, _success: bool) -> None:

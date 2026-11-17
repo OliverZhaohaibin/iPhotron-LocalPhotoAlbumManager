@@ -157,12 +157,15 @@ class FileDiscoveryThread(threading.Thread):
         queue_obj: queue.Queue,
         include: list[str] | None = None,
         exclude: list[str] | None = None,
+        *,
+        recursive: bool = True,
     ) -> None:
         super().__init__(name=f"ScannerDiscovery-{root.name}")
         self._root = Path(root)
         self._queue = queue_obj
         self._include = include or list(DEFAULT_INCLUDE)
         self._exclude = exclude or list(DEFAULT_EXCLUDE)
+        self._recursive = recursive
         self._stop_event = threading.Event()
         self.total_found = 0
         self.daemon = True
@@ -176,9 +179,11 @@ class FileDiscoveryThread(threading.Thread):
             for dirpath, dirnames, filenames in os.walk(self._root):
                 if self._stop_event.is_set():
                     break
-                dirnames[:] = [
-                    name for name in dirnames if name.casefold() not in reserved_names
-                ]
+                dirnames[:] = (
+                    [name for name in dirnames if name.casefold() not in reserved_names]
+                    if self._recursive
+                    else []
+                )
                 for name in filenames:
                     if self._stop_event.is_set():
                         break
@@ -315,6 +320,8 @@ def scan_album(
     existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     thumbnail_cache_dir: Path | None = None,
+    *,
+    recursive: bool = True,
 ) -> Iterator[Dict[str, Any]]:
     """Yield index rows for all matching assets in *root*, scanning in parallel."""
 
@@ -325,6 +332,7 @@ def scan_album(
         path_queue,
         include=list(include_globs),
         exclude=list(exclude_globs),
+        recursive=recursive,
     )
     discoverer.start()
 

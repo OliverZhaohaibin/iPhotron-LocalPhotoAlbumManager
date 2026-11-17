@@ -140,6 +140,23 @@ def test_platform_registry_prefers_macos_backend_and_falls_back_to_qt(
     assert surface.fallback == "imageio_to_qt"
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS ImageIO")
+def test_macos_imageio_preserves_semitransparent_color(tmp_path: Path) -> None:
+    from iPhoto.gui.detail_decode_macos import create_macos_imageio_backend
+
+    backend = create_macos_imageio_backend()
+    if backend is None:
+        pytest.skip("requires PyObjC Quartz")
+    source = tmp_path / "alpha.png"
+    rgba = (240, 40, 80, 128)
+    Image.new("RGBA", (32, 32), rgba).save(source)
+
+    surface = backend.decode(_request(source), _Token())
+
+    assert surface.image.format() == QImage.Format.Format_RGBA8888
+    assert surface.image.pixelColor(16, 16).getRgb() == pytest.approx(rgba, abs=1)
+
+
 def test_platform_registry_keeps_cancellation_terminal() -> None:
     class _CancelledNative:
         def decode(self, request, cancellation):

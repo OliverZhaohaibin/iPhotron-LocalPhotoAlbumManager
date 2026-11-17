@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ...config import RECENTLY_DELETED_DIR_NAME
+from ...domain.models.core import normalise_content_id
 
 
 def insert_rows(
@@ -22,7 +23,11 @@ def insert_rows(
     columns = _asset_insert_columns(conn)
     data_list = []
     for row in rows:
-        data = row_to_db_params(row, include_metadata="metadata" in columns)
+        data = row_to_db_params(
+            row,
+            include_metadata="metadata" in columns,
+            include_content_id_key="content_id_key" in columns,
+        )
         data_list.append(data)
 
     if not data_list:
@@ -55,10 +60,17 @@ def _asset_insert_columns(conn: sqlite3.Connection) -> list[str]:
     table_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(assets)")}
     if "metadata" in table_columns:
         columns.append("metadata")
+    if "content_id_key" in table_columns:
+        columns.append("content_id_key")
     return columns
 
 
-def row_to_db_params(row: dict[str, Any], *, include_metadata: bool = False) -> list[Any]:
+def row_to_db_params(
+    row: dict[str, Any],
+    *,
+    include_metadata: bool = False,
+    include_content_id_key: bool = False,
+) -> list[Any]:
     """Map a dictionary row to a list of values for the DB."""
     gps_val = row.get("gps")
     gps_str = json.dumps(gps_val) if gps_val is not None else None
@@ -145,6 +157,8 @@ def row_to_db_params(row: dict[str, Any], *, include_metadata: bool = False) -> 
     ]
     if include_metadata:
         params.append(_metadata_to_json(row.get("metadata")))
+    if include_content_id_key:
+        params.append(normalise_content_id(row.get("content_id")))
     return params
 
 

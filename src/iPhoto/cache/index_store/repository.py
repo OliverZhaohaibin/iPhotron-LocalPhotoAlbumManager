@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ...config import WORK_DIR_NAME
+from ...domain.models.core import normalise_content_id
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
@@ -41,6 +42,7 @@ from .migrations import SchemaMigrator
 from .queries import QueryBuilder
 from .recovery import RecoveryService
 from .row_mapper import db_row_to_dict, insert_rows, row_to_db_params
+from .scan_merge import conflicting_thumbnail_revisions
 from .scan_merge import merge_scan_rows as merge_scan_rows_payload
 
 logger = get_logger()
@@ -289,45 +291,61 @@ class AssetRepository:
             dict.fromkeys(str(row["rel"]) for row in materialized_rows if row.get("rel"))
         )
 
-        with self.transaction(begin_mode="IMMEDIATE") as conn:
-            existing_rows_by_rel: Dict[str, Dict[str, Any]] = {}
-            if unique_rels:
-                conn.row_factory = sqlite3.Row
-                for offset in range(0, len(unique_rels), _SQLITE_PARAM_CHUNK_SIZE):
-                    chunk = unique_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
-                    placeholders = ", ".join(["?"] * len(chunk))
-                    cursor = conn.execute(
-                        f"SELECT * FROM assets WHERE rel IN ({placeholders})",
-                        chunk,
+        validated_versions: dict[str, tuple[str, int]] = {}
+        current_revisions: dict[str, str | None] = {}
+        while True:
+            with self.transaction(begin_mode="IMMEDIATE") as conn:
+                existing_rows = self._scan_merge_existing_rows(conn, unique_rels)
+                conflicts = conflicting_thumbnail_revisions(materialized_rows, existing_rows)
+                to_validate = {
+                    rel: version for rel, version in conflicts.items()
+                    if validated_versions.get(rel) != version
+                }
+                if not to_validate:
+                    merged_rows = merge_scan_rows_payload(
+                        materialized_rows,
+                        existing_rows,
+                        current_thumbnail_revisions=current_revisions,
                     )
-                    for db_row in cursor:
-                        d = self._db_row_to_dict(db_row)
-                        rel_value = d.get("rel")
-                        if rel_value is not None:
-                            existing_rows_by_rel[str(rel_value)] = d
-                conn.row_factory = None
-
-            merged_rows = merge_scan_rows_payload(
-                materialized_rows,
-                existing_rows_by_rel,
-                is_current_thumbnail_revision=self._is_current_thumbnail_revision,
-            )
-            self._insert_rows(conn, merged_rows)
+                    self._insert_rows(conn, merged_rows)
+                    break
+            # Filesystem reads must release the SQLite write lock. Recheck the
+            # observed thumbnail versions so an edit committed during I/O wins.
+            for rel, version in to_validate.items():
+                current_revisions[rel] = self._current_thumbnail_revision(rel)
+                validated_versions[rel] = version
 
         self._clear_collection_anchor_cache()
         return merged_rows
 
-    def _is_current_thumbnail_revision(self, rel: str, expected: str) -> bool:
+    def _scan_merge_existing_rows(
+        self, conn: sqlite3.Connection, rels: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        previous_factory = conn.row_factory
+        conn.row_factory = sqlite3.Row
+        try:
+            for offset in range(0, len(rels), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join(["?"] * len(chunk))
+                cursor = conn.execute(f"SELECT * FROM assets WHERE rel IN ({placeholders})", chunk)
+                for db_row in cursor:
+                    rows[str(db_row["rel"])] = self._db_row_to_dict(db_row)
+        finally:
+            conn.row_factory = previous_factory
+        return rows
+
+    def _current_thumbnail_revision(self, rel: str) -> str | None:
         from ...infrastructure.services.thumbnail_artifact import thumbnail_revision
 
         try:
-            resolve_library_asset_path(self.library_root, rel)
+            resolved = resolve_library_asset_path(self.library_root, rel)
+            if not resolved.is_file():
+                return None
+            # Keep the lexical path used by the scanner in the revision digest.
+            return thumbnail_revision(self.library_root / rel)
         except (LibraryAssetPathError, OSError, RuntimeError):
-            return False
-        # Keep the lexical path used by the scanner in the revision digest.
-        # The write transaction also orders this check before any later edit
-        # that has saved its sidecar and is waiting to mark the row stale.
-        return thumbnail_revision(self.library_root / rel) == expected
+            return None
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""
@@ -347,15 +365,30 @@ class AssetRepository:
             stamped.append(row_data)
         return stamped
 
-    def remove_rows(self, rels: Iterable[str]) -> None:
+    def remove_rows(self, rels: Iterable[str], *, clear_live_partners: bool = False) -> None:
         """Drop any index rows whose ``rel`` key matches *rels*."""
         removable = list(rels)
         if not removable:
             return
 
-        placeholders = ", ".join(["?"] * len(removable))
-        query = f"DELETE FROM assets WHERE rel IN ({placeholders})"
-        self._db_manager.execute_in_transaction(query, removable)
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            for offset in range(0, len(removable), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = removable[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join(["?"] * len(chunk))
+                if clear_live_partners:
+                    conn.execute(
+                        f"""
+                        UPDATE assets
+                        SET live_role = 0, live_partner_rel = NULL,
+                            index_revision = COALESCE(index_revision, 0) + 1
+                        WHERE rel IN (
+                            SELECT live_partner_rel FROM assets WHERE rel IN ({placeholders})
+                        )
+                          AND live_partner_rel IN ({placeholders})
+                        """,
+                        [*chunk, *chunk],
+                    )
+                conn.execute(f"DELETE FROM assets WHERE rel IN ({placeholders})", chunk)
         self._clear_collection_anchor_cache()
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:
@@ -386,6 +419,37 @@ class AssetRepository:
                     result[str(rel_value)] = d
             return result
         finally:
+            if should_close:
+                conn.close()
+
+    def get_unpaired_live_candidates(
+        self, content_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        keys = sorted({key for value in content_ids if (key := normalise_content_id(value))})
+        if not keys:
+            return {}
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        previous_factory = conn.row_factory
+        try:
+            conn.row_factory = sqlite3.Row
+            result: dict[str, dict[str, Any]] = {}
+            for offset in range(0, len(keys), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = keys[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"""
+                    SELECT * FROM assets WHERE content_id_key IN ({placeholders})
+                        AND is_deleted = 0
+                        AND COALESCE(live_partner_rel, '') = ''
+                    """,
+                    chunk,
+                )
+                for row in cursor:
+                    result[str(row["rel"])] = self._db_row_to_dict(row)
+            return result
+        finally:
+            conn.row_factory = previous_factory
             if should_close:
                 conn.close()
 
@@ -1930,6 +1994,25 @@ class AssetRepository:
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
         self._clear_collection_anchor_cache()
+
+    def update_live_roles(self, updates: Iterable[tuple[str, int, str | None]]) -> None:
+        """Update specific pairs and clear affected former partners."""
+
+        params = [(role, partner, rel, role, partner) for rel, role, partner in updates]
+        if not params:
+            return
+        with self.transaction() as conn:
+            cursor = conn.executemany(
+                """
+                UPDATE assets
+                SET live_role = ?, live_partner_rel = ?,
+                    index_revision = COALESCE(index_revision, 0) + 1
+                WHERE rel = ? AND (live_role IS NOT ? OR live_partner_rel IS NOT ?)
+                """,
+                params,
+            )
+        if cursor.rowcount:
+            self._clear_collection_anchor_cache()
 
     def list_albums(self) -> List[str]:
         """Return a list of distinct album paths in the index."""

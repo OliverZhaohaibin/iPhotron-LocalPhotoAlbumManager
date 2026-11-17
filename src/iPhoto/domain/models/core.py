@@ -73,3 +73,11 @@ class LiveGroup:
     content_id: Optional[str]
     still_image_time: Optional[float]
     confidence: float
+
+
+def normalise_content_id(value: object) -> str | None:
+    """Return the shared comparison key for Live Photo content identifiers."""
+
+    if not isinstance(value, str):
+        return None
+    return value.strip().casefold() or None

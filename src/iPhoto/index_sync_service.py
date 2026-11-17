@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 from .cache.lock import FileLock
 from .config import RECENTLY_DELETED_DIR_NAME
 from .core.pairing import pair_live
-from .errors import IndexCorruptedError, ManifestInvalidError
-from .domain.models.core import LiveGroup
+from .errors import IPhotoError, IndexCorruptedError, ManifestInvalidError
+from .domain.models.core import LiveGroup, normalise_content_id
 from .path_normalizer import compute_album_path, normalise_rel_key
+from .schemas import validate_links
 from .utils.jsonio import read_json, write_json
 from .utils.logging import get_logger
 from .utils.pathutils import ensure_work_dir
@@ -47,7 +48,9 @@ def load_incremental_index_cache(
     
     try:
         if root_only:
-            rows = repository.read_album_assets("", include_subalbums=False)
+            rows = repository.read_album_assets(
+                "", include_subalbums=False, sort_by_date=False, filter_hidden=False
+            )
         elif album_path:
             rows = repository.read_album_assets(album_path, include_subalbums=True)
         else:
@@ -129,6 +132,7 @@ def ensure_links(
     library_root: Optional[Path] = None,
     *,
     repository: "AssetRepositoryPort",
+    root_only: bool = False,
 ) -> List[LiveGroup]:
     """Ensure DB live-role state is current and refresh the derived links snapshot.
     
@@ -137,6 +141,9 @@ def ensure_links(
         rows: List of asset rows (with album-relative paths).
         library_root: If provided, use this as the database root.
     """
+    if root_only:
+        return _ensure_root_media_links(root, rows, repository)
+
     groups, payload = compute_links_payload(rows)
     sync_live_roles_to_db(
         root,
@@ -163,6 +170,86 @@ def ensure_links(
     return groups
 
 
+def _ensure_root_media_links(
+    root: Path, rows: List[dict], repository: "AssetRepositoryPort"
+) -> List[LiveGroup]:
+    # Retain valid cross-album pairs from a full scan without reading other albums.
+    cross_peers = repository.get_rows_by_rels({
+        partner for row in rows
+        if isinstance(partner := row.get("live_partner_rel"), str)
+        and "/" in partner
+    })
+    groups: List[LiveGroup] = []
+    matched: set[str] = set()
+    former_paths = {
+        row["rel"] for row in rows if row.get("live_partner_rel") or row.get("live_role")
+    }
+    active_rows = [row for row in rows if not row.get("is_deleted")]
+    for row in rows:
+        peer = cross_peers.get(row.get("live_partner_rel"))
+        if peer is None or peer.get("live_partner_rel") != row["rel"]:
+            continue
+        former_paths.add(peer["rel"])
+        if row.get("is_deleted") or peer.get("is_deleted"):
+            continue
+        cross_groups = pair_live([row, peer])
+        if cross_groups:
+            groups.extend(cross_groups)
+            matched.add(row["rel"])
+    remaining = {row["rel"]: row for row in active_rows if row["rel"] not in matched}
+    candidates = repository.get_unpaired_live_candidates(
+        cid for row in remaining.values()
+        if (cid := normalise_content_id(row.get("content_id")))
+    )
+    root_paths = set(remaining)
+    remaining.update(candidates)
+    groups.extend(
+        group for group in pair_live(list(remaining.values()))
+        if group.still in root_paths or group.motion in root_paths
+    )
+    sync_live_roles_to_db(root, groups, repository=repository, former_paths=former_paths)
+    _refresh_root_links_snapshot(root, groups)
+    return groups
+
+
+def _refresh_root_links_snapshot(root: Path, groups: List[LiveGroup]) -> None:
+    try:
+        work_dir = ensure_work_dir(root)
+        links_path = work_dir / "links.json"
+        # Leave creation of a complete snapshot to the normal full pairing path.
+        if not links_path.is_file():
+            return
+        with FileLock(root, "links"):
+            existing = read_json(links_path)
+            if not isinstance(existing, dict) or existing.get("schema") != "iPhoto/links@1":
+                return
+            old_groups = existing.get("live_groups", [])
+            if not isinstance(old_groups, list):
+                return
+            nested_groups = [
+                group for group in old_groups
+                if isinstance(group, dict)
+                and "/" in str(group.get("still", ""))
+                and "/" in str(group.get("motion", ""))
+            ]
+            updated_groups = [*nested_groups, *(asdict(group) for group in groups)]
+            if updated_groups == old_groups:
+                return
+            # Older snapshots wrote absent optional values as JSON null.
+            payload = {
+                **existing,
+                "live_groups": [
+                    {key: value for key, value in group.items() if value is not None}
+                    for group in updated_groups
+                ],
+            }
+            if payload != existing:
+                validate_links(payload)
+                write_json(links_path, payload, backup_dir=work_dir / "manifest.bak")
+    except (OSError, IPhotoError) as exc:
+        LOGGER.warning("Failed to update derived links.json for %s: %s", root, exc)
+
+
 def compute_links_payload(rows: List[dict]) -> tuple[List[LiveGroup], Dict[str, object]]:
     groups = pair_live(rows)
     payload: Dict[str, object] = {
@@ -185,6 +272,7 @@ def sync_live_roles_to_db(
     library_root: Optional[Path] = None,
     *,
     repository: "AssetRepositoryPort",
+    former_paths: set[str] | None = None,
 ) -> None:
     """Propagate live photo roles from computed groups to the repository.
     
@@ -214,7 +302,11 @@ def sync_live_roles_to_db(
         # Motion component: Role 1 (Hidden), Partner = Still
         updates.append((motion_rel, 1, still_rel))
 
-    if album_prefix:
+    if former_paths is not None:
+        paired_paths = {rel for rel, _role, _partner in updates}
+        updates.extend((rel, 0, None) for rel in former_paths - paired_paths)
+        repository.update_live_roles(updates)
+    elif album_prefix:
         repository.apply_live_role_updates_for_prefix(album_prefix, updates)
     else:
         repository.apply_live_role_updates(updates)
@@ -299,7 +391,10 @@ def prune_index_scope(
     if not removable:
         return 0
 
-    repository.remove_rows(removable)
+    if root_only:
+        repository.remove_rows(removable, clear_live_partners=True)
+    else:
+        repository.remove_rows(removable)
     return len(removable)
 
 

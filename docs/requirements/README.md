@@ -15,6 +15,9 @@ architecture.
 
 Current entries:
 
+- [`UPSTREAM_GALLERY_PERFORMANCE_PORTING_PLAN.md`](UPSTREAM_GALLERY_PERFORMANCE_PORTING_PLAN.md)
+  covers the parallel project's Gallery patches and their integration with the
+  local sparse-window, viewport-demand, and scan-refresh paths.
 - [`PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md`](PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md):
   packaged validation for first-use recovery and offline recognition model installation.
 - [`ocr/OCR_REQUIREMENTS.md`](ocr/OCR_REQUIREMENTS.md): future, product-level

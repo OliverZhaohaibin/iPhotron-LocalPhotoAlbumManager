@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
@@ -27,6 +28,7 @@ def load_incremental_index_cache(
     library_root: Optional[Path] = None,
     *,
     repository: "AssetRepositoryPort",
+    root_only: bool = False,
 ) -> Dict[str, dict]:
     """Load the existing index into a dictionary for incremental scanning.
 
@@ -44,7 +46,9 @@ def load_incremental_index_cache(
     album_path = compute_album_path(root, library_root)
     
     try:
-        if album_path:
+        if root_only:
+            rows = repository.read_album_assets("", include_subalbums=False)
+        elif album_path:
             rows = repository.read_album_assets(album_path, include_subalbums=True)
         else:
             rows = repository.read_all()
@@ -225,6 +229,7 @@ def prune_index_scope(
     exclude_globs: Iterable[str] | None = None,
     preserve_modified_after_ms: int | None = None,
     current_scan_job_id: str | None = None,
+    root_only: bool = False,
 ) -> int:
     """Delete rows under *root* that were not rediscovered by the completed scan.
 
@@ -244,7 +249,11 @@ def prune_index_scope(
         if rel_key is not None
     }
 
-    if album_path:
+    if root_only:
+        scoped_rows = repository.read_album_assets(
+            "", include_subalbums=False, sort_by_date=False, filter_hidden=False
+        )
+    elif album_path:
         scoped_rows = repository.read_album_assets(
             album_path,
             include_subalbums=True,
@@ -274,6 +283,17 @@ def prune_index_scope(
                 current_scan_job_id=current_scan_job_id,
             ):
                 continue
+            if root_only:
+                # Directory notifications can arrive while a source is unreadable.
+                try:
+                    info = (root / rel_key).stat()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue
+                else:
+                    if stat.S_ISREG(info.st_mode):
+                        continue
             removable.append(rel_key)
 
     if not removable:

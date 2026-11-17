@@ -219,6 +219,20 @@ def test_disk_store_uses_v3_sqlite_index(tmp_path: Path) -> None:
     assert (store.root / "index.sqlite3").is_file()
 
 
+def test_disk_store_misses_surfaces_from_old_imageio_decoder_contract(tmp_path: Path) -> None:
+    request = _request(tmp_path / "alpha.png")
+    previous_store = NeutralSurfaceStore(tmp_path)
+    with patch.object(surface_cache_module, "_DECODE_SEMANTICS_CONTRACT", 2):
+        assert previous_store.write(request, replace(_surface(request), backend="imageio"))
+        previous_store.close()
+
+    current_store = NeutralSurfaceStore(tmp_path)
+    try:
+        assert current_store.load(request) is None
+    finally:
+        current_store.close()
+
+
 def test_trusted_disk_hit_does_not_scan_payload_checksum(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

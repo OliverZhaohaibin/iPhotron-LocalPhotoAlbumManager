@@ -24,6 +24,7 @@ class FilesystemMediaScanner(MediaScannerPort):
         *,
         existing_index: dict[str, dict[str, Any]] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
+        recursive: bool = True,
     ) -> Iterator[dict[str, Any]]:
         scanner = scan_album(
             root,
@@ -32,6 +33,7 @@ class FilesystemMediaScanner(MediaScannerPort):
             existing_index=existing_index,
             progress_callback=progress_callback,
             thumbnail_cache_dir=self._thumbnail_cache_dir,
+            recursive=recursive,
         )
         try:
             yield from scanner

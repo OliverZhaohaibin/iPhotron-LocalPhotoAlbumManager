@@ -70,7 +70,12 @@ def _describe_album(path: Path) -> tuple[str, bool]:
 def _tree_snapshot(entries: list[Path]) -> tuple[AlbumNode, ...]:
     nodes: list[AlbumNode] = []
     for entry in entries:
-        if not entry.is_dir() or entry.name.casefold() in _RESERVED_NAMES:
+        if entry.name.casefold() in _RESERVED_NAMES:
+            continue
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
             continue
         title, has_manifest = _describe_album(entry)
         nodes.append(AlbumNode(entry, 1, title, has_manifest))
@@ -84,7 +89,9 @@ def _tree_snapshot(entries: list[Path]) -> tuple[AlbumNode, ...]:
 
 
 def _root_media_signature(
-    root: Path, entries: list[Path]
+    root: Path,
+    entries: list[Path],
+    previous: dict[str, tuple[int, int, int]],
 ) -> dict[str, tuple[int, int, int]]:
     """Track direct media independently of internal directory writes."""
 
@@ -98,6 +105,10 @@ def _root_media_signature(
         try:
             info = entry.stat()
         except FileNotFoundError:
+            continue
+        except OSError:
+            if entry.name in previous:
+                signature[entry.name] = previous[entry.name]
             continue
         if stat.S_ISREG(info.st_mode):
             signature[entry.name] = (info.st_ino, info.st_size, info.st_mtime_ns)
@@ -192,14 +203,12 @@ class _LibraryWatchWorker(QObject):
         if request is None:
             return
         signature = self._signature(request.paths)
-        if signature == self._poll_signature:
-            return
         changed_paths = self._changed_signature_paths(
             self._poll_signature or (),
             signature,
         )
         self._poll_signature = signature
-        self._emit_snapshot(changed_paths or (request.root,))
+        self._emit_snapshot(changed_paths)
 
     def _emit_snapshot(self, changed_paths: tuple[Path, ...]) -> None:
         request = self._request
@@ -207,14 +216,19 @@ class _LibraryWatchWorker(QObject):
             return
         root_media_changed = False
         try:
-            entries = sorted(request.root.iterdir(), key=lambda item: item.name.casefold())
+            entries = list(request.root.iterdir())
+            previous_media = self._root_media
+            root_media = previous_media
+            if previous_media is None or request.polling or request.root in changed_paths:
+                root_media = _root_media_signature(request.root, entries, previous_media or {})
+                root_media_changed = previous_media is not None and root_media != previous_media
+            if request.polling and previous_media is not None and not (
+                changed_paths or root_media_changed
+            ):
+                return
+            entries.sort(key=lambda item: item.name.casefold())
             albums = _tree_snapshot(entries)
-            if self._root_media is None or request.root in changed_paths:
-                root_media = _root_media_signature(request.root, entries)
-                root_media_changed = (
-                    self._root_media is not None and root_media != self._root_media
-                )
-                self._root_media = root_media
+            self._root_media = root_media
             warning = None
         except OSError as exc:
             albums = ()

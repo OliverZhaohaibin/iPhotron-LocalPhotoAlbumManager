@@ -110,7 +110,7 @@ class LibraryRuntimeController(
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(500)
         self._pending_watch_paths: set[Path] = set()
-        self._watch_scan_queue: list[Path] = []
+        self._watch_scan_queue: list[tuple[Path, bool]] = []
         # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
         # ignore file-system notifications. We use a counter instead of a boolean
         # to correctly handle nested operations that may overlap (e.g., multiple
@@ -133,7 +133,7 @@ class LibraryRuntimeController(
         self._scan_thread_pool.setThreadPriority(QThread.Priority.LowPriority)
         self._live_scan_buffer: List[Dict] = []
         self._live_scan_root: Optional[Path] = None
-        self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool, bool]] = []
+        self._deferred_scan_queue: list[tuple[Path, list[str], list[str], bool, bool, bool]] = []
         self._scan_buffer_lock = QMutex()
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
@@ -386,7 +386,7 @@ class LibraryRuntimeController(
             self._geotagged_assets_cache_root = None
             self.treeUpdated.emit()
         if result.root_media_changed:
-            self._queue_watcher_scan_roots([self._root], requeue_active=True)
+            self._queue_watcher_scan_roots([self._root], root_only=True)
         changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
         self._start_watcher_scans(changed)

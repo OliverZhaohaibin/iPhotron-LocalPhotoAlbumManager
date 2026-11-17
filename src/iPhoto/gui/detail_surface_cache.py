@@ -58,7 +58,8 @@ _SCHEMA: Final = 3
 # LIVE PHOTO REGRESSION GUARD: do not remove this key component or lower it
 # below 2.  Contract 1 may contain Windows HEIC pixels that WIC had already
 # oriented and the old pipeline rotated a second time.
-_DECODE_SEMANTICS_CONTRACT: Final = 2
+# Contract 2 may contain premultiplied ImageIO pixels stored as straight RGBA.
+_DECODE_SEMANTICS_CONTRACT: Final = 3
 _HEADER_SIZE: Final = 4096
 _WRITE_CHUNK_BYTES: Final = 4 * _MIB
 _ACCESS_AUDIT_INTERVAL: Final = 128

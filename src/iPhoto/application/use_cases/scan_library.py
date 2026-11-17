@@ -33,6 +33,7 @@ class ScanLibraryRequest:
     scan_job_id: str | None = None
     scan_started_at_ms: int | None = None
     scan_stage_elapsed_ms: dict[str, float] | None = None
+    recursive: bool = True
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class ScanLibraryUseCase:
         chunk_size = max(1, int(request.chunk_size))
         scan_started = _monotonic_ms()
         last_chunk_flush = scan_started
+        scope_options = {} if request.recursive else {"recursive": False}
 
         for scanned_row in self._scanner.scan(
             request.root,
@@ -69,6 +71,7 @@ class ScanLibraryUseCase:
             request.exclude,
             existing_index=request.existing_index,
             progress_callback=request.progress_callback,
+            **scope_options,
         ):
             if request.is_cancelled is not None and request.is_cancelled():
                 break

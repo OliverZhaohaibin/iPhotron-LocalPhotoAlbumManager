@@ -43,6 +43,8 @@ class ScannerWorker(QRunnable):
         signals: ScannerSignals,
         library_root: Optional[Path] = None,
         scan_service: Optional[LibraryScanService] = None,
+        *,
+        root_only: bool = False,
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -53,6 +55,7 @@ class ScannerWorker(QRunnable):
         # Use library_root for database if provided, otherwise use root
         self._library_root = library_root if library_root else root
         self._scan_service = scan_service
+        self.root_only = root_only
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
@@ -143,6 +146,7 @@ class ScannerWorker(QRunnable):
                 chunk_size=self.SCAN_CHUNK_SIZE,
                 max_chunk_interval_ms=self.SCAN_CHUNK_MAX_INTERVAL_MS,
                 persist_chunks=True,
+                root_only=self.root_only,
             )
             rows = result.rows
             self._failed_count += result.failed_count

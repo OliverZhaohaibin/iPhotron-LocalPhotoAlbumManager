@@ -113,7 +113,10 @@ class FileSystemWatcherMixin:
                 include, exclude = scan_service.scan_filters(scan_root)
             except Exception:
                 include, exclude = list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE)
-            self.start_scanning(scan_root, include, exclude, root_only=root_only)
+            if root_only:
+                self.start_scanning(scan_root, include, exclude, root_only=True)
+            else:
+                self.start_scanning(scan_root, include, exclude)
             return
 
     def _on_watcher_scan_finished(self, _root: Path, _success: bool) -> None:

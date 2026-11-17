@@ -311,6 +311,82 @@ def test_ready_revision_change_replaces_resident_thumbnail(tmp_path: Path, qapp)
     assert key in service._pinned_keys
 
 
+@pytest.mark.parametrize("kind", [ThumbnailRequestKind.GUARD, ThumbnailRequestKind.PREFETCH])
+def test_revision_change_preserves_prefetch_demand_and_publishes(
+    tmp_path: Path, qapp, kind: ThumbnailRequestKind
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(64, 64)
+    path = tmp_path / "photo.jpg"
+    key = service._cache_key(path, size)
+    service._desired_revisions[key] = "old"
+    candidate = ThumbnailPrefetchCandidate(
+        row=0, path=path, l2_cache_key="stable-key", kind=kind.value,
+        rank=0, thumbnail_state="ready", thumb_revision="new",
+    )
+    snapshot = ThumbnailDemandSnapshot(
+        revision=1, size=size, visible_paths=(),
+        guard_paths=(path,) if kind is ThumbnailRequestKind.GUARD else (),
+        speculative_paths=(path,) if kind is ThumbnailRequestKind.PREFETCH else (),
+        candidates=(candidate,), phase="settled", intent="idle",
+    )
+    with patch.object(service, "_start_generation", return_value=True) as start:
+        service.reconcile_demand(snapshot)
+    assert start.call_count == 1
+    assert key in service._prefetch_key_order
+    image = QImage(size, QImage.Format.Format_RGBA8888)
+    image.fill(QColor("blue"))
+
+    service._handle_prefetch_result(
+        path, size, image, service._current_generation, kind, "new"
+    )
+    service._drain_publish_queue()
+
+    assert service.peek_full_thumbnail(path, size) is not None
+    assert service._prefetch_active_tasks == 0
+    service.shutdown()
+
+
+def test_revision_change_waits_for_cancelled_prefetch_before_restarting(tmp_path: Path, qapp) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    size = QSize(64, 64)
+    path = tmp_path / "photo.jpg"
+    key = service._cache_key(path, size)
+    candidate = ThumbnailPrefetchCandidate(
+        row=0, path=path, l2_cache_key="stable-key", kind="guard",
+        rank=0, thumbnail_state="ready", thumb_revision="old",
+    )
+    snapshot = ThumbnailDemandSnapshot(
+        revision=1, size=size, visible_paths=(), guard_paths=(path,),
+        speculative_paths=(), candidates=(candidate,), phase="settled", intent="idle",
+    )
+    with patch.object(service, "_start_generation", return_value=True) as start:
+        service.reconcile_demand(snapshot)
+        token = service._prefetch_active_tokens[key]
+        generation = service._current_generation
+        service.reconcile_demand(replace(
+            snapshot, revision=2, candidates=(replace(candidate, thumb_revision="new"),)
+        ))
+        assert start.call_count == 1
+        assert token.cancelled()
+        assert service._prefetch_active_tokens[key] is token
+        service._handle_prefetch_failure(
+            path, size, "cancelled", generation, ThumbnailRequestKind.GUARD
+        )
+        assert start.call_count == 2
+        assert service._prefetch_active_tasks == 1
+        assert service._prefetch_active_tokens[key] is not token
+    image = QImage(size, QImage.Format.Format_RGBA8888)
+    image.fill(QColor("blue"))
+    service._handle_prefetch_result(
+        path, size, image, service._current_generation, ThumbnailRequestKind.GUARD, "new"
+    )
+    service._drain_publish_queue()
+    assert service.peek_full_thumbnail(path, size) is not None
+    assert service._prefetch_active_tasks == 0
+    service.shutdown()
+
+
 def test_invalidation_prevents_old_worker_from_restoring_stale_disk_thumbnail(
     tmp_path: Path,
 ) -> None:

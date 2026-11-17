@@ -133,6 +133,7 @@ class _LibraryWatchWorker(QObject):
         self._poll_signature: tuple[tuple[str, int, int], ...] | None = None
         self._root_media: dict[str, tuple[int, int, int]] | None = None
         self._albums: tuple[AlbumNode, ...] | None = None
+        self._pending_tree_paths: set[Path] = set()
 
     @Slot()
     def initialize(self) -> None:
@@ -154,6 +155,7 @@ class _LibraryWatchWorker(QObject):
         self._poll_signature = None
         self._root_media = None
         self._albums = None
+        self._pending_tree_paths.clear()
         if self._batch_timer is not None:
             self._batch_timer.stop()
         if self._poll_timer is not None:
@@ -237,6 +239,8 @@ class _LibraryWatchWorker(QObject):
         if request is None:
             return
         root_media_changed = False
+        self._pending_tree_paths.update(changed_paths)
+        changed_paths = tuple(sorted(self._pending_tree_paths))
         try:
             entries = list(request.root.iterdir())
             previous_media = self._root_media
@@ -258,6 +262,7 @@ class _LibraryWatchWorker(QObject):
             if changed_paths or self._albums is None:
                 entries.sort(key=lambda item: item.name.casefold())
                 self._albums = _tree_snapshot(entries)
+                self._pending_tree_paths.clear()
             elif not root_media_changed:
                 return
             albums = self._albums

@@ -141,6 +141,49 @@ def test_root_media_pairing_updates_only_affected_roles_and_links(tmp_path: Path
     }
 
 
+@pytest.mark.parametrize("root_is_still", [False, True])
+def test_root_scan_discovers_unpaired_cross_album_content_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_is_still: bool
+) -> None:
+    service = LibraryScanService(tmp_path)
+    store = get_global_repository(tmp_path)
+    (tmp_path / "Album").mkdir()
+    root_rel = "new.jpg" if root_is_still else "new.mov"
+    peer_rel = "Album/motion.mov" if root_is_still else "Album/still.jpg"
+    root_mime = "image/jpeg" if root_is_still else "video/quicktime"
+    peer_mime = "video/quicktime" if root_is_still else "image/jpeg"
+    for rel in (root_rel, peer_rel, "Album/saved.jpg", "Album/saved.mov"):
+        (tmp_path / rel).touch()
+    store.write_rows([
+        {"rel": peer_rel, "mime": peer_mime, "content_id": "  ABc-ß\t"},
+        {"rel": "Album/saved.jpg", "mime": "image/jpeg", "content_id": "abc-ss",
+         "live_partner_rel": "Album/saved.mov"},
+        {"rel": "Album/saved.mov", "mime": "video/quicktime", "content_id": "abc-ss",
+         "live_role": 1, "live_partner_rel": "Album/saved.jpg"},
+    ])
+    saved = store.get_rows_by_rels(["Album/saved.jpg", "Album/saved.mov"])
+    # Start with a complete snapshot so its root-only refresh is also exercised.
+    links = tmp_path / ".iPhoto" / "links.json"
+    links.write_text(json.dumps({"schema": "iPhoto/links@1", "live_groups": []}))
+    monkeypatch.setattr(store, "read_all", lambda **_kw: pytest.fail("full library read"))
+
+    service.finalize_scan_result(
+        tmp_path,
+        [{"rel": root_rel, "mime": root_mime, "content_id": "abc-ss"}],
+        root_only=True,
+    )
+
+    rows = store.get_rows_by_rels([root_rel, peer_rel])
+    assert rows[root_rel]["live_partner_rel"] == peer_rel
+    assert rows[peer_rel]["live_partner_rel"] == root_rel
+    assert rows[root_rel]["live_role"] == int(not root_is_still)
+    assert rows[peer_rel]["live_role"] == int(root_is_still)
+    assert store.get_rows_by_rels(saved) == saved
+    groups = json.loads(links.read_text())["live_groups"]
+    assert len(groups) == 1
+    assert {groups[0]["still"], groups[0]["motion"]} == {root_rel, peer_rel}
+
+
 def test_subalbum_scan_prefixes_library_relative_rows(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     album_root = library_root / "album"

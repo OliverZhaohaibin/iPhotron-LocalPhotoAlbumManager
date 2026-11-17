@@ -41,6 +41,41 @@ def test_sync_favorites(store: IndexStore) -> None:
     assert data["b.jpg"] == 0
     assert data["c.jpg"] == 0
 
+
+def test_unpaired_live_candidate_lookup_is_indexed_and_chunked(store: IndexStore) -> None:
+    store.write_rows([
+        {"rel": "Album/new.mov", "content_id": " \tStraße-ID\n"},
+        {"rel": "Album/paired.mov", "content_id": "strasse-id", "live_partner_rel": "old.jpg"},
+        {"rel": "Album/deleted.mov", "content_id": "strasse-id", "is_deleted": 1},
+    ])
+
+    rows = store.get_unpaired_live_candidates([*(f"id-{i}" for i in range(1000)), "STRASSE-ID"])
+
+    assert set(rows) == {"Album/new.mov"}
+    with store.transaction() as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM assets WHERE content_id_key IN (?) "
+            "AND is_deleted = 0 AND COALESCE(live_partner_rel, '') = ''",
+            ("strasse-id",),
+        ).fetchall()
+    assert any("idx_assets_live_content_id" in str(row) for row in plan)
+
+
+def test_v4_migration_backfills_live_content_identifiers(tmp_path: Path) -> None:
+    store = IndexStore(tmp_path)
+    store.write_rows([{"rel": "old.mov", "content_id": " \tStraße-ID\n", "is_favorite": 1}])
+    with store.transaction() as conn:
+        conn.execute("DROP INDEX idx_assets_live_content_id")
+        conn.execute("ALTER TABLE assets DROP COLUMN content_id_key")
+        conn.execute("PRAGMA user_version = 4")
+
+    migrated = IndexStore(tmp_path)
+
+    rows = migrated.get_unpaired_live_candidates(["STRASSE-ID"])
+    assert set(rows) == {"old.mov"}
+    assert rows["old.mov"]["content_id"] == " \tStraße-ID\n"
+    assert rows["old.mov"]["is_favorite"] == 1
+
 def test_sync_favorites_invalid_paths(store: IndexStore) -> None:
     """Test syncing with paths not in the DB (should be ignored)."""
     rows = [{"rel": "a.jpg", "is_favorite": 0}]

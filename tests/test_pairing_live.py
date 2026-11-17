@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import iPhoto.core.pairing as pairing
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.config import WORK_DIR_NAME
 from iPhoto.core.pairing import pair_live
@@ -163,3 +164,49 @@ def test_pairing_content_id_is_case_insensitive_and_trimmed() -> None:
     assert group.motion == "IMG_1001.MOV"
     # Keep original content id (un-normalized) in output payload for display/debug.
     assert group.content_id == "abcd-1234"
+
+
+def test_time_pairing_preserves_video_order_for_equal_distances() -> None:
+    rows = [
+        {"rel": "Album/first.jpg", "dt": "2024-01-01T12:00:00Z"},
+        {"rel": "Album/second.jpg", "dt": "2024-01-01T12:00:00Z"},
+        {"rel": "Album/third.jpg", "dt": "2024-01-01T12:00:00Z"},
+        {"rel": "Album/later.mov", "dt": "2024-01-01T13:00:01+01:00"},
+        {"rel": "Album/earlier.mov", "dt": "2024-01-01T11:59:59Z"},
+        {"rel": "Album/same-time.mov", "dt": "2024-01-01T11:59:59Z"},
+    ]
+
+    assert [(group.still, group.motion) for group in pair_live(rows)] == [
+        ("Album/first.jpg", "Album/later.mov"),
+        ("Album/second.jpg", "Album/earlier.mov"),
+        ("Album/third.jpg", "Album/same-time.mov"),
+    ]
+
+
+@pytest.mark.parametrize("dense", [False, True])
+def test_time_pairing_parses_each_timestamp_once(
+    monkeypatch: pytest.MonkeyPatch, dense: bool
+) -> None:
+    count = 1000
+    rows = [
+        {"rel": f"Album/photo-{index}.jpg", "dt": "2024-01-01T12:00:00Z"}
+        for index in range(count)
+    ] + [
+        {"rel": f"Album/video-{index}.mov",
+         "dt": "2024-01-01T12:00:00Z" if dense else "2024-01-01T12:00:10Z"}
+        for index in range(count)
+    ]
+    parse = pairing._parse_dt
+    calls = 0
+
+    def counted_parse(value):
+        nonlocal calls
+        calls += 1
+        return parse(value)
+
+    monkeypatch.setattr(pairing, "_parse_dt", counted_parse)
+
+    groups = pair_live(rows)
+
+    assert len(groups) == (count if dense else 0)
+    assert calls == len(rows)

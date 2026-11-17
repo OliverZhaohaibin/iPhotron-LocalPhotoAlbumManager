@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import datetime
+from bisect import bisect_left
+from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List
 
 from dateutil import parser
 
 from ..config import LIVE_DURATION_PREFERRED, PAIR_TIME_DELTA_SEC
-from ..domain.models.core import LiveGroup
+from ..domain.models.core import LiveGroup, normalise_content_id
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -67,15 +68,66 @@ def _is_video(row: Dict[str, object]) -> bool:
     return False
 
 
-def _normalise_content_id(value: object) -> str | None:
-    """Return a stable comparison key for Live Photo content identifiers."""
+class _TimeCandidates:
+    """Find the nearest unused video without rescanning exhausted timestamps."""
 
-    if not isinstance(value, str):
-        return None
-    trimmed = value.strip()
-    if not trimmed:
-        return None
-    return trimmed.casefold()
+    def __init__(self, candidates: list[tuple[datetime, int, dict]]) -> None:
+        buckets: dict[datetime, deque[tuple[int, dict]]] = defaultdict(deque)
+        for moment, order, row in candidates:
+            buckets[moment].append((order, row))
+        self._times = sorted(buckets)
+        self._rows = [buckets[moment] for moment in self._times]
+        # Disjoint sets skip exhausted buckets in either direction. Each video
+        # is discarded at most once per index, including dense same-time bursts.
+        self._next = list(range(len(self._times) + 1))
+        self._previous = list(range(len(self._times) + 1))
+
+    @staticmethod
+    def _find(parents: list[int], index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def _available(
+        self, position: int, used: set[str], *, forward: bool
+    ) -> int:
+        while 0 <= position < len(self._times):
+            rows = self._rows[position]
+            while rows and rows[0][1]["rel"] in used:
+                rows.popleft()
+            if rows:
+                return position
+            self._next[position] = self._find(self._next, position + 1)
+            self._previous[position + 1] = self._find(self._previous, position)
+            position = (
+                self._find(self._next, position)
+                if forward
+                else self._find(self._previous, position + 1) - 1
+            )
+        return position
+
+    def nearest(self, moment: datetime, used: set[str]) -> dict | None:
+        split = bisect_left(self._times, moment)
+        right = self._available(self._find(self._next, split), used, forward=True)
+        left = self._available(
+            self._find(self._previous, split) - 1, used, forward=False
+        )
+        candidates = []
+        for position in (left, right):
+            if 0 <= position < len(self._times):
+                order, row = self._rows[position][0]
+                delta = abs((moment - self._times[position]).total_seconds())
+                if delta <= PAIR_TIME_DELTA_SEC:
+                    candidates.append((delta, order, row))
+        return min(candidates, key=lambda item: item[:2])[2] if candidates else None
+
+
+def _pairing_time(row: dict) -> datetime | None:
+    moment = _parse_dt(row.get("dt"))
+    if moment is not None and moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+    return moment
 
 
 def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
@@ -95,11 +147,11 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
     # 1) strong match by content_id
     video_by_cid: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     for video in videos.values():
-        cid = _normalise_content_id(video.get("content_id"))
+        cid = normalise_content_id(video.get("content_id"))
         if cid:
             video_by_cid[cid].append(video)
     for photo in photos.values():
-        cid = _normalise_content_id(photo.get("content_id"))
+        cid = normalise_content_id(photo.get("content_id"))
         if not cid or cid not in video_by_cid:
             continue
         candidates = [v for v in video_by_cid[cid] if v["rel"] not in used_videos]
@@ -116,13 +168,36 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
             )
             used_videos.add(chosen["rel"])
 
+    if len(matched) == len(photos):
+        return list(matched.values())
+
+    by_stem: dict[str, list[tuple[datetime, int, dict]]] = defaultdict(list)
+    by_folder: dict[str, list[tuple[datetime, int, dict]]] = defaultdict(list)
+    for order, video in enumerate(videos.values()):
+        if video["rel"] in used_videos:
+            continue
+        moment = _pairing_time(video)
+        if moment is None:
+            continue
+        path = Path(video["rel"])
+        candidate = (moment, order, video)
+        by_stem[path.stem].append(candidate)
+        by_folder[str(path.parent)].append(candidate)
+    stem_indexes = {stem: _TimeCandidates(rows) for stem, rows in by_stem.items()}
+    folder_indexes = {folder: _TimeCandidates(rows) for folder, rows in by_folder.items()}
+    photo_times = {
+        rel: _pairing_time(photo) for rel, photo in photos.items() if rel not in matched
+    }
+
     # 2) medium match by same stem + time delta
     for photo in photos.values():
         if photo["rel"] in matched:
             continue
-        stem = Path(photo["rel"]).stem
-        candidates = [v for v in videos.values() if Path(v["rel"]).stem == stem]
-        chosen = _match_by_time(photo, candidates, used_videos)
+        moment = photo_times[photo["rel"]]
+        candidates = stem_indexes.get(Path(photo["rel"]).stem)
+        if moment is None or candidates is None:
+            continue
+        chosen = candidates.nearest(moment, used_videos)
         if chosen:
             used_videos.add(chosen["rel"])
             matched[photo["rel"]] = _build_group(photo, chosen, confidence=0.7)
@@ -131,35 +206,16 @@ def pair_live(index_rows: List[Dict[str, object]]) -> List[LiveGroup]:
     for photo in photos.values():
         if photo["rel"] in matched:
             continue
-        folder = str(Path(photo["rel"]).parent)
-        candidates = [v for v in videos.values() if str(Path(v["rel"]).parent) == folder]
-        chosen = _match_by_time(photo, candidates, used_videos)
+        moment = photo_times[photo["rel"]]
+        candidates = folder_indexes.get(str(Path(photo["rel"]).parent))
+        if moment is None or candidates is None:
+            continue
+        chosen = candidates.nearest(moment, used_videos)
         if chosen:
             used_videos.add(chosen["rel"])
             matched[photo["rel"]] = _build_group(photo, chosen, confidence=0.5)
 
     return list(matched.values())
-
-
-def _match_by_time(
-    photo: Dict[str, object],
-    candidates: Iterable[Dict[str, object]],
-    used_videos: set[str],
-) -> Dict[str, object] | None:
-    photo_dt = _parse_dt(photo.get("dt"))
-    best: Tuple[float, Dict[str, object]] | None = None
-    for candidate in candidates:
-        if candidate["rel"] in used_videos:
-            continue
-        video_dt = _parse_dt(candidate.get("dt"))
-        if not photo_dt or not video_dt:
-            continue
-        delta = abs((photo_dt - video_dt).total_seconds())
-        if delta > PAIR_TIME_DELTA_SEC:
-            continue
-        if best is None or delta < best[0]:
-            best = (delta, candidate)
-    return best[1] if best else None
 
 
 def _select_best_video(candidates: Iterable[Dict[str, object]]) -> Dict[str, object] | None:

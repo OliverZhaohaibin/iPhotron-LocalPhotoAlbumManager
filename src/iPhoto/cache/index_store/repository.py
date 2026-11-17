@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ...config import WORK_DIR_NAME
+from ...domain.models.core import normalise_content_id
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
@@ -418,6 +419,37 @@ class AssetRepository:
                     result[str(rel_value)] = d
             return result
         finally:
+            if should_close:
+                conn.close()
+
+    def get_unpaired_live_candidates(
+        self, content_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        keys = sorted({key for value in content_ids if (key := normalise_content_id(value))})
+        if not keys:
+            return {}
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        previous_factory = conn.row_factory
+        try:
+            conn.row_factory = sqlite3.Row
+            result: dict[str, dict[str, Any]] = {}
+            for offset in range(0, len(keys), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = keys[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"""
+                    SELECT * FROM assets WHERE content_id_key IN ({placeholders})
+                        AND is_deleted = 0
+                        AND COALESCE(live_partner_rel, '') = ''
+                    """,
+                    chunk,
+                )
+                for row in cursor:
+                    result[str(row["rel"])] = self._db_row_to_dict(row)
+            return result
+        finally:
+            conn.row_factory = previous_factory
             if should_close:
                 conn.close()
 

@@ -11,7 +11,7 @@ from .cache.lock import FileLock
 from .config import RECENTLY_DELETED_DIR_NAME
 from .core.pairing import pair_live
 from .errors import IPhotoError, IndexCorruptedError, ManifestInvalidError
-from .domain.models.core import LiveGroup
+from .domain.models.core import LiveGroup, normalise_content_id
 from .path_normalizer import compute_album_path, normalise_rel_key
 from .schemas import validate_links
 from .utils.jsonio import read_json, write_json
@@ -196,7 +196,17 @@ def _ensure_root_media_links(
         if cross_groups:
             groups.extend(cross_groups)
             matched.add(row["rel"])
-    groups.extend(pair_live([row for row in active_rows if row["rel"] not in matched]))
+    remaining = {row["rel"]: row for row in active_rows if row["rel"] not in matched}
+    candidates = repository.get_unpaired_live_candidates(
+        cid for row in remaining.values()
+        if (cid := normalise_content_id(row.get("content_id")))
+    )
+    root_paths = set(remaining)
+    remaining.update(candidates)
+    groups.extend(
+        group for group in pair_live(list(remaining.values()))
+        if group.still in root_paths or group.motion in root_paths
+    )
     sync_live_roles_to_db(root, groups, repository=repository, former_paths=former_paths)
     _refresh_root_links_snapshot(root, groups)
     return groups

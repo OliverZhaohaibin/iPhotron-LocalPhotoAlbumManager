@@ -255,6 +255,49 @@ def test_unreadable_child_album_does_not_block_root_scan(
     controller.shutdown()
 
 
+@pytest.mark.parametrize("polling", [False, True])
+def test_tree_refresh_retries_after_a_temporary_read_failure(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, polling: bool
+) -> None:
+    album = tmp_path / "Album"
+    album.mkdir()
+    worker = _LibraryWatchWorker()
+    worker._watcher = _FakeWatcher()  # type: ignore[assignment]
+    results = []
+    worker.resultReady.connect(results.append)
+    worker.configure(LibraryWatchRequest(1, tmp_path, (tmp_path, album), polling))
+    new_album = tmp_path / "New Album"
+    new_album.mkdir()
+    (album / "new.jpg").touch()
+    (tmp_path / "root.jpg").touch()
+    original_iterdir = Path.iterdir
+
+    def failing_iterdir(path: Path):
+        if path == album:
+            raise PermissionError("Temporarily unreadable")
+        return original_iterdir(path)
+
+    with monkeypatch.context() as failing:
+        failing.setattr(Path, "iterdir", failing_iterdir)
+        if polling:
+            worker._poll()
+        else:
+            worker._on_directory_changed(str(album))
+            worker._on_directory_changed(str(tmp_path))
+        assert results[-1].warning is not None
+        assert results[-1].root_media_changed
+
+    worker._poll()
+
+    assert results[-1].warning is None
+    assert {node.path for node in results[-1].albums} == {album, new_album}
+    assert album in results[-1].changed_paths
+    assert set(worker._request.paths) == {tmp_path, album, new_album}
+    count = len(results)
+    worker._poll()
+    assert len(results) == count
+
+
 def test_root_watcher_scan_preserves_child_album_assets(qapp, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     album = root / "Custom"

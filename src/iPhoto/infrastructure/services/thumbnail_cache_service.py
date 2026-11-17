@@ -1001,12 +1001,12 @@ class ThumbnailCacheService(QObject):
         if request.thumb_revision:
             if previous_revision is not None and previous_revision != request.thumb_revision:
                 # A scan can replace the ready disk artifact at the same path.
-                pinned = key in self._pinned_keys
                 self.invalidate(
-                    request.path, size=request.size, desired_revision=request.thumb_revision
+                    request.path,
+                    size=request.size,
+                    desired_revision=request.thumb_revision,
+                    preserve_demand=True,
                 )
-                if pinned:
-                    self._pinned_keys.add(key)
             self._desired_revisions[key] = request.thumb_revision
         self._thumbnail_states[key] = request.thumbnail_state
 
@@ -1039,6 +1039,10 @@ class ThumbnailCacheService(QObject):
             if queued is not None:
                 self._prefetch_kinds[key] = request.kind
                 self._prefetch_queued[key] = request
+            return
+        if key in self._prefetch_active_tokens:
+            # Let the cancelled worker release its lane before replacing it.
+            self._prefetch_generations[key] = request.generation
             return
         self._prefetch_pending.add(key)
         self._prefetch_generations[key] = request.generation
@@ -1244,14 +1248,15 @@ class ThumbnailCacheService(QObject):
             self._pending_tasks.discard(key)
             self._pending_generations.pop(key, None)
 
-    def _cancel_prefetch_key(self, key: str) -> None:
+    def _cancel_prefetch_key(self, key: str, *, preserve_demand: bool = False) -> None:
         self._prefetch_queued.pop(key, None)
         self._prefetch_pending.discard(key)
         self._prefetch_generations.pop(key, None)
         self._prefetch_kinds.pop(key, None)
-        self._prefetch_key_order = [
-            candidate for candidate in self._prefetch_key_order if candidate != key
-        ]
+        if not preserve_demand:
+            self._prefetch_key_order = [
+                candidate for candidate in self._prefetch_key_order if candidate != key
+            ]
         if key in self._prefetch_promoted_visible:
             self._prefetch_promoted_visible.discard(key)
             self._pending_tasks.discard(key)
@@ -2308,11 +2313,16 @@ class ThumbnailCacheService(QObject):
             and key in self._prefetch_key_order
             and key not in self._pending_tasks
         ):
+            desired_kind = (
+                ThumbnailRequestKind.GUARD
+                if key in self._current_guard_keys
+                else ThumbnailRequestKind.PREFETCH
+            )
             self._queue_prefetch(
                 ThumbnailRequest(
                     path,
                     size,
-                    kind,
+                    desired_kind,
                     self._current_generation,
                     thumbnail_state=self._thumbnail_states.get(key, "ready"),
                     thumb_revision=self._desired_revisions.get(key),
@@ -2326,6 +2336,7 @@ class ThumbnailCacheService(QObject):
         *,
         size: QSize | None = None,
         desired_revision: str | None = None,
+        preserve_demand: bool = False,
     ):
         """Removes the thumbnail from cache to force regeneration."""
         if size is None:
@@ -2372,8 +2383,9 @@ class ThumbnailCacheService(QObject):
         for affected_key in affected_keys:
             self._failure_until.pop(affected_key, None)
             self._prefetch_l2_miss_until.pop(affected_key, None)
-            self._pinned_keys.discard(affected_key)
-            self._cancel_prefetch_key(affected_key)
+            if not preserve_demand:
+                self._pinned_keys.discard(affected_key)
+            self._cancel_prefetch_key(affected_key, preserve_demand=preserve_demand)
 
             active_token = self._visible_active_tokens.get(affected_key)
             if active_token is not None:

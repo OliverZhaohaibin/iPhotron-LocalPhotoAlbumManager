@@ -1525,7 +1525,12 @@ class PlayerViewController(QObject):
         session = self._session_for_request(request)
         render_adjustments = dict(adjustments)
         if session is not None:
-            if dict(session.baseline_state.raw_adjustments) != dict(adjustments):
+            # LOD requests can carry unsaved Edit values; they must not become
+            # the baseline that Cancel restores.
+            if (
+                session.edit_references == 0
+                and dict(session.baseline_state.raw_adjustments) != dict(adjustments)
+            ):
                 state = EditRenderState.create(
                     adjustments,
                     color_stats=session.edit_state.color_stats,
@@ -1533,7 +1538,7 @@ class PlayerViewController(QObject):
                 )
                 session.edit_state = state
                 session.baseline_state = state
-            render_adjustments = dict(session.edit_state.shader_adjustments)
+            render_adjustments = dict(session.presentation_adjustments)
         decode_key = DetailDecodeKey.from_request(request)
         defer_presentation = bool(
             self._defer_still_updates
@@ -1809,10 +1814,7 @@ class PlayerViewController(QObject):
             make_current=False,
             activate_surface=False,
         )
-        if session.edit_references > 0:
-            adjustments = dict(session.edit_state.shader_adjustments)
-        else:
-            adjustments = dict(session.baseline_state.shader_adjustments)
+        adjustments = dict(session.presentation_adjustments)
         self._present_generation = generation
         self._present_started_at = self._loading_started_at
         self._present_source = source
@@ -2020,7 +2022,7 @@ class PlayerViewController(QObject):
                 previous_surface = candidate_session.surface_for_key(previous_key)
                 if previous_surface is None:
                     continue
-                adjustments = dict(candidate_session.baseline_state.shader_adjustments)
+                adjustments = dict(candidate_session.presentation_adjustments)
                 activate = getattr(self._image_viewer, "activate_resident_surface", None)
                 if callable(activate) and activate(
                     previous_key,
@@ -2214,7 +2216,7 @@ class PlayerViewController(QObject):
         )
         state = handle.next_state(raw_adjustments)
         self._active_adjustments = dict(state.raw_adjustments)
-        self._image_viewer.set_adjustments(state.shader_adjustments)
+        self._image_viewer.set_adjustments(handle.presentation_adjustments)
         emit_detail_event(
             "edit_state_updated",
             generation=self._request_generation,
@@ -2226,6 +2228,17 @@ class PlayerViewController(QObject):
         if current_geometry != previous_geometry:
             self._queue_render_session_lod(handle)
         return state
+
+    def set_render_session_compare(
+        self,
+        handle: PhotoRenderSessionHandle,
+        active: bool,
+    ) -> None:
+        """Keep original-image comparison active across asynchronous LOD draws."""
+
+        self._require_current_session(handle)
+        handle.compare_active = bool(active)
+        self._image_viewer.set_adjustments(handle.presentation_adjustments)
 
     def apply_committed_adjustments(
         self,
@@ -2244,7 +2257,7 @@ class PlayerViewController(QObject):
             state = session.next_state(adjustments, kind="commit")
             session.baseline_state = state
             self._active_adjustments = dict(state.raw_adjustments)
-            self._image_viewer.set_adjustments(state.shader_adjustments)
+            self._image_viewer.set_adjustments(session.presentation_adjustments)
             emit_detail_event(
                 "edit_state_committed",
                 generation=self._request_generation,
@@ -2372,6 +2385,7 @@ class PlayerViewController(QObject):
         )
         self._render_session_interaction_depth.pop(handle.session_id, None)
         self._render_session_lod_pending.discard(handle.session_id)
+        handle.compare_active = False
         state = handle.commit_current_state() if committed else handle.restore_baseline()
         handle.edit_references = max(0, handle.edit_references - 1)
         self._active_adjustments = dict(state.raw_adjustments)

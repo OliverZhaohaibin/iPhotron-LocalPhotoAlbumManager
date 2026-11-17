@@ -121,6 +121,42 @@ def test_crop_interaction_flushes_final_state_before_ending_render_interaction()
     assert coordinator._pending_session_values is None
 
 
+@pytest.mark.parametrize("is_video", [False, True])
+def test_compare_uses_shared_still_session_and_retains_video_transport(is_video) -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    handle = None if is_video else object()
+    render_controller = Mock()
+    viewport = Mock()
+    coordinator._render_session_handle = handle
+    coordinator._render_session_controller = render_controller
+    coordinator._active_edit_viewport = Mock(return_value=viewport)
+    coordinator._is_video_source = Mock(return_value=is_video)
+    coordinator._apply_session_adjustments_to_viewer = Mock()
+    coordinator._safe_video_ratio = Mock(return_value=0.0)
+    coordinator._ui = SimpleNamespace(
+        video_area=Mock(),
+        video_trim_bar=Mock(),
+    )
+    coordinator._ui.video_area.player_bar.duration.return_value = 2000
+
+    EditCoordinator._handle_compare_pressed(coordinator)
+    assert coordinator._compare_active
+    EditCoordinator._handle_compare_released(coordinator)
+
+    assert not coordinator._compare_active
+    coordinator._apply_session_adjustments_to_viewer.assert_called_once_with()
+    if is_video:
+        render_controller.set_render_session_compare.assert_not_called()
+        viewport.set_adjustments.assert_called_once_with({})
+        coordinator._ui.video_area.set_trim_range_ms.assert_called_once_with(0, 2000)
+    else:
+        assert render_controller.set_render_session_compare.call_args_list == [
+            call(handle, True),
+            call(handle, False),
+        ]
+        viewport.set_adjustments.assert_not_called()
+
+
 def test_leave_edit_mode_requests_video_restore_with_probed_duration() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     source = Path("/fake/video.mp4")

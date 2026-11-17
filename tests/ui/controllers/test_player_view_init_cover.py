@@ -270,6 +270,25 @@ def controller(qapp):
         qapp.processEvents()
 
 
+@pytest.fixture
+def editable_still(controller, tmp_path):
+    path = tmp_path / "edit-session.jpg"
+    initial = _surface(path, QImage(1024, 768, QImage.Format.Format_RGBA8888))
+    controller._active_asset_id = "asset-1"
+    controller._active_source_identity = AssetSourceIdentity.create(
+        path,
+        width=4000,
+        height=3000,
+        source_mtime_ns=1,
+        index_revision=3,
+    )
+    controller._upsert_render_session(initial, {"Exposure": 0.2})
+    controller._image_viewer._current_source = initial.decode_key
+    controller._image_viewer.resize(800, 600)
+    controller._current_decode_level = 1024
+    return controller.acquire_render_session(path)
+
+
 class TestInitCoverTracking:
     """Per-widget first-render tracking in PlayerViewController."""
 
@@ -1098,6 +1117,138 @@ class TestInitCoverTracking:
         assert state.raw_adjustments["Exposure"] == 0.7
         assert restored.raw_adjustments["Exposure"] == 0.2
         set_image.assert_not_called()
+
+    @pytest.mark.parametrize("committed", [False, True])
+    @pytest.mark.parametrize("deliver_before_finish", [False, True])
+    def test_lod_upgrade_preserves_cancel_baseline_and_done_state(
+        self,
+        controller,
+        editable_still,
+        mocker,
+        committed,
+        deliver_before_finish,
+    ):
+        handle = editable_still
+        baseline = handle.baseline_state
+        texture_key = handle.current_texture_key
+        edited_values = {"Exposure": 0.7, "Crop_W": 0.25, "Crop_H": 0.25}
+        controller.update_render_session(handle, edited_values)
+        controller._lod_timer.stop()
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        present = mocker.patch.object(controller, "_on_adjusted_image_ready")
+
+        controller._request_higher_lod()
+
+        request = schedule.call_args.args[0]
+        assert request.decode_level > 1024
+        assert handle.baseline_state is baseline
+        upgraded = _surface(
+            handle.source,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=request.decode_level,
+        )
+        if deliver_before_finish:
+            controller._on_scheduled_image_ready(request.generation, upgraded)
+            assert handle.baseline_state is baseline
+
+        result = controller.finish_render_session(handle, committed=committed)
+
+        expected_values = edited_values if committed else dict(baseline.raw_adjustments)
+        assert dict(result.raw_adjustments) == expected_values
+        assert handle.edit_state is handle.baseline_state
+        assert controller._image_viewer._adjustments == dict(result.shader_adjustments)
+        if not deliver_before_finish:
+            controller._on_scheduled_image_ready(request.generation, upgraded)
+            assert present.call_args.args[2] == dict(result.shader_adjustments)
+        assert handle.current_texture_key == texture_key
+        assert controller.acquire_render_session(handle.source).edit_state is result
+        controller.finish_render_session(handle, committed=False)
+
+    @pytest.mark.parametrize("compare_on_delivery", [False, True])
+    def test_pending_lod_obeys_current_compare_state(
+        self,
+        controller,
+        editable_still,
+        mocker,
+        compare_on_delivery,
+    ):
+        handle = editable_still
+        controller.update_render_session(
+            handle, {"Exposure": 0.7, "Crop_W": 0.25, "Crop_H": 0.25}
+        )
+        controller._lod_timer.stop()
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        controller._request_higher_lod()
+        request = schedule.call_args.args[0]
+        texture_key = handle.current_texture_key
+        set_image = mocker.patch.object(controller._image_viewer, "set_image")
+
+        controller.set_render_session_compare(handle, True)
+        assert controller._image_viewer._adjustments == {}
+        state = controller.update_render_session(
+            handle, {"Exposure": 0.9, "Crop_W": 0.25, "Crop_H": 0.25}
+        )
+        assert controller._image_viewer._adjustments == {}
+        if not compare_on_delivery:
+            controller.set_render_session_compare(handle, False)
+        upgraded = _surface(
+            handle.source,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=request.decode_level,
+        )
+        controller._on_scheduled_image_ready(request.generation, upgraded)
+
+        expected = {} if compare_on_delivery else dict(state.shader_adjustments)
+        assert set_image.call_args.args[1] == expected
+        controller.set_render_session_compare(handle, False)
+        assert controller._image_viewer._adjustments == dict(state.shader_adjustments)
+        assert handle.edit_state is state
+        assert handle.current_texture_key == texture_key
+        assert schedule.call_count == 1
+        controller.finish_render_session(handle, committed=False)
+
+    def test_resident_lod_obeys_compare_state(self, controller, editable_still, mocker):
+        handle = editable_still
+        controller.update_render_session(
+            handle, {"Exposure": 0.7, "Crop_W": 0.25, "Crop_H": 0.25}
+        )
+        controller._lod_timer.stop()
+        controller.set_render_session_compare(handle, True)
+        activate = mocker.Mock(return_value=True)
+        controller._image_viewer.activate_resident_surface = activate
+        schedule = mocker.patch.object(controller._still_scheduler, "request")
+
+        controller._request_higher_lod()
+
+        assert activate.call_args.args[1] == {}
+        schedule.assert_not_called()
+        controller.finish_render_session(handle, committed=False)
+        assert not handle.compare_active
+        assert controller._image_viewer._adjustments == dict(handle.baseline_state.shader_adjustments)
+
+    @pytest.mark.parametrize("compare_active", [False, True])
+    def test_failed_lod_upload_preserves_edit_presentation(
+        self, controller, editable_still, mocker, compare_active
+    ):
+        handle = editable_still
+        state = controller.update_render_session(handle, {"Exposure": 0.7})
+        controller.set_render_session_compare(handle, compare_active)
+        controller._request_generation = 7
+        controller._request_reason_by_generation[7] = "zoom"
+        controller._last_presented_decode_key = handle.current_texture_key
+        activate = mocker.Mock(return_value=True)
+        controller._image_viewer.activate_resident_surface = activate
+        upgraded = _surface(
+            handle.source,
+            QImage(2048, 1536, QImage.Format.Format_RGBA8888),
+            level=2048,
+        )
+
+        controller._on_still_texture_allocation_failed(upgraded.decode_key, 7, "upload_failed")
+
+        expected = {} if compare_active else dict(state.shader_adjustments)
+        assert activate.call_args.args[1] == expected
+        controller.finish_render_session(handle, committed=False)
 
     def test_crop_interaction_defers_lod_until_final_geometry(self, controller):
         path = Path("/tmp/crop-session.jpg")

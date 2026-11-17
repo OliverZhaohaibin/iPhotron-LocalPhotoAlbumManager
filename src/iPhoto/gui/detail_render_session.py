@@ -76,6 +76,7 @@ class PhotoRenderSessionHandle:
     available_lods: set[int | str] = field(default_factory=set)
     edit_references: int = 0
     residency_tracker: SurfaceResidencyTracker | None = None
+    compare_active: bool = False
     _revision_counter: int = 0
     _surfaces_by_key: dict[DetailDecodeKey, DecodedSurface] = field(default_factory=dict)
 
@@ -100,6 +101,15 @@ class PhotoRenderSessionHandle:
     @property
     def current_texture_key(self) -> DetailDecodeKey:
         return self.current_surface.decode_key
+
+    @property
+    def presentation_adjustments(self) -> Mapping[str, Any]:
+        """Select shared-surface uniforms without changing the saved edit state."""
+
+        if self.compare_active:
+            return MappingProxyType({})
+        state = self.edit_state if self.edit_references > 0 else self.baseline_state
+        return state.shader_adjustments
 
     def replace_surface(self, surface: DecodedSurface) -> None:
         self.current_surface = surface

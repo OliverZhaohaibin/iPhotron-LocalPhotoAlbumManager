@@ -673,8 +673,8 @@ class EditCoordinator(QObject):
 
     def _handle_compare_pressed(self):
         self._compare_active = True
-        viewport = self._active_edit_viewport()
-        viewport.set_adjustments({})
+        if not self._set_render_session_compare(True):
+            self._active_edit_viewport().set_adjustments({})
         if self._is_video_source():
             duration_ms = self._ui.video_area.player_bar.duration()
             if duration_ms > 0:
@@ -684,7 +684,16 @@ class EditCoordinator(QObject):
 
     def _handle_compare_released(self):
         self._compare_active = False
+        self._set_render_session_compare(False)
         self._apply_session_adjustments_to_viewer()
+
+    def _set_render_session_compare(self, active: bool) -> bool:
+        handle = self._render_session_handle
+        set_compare = getattr(self._render_session_controller, "set_render_session_compare", None)
+        if handle is None or not callable(set_compare):
+            return False
+        set_compare(handle, active)
+        return True
 
     def push_undo_state(self):
         self._history_manager.push_undo_state()

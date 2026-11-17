@@ -258,6 +258,8 @@ def test_resident_live_photo_still_is_deferred_while_motion_is_visible() -> None
     surface = _surface(request)
     session = SimpleNamespace(
         baseline_state=SimpleNamespace(raw_adjustments={}),
+        edit_references=0,
+        presentation_adjustments={"Exposure": 0.25},
         edit_state=SimpleNamespace(
             color_stats=surface.color_stats,
             shader_adjustments={"Exposure": 0.25},

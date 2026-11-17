@@ -568,7 +568,12 @@ with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,
 half-size, then full fallback sequence. All stale generations are rejected at
 thread/render boundaries. Static Edit no longer creates a second full-image
 loader or CPU preview session; Done/Cancel and fullscreen retain the same render
-session. Export remains an independent full-resolution path.
+session. LOD upgrades preserve the editing baseline until Done commits it;
+Cancel restores that baseline even when an upgrade completes later. Original
+comparison is transient presentation state on the shared session, so resident
+activation and asynchronous surface delivery preserve it without changing edit
+values or source texture identity. Export remains an independent full-resolution
+path.
 
 Windows OpenGL defaults to windowed fullscreen on the existing native window,
 covering the screen plus one logical pixel of height. This strategy is shared

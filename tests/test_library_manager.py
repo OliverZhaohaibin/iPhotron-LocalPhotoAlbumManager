@@ -18,6 +18,8 @@ from PySide6.QtWidgets import QApplication
 
 from iPhoto.application.use_cases.scan_library import ScanLibraryResult
 from iPhoto.bootstrap.library_session import LibrarySession
+from iPhoto.cache.index_store import get_global_repository
+from iPhoto.gui.facade import AppFacade
 from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.pets.pipeline import PET_DETECTOR_PIPELINE_VERSION
@@ -207,6 +209,132 @@ def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:
     )
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert data["title"] == "Arrival"
+
+
+def test_rename_album_publishes_ready_index_before_gallery_reopens(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    root = tmp_path / "Library"
+    old = root / "Trip"
+    (old / "Day1").mkdir(parents=True)
+    manager = LibraryRuntimeController()
+    facade = AppFacade()
+    try:
+        manager.bind_path(root)
+        facade._inject_scan_dependencies_for_tests(library_manager=manager)
+        repository = get_global_repository(root)
+        rows = [
+            {"rel": rel, "id": rel, "thumbnail_state": "ready", "thumb_cache_key": rel,
+             "thumb_revision": "existing-revision", "micro_thumbnail": b"existing-preview",
+             "is_favorite": True, "face_status": "done", "pet_status": "done"}
+            for rel in ("Trip/photo.jpg", "Trip/Day1/child.jpg")
+        ]
+        repository.write_rows(rows)
+        for path in (old, old / "Day1"):
+            repository.create_scan_job(job_id=path.name, root=path.as_posix(), scope="album")
+            repository.update_scan_job_stage(path.name, status="completed", finished=True)
+        observed = []
+
+        def reopen_album(_old, new):
+            observed.append((
+                repository.count(album_path="Renamed Trip", filter_hidden=False),
+                manager.scan_service.is_scan_scope_complete(new),
+                manager.scan_service.is_scan_scope_complete(new / "Day1"),
+            ))
+            facade.open_album(new)
+
+        manager.albumRenamed.connect(reopen_album)
+        with patch.object(manager, "start_session_scan") as scans:
+            manager.rename_album(manager.list_albums()[0], "Renamed Trip")
+            scans.assert_not_called()
+
+        assert observed == [(2, True, True)]
+        assert facade.current_album.root == root / "Renamed Trip"
+        assert not repository.get_rows_by_rels([row["rel"] for row in rows])
+        renamed = repository.get_rows_by_rels(["Renamed Trip/photo.jpg", "Renamed Trip/Day1/child.jpg"])
+        assert len(renamed) == 2
+        for row in renamed.values():
+            assert row["thumbnail_state"] == "ready"
+            assert row["thumb_cache_key"]
+            assert row["thumb_revision"] == "existing-revision"
+            assert row["micro_thumbnail"] == b"existing-preview"
+            assert row["is_favorite"]
+            assert row["face_status"] == "done"
+            assert row["pet_status"] == "done"
+    finally:
+        manager.shutdown()
+
+
+def test_failed_album_index_rename_rolls_back_folder_and_manifest(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    root = tmp_path / "Library"
+    old = root / "Trip"
+    old.mkdir(parents=True)
+    _write_manifest(old, "Trip")
+    manager = LibraryRuntimeController()
+    try:
+        manager.bind_path(root)
+        repository = get_global_repository(root)
+        repository.write_rows([
+            {"rel": "Trip/photo.jpg", "id": "source", "is_favorite": True},
+            {"rel": "New/photo.jpg", "id": "durable-destination", "is_favorite": True},
+        ])
+        before = repository.get_rows_by_rels(["Trip/photo.jpg", "New/photo.jpg"])
+        renamed = QSignalSpy(manager.albumRenamed)
+
+        with pytest.raises(AlbumOperationError, match="already has indexed assets"):
+            manager.rename_album(manager.list_albums()[0], "New")
+
+        assert old.is_dir()
+        assert not (root / "New").exists()
+        assert json.loads((old / ".iphoto.album.json").read_text())["title"] == "Trip"
+        assert repository.get_rows_by_rels(before) == before
+        assert renamed.count() == 0
+        assert str(root) in manager._watcher.directories()
+        assert manager._watch_suspend_depth == 0
+    finally:
+        manager.shutdown()
+
+
+def test_internal_album_rename_rejects_stale_background_tree_snapshot(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    from iPhoto.library.watch_service import LibraryWatchResult
+
+    root = tmp_path / "Library"
+    old = root / "Trip"
+    old.mkdir(parents=True)
+    manager = LibraryRuntimeController()
+    try:
+        manager.bind_path(root)
+        old_node = manager.list_albums()[0]
+        manager._background_watch_generation = 41
+        manager._background_watch_polling = True
+        rename = manager.scan_service.rename_album
+
+        def rename_without_watches(source, destination):
+            assert not manager._watcher.directories()
+            assert manager._watch_suspend_depth == 1
+            rename(source, destination)
+
+        with (
+            patch.object(manager._watch_service, "configure", return_value=42) as configure,
+            patch.object(manager.scan_service, "rename_album", side_effect=rename_without_watches),
+        ):
+            manager.rename_album(old_node, "New")
+        assert configure.call_args.kwargs["polling"] is True
+        assert root / "New" in configure.call_args.args[1]
+        assert old not in configure.call_args.args[1]
+        assert str(root / "New") in manager._watcher.directories()
+        assert manager._watch_suspend_depth == 0
+
+        with patch.object(manager, "start_scanning") as scans:
+            manager._on_background_watch_result(LibraryWatchResult(41, (root,), (old_node,)))
+            scans.assert_not_called()
+        assert [node.path for node in manager.list_albums()] == [root / "New"]
+    finally:
+        manager.shutdown()
 
 
 @pytest.mark.parametrize("reserved_name", [".iPhoto", ".iphoto", ".IPHOTO", ".Trash", "exported"])

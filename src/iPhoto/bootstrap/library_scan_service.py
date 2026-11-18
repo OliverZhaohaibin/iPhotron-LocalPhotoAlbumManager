@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import sqlite3
 import stat
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -27,6 +28,7 @@ from ..config import (
 )
 from ..errors import (
     AlbumNotFoundError,
+    AlbumOperationError,
     IndexCorruptedError,
     IPhotoError,
     ManifestInvalidError,
@@ -92,6 +94,28 @@ class LibraryScanService:
             thumbnail_cache_dir=self._thumbnail_cache_dir(),
         )
         self._repository_factory = repository_factory or get_global_repository
+        self._album_path_lock = threading.RLock()
+
+    def rename_album(self, old_root: Path, new_root: Path) -> None:
+        """Commit a known folder rename before any presentation queries reopen it."""
+
+        from ..application.services.album_manifest_service import Album
+
+        old_root = Path(old_root)
+        new_root = Path(new_root)
+        if not self._album_path(old_root) or not self._album_path(new_root):
+            raise ValueError("Album rename must remain inside the active library")
+        # Pairing can materialize .iPhoto under an album. Serialize it with the
+        # filesystem move so a queued old-path task cannot recreate the folder.
+        with self._album_path_lock:
+            old_root.rename(new_root)
+            try:
+                Album.open(new_root)
+                self._repository().remap_album_paths(old_root, new_root)
+            except Exception as exc:
+                new_root.rename(old_root)
+                Album.open(old_root)
+                raise AlbumOperationError(f"Failed to update the renamed album: {exc}") from exc
 
     def prepare_album_open(
         self,
@@ -348,16 +372,19 @@ class LibraryScanService:
     def finalize_scan(self, root: Path, rows: Iterable[dict[str, Any]]) -> None:
         """Persist additive scan side effects after a successful scan."""
 
-        scan_root = Path(root)
-        materialized_rows = [dict(row) for row in rows]
-        repository = self._repository()
-        update_index_snapshot(
-            scan_root,
-            materialized_rows,
-            library_root=self.library_root,
-            repository=repository,
-        )
-        self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
+        with self._album_path_lock:
+            scan_root = Path(root)
+            if not scan_root.is_dir():
+                raise AlbumNotFoundError(f"Album directory is unavailable: {scan_root}")
+            materialized_rows = [dict(row) for row in rows]
+            repository = self._repository()
+            update_index_snapshot(
+                scan_root,
+                materialized_rows,
+                library_root=self.library_root,
+                repository=repository,
+            )
+            self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
 
     def finalize_scan_result(
         self,
@@ -630,7 +657,13 @@ class LibraryScanService:
     def pair_album(self, root: Path, *, root_only: bool = False) -> list[LiveGroup]:
         """Rebuild Live Photo roles and derived links for *root*."""
 
+        with self._album_path_lock:
+            return self._pair_existing_album(root, root_only=root_only)
+
+    def _pair_existing_album(self, root: Path, *, root_only: bool) -> list[LiveGroup]:
         scan_root = Path(root)
+        if not scan_root.is_dir():
+            return []
         album_path = self._album_path(scan_root)
         repository = self._repository()
         if root_only:
@@ -728,18 +761,21 @@ class LibraryScanService:
     ) -> "list[LiveGroup]":
         """Rebuild links using already materialized rows for *root*."""
 
-        scan_root = Path(root)
-        materialized = [dict(row) for row in rows]
-        active_repository = repository or self._repository()
-        album_path = self._album_path(scan_root)
-        if album_path:
-            materialized = self._album_relative_rows(materialized, album_path)
-        return ensure_links(
-            scan_root,
-            materialized,
-            library_root=self.library_root,
-            repository=active_repository,
-        )
+        with self._album_path_lock:
+            scan_root = Path(root)
+            if not scan_root.is_dir():
+                return []
+            materialized = [dict(row) for row in rows]
+            active_repository = repository or self._repository()
+            album_path = self._album_path(scan_root)
+            if album_path:
+                materialized = self._album_relative_rows(materialized, album_path)
+            return ensure_links(
+                scan_root,
+                materialized,
+                library_root=self.library_root,
+                repository=active_repository,
+            )
 
     def sync_manifest_favorites(
         self,

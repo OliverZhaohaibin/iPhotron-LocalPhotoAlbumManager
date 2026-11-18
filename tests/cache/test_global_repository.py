@@ -99,6 +99,51 @@ def test_relocate_rows_preserves_state_pairing_and_pending_location_jobs(
         ).fetchone() == ("New/photo.jpg", str(tmp_path / "New" / "photo.jpg"), "queued")
 
 
+@pytest.mark.parametrize("album_name", ["Trip", "Trip_%", "旅行_50%"])
+def test_known_album_rename_keeps_ready_facts_pairing_and_location_jobs(
+    tmp_path: Path, album_name: str
+) -> None:
+    from iPhoto.infrastructure.repositories.location_assignment_repository import (
+        IndexStoreLocationAssignmentRepository,
+    )
+
+    repo = get_global_repository(tmp_path)
+    photo = f"{album_name}/photo.jpg"
+    motion = f"{album_name}/Nested/motion.mov"
+    other_case = album_name.lower() if album_name.lower() != album_name else "Other"
+    untouched = [f"{album_name}-copy/photo.jpg", f"{other_case}/other.jpg", "Trip_X/photo.jpg"]
+    repo.write_rows([
+        {"rel": photo, "id": "photo", "is_favorite": True,
+         "live_partner_rel": motion, "thumbnail_state": "ready", "thumb_cache_key": "old-key",
+         "thumb_revision": "old-revision", "micro_thumbnail": b"preview"},
+        {"rel": motion, "id": "motion", "live_role": 1, "live_partner_rel": photo},
+        *({"rel": rel, "id": rel, "is_favorite": True} for rel in untouched),
+    ])
+    preserved = repo.get_rows_by_rels(untouched)
+    job = IndexStoreLocationAssignmentRepository(tmp_path).assign_location(
+        asset_rel=photo, asset_path=tmp_path / photo, gps={"lat": 52.5, "lon": 13.4},
+        location="Manual place", is_video=False, metadata_updates={},
+    )
+    before = repo.get_rows_by_rels([photo, motion])
+
+    repo.remap_album_paths(tmp_path / album_name, tmp_path / "New")
+
+    renamed = repo.get_rows_by_rels(["New/photo.jpg", "New/Nested/motion.mov"])
+    assert not repo.get_rows_by_rels([photo, motion])
+    assert renamed["New/photo.jpg"]["live_partner_rel"] == "New/Nested/motion.mov"
+    assert renamed["New/Nested/motion.mov"]["live_partner_rel"] == "New/photo.jpg"
+    assert renamed["New/Nested/motion.mov"]["parent_album_path"] == "New/Nested"
+    for key in ("thumbnail_state", "thumb_cache_key", "thumb_revision", "micro_thumbnail",
+                "is_favorite", "gps", "location"):
+        assert renamed["New/photo.jpg"][key] == before[photo][key]
+    assert repo.get_rows_by_rels(untouched) == preserved
+    with sqlite3.connect(repo.path) as connection:
+        assert connection.execute(
+            "SELECT asset_rel, asset_path, status FROM metadata_write_jobs WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone() == ("New/photo.jpg", str(tmp_path / "New" / "photo.jpg"), "queued")
+
+
 def test_relocate_rows_rejects_changed_source_identity_without_losing_state(tmp_path: Path) -> None:
     repo = get_global_repository(tmp_path)
     repo.write_rows([

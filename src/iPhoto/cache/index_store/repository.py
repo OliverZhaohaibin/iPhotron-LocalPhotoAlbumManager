@@ -455,6 +455,64 @@ class AssetRepository:
                     )
         self._clear_collection_anchor_cache()
 
+    def remap_album_paths(self, old_root: Path, new_root: Path) -> None:
+        """Retarget a known rename while keeping ready thumbnails and user state."""
+
+        old_rel = old_root.relative_to(self.library_root).as_posix()
+        new_rel = new_root.relative_to(self.library_root).as_posix()
+        if old_rel == "." or new_rel == "." or old_root == new_root:
+            raise ValueError("Album rename requires two distinct library subdirectories")
+        # '/' sorts immediately before '0'. These binary prefix bounds use the
+        # path index and treat case and wildcard characters literally.
+        source_bounds = (old_rel + "/", old_rel + "0")
+        target_bounds = (new_rel + "/", new_rel + "0")
+        suffix_start = len(old_rel) + 1
+        now = _utc_ms()
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            if conn.execute(
+                "SELECT 1 FROM assets WHERE rel >= ? AND rel < ? LIMIT 1",
+                target_bounds,
+            ).fetchone() is not None:
+                raise ValueError(f"Destination album already has indexed assets: {new_root}")
+            # Cache keys identify existing library-wide JPEG artifacts. A folder
+            # rename changes neither those artifacts nor the media/edit inputs.
+            conn.execute(
+                "UPDATE assets SET rel = ? || substr(rel, ?), "
+                "parent_album_path = ? || substr(parent_album_path, ?), "
+                "index_revision = COALESCE(index_revision, 0) + 1, index_updated_at_ms = ? "
+                "WHERE rel >= ? AND rel < ?",
+                (new_rel, suffix_start, new_rel, suffix_start, now, *source_bounds),
+            )
+            conn.execute(
+                "UPDATE assets SET live_partner_rel = ? || substr(live_partner_rel, ?), "
+                "index_revision = COALESCE(index_revision, 0) + 1, index_updated_at_ms = ? "
+                "WHERE live_partner_rel >= ? AND live_partner_rel < ?",
+                (new_rel, suffix_start, now, *source_bounds),
+            )
+            jobs = conn.execute(
+                "SELECT job_id, asset_rel FROM metadata_write_jobs "
+                "WHERE asset_rel >= ? AND asset_rel < ? AND status IN ('queued', 'writing', 'failed')",
+                source_bounds,
+            ).fetchall()
+            for job_id, asset_rel in jobs:
+                destination = new_root / Path(asset_rel).relative_to(old_rel)
+                conn.execute(
+                    "UPDATE metadata_write_jobs SET asset_rel = ?, asset_path = ?, "
+                    "updated_at = ? WHERE job_id = ?",
+                    (destination.relative_to(self.library_root).as_posix(),
+                     str(destination), now, job_id),
+                )
+            # Completed album scans remain complete at their new paths. Keep
+            # timestamps intact so the latest-job ordering does not change.
+            old_scan_root = old_root.as_posix()
+            conn.execute(
+                "UPDATE scan_jobs SET root = ? || substr(root, ?) "
+                "WHERE root = ? OR (root >= ? AND root < ?)",
+                (new_root.as_posix(), len(old_scan_root) + 1, old_scan_root,
+                 old_scan_root + "/", old_scan_root + "0"),
+            )
+        self._clear_collection_anchor_cache()
+
     def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:
         """Return a mapping of ``rel`` → row dict for the given *rels*.
 

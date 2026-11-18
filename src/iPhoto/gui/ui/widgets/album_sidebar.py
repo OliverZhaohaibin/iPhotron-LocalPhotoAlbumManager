@@ -211,6 +211,7 @@ class AlbumSidebar(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         self._tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self._library.albumRenamed.connect(self._on_album_renamed)
         self._tree.doubleClicked.connect(self._on_double_clicked)
         self._tree.clicked.connect(self._on_clicked)
         self._tree.setIndentation(0)
@@ -363,6 +364,22 @@ class AlbumSidebar(QWidget):
                 child = self._model.index(child_row, 0, root_index)
                 if child.isValid():
                     self._tree.expand(child)
+
+    def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        def retarget(path: Path | None) -> Path | None:
+            if path is None:
+                return None
+            try:
+                return new_path / path.relative_to(old_path)
+            except ValueError:
+                return path
+
+        self._pending_selection = retarget(self._pending_selection)
+        self._current_selection = retarget(self._current_selection)
+        if self._current_pinned_selection is not None:
+            kind, item_id = self._current_pinned_selection
+            if kind == "album":
+                self._current_pinned_selection = (kind, str(retarget(Path(item_id))))
 
     def _on_model_reset(self) -> None:
         _logger.info(

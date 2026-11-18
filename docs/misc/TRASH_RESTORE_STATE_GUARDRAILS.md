@@ -18,10 +18,15 @@ This note protects Recently Deleted, restore metadata, and durable user state.
 - Scan merge and rescan must not implicitly clear durable user decisions such as
   favorites, hidden/trash state, pinned/order, manual metadata, People/Pets state, or
   edit sidecars.
+- Watcher reconciliation must migrate verified renamed assets and unfinished
+  location write jobs before pruning missing album rows. Match relative media
+  paths and asset IDs derived from file content; filenames alone must not
+  transfer user state.
 
 ## Focused Checks
 
 ```bash
+.venv/bin/python -m pytest tests/test_library_watch_service.py tests/application/test_library_scan_service.py -q
 .venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_restoration_service.py -q
 .venv/bin/python -m pytest tests/cache/test_global_repository.py tests/cache/test_index_store_features.py -q
 ```

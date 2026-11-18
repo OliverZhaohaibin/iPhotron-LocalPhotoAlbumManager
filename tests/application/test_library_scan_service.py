@@ -14,6 +14,7 @@ import iPhoto.bootstrap.library_scan_service as scan_service_module
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.utils.hashutils import compute_file_id
 
 
 class _Scanner:
@@ -150,6 +151,75 @@ def test_missing_album_reconciliation_rechecks_before_removing_rows(
             ) is (change == "cancelled")
 
     assert store.get_rows_by_rels(["Gone/photo.jpg"]) == before
+
+
+@pytest.mark.parametrize("matching_content", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_missing_album_reconciliation_only_relocates_matching_assets(
+    tmp_path: Path, matching_content: bool, nested: bool
+) -> None:
+    parent = tmp_path / "Parent" if nested else tmp_path
+    old = parent / "Old"
+    old.mkdir(parents=True)
+    source = old / "photo.jpg"
+    source.write_bytes(b"original media")
+    source_rel = source.relative_to(tmp_path).as_posix()
+    destination_rel = (parent / "New" / "photo.jpg").relative_to(tmp_path).as_posix()
+    asset_id = f"as_{compute_file_id(source)}"
+    store = get_global_repository(tmp_path)
+    gps = {"lat": 52.5, "lon": 13.4}
+    store.write_rows([{
+        "rel": source_rel, "id": asset_id, "is_favorite": True,
+        "gps": gps, "location": "Local place", "thumbnail_state": "ready",
+        "thumb_cache_key": "old-path", "face_status": "done", "pet_status": "done",
+    }])
+    source.unlink()
+    old.rmdir()
+    new = parent / "New"
+    new.mkdir()
+    (new / "photo.jpg").write_bytes(b"original media" if matching_content else b"different media")
+
+    assert LibraryScanService(tmp_path).reconcile_missing_album_scope(
+        old, relocation_roots=(new,)
+    )
+
+    assert not store.get_rows_by_rels([source_rel])
+    relocated = store.get_rows_by_rels([destination_rel])
+    if matching_content:
+        row = relocated[destination_rel]
+        assert row["is_favorite"]
+        assert row["gps"] == gps
+        assert row["location"] == "Local place"
+        assert row["thumbnail_state"] == "stale"
+        assert row["thumb_cache_key"] is None
+        assert row["face_status"] is None
+        assert row["pet_status"] is None
+        # The state has already been committed even if destination scanning is
+        # interrupted or the process closes before it starts.
+        reset_global_repository()
+        assert get_global_repository(tmp_path).get_rows_by_rels([destination_rel]) == relocated
+    else:
+        assert not relocated
+
+
+def test_ambiguous_album_relocation_does_not_discard_user_state(tmp_path: Path) -> None:
+    candidates = [tmp_path / name for name in ("New", "Copy")]
+    for candidate in candidates:
+        candidate.mkdir()
+        (candidate / "photo.jpg").write_bytes(b"same media")
+    store = get_global_repository(tmp_path)
+    store.write_rows([{
+        "rel": "Old/photo.jpg", "id": f"as_{compute_file_id(candidates[0] / 'photo.jpg')}",
+        "is_favorite": True, "location": "Local place",
+    }])
+    before = store.get_rows_by_rels(["Old/photo.jpg"])
+
+    with pytest.raises(ValueError, match="Ambiguous relocated asset"):
+        LibraryScanService(tmp_path).reconcile_missing_album_scope(
+            tmp_path / "Old", relocation_roots=candidates
+        )
+
+    assert store.get_rows_by_rels(["Old/photo.jpg"]) == before
 
 
 def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:

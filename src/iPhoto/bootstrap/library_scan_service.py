@@ -43,6 +43,7 @@ from ..domain.models.scan import ScanBatchCommitted
 from ..io.scanner_adapter import process_media_paths
 from ..media_classifier import ALL_IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ..path_normalizer import compute_album_path
+from ..utils.hashutils import compute_file_id
 from ..utils.jsonio import read_json
 from ..utils.logging import get_logger
 from ..utils.pathutils import ensure_work_dir, resolve_work_dir
@@ -427,8 +428,9 @@ class LibraryScanService:
         root: Path,
         *,
         is_cancelled: Callable[[], bool] | None = None,
+        relocation_roots: Iterable[Path] = (),
     ) -> bool:
-        """Return whether a disappeared album was handled without a rescan."""
+        """Reconcile a missing scope, migrating verified renames before pruning."""
 
         scan_root = Path(root)
         album_path = self._album_path(scan_root)
@@ -450,8 +452,8 @@ class LibraryScanService:
         if is_cancelled is not None and is_cancelled():
             return True
         repository = self._repository()
-        rels = [
-            str(row["rel"])
+        rows = [
+            {"rel": str(row["rel"]), "id": row.get("id")}
             for row in repository.read_album_assets(
                 album_path,
                 include_subalbums=True,
@@ -460,6 +462,37 @@ class LibraryScanService:
             )
             if row.get("rel")
         ]
+        # Newly discovered scopes are only hints: filenames alone cannot prove
+        # a rename. Verify content identity before moving any persisted state.
+        candidates = [
+            Path(candidate)
+            for candidate in relocation_roots
+            if (relative := self._album_path(Path(candidate)))
+            and RECENTLY_DELETED_DIR_NAME not in Path(relative).parts
+        ]
+        destinations: dict[str, str] = {}
+        expected_ids: dict[str, str] = {}
+        for row in rows:
+            if is_cancelled is not None and is_cancelled():
+                return True
+            source = str(row["rel"])
+            asset_id = str(row.get("id") or "")
+            if not asset_id:
+                continue
+            subpath = Path(source).relative_to(album_path)
+            matches = set()
+            for candidate in candidates:
+                target = candidate / subpath
+                try:
+                    if target.is_file() and f"as_{compute_file_id(target)}" == asset_id:
+                        matches.add(target.relative_to(self.library_root).as_posix())
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+            if len(matches) > 1:
+                raise ValueError(f"Ambiguous relocated asset; retaining source state: {source}")
+            if matches:
+                destinations[source] = matches.pop()
+                expected_ids[source] = asset_id
         # Recheck after the read: a queued notification may outlive a rename or
         # temporary disappearance. A recreated scope must follow a normal scan.
         if not scope_is_missing():
@@ -468,8 +501,11 @@ class LibraryScanService:
             raise AlbumNotFoundError(f"Library directory is unavailable: {self.library_root}")
         if is_cancelled is not None and is_cancelled():
             return True
-        if rels:
-            repository.remove_rows(rels, clear_live_partners=True)
+        if destinations:
+            repository.relocate_rows(destinations, expected_asset_ids=expected_ids)
+        remaining = [str(row["rel"]) for row in rows if row["rel"] not in destinations]
+        if remaining:
+            repository.remove_rows(remaining, clear_live_partners=True)
         return True
 
     def refresh_restored_album(

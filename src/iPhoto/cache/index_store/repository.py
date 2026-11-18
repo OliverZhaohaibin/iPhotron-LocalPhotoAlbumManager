@@ -20,6 +20,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -389,6 +390,69 @@ class AssetRepository:
                         [*chunk, *chunk],
                     )
                 conn.execute(f"DELETE FROM assets WHERE rel IN ({placeholders})", chunk)
+        self._clear_collection_anchor_cache()
+
+    def relocate_rows(
+        self,
+        destinations: Mapping[str, str],
+        *,
+        expected_asset_ids: Mapping[str, str],
+    ) -> None:
+        """Move verified scan rows without dropping their durable user choices."""
+
+        if not destinations:
+            return
+        if (
+            set(destinations) & set(destinations.values())
+            or len(set(destinations.values())) != len(destinations)
+        ):
+            raise ValueError("Asset relocation paths must be distinct")
+        now = _utc_ms()
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            sources = {}
+            source_rels = list(destinations)
+            for offset in range(0, len(source_rels), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = source_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join("?" for _ in chunk)
+                for source, asset_id, partner in conn.execute(
+                    f"SELECT rel, id, live_partner_rel FROM assets WHERE rel IN ({placeholders})", chunk
+                ):
+                    if asset_id != expected_asset_ids[source]:
+                        raise ValueError(f"Asset changed during relocation: {source}")
+                    sources[source] = partner
+            for source in sources:
+                destination = destinations[source]
+                parent = Path(destination).parent
+                existing = conn.execute("SELECT id FROM assets WHERE rel = ?", (destination,)).fetchone()
+                if existing is not None and existing[0] != expected_asset_ids[source]:
+                    raise ValueError(f"Destination asset changed during relocation: {destination}")
+                conn.execute("DELETE FROM assets WHERE rel = ?", (destination,))
+                # Update in place so even optional metadata columns survive.
+                # Path-based rendering and recognition facts need a fresh scan.
+                conn.execute(
+                    "UPDATE assets SET rel = ?, parent_album_path = ?, "
+                    "thumbnail_state = 'stale', micro_thumbnail = NULL, "
+                    "thumb_cache_key = NULL, thumb_revision = NULL, "
+                    "face_status = NULL, pet_status = NULL, "
+                    "index_revision = COALESCE(index_revision, 0) + 1, "
+                    "index_updated_at_ms = ? WHERE rel = ?",
+                    (destination, parent.as_posix() if parent != Path(".") else "", now, source),
+                )
+                conn.execute(
+                    "UPDATE metadata_write_jobs SET asset_rel = ?, asset_path = ?, "
+                    "updated_at = ? WHERE asset_rel = ? AND status IN ('queued', 'writing', 'failed')",
+                    (destination, str(self.library_root / destination), now, source),
+                )
+            # Follow the reciprocal pair's primary key, rather than scanning
+            # every library row once for each relocated asset.
+            for source, partner in sources.items():
+                if partner:
+                    conn.execute(
+                        "UPDATE assets SET live_partner_rel = ?, "
+                        "index_revision = COALESCE(index_revision, 0) + 1, "
+                        "index_updated_at_ms = ? WHERE rel = ? AND live_partner_rel = ?",
+                        (destinations[source], now, destinations.get(partner, partner), source),
+                    )
         self._clear_collection_anchor_cache()
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:

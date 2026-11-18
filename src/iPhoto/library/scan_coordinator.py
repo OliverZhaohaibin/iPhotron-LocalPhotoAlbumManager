@@ -143,6 +143,7 @@ class ScanCoordinatorMixin:
         self._live_scan_buffer.clear()
 
         # Pass library root to scanner so all assets go to global database
+        relocation_roots = getattr(self, "_watch_scan_relocation_roots", {}).pop(root, None)
         worker = ScannerWorker(
             root,
             include,
@@ -152,6 +153,8 @@ class ScanCoordinatorMixin:
             scan_service=getattr(self, "_scan_service", None),
             root_only=root_only,
             finalize_scan=True,
+            reconcile_missing_scope=relocation_roots is not None,
+            relocation_roots=relocation_roots or (),
         )
         self._current_scanner_worker = worker
         signals.progressUpdated.connect(self.scanProgress)

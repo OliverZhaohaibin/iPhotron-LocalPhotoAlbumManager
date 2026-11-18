@@ -111,6 +111,7 @@ class LibraryRuntimeController(
         self._debounce.setInterval(500)
         self._pending_watch_paths: set[Path] = set()
         self._watch_scan_queue: list[tuple[Path, bool]] = []
+        self._watch_scan_relocation_roots: dict[Path, tuple[Path, ...]] = {}
         # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
         # ignore file-system notifications. We use a counter instead of a boolean
         # to correctly handle nested operations that may overlap (e.g., multiple
@@ -203,6 +204,7 @@ class LibraryRuntimeController(
         self._delivered_recognition_event_ids.clear()
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
+        self._watch_scan_relocation_roots.clear()
         self._root = Path(prepared.root)
         self._deleted_dir = None
         self._geotagged_assets_cache = None
@@ -259,6 +261,7 @@ class LibraryRuntimeController(
         self._recognition_scans_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
+        self._watch_scan_relocation_roots.clear()
         self._face_scan_status_message = None
         self._pet_scan_status_message = None
         self._unbind_people_index_coordinator()
@@ -349,6 +352,7 @@ class LibraryRuntimeController(
         self._live_scan_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
+        self._watch_scan_relocation_roots.clear()
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         self._unbind_people_index_coordinator()
@@ -395,6 +399,12 @@ class LibraryRuntimeController(
         removed_scopes = sorted(
             path for path in removed if not any(parent in removed for parent in path.parents)
         )
+        added = nodes.keys() - previous_paths
+        relocation_roots = tuple(sorted(
+            path for path in added if not any(parent in added for parent in path.parents)
+        ))
+        for path in removed_scopes:
+            self._watch_scan_relocation_roots[path] = relocation_roots
         # Missing scopes cannot pass the normal existing-directory deduplication.
         # The scan worker revalidates them before applying scoped reconciliation.
         if removed_scopes:

@@ -12,11 +12,13 @@ from PIL import Image
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.library.runtime_controller import LibraryRuntimeController
+from iPhoto.library.tree import AlbumNode
 from iPhoto.library.watch_service import (
     LibraryWatchRequest,
     LibraryWatchResult,
     _LibraryWatchWorker,
 )
+from iPhoto.utils.hashutils import compute_file_id
 
 
 class _FakeWatcher:
@@ -378,10 +380,13 @@ def test_background_snapshot_reconciles_disappeared_album_without_scanning_sibli
         controller.bind_path(root)
         repository = get_global_repository(root)
         repository.write_rows([
-            {"rel": rel, "id": rel, "is_favorite": True,
+            {"rel": rel, "id": f"as_{compute_file_id(root / rel)}", "is_favorite": True,
              "thumbnail_state": "ready", "thumb_cache_key": rel}
             for rel in ("Old/photo.jpg", "Old/Nested/photo.jpg", "Custom/kept.tiff")
         ])
+        gps = {"lat": 52.5, "lon": 13.4}
+        for rel in ("Old/photo.jpg", "Old/Nested/photo.jpg"):
+            repository.update_asset_geodata(rel, gps=gps, location=f"Manual: {rel}")
         preserved = repository.get_rows_by_rels(["Custom/kept.tiff"])
         controller._background_watch_generation = 1
         worker.resultReady.connect(controller._on_background_watch_result)
@@ -410,7 +415,19 @@ def test_background_snapshot_reconciles_disappeared_album_without_scanning_sibli
             read_all.assert_not_called()
         if rename:
             expected = {"New/photo.jpg", "New/Nested/photo.jpg"}
-            assert set(repository.get_rows_by_rels(expected)) == expected
+            renamed_rows = repository.get_rows_by_rels(expected)
+            assert set(renamed_rows) == expected
+            for rel, row in renamed_rows.items():
+                assert row["is_favorite"]
+                assert row["gps"] == gps
+                assert row["has_gps"]
+                assert row["location"] == f"Manual: {rel.replace('New/', 'Old/', 1)}"
+                assert row["thumbnail_state"] == "ready"
+                assert row["thumb_cache_key"]
+            # A second scan must retain the migrated local state as well.
+            controller.scan_service.rescan_album(root / "New")
+            assert all(row["is_favorite"] and row["gps"] == gps
+                       for row in repository.get_rows_by_rels(expected).values())
     finally:
         controller.shutdown()
 
@@ -438,6 +455,42 @@ def test_removed_album_reconciliation_waits_for_its_active_scan(qapp, tmp_path: 
 
         assert not repository.get_rows_by_rels(["Removed/photo.jpg"])
         assert not album.exists()
+    finally:
+        controller.shutdown()
+
+
+def test_album_rename_preserves_state_when_an_older_scan_has_not_started(qapp, tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    old = root / "Old"
+    old.mkdir()
+    Image.new("RGB", (16, 16), "red").save(old / "photo.jpg")
+    controller = LibraryRuntimeController()
+    try:
+        controller.bind_path(root)
+        repository = get_global_repository(root)
+        repository.write_rows([{
+            "rel": "Old/photo.jpg", "id": f"as_{compute_file_id(old / 'photo.jpg')}",
+            "is_favorite": True, "location": "Local place",
+        }])
+        controller._background_watch_generation = 1
+        pending = []
+        with patch.object(controller._scan_thread_pool, "start", side_effect=pending.append):
+            controller.start_scanning(old, ["*.jpg"], [])
+            earlier_scan = controller._current_scanner_worker
+            new = root / "New"
+            old.rename(new)
+            controller._on_background_watch_result(
+                LibraryWatchResult(1, (root,), (AlbumNode(new, 1, "New", False),))
+            )
+            while pending:
+                pending.pop(0).run()
+
+        assert earlier_scan.failed
+        assert not old.exists()
+        assert not repository.get_rows_by_rels(["Old/photo.jpg"])
+        row = repository.get_rows_by_rels(["New/photo.jpg"])["New/photo.jpg"]
+        assert row["is_favorite"]
+        assert row["location"] == "Local place"
     finally:
         controller.shutdown()
 

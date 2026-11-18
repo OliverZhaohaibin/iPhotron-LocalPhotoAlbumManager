@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from dataclasses import dataclass
@@ -66,6 +66,14 @@ class AssetRepositoryPort(Protocol):
 
     def remove_rows(self, rels: Iterable[str], *, clear_live_partners: bool = False) -> None:
         """Remove rows identified by library-relative paths."""
+
+    def relocate_rows(
+        self,
+        destinations: Mapping[str, str],
+        *,
+        expected_asset_ids: Mapping[str, str],
+    ) -> None:
+        """Atomically relocate verified assets and their pending metadata writes."""
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
         """Return existing rows keyed by library-relative path."""

@@ -46,6 +46,97 @@ def clean_global_state():
     reset_global_repository()
 
 
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.parametrize("move_partner", [False, True])
+def test_relocate_rows_preserves_state_pairing_and_pending_location_jobs(
+    tmp_path: Path, with_metadata: bool, move_partner: bool
+) -> None:
+    import json
+    from iPhoto.infrastructure.repositories.location_assignment_repository import (
+        IndexStoreLocationAssignmentRepository,
+    )
+
+    repo = get_global_repository(tmp_path)
+    if with_metadata:
+        with repo.transaction() as conn:
+            conn.execute("ALTER TABLE assets ADD COLUMN metadata TEXT")
+    motion_rel = "Old/motion.mov" if move_partner else "motion.mov"
+    destination_motion = "New/motion.mov" if move_partner else "motion.mov"
+    repo.write_rows([
+        {"rel": "Old/photo.jpg", "id": "photo", "is_favorite": True,
+         "live_partner_rel": motion_rel},
+        {"rel": motion_rel, "id": "motion", "live_role": 1,
+         "live_partner_rel": "Old/photo.jpg"},
+    ])
+    gps = {"lat": 52.5, "lon": 13.4}
+    job = IndexStoreLocationAssignmentRepository(tmp_path).assign_location(
+        asset_rel="Old/photo.jpg", asset_path=tmp_path / "Old" / "photo.jpg",
+        gps=gps, location="Local place", is_video=False,
+        metadata_updates={"location_name": "Local place", "custom_note": "Keep me"},
+    )
+
+    destinations = {"Old/photo.jpg": "New/photo.jpg"}
+    expected_ids = {"Old/photo.jpg": "photo"}
+    if move_partner:
+        destinations[motion_rel] = destination_motion
+        expected_ids[motion_rel] = "motion"
+    repo.relocate_rows(destinations, expected_asset_ids=expected_ids)
+
+    rows = repo.get_rows_by_rels(["Old/photo.jpg", "New/photo.jpg", destination_motion])
+    assert set(rows) == {"New/photo.jpg", destination_motion}
+    assert rows["New/photo.jpg"]["is_favorite"]
+    assert rows["New/photo.jpg"]["location"] == "Local place"
+    assert rows["New/photo.jpg"]["gps"] == gps
+    assert rows["New/photo.jpg"]["live_partner_rel"] == destination_motion
+    assert rows[destination_motion]["live_partner_rel"] == "New/photo.jpg"
+    assert rows[destination_motion]["live_role"] == 1
+    if with_metadata:
+        assert json.loads(rows["New/photo.jpg"]["metadata"])["custom_note"] == "Keep me"
+    with sqlite3.connect(repo.path) as conn:
+        assert conn.execute(
+            "SELECT asset_rel, asset_path, status FROM metadata_write_jobs WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone() == ("New/photo.jpg", str(tmp_path / "New" / "photo.jpg"), "queued")
+
+
+def test_relocate_rows_rejects_changed_source_identity_without_losing_state(tmp_path: Path) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([
+        {"rel": "Old/a.jpg", "id": "a", "is_favorite": True},
+        {"rel": "Old/b.jpg", "id": "b-changed", "location": "Local place"},
+    ])
+    sources = ["Old/a.jpg", "Old/b.jpg"]
+    before = repo.get_rows_by_rels(sources)
+
+    with pytest.raises(ValueError, match="Asset changed during relocation"):
+        repo.relocate_rows(
+            {"Old/a.jpg": "New/a.jpg", "Old/b.jpg": "New/b.jpg"},
+            expected_asset_ids={"Old/a.jpg": "a", "Old/b.jpg": "b"},
+        )
+
+    assert repo.get_rows_by_rels(sources) == before
+    assert not repo.get_rows_by_rels(["New/a.jpg", "New/b.jpg"])
+
+
+def test_relocate_rows_rolls_back_when_a_destination_was_replaced(tmp_path: Path) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([
+        {"rel": "Old/a.jpg", "id": "a", "is_favorite": True},
+        {"rel": "Old/b.jpg", "id": "b", "location": "Local place"},
+        {"rel": "New/b.jpg", "id": "another-asset", "is_favorite": True},
+    ])
+    before = repo.get_rows_by_rels(["Old/a.jpg", "Old/b.jpg", "New/b.jpg"])
+
+    with pytest.raises(ValueError, match="Destination asset changed during relocation"):
+        repo.relocate_rows(
+            {"Old/a.jpg": "New/a.jpg", "Old/b.jpg": "New/b.jpg"},
+            expected_asset_ids={"Old/a.jpg": "a", "Old/b.jpg": "b"},
+        )
+
+    assert repo.get_rows_by_rels(before) == before
+    assert not repo.get_rows_by_rels(["New/a.jpg"])
+
+
 class TestGlobalRepositorySingleton:
     """Tests for the global repository singleton pattern."""
 

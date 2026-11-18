@@ -24,6 +24,7 @@ from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.menus.core import MenuContext, populate_menu
 from iPhoto.gui.ui.menus.gallery_menu import GalleryMenuHandlers, gallery_action_specs
 from iPhoto.gui.ui.menus.style import apply_menu_style
+from iPhoto.utils.pathutils import normalise_for_compare
 
 from ...facade import AppFacade
 from ...services.people_service_resolver import resolve_people_service
@@ -340,13 +341,24 @@ class ContextMenuController(QObject):
 
         try:
             self._prepare_file_mutation(paths)
-            queued_move = self._facade.move_assets(paths, target)
-            if not queued_move:
+            move_plan = self._facade.move_assets_with_plan(paths, target)
+            if move_plan is None:
                 return
+            accepted_paths = list(move_plan.sources)
             if selected_indexes and not self._apply_optimistic_move(
-                paths, destination_root=target
+                accepted_paths, destination_root=move_plan.destination_root
             ):
-                self._remove_selection_rows(selected_indexes)
+                accepted_keys = {normalise_for_compare(path) for path in accepted_paths}
+                accepted_indexes = []
+                for index in selected_indexes:
+                    raw_path = index.data(Roles.ABS)
+                    if (
+                        isinstance(raw_path, (str, Path))
+                        and raw_path
+                        and normalise_for_compare(Path(raw_path)) in accepted_keys
+                    ):
+                        accepted_indexes.append(index)
+                self._remove_selection_rows(accepted_indexes)
         except Exception:
             rollback = getattr(
                 self._current_asset_model(),

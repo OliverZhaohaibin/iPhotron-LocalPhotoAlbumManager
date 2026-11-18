@@ -12,6 +12,7 @@ from ..application.services.album_manifest_service import Album
 from ..utils.logging import get_logger
 from .background_task_manager import BackgroundTaskManager
 if TYPE_CHECKING:
+    from ..bootstrap.library_asset_operation_service import AssetMovePlan
     from ..library.runtime_controller import LibraryRuntimeController
     from .services import (
         AlbumMetadataService,
@@ -374,6 +375,15 @@ class AppFacade(QObject):
         """Move *sources* into *destination* and refresh the relevant albums."""
 
         return self.move_service.move_assets(sources, destination)
+
+    def move_assets_with_plan(
+        self,
+        sources: Iterable[Path],
+        destination: Path,
+    ) -> AssetMovePlan | None:
+        """Queue a move and return its accepted source/destination plan."""
+
+        return self.move_service.move_assets_with_plan(sources, destination)
 
     def delete_assets(self, sources: Iterable[Path]) -> bool:
         """Move *sources* into the dedicated deleted-items folder."""

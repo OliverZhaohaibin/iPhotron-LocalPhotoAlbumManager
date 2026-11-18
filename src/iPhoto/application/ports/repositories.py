@@ -78,6 +78,9 @@ class AssetRepositoryPort(Protocol):
     def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
         """Return existing rows keyed by library-relative path."""
 
+    def remap_album_paths(self, old_root: Path, new_root: Path) -> None:
+        """Retarget indexed media and cached pixels, dropping path-based revisions."""
+
     def get_unpaired_live_candidates(
         self, content_ids: Iterable[str]
     ) -> dict[str, dict[str, Any]]:

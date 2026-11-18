@@ -123,6 +123,7 @@ class LibraryRuntimeController(
         self._watch_service = LibraryWatchService(self)
         self._watch_service.resultReady.connect(self._on_background_watch_result)
         self._background_watch_generation = 0
+        self._background_watch_polling = False
 
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
@@ -231,6 +232,7 @@ class LibraryRuntimeController(
         storage_profile = getattr(prepared, "storage_profile", None)
         storage_kind = getattr(storage_profile, "kind", prepared.storage_kind)
         polling = storage_kind in {"network", "removable"} or prepared.storage_kind == "slow"
+        self._background_watch_polling = polling
         watch_paths = (self._root, *(node.path for node in self._nodes.values()))
         scan_service = self.scan_service
         self._background_watch_generation = self._watch_service.configure(
@@ -898,7 +900,7 @@ class LibraryRuntimeController(
             raise LibraryUnavailableError("Basic Library path has not been configured.")
         return self._root
 
-    def _refresh_tree(self) -> None:
+    def _refresh_tree(self, *, notify: bool = True) -> None:
         if self._root is None:
             self._albums = []
             self._children = {}
@@ -907,7 +909,8 @@ class LibraryRuntimeController(
             self._geotagged_assets_cache = None
             self._geotagged_assets_cache_root = None
             self._rebuild_watches()
-            self.treeUpdated.emit()
+            if notify:
+                self.treeUpdated.emit()
             return
         previous_albums = self._albums
         previous_children = self._children
@@ -942,7 +945,8 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         self._rebuild_watches()
-        self.treeUpdated.emit()
+        if notify:
+            self.treeUpdated.emit()
 
 
 __all__ = ["GeotaggedAsset", "LibraryRuntimeController"]

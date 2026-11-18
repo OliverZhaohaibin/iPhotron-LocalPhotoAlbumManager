@@ -1045,7 +1045,6 @@ class DesktopCoordinatorRuntime(QObject):
             library_root=self._context.library.root(),
             fallback_label=new_path.name,
         )
-        self._thumbnail_service.remap_album_paths(old_path, new_path)
         self._gallery_vm.handle_album_renamed(old_path, new_path)
 
     def _handle_people_snapshot_sidebar_refresh(self, event: object) -> None:

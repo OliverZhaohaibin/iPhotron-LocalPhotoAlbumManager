@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ class ScanLibraryRequest:
     scan_started_at_ms: int | None = None
     scan_stage_elapsed_ms: dict[str, float] | None = None
     recursive: bool = True
+    commit_guard: Callable[[], AbstractContextManager[bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,19 @@ class ScanLibraryUseCase:
         )
 
     def _merge_chunk(
+        self,
+        chunk: list[dict[str, Any]],
+        request: ScanLibraryRequest,
+        *,
+        metadata_elapsed_ms: float | None = None,
+    ) -> int:
+        guard = request.commit_guard() if request.commit_guard is not None else nullcontext(True)
+        with guard as can_commit:
+            if not can_commit:
+                return 0
+            return self._commit_chunk(chunk, request, metadata_elapsed_ms=metadata_elapsed_ms)
+
+    def _commit_chunk(
         self,
         chunk: list[dict[str, Any]],
         request: ScanLibraryRequest,

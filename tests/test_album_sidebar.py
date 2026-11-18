@@ -377,6 +377,47 @@ def test_sidebar_pinned_album_rename_updates_album_tree(
     assert sidebar.tree_model().data(albums_index) == "Renamed Trip"
 
 
+@pytest.mark.parametrize("pin_child", [False, True])
+def test_renamed_pinned_album_does_not_leave_old_directory_or_selection(
+    tmp_path: Path, qapp: QApplication, pin_child: bool
+) -> None:
+    from iPhoto.library.scan_coordinator import _PairingWorker
+
+    root = tmp_path / "Library"
+    old = root / "Trip"
+    child = old / "Day1"
+    child.mkdir(parents=True)
+    manager = LibraryRuntimeController()
+    try:
+        manager.bind_path(root)
+        pinned_service = PinnedItemsService(_settings(tmp_path))
+        pinned_service.pin_album(child if pin_child else old, "Trip", library_root=root)
+        sidebar = AlbumSidebar(manager)
+        sidebar.set_pinned_service(pinned_service)
+        manager.albumRenamed.connect(lambda old, new: pinned_service.remap_album_path(
+            old, new, library_root=root, fallback_label=new.name
+        ))
+        sidebar.select_pinned_item(pinned_service.items_for_library(root)[0])
+        pending_pairing = _PairingWorker(old, manager.scan_service)
+
+        manager.rename_album(manager.list_albums()[0], "Renamed Trip")
+        pending_pairing.run()
+        manager._refresh_tree()
+        qapp.processEvents()
+
+        new = root / "Renamed Trip"
+        pinned = pinned_service.items_for_library(root)
+        assert len(pinned) == 1
+        assert pinned[0].item_id == str((new / "Day1" if pin_child else new).resolve())
+        assert not old.exists()
+        assert not sidebar.tree_model().index_for_path(old).isValid()
+        index = sidebar.tree_model().index_for_pinned_item(pinned[0])
+        assert index.isValid()
+        assert sidebar._tree.currentIndex() == index
+    finally:
+        manager.shutdown()
+
+
 def test_sidebar_pinned_item_context_menu_offers_unpin(tmp_path: Path, qapp: QApplication) -> None:
     root = tmp_path / "Library"
     root.mkdir()

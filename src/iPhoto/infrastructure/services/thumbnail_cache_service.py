@@ -3117,7 +3117,7 @@ class ThumbnailCacheService(QObject):
             return None
         if cancellation is not None and cancellation.cancelled():
             return None
-        if thumbnail_state == "stale":
+        if thumbnail_state == "stale" or thumb_revision is None:
             if self._publish_thumbnail_ready(path, artifact):
                 self._thumbnail_states[self._cache_key(path, size)] = "ready"
         if size == artifact.image.size():

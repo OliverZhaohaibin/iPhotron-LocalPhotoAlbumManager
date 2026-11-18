@@ -264,6 +264,23 @@ def test_nested_relocation_candidates_require_stronger_subtree_evidence(
         assert not store.get_rows_by_rels(["New/photo.jpg", "New/Nested/photo.jpg"])
 
 
+def test_queued_scan_side_effects_cannot_recreate_a_renamed_album(tmp_path: Path) -> None:
+    old = tmp_path / "Old"
+    old.mkdir()
+    service = LibraryScanService(tmp_path)
+    new = tmp_path / "New"
+    service.rename_album(old, new)
+
+    assert service.pair_album(old) == []
+    assert service.ensure_links_for_rows(old, []) == []
+    with pytest.raises(scan_service_module.AlbumNotFoundError):
+        service.finalize_scan(old, [{"rel": "Old/photo.jpg", "id": "photo"}])
+
+    assert not old.exists()
+    assert new.is_dir()
+    assert not get_global_repository(tmp_path).get_rows_by_rels(["Old/photo.jpg"])
+
+
 def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     library_root.mkdir()

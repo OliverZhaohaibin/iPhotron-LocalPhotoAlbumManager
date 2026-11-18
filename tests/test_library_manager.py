@@ -256,7 +256,7 @@ def test_rename_album_publishes_ready_index_before_gallery_reopens(
         for row in renamed.values():
             assert row["thumbnail_state"] == "ready"
             assert row["thumb_cache_key"]
-            assert row["thumb_revision"] == "existing-revision"
+            assert row["thumb_revision"] is None
             assert row["micro_thumbnail"] == b"existing-preview"
             assert row["is_favorite"]
             assert row["face_status"] == "done"

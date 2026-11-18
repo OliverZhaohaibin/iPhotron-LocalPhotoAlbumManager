@@ -133,15 +133,39 @@ def test_known_album_rename_keeps_ready_facts_pairing_and_location_jobs(
     assert renamed["New/photo.jpg"]["live_partner_rel"] == "New/Nested/motion.mov"
     assert renamed["New/Nested/motion.mov"]["live_partner_rel"] == "New/photo.jpg"
     assert renamed["New/Nested/motion.mov"]["parent_album_path"] == "New/Nested"
-    for key in ("thumbnail_state", "thumb_cache_key", "thumb_revision", "micro_thumbnail",
+    for key in ("thumbnail_state", "micro_thumbnail",
                 "is_favorite", "gps", "location"):
         assert renamed["New/photo.jpg"][key] == before[photo][key]
+    from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_key
+
+    assert renamed["New/photo.jpg"]["thumb_cache_key"].startswith(
+        f"{thumbnail_cache_key(tmp_path / 'New/photo.jpg')}-"
+    )
+    assert renamed["New/photo.jpg"]["thumb_revision"] is None
     assert repo.get_rows_by_rels(untouched) == preserved
     with sqlite3.connect(repo.path) as connection:
         assert connection.execute(
             "SELECT asset_rel, asset_path, status FROM metadata_write_jobs WHERE job_id = ?",
             (job.job_id,),
         ).fetchone() == ("New/photo.jpg", str(tmp_path / "New" / "photo.jpg"), "queued")
+
+
+def test_ready_thumbnail_can_publish_only_a_previously_unknown_revision(tmp_path: Path) -> None:
+    repository = get_global_repository(tmp_path)
+    repository.write_rows([{
+        "rel": "photo.jpg", "id": "photo", "thumbnail_state": "ready",
+        "thumb_cache_key": "cached", "micro_thumbnail": b"preview",
+    }])
+
+    def publish():
+        return repository.update_thumbnail_ready(
+            "photo.jpg", thumb_cache_key="cached", micro_thumbnail=b"preview",
+            expected_revision="current",
+        )
+
+    assert publish()
+    assert repository.get_rows_by_rels(["photo.jpg"])["photo.jpg"]["thumb_revision"] == "current"
+    assert not publish()
 
 
 def test_relocate_rows_rejects_changed_source_identity_without_losing_state(tmp_path: Path) -> None:

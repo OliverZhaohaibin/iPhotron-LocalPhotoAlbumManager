@@ -8,7 +8,8 @@ import stat
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -95,6 +96,7 @@ class LibraryScanService:
         )
         self._repository_factory = repository_factory or get_global_repository
         self._album_path_lock = threading.RLock()
+        self._album_path_generation = 0
 
     def rename_album(self, old_root: Path, new_root: Path) -> None:
         """Commit a known folder rename before any presentation queries reopen it."""
@@ -116,6 +118,16 @@ class LibraryScanService:
                 new_root.rename(old_root)
                 Album.open(old_root)
                 raise AlbumOperationError(f"Failed to update the renamed album: {exc}") from exc
+            self._album_path_generation += 1
+
+    @contextmanager
+    def _scan_commit_guard(
+        self, generation: int, is_cancelled: Callable[[], bool]
+    ) -> Iterator[bool]:
+        # Cancellation alone cannot stop a batch already waiting to commit.
+        # Keep validation, persistence and publication atomic with path remaps.
+        with self._album_path_lock:
+            yield generation == self._album_path_generation and not is_cancelled()
 
     def prepare_album_open(
         self,
@@ -196,6 +208,14 @@ class LibraryScanService:
     ) -> ScanLibraryResult:
         """Scan *root* using the shared application use case."""
 
+        with self._album_path_lock:
+            path_generation = self._album_path_generation
+
+        def scan_cancelled() -> bool:
+            return path_generation != self._album_path_generation or (
+                is_cancelled is not None and is_cancelled()
+            )
+
         scan_started_ms = _monotonic_ms()
         scan_started_at_ms = _utc_ms()
         stage_elapsed_ms: dict[str, float] = {}
@@ -273,7 +293,7 @@ class LibraryScanService:
                     exclude=resolved_exclude,
                     existing_index=existing_index,
                     progress_callback=progress_callback,
-                    is_cancelled=is_cancelled,
+                    is_cancelled=scan_cancelled,
                     row_transform=self._library_relative_transform(scan_root),
                     scan_batch_callback=scan_batch_callback,
                     batch_failed_callback=batch_failed_callback,
@@ -285,6 +305,7 @@ class LibraryScanService:
                     scan_started_at_ms=scan_started_at_ms,
                     scan_stage_elapsed_ms=stage_elapsed_ms,
                     recursive=not root_only,
+                    commit_guard=lambda: self._scan_commit_guard(path_generation, scan_cancelled),
                 )
             )
             stage_elapsed_ms[ScanStage.METADATA.value] = round(
@@ -307,7 +328,7 @@ class LibraryScanService:
                 stage=ScanStage.VISIBLE_PUBLISH.value,
                 status=(
                     "cancelled"
-                    if is_cancelled is not None and is_cancelled()
+                    if scan_cancelled()
                     else "scanned"
                 ),
                 processed_count=len(result.rows),
@@ -329,6 +350,8 @@ class LibraryScanService:
                     "stage_elapsed_ms": stage_elapsed_ms,
                 },
             )
+        if path_generation != self._album_path_generation:
+            raise AlbumOperationError("Album paths changed during the scan; please retry the scan.")
         return result
 
     def rescan_album(

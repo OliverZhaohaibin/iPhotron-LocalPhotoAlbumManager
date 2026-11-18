@@ -79,7 +79,7 @@ class AssetRepositoryPort(Protocol):
         """Return existing rows keyed by library-relative path."""
 
     def remap_album_paths(self, old_root: Path, new_root: Path) -> None:
-        """Retarget a known folder rename without invalidating indexed media."""
+        """Retarget indexed media and cached pixels, dropping path-based revisions."""
 
     def get_unpaired_live_candidates(
         self, content_ids: Iterable[str]

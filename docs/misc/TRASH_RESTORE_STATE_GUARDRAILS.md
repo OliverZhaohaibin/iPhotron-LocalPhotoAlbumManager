@@ -30,7 +30,13 @@ This note protects Recently Deleted, restore metadata, and durable user state.
   rows; tied matches stay ambiguous and retain source state.
 - In-app album rename must commit indexed paths, Live Photo partners, pending
   location jobs, and completed scan scopes before the renamed album is opened.
-  Keep ready thumbnail keys and previews usable without rescanning media.
+  Move indexed thumbnail artifacts to fresh cache keys and retain ready state
+  and previews without rescanning media. Drop path-dependent render revisions;
+  cache-miss workers must regenerate and publish the current revision. Reusing
+  an old media path must not overwrite a renamed asset's cached pixels. Missing
+  source artifacts must not adopt unrelated cached pixels at the destination.
+  Serialize scan batch commits and publication with renames, rejecting batches
+  from an earlier path generation even when the old directory is recreated.
   Retarget pinned selection with the tree snapshot, reject stale watcher
   snapshots, and never let queued pairing recreate the old album directory.
 
@@ -38,6 +44,7 @@ This note protects Recently Deleted, restore metadata, and durable user state.
 
 ```bash
 .venv/bin/python -m pytest tests/test_library_watch_service.py tests/application/test_library_scan_service.py -q
+.venv/bin/python -m pytest tests/application/test_album_rename_cache_and_scan.py -q
 .venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_restoration_service.py -q
 .venv/bin/python -m pytest tests/cache/test_global_repository.py tests/cache/test_index_store_features.py -q
 ```

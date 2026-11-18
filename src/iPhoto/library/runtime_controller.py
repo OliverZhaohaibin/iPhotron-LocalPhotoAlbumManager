@@ -398,6 +398,8 @@ class LibraryRuntimeController(
         changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
         removed = previous_paths - nodes.keys()
+        # Share a prune boundary for the subtree; the session still verifies
+        # each nested source album before removing any unmatched rows.
         removed_scopes = sorted(
             path for path in removed if not any(parent in removed for parent in path.parents)
         )

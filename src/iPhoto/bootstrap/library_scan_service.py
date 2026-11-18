@@ -520,9 +520,9 @@ class LibraryScanService:
             if (relative := self._album_path(Path(candidate)))
             and RECENTLY_DELETED_DIR_NAME not in Path(relative).parts
         ]
-        verified_by_candidate: dict[Path, dict[str, str]] = {
-            candidate: {} for candidate in candidates
-        }
+        verified_by_scope: dict[tuple[Path, Path], dict[str, str]] = {}
+        target_ids: dict[Path, str] = {}
+        source_album = Path(album_path)
         for row in rows:
             if is_cancelled is not None and is_cancelled():
                 return True
@@ -530,26 +530,34 @@ class LibraryScanService:
             asset_id = str(row.get("id") or "")
             if not asset_id:
                 continue
-            subpath = Path(source).relative_to(album_path)
-            for candidate in candidates:
-                target = candidate / subpath
-                try:
-                    if target.is_file() and f"as_{compute_file_id(target)}" == asset_id:
-                        verified_by_candidate[candidate][source] = target.relative_to(
-                            self.library_root
-                        ).as_posix()
-                except (FileNotFoundError, NotADirectoryError):
-                    continue
+            source_path = Path(source)
+            # The prune boundary may cover a deleted parent whose children
+            # moved independently. Verify each source album's relative paths.
+            for parent in source_path.relative_to(source_album).parents:
+                source_scope = source_album / parent
+                subpath = source_path.relative_to(source_scope)
+                for candidate in candidates:
+                    target = candidate / subpath
+                    try:
+                        target_id = target_ids.get(target)
+                        if target_id is None and target.is_file():
+                            target_id = f"as_{compute_file_id(target)}"
+                            target_ids[target] = target_id
+                        if target_id == asset_id:
+                            verified_by_scope.setdefault((source_scope, candidate), {})[
+                                source
+                            ] = target.relative_to(self.library_root).as_posix()
+                    except (FileNotFoundError, NotADirectoryError):
+                        continue
         matches_by_source: dict[str, set[str]] = {}
-        for candidate, verified in verified_by_candidate.items():
-            # A renamed subtree also publishes its child albums as hints.
-            # Ignore a child mapping only when an ancestor explains strictly
-            # more of the same source rows. Equal or unrelated matches remain
-            # ambiguous rather than transferring choices to a possible copy.
+        for (source_scope, candidate), verified in verified_by_scope.items():
+            # Prefer a whole-subtree rename only with strictly stronger evidence
+            # than its nested source/destination mappings. Ties stay ambiguous.
             if any(
-                verified.keys() < verified_by_candidate[parent].keys()
-                for parent in candidate.parents
-                if parent in verified_by_candidate
+                verified.keys() < verified_by_scope[ancestor].keys()
+                for source_parent in (source_scope, *source_scope.parents)
+                for target_parent in (candidate, *candidate.parents)
+                if (ancestor := (source_parent, target_parent)) in verified_by_scope
             ):
                 continue
             for source, destination in verified.items():

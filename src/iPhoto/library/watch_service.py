@@ -71,21 +71,33 @@ def _describe_album(path: Path) -> tuple[str, bool]:
     return path.name, marker.exists()
 
 
+def _snapshot_entry_is_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(path.stat().st_mode)
+    except FileNotFoundError:
+        if path.is_symlink():
+            return False
+        # A disappeared entry may be a renamed album. Retry the snapshot instead
+        # of publishing an omission that could discard its persisted state.
+        raise
+    except NotADirectoryError:
+        raise
+    except OSError:
+        return False
+
+
 def _tree_snapshot(entries: list[Path]) -> tuple[AlbumNode, ...]:
     nodes: list[AlbumNode] = []
     for entry in entries:
         if entry.name.casefold() in _RESERVED_NAMES:
             continue
-        try:
-            if not entry.is_dir():
-                continue
-        except OSError:
+        if not _snapshot_entry_is_dir(entry):
             continue
         title, has_manifest = _describe_album(entry)
         nodes.append(AlbumNode(entry, 1, title, has_manifest))
         children = sorted(entry.iterdir(), key=lambda item: item.name.casefold())
         for child in children:
-            if not child.is_dir() or child.name.casefold() in _RESERVED_NAMES:
+            if child.name.casefold() in _RESERVED_NAMES or not _snapshot_entry_is_dir(child):
                 continue
             child_title, child_manifest = _describe_album(child)
             nodes.append(AlbumNode(child, 2, child_title, child_manifest))

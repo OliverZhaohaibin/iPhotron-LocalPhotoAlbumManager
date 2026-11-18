@@ -22,6 +22,10 @@ This note protects Recently Deleted, restore metadata, and durable user state.
   location write jobs before pruning missing album rows. Match relative media
   paths and asset IDs derived from file content; filenames alone must not
   transfer user state.
+- An entry disappearing during tree enumeration invalidates the snapshot. Keep
+  the previous tree and retry pending paths on the next poll before pruning
+  missing albums. Missing parent scopes must independently verify their source
+  child albums so moving a child and deleting its empty parent preserves state.
 - Relocation hints must include newly discovered child albums, even when scan
   scopes are deduplicated to their parents, and accumulate later destinations
   while reconciliation is queued. Dispatched reconciliation must be cancelled

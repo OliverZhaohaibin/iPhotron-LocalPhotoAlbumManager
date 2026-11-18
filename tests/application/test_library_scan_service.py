@@ -281,6 +281,30 @@ def test_queued_scan_side_effects_cannot_recreate_a_renamed_album(tmp_path: Path
     assert not get_global_repository(tmp_path).get_rows_by_rels(["Old/photo.jpg"])
 
 
+def test_nested_source_relocation_retains_state_when_parent_and_child_matches_tie(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "New"
+    nested = destination / "Nested"
+    nested.mkdir(parents=True)
+    for directory in (destination, nested):
+        (directory / "photo.jpg").write_bytes(b"identical media in separate albums")
+    store = get_global_repository(tmp_path)
+    store.write_rows([{
+        "rel": "Old/Nested/photo.jpg", "id": f"as_{compute_file_id(nested / 'photo.jpg')}",
+        "is_favorite": True, "location": "Manual location",
+    }])
+    before = store.get_rows_by_rels(["Old/Nested/photo.jpg"])
+
+    with pytest.raises(ValueError, match="Ambiguous relocated asset"):
+        LibraryScanService(tmp_path).reconcile_missing_album_scope(
+            tmp_path / "Old", relocation_roots=(destination, nested)
+        )
+
+    assert store.get_rows_by_rels(before) == before
+    assert not store.get_rows_by_rels(["New/photo.jpg", "New/Nested/photo.jpg"])
+
+
 def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     library_root.mkdir()

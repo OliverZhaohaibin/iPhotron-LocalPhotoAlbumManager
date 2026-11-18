@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -45,6 +46,34 @@ def _make_controller(
     if mock_optimistic:
         controller._apply_optimistic_move = MagicMock(return_value=True)  # type: ignore[method-assign]
     return controller, facade
+
+
+@pytest.mark.parametrize(
+    ("selected_rel_paths", "last_album", "expected_targets"),
+    [
+        (["B/photo.jpg"], "A", ["A", "A/Child", "C"]),
+        (["A/photo.jpg", "B/photo.jpg"], "A", ["A", "A/Child", "B", "C"]),
+        (["A/Child/photo.jpg"], "A", ["A", "B", "C"]),
+        (["A/photo.jpg"], "A", ["A/Child", "B", "C"]),
+        ([], "A", ["A", "A/Child", "B", "C"]),
+    ],
+)
+def test_move_targets_follow_selected_sources_instead_of_browsing_history(
+    tmp_path: Path,
+    selected_rel_paths: list[str],
+    last_album: str,
+    expected_targets: list[str],
+) -> None:
+    controller, facade = _make_controller(
+        selected_paths=[tmp_path / path for path in selected_rel_paths],
+    )
+    facade.current_album = SimpleNamespace(root=tmp_path / last_album)
+    entries = [(name, tmp_path / name) for name in ("A", "A/Child", "B", "C")]
+    controller._navigation.sidebar_model.return_value.iter_album_entries.return_value = entries
+
+    assert controller._collect_move_targets() == [
+        (name, tmp_path / name) for name in expected_targets
+    ]
 
 
 def test_delete_selection_prepares_paths_before_mutation() -> None:

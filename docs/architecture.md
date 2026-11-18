@@ -131,7 +131,7 @@ Forbidden dependency direction:
 ```text
 domain -> application/gui/infrastructure
 application -> gui/concrete cache/concrete infrastructure
-infrastructure/cache/core/io/library/people/pets -> gui
+infrastructure/cache/core/io/library/people/pets/recognition -> gui
 production runtime -> iPhoto.legacy
 production runtime -> iPhoto.models.*
 ```
@@ -152,6 +152,8 @@ RuntimeContext
   recent_albums
   defer_startup_tasks
   container
+  map_extensions
+  recognition_extensions
   library_session: LibrarySession | None
   open_library(root)
   close_library()
@@ -321,6 +323,22 @@ Current public boundary names include:
 | `TaskSchedulerPort` | Background task submission and cancellation boundary. |
 | `ThumbnailRendererPort` | Thumbnail/preview generation without GUI ownership. |
 
+### Recognition Coordination
+
+`LibrarySession.recognition_queries`, `recognition_merges`, and
+`recognition_edits` compose reads and identity workflows across People and Pets.
+Each context retains ownership of its own detections, embeddings, canonical
+records, and runtime snapshot. Mixed groups and cross-kind redirects are durable
+coordination state in the People state repository, not shared detection tables.
+
+Recognition writes use the session's shared `recognition_mutations` coordinator.
+Its library-wide mutation lease covers admission through apply/finalize; existing
+state guards and recovery handlers must not be bypassed. The coordinator owns
+`.iPhoto/recognition/operations.db`, a durable operation journal and event outbox.
+Unfinished operations and pending event dispatch survive session restarts and
+snapshot rebuilds. Delivery is at-least-once, using stable event ids; recovery
+must retain this behavior rather than assuming a published event cannot replay.
+
 ### Large Library Query And Scan Contracts
 
 Large-library browsing is part of the current production architecture, not a
@@ -452,14 +470,17 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
 | `.iPhoto/cache/detail-surfaces/v3/` | SQLite-indexed, rebuildable neutral RGBA8/sRGB Detail surfaces keyed by source identity, decoder contract, orientation, and LOD; trusted hits validate indexed header/stat metadata without scanning the full payload, and sidecar revision is excluded. |
 | `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
-| `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers, and manual faces. |
-| `.iPhoto/faces/thumbnails/` | Rebuildable cropped face thumbnails. |
+| `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers/caches, manual faces, and cross-kind identity coordination. Group cache tables include custom cover choices. |
+| `.iPhoto/faces/thumbnails/` | Cropped face thumbnails; preserve durable cover and manual-face references when rebuilding or cleaning up. |
 | `.iPhoto/pets/pet_index.db` | Rebuildable Pets detections and clustered pet records. |
 | `.iPhoto/pets/pet_state.db` | Durable Pets profiles, names, covers, hidden flags, rejected keys, and merge redirects. |
-| `.iPhoto/pets/thumbnails/` | Rebuildable cropped pet thumbnails; replaced detections are reference-pruned after a successful snapshot commit. |
+| `.iPhoto/pets/thumbnails/` | Cropped pet thumbnails; after a successful commit, prune only displaced candidates unreferenced by runtime detections or durable covers. Never sweep in-flight crops. |
+| `.iPhoto/recognition/operations.db` | Durable recognition mutation journal and event outbox; unfinished recovery and pending dispatch must survive restarts and runtime snapshot rebuilds. |
 | `.ipo` sidecars | Durable non-destructive edit instructions next to source media. |
 | `.iphoto.album.json` / `.iPhoto/manifest.json` | Folder-local album metadata formats. |
 | `.iphoto.album` | Legacy album marker compatibility file. |
+| `.iPhoto/manifest.bak/` | Manifest/links backup area. |
+| `.iPhoto/locks/` | File-level locks for JSON sidecars. |
 
 Implementation stages may continue storing scan facts and some user state in the
 same SQLite file, but repository APIs and merge behavior must maintain the
@@ -560,12 +581,22 @@ it intentionally excludes `.ipo` revision. Initial quality is selected from
 physical viewport demand rather than full sensor dimensions. Zoom, crop,
 rotation, or perspective may request a higher LOD, but the prior texture stays
 visible until the replacement is drawn. Current/previous/next GPU residency is
-bounded by both three textures and 192MB. Source changes invalidate neutral
-surfaces and textures; sidecar changes replace render state only.
+bounded by both three textures and 192MB. Initial uploads do not generate
+mipmaps. Source changes invalidate neutral surfaces and textures; sidecar changes
+replace render state only.
+
+Media preview defaults to QRhi/Metal on macOS and QRhi/OpenGL on Windows and
+Linux. Windows D3D11 remains an explicit Detail-only experiment with unsupported
+GPU Maps combinations; follow the
+[Windows QRhi support matrix](misc/WINDOWS_D3D11_QRHI_STATUS.md) before changing
+backend support. OpenGL Maps retain the `QOpenGLWindow + createWindowContainer()`
+surface where required to avoid transparent-window composition issues; native
+OsmAnd widget/helper selection stays in runtime adapters and widget factories.
 
 Non-RAW platform selection is ImageIO on macOS, WIC on Windows, and Qt on Linux,
-with Qt fallback inside the same worker lane. RAW uses rawpy and its embedded,
-half-size, then full fallback sequence. All stale generations are rejected at
+with Qt fallback inside the same worker lane. WIC/COM declarations must use
+fixed-width Windows ABI types. RAW uses rawpy and its embedded, half-size, then
+full fallback sequence. All stale generations are rejected at
 thread/render boundaries. Static Edit no longer creates a second full-image
 loader or CPU preview session; Done/Cancel and fullscreen retain the same render
 session. LOD upgrades preserve the editing baseline until Done commits it;
@@ -746,6 +777,11 @@ The guardrails enforce:
 The GitHub Actions workflow also runs `python tools/check_architecture.py`
 before the broader test suite.
 
+Static coverage is partial: the lower-layer GUI import check currently omits
+`pets/` and `recognition/`, and the import checker's `src/iPhoto` root excludes
+`src/maps/`. Extending that coverage is follow-up work; passing the current
+checks does not waive the documented dependency rules.
+
 ## Decision Log
 
 ### ADR-1: Folder-Native Albums
@@ -827,12 +863,96 @@ The current production source satisfies the vNext architecture criteria when:
   Photos, People, Pets, Maps fallback, editing, location assignment, trash,
   import/move/delete/restore, and export.
 
-Recommended verification after architecture-sensitive changes:
+## Verification By Change Type
+
+Read the matching [task references](../AGENTS.md#6-required-task-references-and-verification)
+before changing a protected workflow, then run its regression checks. Use the
+groups below for the affected behavior; boundary changes also require the
+[architecture checks](#architecture-guardrails). Combine groups when a change
+crosses boundaries.
+
+Use temporary libraries/settings or isolated copies for tests and manual
+validation. Performance runs use dedicated benchmark libraries. Never prepare a
+test by clearing or mutating a user's production library. Report executed
+commands, results, and remaining validation gaps. Native backend changes require
+packaged validation on the target OS; source/offscreen results are not native
+decode, graphics, or compositor evidence.
+
+### Runtime, Session, And Scan
 
 ```bash
-python3 tools/check_architecture.py
-.venv/bin/python -m pytest tests/architecture -q
 .venv/bin/python -m pytest tests/application/test_runtime_context.py tests/application/test_library_session.py tests/application/test_scan_library_use_case.py -q
+```
+
+Scan publishing and query changes also follow the
+[scan publishing](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) and
+[large-library query](misc/LARGE_LIBRARY_QUERY_GUARDRAILS.md) checks.
+
+### Asset Lifecycle, Move, Restore, And Album Rename
+
+```bash
 .venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py -q
+.venv/bin/python -m pytest tests/application/test_album_rename_cache_and_scan.py -q
+```
+
+Select additional UI regressions from the
+[move/restore](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md),
+[trash state](misc/TRASH_RESTORE_STATE_GUARDRAILS.md), and
+[Gallery cache](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) guardrails.
+
+### Detail Rendering, Decoders, Caches, And Edit
+
+```bash
+.venv/bin/python -m pytest -q tests/gui/test_detail_pipeline.py tests/gui/test_detail_render_coordinator.py tests/gui/test_detail_decode_backend.py tests/gui/test_detail_request_scheduler.py tests/gui/test_detail_surface_cache.py tests/gui/test_detail_render_session.py tests/ui/controllers/test_player_view_controller_adjustments.py tests/ui/widgets/test_still_texture_residency.py tests/test_detail_benchmark.py
+.venv/bin/python tools/check_architecture.py
+.venv/bin/python -m compileall -q src tools
+```
+
+Use the [Detail benchmark runbook](requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md)
+for transaction stages, cache/decoder fields, SLO checks, and platform evidence.
+
+### Startup And Shutdown
+
+```bash
+.venv/bin/python -m pytest -q tests/gui/test_startup_import_boundary.py tests/gui/test_startup_orchestrator.py tests/gui/test_gui_startup_job_queue.py tests/gui/test_startup_shutdown_smoke.py tests/test_startup_profile.py tests/test_startup_benchmark.py
+```
+
+Milestone, scheduling, or native hierarchy changes also require the
+[startup runbook](requirements/STARTUP_BENCHMARK_RUNBOOK.md) and
+[manual matrix](requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md).
+
+### Recognition Coordination And State
+
+```bash
+.venv/bin/python -m pytest -q tests/test_recognition_operation_journal.py tests/test_recognition_merge_service.py tests/application/test_recognition_query_service.py tests/application/test_recognition_batch_queries.py tests/application/test_recognition_edit_service.py
+```
+
+People/Pets snapshot, cover, group, visibility, and crop changes also use the
+[Pets runtime regressions](misc/PETS_RECOGNITION_RUNTIME.md#focused-verification)
+and [dashboard/popup checks](misc/PROJECT_POPUP_GUARDRAILS.md#regression-tests-to-keep).
+
+### UI Text, Popups, And Extension Installation
+
+Use the extraction/compilation workflow and tests in the
+[i18n guardrail](misc/I18N_UI_TEXT_GUARDRAILS.md), and the relevant widget and
+theme checks in the [popup guardrail](misc/PROJECT_POPUP_GUARDRAILS.md).
+
+Map and recognition installers have their own
+[Map](requirements/MAP_EXTENSION_INSTALL_VALIDATION.md) and
+[People/Pets](requirements/PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md) regression
+and packaged validation matrices. Shared installer changes require both suites.
+Include required QSB shaders, translations, and enabled Maps runtime assets in
+packaged checks.
+
+### Gallery And Performance
+
+Run relevant performance regressions for query, scan, and scheduling changes;
+the broader suite is:
+
+```bash
 .venv/bin/python -m pytest tests/performance -q
 ```
+
+Gallery demand, lane capacity, publish budgets, or cache policy changes also
+follow the real-Qt benchmark requirements in the
+[Gallery scroll guardrail](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md).

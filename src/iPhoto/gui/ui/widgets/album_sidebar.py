@@ -443,7 +443,9 @@ class AlbumSidebar(QWidget):
             return
         if node_type == NodeType.HEADER:
             if item.title == "Albums":
+                self._current_selection = None
                 self._current_pinned_selection = None
+                self._current_static_selection = item.title
                 self.staticNodeSelected.emit("Albums")
             return
         if node_type == NodeType.STATIC:
@@ -454,6 +456,7 @@ class AlbumSidebar(QWidget):
                 self.bindLibraryRequested.emit()
                 return
             self._current_selection = None
+            self._current_pinned_selection = None
             self._current_static_selection = item.title
             if item.title == self.ALL_PHOTOS_TITLE:
                 _logger.info("_on_selection_changed: emitting allPhotosSelected")
@@ -649,17 +652,23 @@ class AlbumSidebar(QWidget):
         self._pending_selection = target
 
     def _find_static_index(self, title: str) -> QModelIndex:
-        root_index = self._model.index(0, 0)
-        if not root_index.isValid():
-            return QModelIndex()
-        item = self._model.item_from_index(root_index)
-        if item is None:
-            return QModelIndex()
-        for row in range(self._model.rowCount(root_index)):
-            index = self._model.index(row, 0, root_index)
-            child = self._model.item_from_index(index)
-            if child and child.title == title:
-                return index
+        # Smart collections live under Basic Library; Albums and Recently
+        # Deleted are root rows. Match navigation items, never same-named albums.
+        for row in range(self._model.rowCount()):
+            root_index = self._model.index(row, 0)
+            item = self._model.item_from_index(root_index)
+            if item is None:
+                continue
+            if item.title == title and (
+                item.node_type == NodeType.STATIC
+                or (item.node_type == NodeType.HEADER and title == "Albums")
+            ):
+                return root_index
+            for child_row in range(self._model.rowCount(root_index)):
+                index = self._model.index(child_row, 0, root_index)
+                child = self._model.item_from_index(index)
+                if child and child.node_type == NodeType.STATIC and child.title == title:
+                    return index
         return QModelIndex()
 
     def _on_files_dropped(self, target: Path, paths: list[Path]) -> None:

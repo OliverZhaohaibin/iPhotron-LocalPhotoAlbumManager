@@ -1039,6 +1039,7 @@ class DesktopCoordinatorRuntime(QObject):
         return Path(__file__).resolve().parents[3] / "maps"
 
     def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        self._thumbnail_service.remap_album_paths(old_path, new_path)
         self._pinned_items_service.remap_album_path(
             old_path,
             new_path,

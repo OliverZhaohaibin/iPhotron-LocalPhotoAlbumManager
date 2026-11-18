@@ -39,6 +39,10 @@ repaint work.
   never alias one QPixmap under multiple size keys. Preserve the union of visible pins,
   per-surface lease release, demand-aware eviction, staging caps, miss TTLs,
   low-memory release, and speculative backoff when changing cache behavior.
+- In-app album rename must rekey resident L1 pixmaps and surface leases before
+  pinned/Gallery refreshes. Transfer native-slot ownership without copying pixels,
+  allocating replacement slots, or traversing media. Fresh path revisions must
+  not evict these source-identical thumbnails; old paths must release ownership.
 - Filmstrip full demand stops at its existing two-screen guard; it does not add
   far speculation at 512px. Gallery full speculation and both surfaces' micro
   warm ranges remain unchanged.

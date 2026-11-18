@@ -22,6 +22,23 @@ small convenience fallbacks can reintroduce full-library work.
 - Keep ready-query `EXPLAIN QUERY PLAN` tests using visible/gps indexes and no
   temp sort for hot views.
 
+## Visibility Flag Migrations
+
+Collection queries use denormalized columns such as `is_deleted`, `has_gps`,
+`thumbnail_state`, and `live_role` so large libraries can stay on covering
+indexes instead of scanning path/text payloads. When adding or tightening one
+of these flags, update both row writes and schema migration:
+
+- New scan rows should derive the flag at write time in the index-store mapper.
+- Existing databases need a migration backfill before hot queries depend on the
+  new flag.
+- Do not remove compatibility path predicates from a query unless the migration
+  proves equivalent legacy rows are backfilled. `.Trash` is especially
+  sensitive: normal collections must exclude it, but the Recently Deleted album
+  still needs to show it.
+- Add one focused upgrade regression test for legacy rows and one query-level
+  test for the visible collection behavior.
+
 ## Focused Checks
 
 ```bash

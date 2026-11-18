@@ -85,9 +85,13 @@ python3 tools/check_flatpak_elf_abi.py \
 
 Recognition models follow the standalone build posture: omitted by default,
 or copied from the ignored `src/extension/models` staging directory when that
-directory was populated before the Nuitka build. YOLOX can use its verified
-network acquisition path; the current DINOv2 manifest has no URL and requires a
-pre-provisioned artifact.
+directory was populated before the Nuitka build. With the corresponding AI
+runtime included, the app can also install both model sets from the official
+People & Pets ZIP after recognition activation or through Settings. The ZIP
+includes verified DINOv2 TorchScript and metadata; the individual manifest's
+missing URL does not prevent this combined installation. See the
+[shared installation contract](../architecture.md#recognition-extension-installation).
+Copying models alone does not prove frozen Pets runtime availability.
 
 ## Sandbox Contract
 
@@ -95,16 +99,26 @@ The manifest declares:
 
 - Wayland and fallback X11 sockets plus shared IPC;
 - DRI for GPU rendering and PulseAudio for media playback;
-- network access for explicitly invoked extension/model acquisition; and
+- network access for manual extension installation and gated first-use model recovery; and
 - `--filesystem=host:rw`, because folder-native libraries may be selected
   outside a single XDG media directory.
 
 The package does not inherit executables from the host `PATH`. The 25.08
 Freedesktop runtime supplies FFmpeg, but release validation must still exercise
-the exact codecs used by iPhotron. ExifTool is optional: to enable metadata
-extraction and explicit GPS write-back, stage an executable at
-`dist/entrypoint.dist/iPhoto/bin/exiftool` before packaging. Without it, the
-application follows its existing recoverable warning/degradation path.
+the exact codecs used by iPhotron. ExifTool is optional and the maintained
+standalone build does not stage its executable. Without it, extraction and
+explicit GPS write-back follow their recoverable warning/degradation paths;
+a local location assignment still persists.
+
+Do not add an ExifTool executable or change any other payload node after the
+standalone build manifest is emitted: that invalidates `artifact_tree_sha256`.
+A build that promises bundled ExifTool must assemble its executable and runtime
+dependencies before generating final provenance and pass the same ABI and
+write-back checks. There is currently no maintained pre-manifest ExifTool
+assembly hook; this is tracked as
+[CG-03](../technical-debt/CURRENT_CONTRACT_GAPS.md#cg-03-exiftool-payload-assembly).
+Do not bypass the tree audit or relabel a custom payload as an unchanged
+maintained build.
 
 ## Verification
 

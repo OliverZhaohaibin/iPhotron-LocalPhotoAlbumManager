@@ -17,6 +17,9 @@ Treat these as regression rules when adding or changing user-visible UI.
   `{count}`. Do not build translation source strings with f-strings.
 - Use `iPhoto.gui.i18n.formatters` for UI-facing dates, numbers, decimals, and
   file sizes so formatting follows the effective UI locale.
+- Edit controls that match Apple Photos use the current
+  [edit terminology glossary](apple_photos_edit_glossary.md). The archived i18n
+  glossary is a historical snapshot, not a competing terminology source.
 
 ## Runtime refresh contract
 

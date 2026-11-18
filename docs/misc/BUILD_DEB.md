@@ -1,6 +1,8 @@
 # Building a Debian Package (.deb) for Linux
 
-This document describes how to build a Debian package (`.deb`) for iPhotron on Linux.
+This is a manual Debian package (`.deb`) recipe for a previously built Linux
+standalone. There is no maintained `.deb` builder in this checkout; validate the
+result on each intended distribution before treating it as a release artifact.
 
 ## Overview
 
@@ -18,7 +20,7 @@ runtimes from the standalone bundle. People needs `insightface` and
 `onnxruntime`; Pets needs `onnxruntime`, `torch`, `torchvision`, `usearch`, and
 `certifi`. Offline builds also retain any explicitly staged
 `extension/models` artifacts.
-These are added at the Nuitka stage described in
+AI runtime inclusion is configured and verified at the Nuitka stage described in
 [`BUILD_EXE.md`](BUILD_EXE.md); the `.deb` stage must not strip them from
 `/opt/iPhotron/`.
 
@@ -34,7 +36,7 @@ Create a staging directory that keeps the standalone bundle intact and exposes
 an `iPhotron` launcher on `PATH`:
 
 ```
-iPhotron_VERSION_amd64/
+iphotron_VERSION_amd64/
 ├── DEBIAN/
 │   └── control
 ├── opt/
@@ -52,9 +54,8 @@ iPhotron_VERSION_amd64/
 │                   │   └── geonames.sqlite3
 │                   └── bin/
 └── usr/
-    └── local/
-        └── bin/
-            └── iPhotron          ← launcher script
+    └── bin/
+        └── iPhotron              ← launcher script
 ```
 
 ## The `control` File
@@ -64,7 +65,7 @@ for both the staging directory and package metadata:
 
 ```bash
 VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-PKG_ROOT="iPhotron_${VERSION}_amd64"
+PKG_ROOT="iphotron_${VERSION}_amd64"
 ```
 
 The `DEBIAN/control` file contains the package metadata. Create it with the
@@ -73,12 +74,12 @@ expanded value of `VERSION` rather than a hard-coded release number. The
 write the marker literally into the final control file.
 
 ```
-Package: iPhotron
+Package: iphotron
 Version: ${VERSION}
 Section: graphics
 Priority: optional
 Architecture: amd64
-Maintainer: OliverZhao
+Maintainer: Your Name <you@example.com>
 Description: Folder-native local photo album manager
  iPhotron is a folder-native photo manager inspired by macOS Photos.
  It organizes media using lightweight JSON manifests and provides rich
@@ -89,11 +90,19 @@ Description: Folder-native local photo album manager
 >
 > | Field | Value | Notes |
 > |-------|-------|-------|
-> | `Package` | `iPhotron` | Binary package name |
+> | `Package` | `iphotron` | Lowercase binary package name; product branding remains iPhotron |
 > | `Version` | `${VERSION}` | Exact upstream version read from `pyproject.toml` |
 > | `Architecture` | `amd64` | Target CPU architecture (x86-64) |
-> | `Maintainer` | `OliverZhao` | Name (and optionally email) of the package maintainer |
+> | `Maintainer` | `Your Name <you@example.com>` | Replace with the actual release maintainer's name and email |
 > | `Description` | short + long | First line is the synopsis; indented lines form the long description |
+
+Debian requires lowercase package names and prohibits package-installed files
+under `/usr/local`; the launcher therefore goes in `/usr/bin`. See the official
+[control-field rules](https://www.debian.org/doc/debian-policy/ch-controlfields.html#s-f-source)
+and [site-specific directory policy](https://www.debian.org/doc/debian-policy/ch-opersys.html#site-specific-programs).
+Add the runtime `Depends` required by the actual standalone and target
+distribution after checking its shared-library dependencies on a clean host.
+The minimal template does not establish dependency completeness.
 
 ## Build Steps
 
@@ -101,9 +110,9 @@ Description: Folder-native local photo album manager
 
    ```bash
    VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-   PKG_ROOT="iPhotron_${VERSION}_amd64"
+   PKG_ROOT="iphotron_${VERSION}_amd64"
    APP_ROOT="$PKG_ROOT/opt/iPhotron"
-   BIN_ROOT="$PKG_ROOT/usr/local/bin"
+   BIN_ROOT="$PKG_ROOT/usr/bin"
    APP_DIST=dist/entrypoint.dist
    APP_EXECUTABLE=""
 
@@ -151,13 +160,30 @@ Description: Folder-native local photo album manager
    find "$APP_ROOT/extension/models" -name 'det_500m.onnx' -o -name 'w600k_mbf.onnx'
    find "$APP_ROOT" -path '*torch*' -o -path '*torchvision*' -o -path '*usearch*'
    find "$APP_ROOT/extension/models/pets" -name 'yolox_nano_coco.onnx' -o -name 'dinov2_vits14.pt'
+   find "$APP_ROOT/extension/models/pets" -name 'dinov2_vits14.pt.metadata.json'
    ```
 
-2. **Create the `control` file** — save the content from the section above to `"$PKG_ROOT/DEBIAN/control"` and ensure it is not world-writable:
+2. **Create the `control` file** — use an expanded version and actual maintainer
+   details. The following template writes real newlines and substitutes the
+   version; replace the example maintainer before building:
 
    ```bash
+   MAINTAINER='Your Name <you@example.com>'
+   cat > "$PKG_ROOT/DEBIAN/control" <<EOF
+   Package: iphotron
+   Version: ${VERSION}
+   Section: graphics
+   Priority: optional
+   Architecture: amd64
+   Maintainer: ${MAINTAINER}
+   Description: Folder-native local photo album manager
+    iPhotron manages folder-native albums and non-destructive edits.
+   EOF
+   chmod 755 "$PKG_ROOT/DEBIAN"
    chmod 644 "$PKG_ROOT/DEBIAN/control"
    ```
+
+   Add the reviewed runtime `Depends` before building.
 
 3. **Build the package**:
 
@@ -203,7 +229,7 @@ sudo apt-get install -f   # fix missing dependencies if any
 ## Removal
 
 ```bash
-sudo apt remove iPhotron
+sudo apt remove iphotron
 ```
 
 ## Troubleshooting
@@ -212,9 +238,9 @@ sudo apt remove iPhotron
 |---------|--------------|-----|
 | `dpkg-deb: error: control directory has bad permissions` | `DEBIAN/` directory not mode 755 | `chmod 755 "$PKG_ROOT/DEBIAN"` |
 | `dpkg: dependency problems` after install | Missing runtime libraries | Add `Depends:` line to `control` listing required packages |
-| Binary not found after install | Wrong install path in staging tree, or launcher points to the wrong standalone executable | Ensure the launcher under `usr/local/bin/` points to the executable copied into `/opt/iPhotron/` |
+| Binary not found after install | Wrong install path in staging tree, or launcher points to the wrong standalone executable | Ensure the launcher under `usr/bin/` points to the executable copied into `/opt/iPhotron/` |
 | Location view falls back unexpectedly after install | `maps/tiles/extension/` was not included in the package | Re-stage the standalone bundle and verify the `.deb` contents include `World_basemap_2.obf`, resources, and Linux map binaries |
 | Native maps fail with GLX/XCB startup errors | The runtime was installed correctly, but the desktop session lacks XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
-| People scan is unavailable in the installed app | The standalone build was produced without the optional face runtime or offline model staging | Rebuild with `insightface` and `onnxruntime`; if offline People support is promised, explicitly stage `src/extension/models` before building the standalone |
-| People scan starts but never creates clusters | The model cache or an InsightFace submodel/dependency is missing from `/opt/iPhotron/` | Verify `extension/models`, exclude unused `albumentations`/`pydantic` packages at the Nuitka stage, and keep InsightFace limited to detection and recognition |
-| Pets scan is unavailable in the installed app | The standalone build omitted `pets-ai` packages or `extension/models/pets` | Rebuild the standalone app with `onnxruntime`, `torch`, `torchvision`, `usearch`, `certifi`, and both Pets model files before staging the `.deb` |
+| People scan is unavailable in the installed app | The frozen face runtime or a usable local model pack is unavailable | Verify frozen `insightface` and `onnxruntime`, then install the combined People & Pets extension; stage usable models before Nuitka when offline support is promised |
+| People scan starts but never creates clusters | A local model is damaged or a packaged dependency fails | Inspect the scan traceback and the selected managed/override/bundled model root; exclude unused mask-rendering dependencies and load only local detection/recognition sessions |
+| Pets scan is unavailable in the installed app | The standalone omitted the AI runtime, or no usable model installation is available | Verify the frozen `pets-ai` runtime; install the combined model extension, or include both verified Pets models and DINOv2 metadata for offline use |

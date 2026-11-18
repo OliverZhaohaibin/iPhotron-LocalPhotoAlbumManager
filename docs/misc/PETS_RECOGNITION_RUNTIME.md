@@ -48,28 +48,11 @@ IPHOTO_PET_MODEL_DIR override
 -> optional bundled extension/models/pets fallback
 ```
 
-Install the combined model package from **Settings → Download People & Pets
-Extension…**. The app can download it directly, open the browser, or import the
-official ZIP offline through **Install from File…**. The installer checks the
-Release archive and its contents before publishing the model directories for
-both workers. The ZIP includes the DINOv2 metadata alongside the TorchScript
-file. [Official People & Pets ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/pet-models-v1/iphotron-recognition-models-v1.zip)
-
-The combined extension is installed into:
-
-```text
-macOS:  ~/Library/Application Support/iPhoto/extensions/recognition/v1/models
-Windows: %LOCALAPPDATA%/iPhoto/extensions/recognition/v1/models
-Linux:  ${XDG_DATA_HOME:-~/.local/share}/iPhoto/extensions/recognition/v1/models
-```
-
-People reads `buffalo_s/` from that directory and Pets reads `pets/`. The
-`IPHOTO_FACE_MODEL_DIR` and `IPHOTO_PET_MODEL_DIR` overrides take precedence.
-Existing Face caches and bundled models remain readable. When a worker with
-pending work first finds a missing model, the desktop silently attempts to
-download and install the official GitHub Release ZIP once. That install
-provisions both People and Pets, even when only one worker reports a missing
-model. Manual downloads use the same ZIP and installer.
+The [shared recognition installation contract](../architecture.md#recognition-extension-installation)
+owns combined model roots, previous-installation recovery, process-wide silent
+attempts, and the Settings/browser/offline ZIP workflow. Pets reads `pets/`
+under that installed root. The same verified ZIP provides both model sets,
+including DINOv2 metadata; it does not install the optional Python runtime.
 
 Existing Pets caches are still discovered at:
 
@@ -102,8 +85,9 @@ package installs both model sets whenever installed through People or Settings.
 `IPHOTO_PET_SCAN_DISABLED=1` disables the Pet worker.
 
 Offline packages that promise out-of-box Pets support must include the Python
-AI runtime and both model files under `extension/models/pets`. Other packages
-can provision models through the extension or a user-managed directory. A build that omits the runtime or models must
+AI runtime, both model files, and DINOv2 metadata under `extension/models/pets`.
+Other packages can provision models through the extension or a user-managed
+directory. A build that omits the runtime or models must
 preserve graceful degradation: core browsing, People, Maps, editing, and
 library state remain usable.
 
@@ -193,9 +177,8 @@ desktop startup behavior.
 
 The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies and models pause recognition while preserving pending
-rows. A failed silent installation produces one browser and file installation
-prompt per app run. A successful install resumes the affected
-worker for the active library after that worker exits.
+rows. Recovery prompts and successful-install resumption follow the
+[shared lifecycle contract](../architecture.md#recognition-extension-installation).
 
 ## Persistence And Mutation Safety
 

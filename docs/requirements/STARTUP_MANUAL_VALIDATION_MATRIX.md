@@ -11,6 +11,9 @@
 > artifact、build fingerprint 和逐项报告，该记录为
 > `user_reported_multi_platform_smoke_pass`，下列正式矩阵状态保持不变。
 
+> 2026-11-18：补充图库准备、迁移和凭据失效的通用验收场景；本次仅核对
+> 文档及源码测试，没有新增实包验收证据，以下平台状态不变。
+
 ## 通用要求
 
 每个平台使用独立、可丢弃的图库和 settings。每个 generation 必须恰好一个 terminal：`startup.completed`、`startup.degraded`、`startup.failed`、`startup.cancelled`。报告不得包含真实用户路径；原始日志先脱敏再共享。
@@ -26,6 +29,18 @@
   surface creation、reparent、parentless warm-up 或平台特例 hide/show
 - pre-show native hierarchy 失败时本进程明确失败退出，不宣称通过 startup
   generation retry 重建 native hierarchy
+
+每个平台还需用隔离图库覆盖
+[图库准备与恢复契约](../architecture.md#library-preparation-and-schema-recovery)：
+
+- 当前 schema 重开不重复全表修复；旧 schema 的版本升级保留有效 SQLite
+  在线备份及迁移状态，覆盖已提交 WAL 数据和升级中关窗后的恢复。
+- 兼容的完整无版本 schema 走事务内接纳路径；未知 schema 不得套用该快路径。
+- 较新 schema 明确拒绝打开，不降级或重建；数据库与备份同时损坏时保留证据。
+- 准备完成后替换或修改数据库（包括 WAL 中 schema 变化）、切库、取消或重试，
+  旧结果不得绑定；validated credential 不能重复消费。
+- helper 普通超时、迁移超时与关闭终止后，主窗口保持正确终态，不遗留进程或
+  重新启动已取消的工作。记录实际 revision、artifact 和通过/失败结果。
 
 ## macOS Apple Silicon / Intel
 

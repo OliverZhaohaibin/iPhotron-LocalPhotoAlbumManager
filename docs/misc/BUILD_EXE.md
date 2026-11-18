@@ -9,8 +9,8 @@ development time. For release builds the kernels are compiled ahead-of-time
 (AOT) into a native C-extension so that the heavy `numba` and `llvmlite`
 packages can be completely excluded from the final distribution.
 
-All Numba imports across the codebase use **conditional (try/except)** import
-guards. When the AOT-compiled extension (`_jit_compiled`) is present the
+Runtime Numba imports use **conditional (try/except)** import guards; the AOT
+build tool itself requires Numba. When the compiled extension (`_jit_compiled`) is present the
 application loads it directly; when it is absent and Numba is installed it
 falls back to runtime JIT; otherwise it uses a pure-NumPy implementation.
 This means the executable works correctly without `numba` or `llvmlite`
@@ -22,86 +22,41 @@ installed as long as the AOT module has been built.
    compilation step):
 
    ```bash
-   pip install .[dev]
+   python -m pip install -e ".[dev]"
    ```
 
 2. Ensure **Nuitka** is installed:
 
    ```bash
-   pip install nuitka
+   python -m pip install nuitka
    ```
 
 ## Maps Extension in Release Builds
 
-Besides the AOT-compiled filter module, release builds that include offline
-maps rely on a self-contained runtime under `src/maps/tiles/extension/`.
+The [Maps development guide](MAP_EXTENSION_DEVELOPMENT.md) owns SDK build,
+sync, and staging. SDK commands run in the separate upstream checkout, not this
+repository. Stage the intended platform runtime under
+`src/maps/tiles/extension/` before a build that includes bundled maps.
 
-Expected layout:
+The layout includes `World_basemap_2.obf`, OsmAnd resource directories,
+`search/geonames.sqlite3`, and helper/native libraries under `bin/`. Windows
+base builds omit this large extension and can install it through Settings;
+`-IncludeOptionalAssets` includes staged assets. The maintained Linux and macOS
+scripts include staged map assets. Runtime discovery keeps managed user targets
+separate from read-only bundled fallbacks.
 
-| Path | Purpose |
-|---|---|
-| `src/maps/tiles/extension/World_basemap_2.obf` | Default offline OBF dataset |
-| `src/maps/tiles/extension/misc/` | OsmAnd miscellaneous resources |
-| `src/maps/tiles/extension/poi/` | OsmAnd POI resources |
-| `src/maps/tiles/extension/rendering_styles/` | OsmAnd style XML files |
-| `src/maps/tiles/extension/routing/` | OsmAnd routing resources |
-| `src/maps/tiles/extension/search/geonames.sqlite3` | Offline place search database used by Assign Location |
-| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries plus dependent libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux, Mach-O binaries/`.dylib`/frameworks on macOS) |
-
-The upstream source of truth for producing those files is the standalone
-[`PySide6-OsmAnd-SDK`](https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK)
-repository. Build the runtime there first, then sync the outputs into the
-iPhotron checkout before packaging.
-
-Recommended Windows command in `PySide6-OsmAnd-SDK`:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\osmand_render_helper_native\build_native_widget_msvc.ps1 -BuildType Release
-```
-
-Recommended Linux command in `PySide6-OsmAnd-SDK`:
-
-```bash
-bash tools/osmand_render_helper_native/build_linux.sh
-```
-
-Recommended macOS command in `PySide6-OsmAnd-SDK`:
-
-```bash
-QT_ROOT=/opt/homebrew/opt/qt bash tools/osmand_render_helper_native/build_macos.sh
-```
-
-The relevant runtime outputs are mirrored under:
-
-- `tools\osmand_render_helper_native\dist-msvc\osmand_render_helper.exe`
-- `tools\osmand_render_helper_native\dist-msvc\osmand_native_widget.dll`
-- `tools\osmand_render_helper_native\dist-msvc\OsmAndCore_shared.dll`
-- `tools\osmand_render_helper_native\dist-msvc\OsmAndCoreTools_shared.dll`
-- `tools\osmand_render_helper_native\dist-msvc\Qt6*.dll`
-- `tools/osmand_render_helper_native/dist-linux/osmand_render_helper`
-- `tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so`
-- `tools/osmand_render_helper_native/dist-linux/libOsmAndCore_shared.so`
-- `tools/osmand_render_helper_native/dist-linux/libOsmAndCoreTools_shared.so`
-- `tools/osmand_render_helper_native/dist-macosx/osmand_render_helper`
-- `tools/osmand_render_helper_native/dist-macosx/osmand_native_widget.dylib`
-- non-system macOS Mach-O dependencies copied into `src/maps/tiles/extension/bin`
-
-You also need:
-
-- `vendor\osmand\resources\misc`
-- `vendor\osmand\resources\poi`
-- `vendor\osmand\resources\rendering_styles`
-- `vendor\osmand\resources\routing`
-- `plugin\data\geonames.sqlite3`
-- `src\maps\tiles\World_basemap_2.obf`
-
-For the full end-to-end sync workflow, see [docs/development.md](../development.md).
+Keep all required QSB shaders and translations in every enabled media/UI
+configuration. Test the packaged app on the target OS using the
+[Map installation matrix](../requirements/MAP_EXTENSION_INSTALL_VALIDATION.md)
+and the [startup matrix](../requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md).
+A successful source map preview is not packaged acceptance.
 
 ## Face Recognition in Release Builds
 
-The People feature uses InsightFace for face detection and embeddings. Release
-builds must include its Python runtime even though the model data itself is an
-optional component: Nuitka's standalone/no-site output will not read packages
+The People feature uses InsightFace for face detection and embeddings. The
+maintained platform scripts explicitly include this runtime. Any frozen build
+that promises People scanning must include its Python dependencies even when
+models are provisioned later: standalone/no-site output will not read packages
 from the user's Python environment after packaging.
 
 Required Python packages for the face runtime are:
@@ -119,7 +74,9 @@ Install them into the build environment before running Nuitka:
 python -m pip install -e ".[ai-demo]"
 ```
 
-People loads local ONNX models. The official People & Pets ZIP supplies both
+People loads local ONNX models with InsightFace downloads disabled. The
+[shared extension contract](../architecture.md#recognition-extension-installation)
+owns installation roots, automatic attempts, and recovery. The official ZIP supplies both
 recognition model sets on first use or through Settings. An offline build can
 bundle models from the ignored `src/extension/models/` staging directory, with
 the People ONNX files under `src/extension/models/buffalo_s/`.
@@ -135,15 +92,17 @@ $env:IPHOTO_FACE_MODEL_DIR = "D:\path\to\models"
 Important packaging rules:
 
 - Include `insightface` and `onnxruntime` in the Nuitka bundle.
-- Include `src/extension/models` as `extension/models` only for an offline
-  `-IncludeOptionalAssets` build.
+- On Windows, `-IncludeOptionalAssets` includes staged `src/extension/models`
+  as `extension/models`. Linux/macOS include that directory when it exists.
+  Validate the intended offline payload before building.
 - Do not rely on installing `insightface` or `onnxruntime` next to an already
   built executable; standalone/no-site builds will not load those packages.
 - Exclude `albumentations`, `albucore`, `pydantic`, `pydantic_core`, and
   `typing_inspection`. The People pipeline installs a lightweight
   albumentations stub because InsightFace's mask-rendering import path is not
   used by iPhotron.
-- Keep InsightFace limited to `allowed_modules=["detection", "recognition"]`.
+- Keep InsightFace limited to local `detection` and `recognition` sessions,
+  with downloads disabled as described in the [People runtime](PEOPLE_RECOGNITION_RUNTIME.md).
   People clustering needs only bounding boxes and embeddings. Loading
   landmark/gender-age models in packaged builds has caused asset-level
   failures such as `'NoneType' object has no attribute 'shape'`.
@@ -173,12 +132,15 @@ python -m pip install -e ".[pets-ai]"
 ```
 
 The standalone bundle must retain `onnxruntime`, `torch`, `torchvision`,
-`usearch`, and `certifi`. An offline-ready build must also include:
+`usearch`, and `certifi`. An offline-ready build must also include the complete
+verified model layout:
 
 ```text
 extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
-└── embedding/dinov2_vits14/dinov2_vits14.pt
+└── embedding/dinov2_vits14/
+    ├── dinov2_vits14.pt
+    └── dinov2_vits14.pt.metadata.json
 ```
 
 The platform build scripts copy `src/extension/models` to `extension/models`
@@ -246,8 +208,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -Outpu
 
 The default is a fast-starting base package: it omits the map extension's
 roughly 45,000 files and optional staged People/Pets models. The runtime uses
-its platform-specific search roots; Pets can acquire YOLOX but requires a
-pre-provisioned DINOv2 artifact. Pass
+its platform-specific search roots and can install both model sets through the
+combined People & Pets extension. This still requires the corresponding Python
+AI runtimes in the frozen app. Pass
 `-IncludeOptionalAssets` when a controlled deployment requires a completely
 offline bundle. Every build writes `nuitka-compilation-report.xml` below the
 output directory for import auditing. The executable icon defaults to
@@ -291,8 +254,9 @@ before invoking Nuitka:
    `src/maps/tiles/extension/bin`
 3. it includes `src/maps/tiles` in the standalone bundle so the packaged app
    ships with the extension
-4. it includes the QRhi shader source/QSB files used by the image, overlay, and
-   video preview widgets
+
+QRhi shaders and translation resources are included independently of the
+optional-assets switch; the base package still needs them for media and UI.
 
 The sync step currently requires these files to exist in
 `tools\osmand_render_helper_native\dist-msvc`:
@@ -313,7 +277,7 @@ Useful flags:
   Skip the copy into `src/maps/tiles/extension/bin` if you already staged the
   runtime manually.
 - `-IncludeOptionalAssets`
-  Bundle the staged map extension and recognition models for a fully offline build.
+  Bundle the staged map extension and recognition models; verify the required AI runtime and complete models before claiming offline support.
 - `-ConsoleMode disable|attach|force`
   Control the Windows console mode.
 - `-Jobs <n>`
@@ -381,63 +345,19 @@ resolved non-system Mach-O dependencies, then patches `install_name`/rpaths and
 ad-hoc signs the staged binaries. A manual macOS packaging command must include
 `src/maps/tiles` and the QRhi `.qsb` shader files just like the Windows script.
 
-Example Nuitka command (adjust platform flags as needed). It intentionally
-omits model data; append
-`--include-data-dir=src/extension/models=extension/models` only after optional
-offline assets have been staged:
+### Maintained Build Profiles
 
-```bash
-nuitka --standalone \
-    --nofollow-import-to=numba \
-    --nofollow-import-to=llvmlite \
-    --nofollow-import-to=albumentations \
-    --nofollow-import-to=albucore \
-    --nofollow-import-to=pydantic \
-    --nofollow-import-to=pydantic_core \
-    --nofollow-import-to=typing_inspection \
-    --nofollow-import-to=pytest \
-    --nofollow-import-to=iPhoto.tests \
-    --include-package=iPhoto \
-    --include-package=insightface \
-    --include-package=onnxruntime \
-    --output-dir=dist \
-    src/entrypoint.py
-```
+Use the platform scripts for complete flags, QSB assets, translations, optional
+model staging, and build-manifest generation. Partial manual Nuitka commands
+are not equivalent release procedures. A custom profile must provide the same
+required assets and its own truthful build/validation evidence; it must not be
+labeled as output from an unchanged maintained script.
 
-### Startup-speed optimized build profile (recommended)
-
-If launch latency is the top priority, prefer a **directory-based standalone build**
-instead of onefile packaging. Onefile executables must unpack at process start,
-which can dominate cold-start time on slower disks.
-
-```bash
-nuitka --standalone \
-    --python-flag=no_site \
-    --lto=yes \
-    --clang \
-    --follow-imports \
-    --nofollow-import-to=numba \
-    --nofollow-import-to=llvmlite \
-    --nofollow-import-to=albumentations \
-    --nofollow-import-to=albucore \
-    --nofollow-import-to=pydantic \
-    --nofollow-import-to=pydantic_core \
-    --nofollow-import-to=typing_inspection \
-    --nofollow-import-to=pytest \
-    --nofollow-import-to=iPhoto.tests \
-    --include-package=iPhoto \
-    --include-package=insightface \
-    --include-package=onnxruntime \
-    --assume-yes-for-downloads \
-    --output-dir=dist \
-    src/entrypoint.py
-```
-
-Notes:
-
-- `--python-flag=no_site` skips importing `site` at startup, reducing process init overhead.
-- `--lto=yes` + `--clang` can improve generated binary performance (build time increases).
-- For fastest startup, **do not add `--onefile`**.
+The fast profiles use directory-based standalone output and exclude `numba`
+and `llvmlite` after AOT. `no_site`, LTO, and compiler selection belong to the
+platform script. Keep directory-based output for startup comparisons: onefile
+startup adds extraction cost and is a different performance target. Linux
+standalone icons are supplied at the AppImage/Flatpak stage.
 
 ### Key flags explained
 
@@ -523,24 +443,15 @@ After building, confirm that:
    `%LOCALAPPDATA%\iPhoto\iPhoto.log` for messages such as `Face detection
    failed for ...` or `Face scan failed for asset ...`.
 
-## Windows Installer Notes
+## Historical Windows Installer Notes
 
-The Inno Setup script `tools/v4.50.iss` supports an **optional downloadable map
-extension package**. At install time it downloads
-`iPhotos-maps-extension-win-msvc-package.zip` and extracts it into
-`{app}\maps\tiles`, expecting the archive to contain an `extension\...` root.
-
-That means the archive should unpack to:
-
-- `{app}\maps\tiles\extension\World_basemap_2.obf`
-- `{app}\maps\tiles\extension\misc\...`
-- `{app}\maps\tiles\extension\poi\...`
-- `{app}\maps\tiles\extension\rendering_styles\...`
-- `{app}\maps\tiles\extension\routing\...`
-- `{app}\maps\tiles\extension\bin\...`
-
-If you regenerate the optional archive for a release, keep the root folder name
-as `extension` so the install script lands the files in the correct location.
+An older release procedure used an Inno Setup script and a separately
+downloaded map archive. That script is no longer present in this checkout, so
+those instructions are not an executable release path. The maintained entry
+point here is the Windows Nuitka standalone script; the current app installs
+maps through the process-scoped [extension workflow](MAP_EXTENSION_INSTALLATION.md).
+Record a separate build driver and acceptance evidence if a future installer is
+introduced.
 
 ## Troubleshooting
 
@@ -558,7 +469,6 @@ as `extension` so the install script lands the files in the correct location.
 | Linux native maps fail with GLX/XCB startup errors | The session is Wayland-only or missing XWayland/XCB GL integration | Install/enable XWayland and rerun, or set `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET=0` to force the helper-backed Python OBF path |
 | macOS Location map tiles are transparent | The legacy map is running through `QOpenGLWidget` inside a transparent top-level window, or the GL surface is not repainting fully | Keep the macOS legacy path on `MapGLWindowWidget`/`QOpenGLWindow`, set `IPHOTO_MAP_GL_DEBUG=1`, and verify full-update repaint behavior |
 | Packaged macOS media preview fails before first frame | QRhi shader `.qsb` files were not bundled, or `IPHOTO_RHI_BACKEND` forced an unavailable backend | Include the image/overlay/video `.qsb` files and test both default Metal and `IPHOTO_RHI_BACKEND=opengl` diagnostics |
-| Installer downloads the optional package but the map is still unavailable | The ZIP root does not contain `extension\...` or the expected OBF file is missing | Recreate the archive with the `extension` root and verify `extension\World_basemap_2.obf` exists before publishing |
 | `Face scanning paused: name 'Literal' is not defined` | A third-party annotation was evaluated at runtime inside the packaged app | Rebuild with the current People pipeline, which installs runtime typing compatibility before importing InsightFace |
 | `Face scanning paused: name 'NDArray' is not defined` | Same runtime annotation issue, usually from numpy typing annotations | Rebuild with the current People pipeline; do not remove the runtime typing compatibility helper |
 | `Some assets could not be face scanned and will be retried after a rescan` | Asset-level face detection failed twice; check `%LOCALAPPDATA%\iPhoto\iPhoto.log` for the real traceback | Confirm the packaged build loads the detection and recognition ONNX models, then rescan. Full library rescan resets `retry`/`failed` face statuses |

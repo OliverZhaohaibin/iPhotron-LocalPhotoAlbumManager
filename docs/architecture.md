@@ -1,17 +1,18 @@
-# Architecture vNext
+# Architecture
 
-This document describes the current production architecture of iPhotron after
-the vNext cleanup. The codebase is a library-scoped modular desktop monolith:
+This document owns iPhotron's current cross-module runtime and persistence
+contracts. The codebase is a library-scoped modular desktop monolith:
 one process-level `RuntimeContext` owns one active `LibrarySession`, and GUI,
 CLI, watchers, and workers enter behavior through application surfaces rather
 than legacy facades.
 
-For completed migration records and verification history, see
-`docs/finished/refactor/vnext-2026-06/`.
+Use the [development guide](development.md) for environment and routine commands,
+and the linked `misc/` references for subsystem rules. Completed migration
+records live in the [vNext archive](finished/refactor/vnext-2026-06/README.md).
 
 ## Status
 
-The vNext architecture cleanup is complete for production source code.
+The production entry path is `RuntimeContext -> LibrarySession`.
 
 - Production runtime code no longer imports `iPhoto.legacy` or `iPhoto.models.*`.
 - The compatibility application tree and old domain-repository implementation
@@ -25,9 +26,11 @@ The vNext architecture cleanup is complete for production source code.
 - Architecture guardrails are enforced by `tools/check_architecture.py` and
   `tests/architecture`.
 
-The remaining pre-release checks are product validation tasks, such as manual Qt
-GUI smoke testing and opening an existing library. They do not change the
-architecture convergence status.
+These contracts do not establish that every implementation boundary or packaged
+platform has been verified. Known boundary/tooling gaps are tracked in the
+[current contract debt](technical-debt/CURRENT_CONTRACT_GAPS.md); native
+acceptance is recorded through the linked validation protocols for the tested
+revision and artifact. Completed migration status is not release acceptance.
 
 ## Product Principles
 
@@ -257,12 +260,20 @@ non-recoverable for that process. Startup-generation retry applies only after a
 valid visible shell exists; it must not claim to reconstruct the native
 hierarchy after `QMenuBar` has already created the top-level handle.
 
+Keep imports above `firstPainted` narrow: importing `iPhoto.gui.main` or
+`MainWindow` must not load NumPy, QtMultimedia, People/Pets AI, map rendering,
+asset-import services, edit-session models, or `DesktopCoordinatorRuntime`.
+Startup-reachable package convenience exports use lazy `__getattr__` where
+needed; optional workflow imports belong at their use site. Preserve public
+names and test patch targets when changing this loading boundary. The focused
+contract is `tests/gui/test_startup_import_boundary.py`.
+
 ## Layer Boundaries
 
 ### Domain
 
 `domain/` owns dataclasses, value objects, query models, and pure domain
-services. It must not import Qt, SQLite, filesystem-writing adapters, ExifTool,
+services. It must not import Qt, SQLite, filesystem I/O adapters, ExifTool,
 FFmpeg, GUI helpers, or runtime singletons.
 
 ### Application
@@ -309,6 +320,7 @@ Current public boundary names include:
 | `EditSidecarPort` | `.ipo` read/write and edit state persistence. |
 | `LibraryStateRepositoryPort` | Durable library user-state boundary for favorites, hidden/trash, pinned/order, and related state. |
 | `LocationAssetServicePort` | Session-bound geotagged asset queries. |
+| `LocationAssignmentRepositoryPort` | Atomic local location assignment and durable original-file write job creation. |
 | `LocationMetadataPort` | Explicit location assignment metadata write/read-back boundary. |
 | `MediaScannerPort` | Media discovery and normalized scan candidates without persistence ownership. |
 | `MetadataReaderPort` | Image/video metadata reads. |
@@ -330,6 +342,8 @@ Current public boundary names include:
 Each context retains ownership of its own detections, embeddings, canonical
 records, and runtime snapshot. Mixed groups and cross-kind redirects are durable
 coordination state in the People state repository, not shared detection tables.
+People, Pets, and cross-kind merge/redirect services must reject identities
+whose hidden states differ, even when a caller bypasses the UI guard.
 
 Recognition writes use the session's shared `recognition_mutations` coordinator.
 Its library-wide mutation lease covers admission through apply/finalize; existing
@@ -400,6 +414,17 @@ capabilities. An installation that is only staged returns `pending_restart`;
 it is never presented as already activated. The package directory remains a
 read-only fallback, separate from the managed write target.
 
+Both map and recognition installation are process-scoped and available without
+an active library. Infrastructure owns archive verification, private staging,
+extraction, promotion, and locking; Qt adapters transport cancellation, progress,
+and typed results. Shutdown cancels active acquisition and suppresses late UI
+and recognition-resume callbacks. A successful process-wide installation may
+serve the current library, but worker resumption must recheck the current
+binding and its recognition activation gate. Stale model-failure notifications
+must not open recovery UI for a superseded library.
+See the [shared recognition installation contract](#recognition-extension-installation)
+and the [map installation guide](misc/MAP_EXTENSION_INSTALLATION.md).
+
 ### GUI
 
 `gui/` owns PySide6 presentation: views, widgets, controllers, viewmodels,
@@ -447,6 +472,7 @@ It is not a legacy manager facade.
 
 - `people/`: optional face detection/clustering runtime, People repositories,
   stable People state, manual faces, groups, covers, and People service API.
+  See the [People runtime](misc/PEOPLE_RECOGNITION_RUNTIME.md).
 - `pets/`: optional YOLOX/DINOv2 detection and identity clustering runtime,
   rebuildable pet repository, durable pet state, and session-bound Pet service.
   The People & Pets dashboard composes both services without merging their
@@ -465,7 +491,8 @@ Each library root owns a `.iPhoto/` workspace.
 
 | Path | Ownership |
 | --- | --- |
-| `.iPhoto/global_index.db` | Current SQLite asset index and repository-backed state store for scan rows, pagination, Live Photo roles, trash/favorite/hidden state, independent `face_status`/`pet_status`, and related library state. |
+| `.iPhoto/global_index.db` | Authoritative SQLite asset rows and repository-backed user state; also owns pagination, Live Photo roles, independent `face_status`/`pet_status`, scan jobs/events, and durable `metadata_write_jobs`. |
+| `.iPhoto/startup-migration.json` / `.iPhoto/global_index.db.migration-*.bak` | Interrupted schema-upgrade state and validated safety backup; retain recovery evidence until successful migration/cleanup. |
 | `.iPhoto/links.json` | Derived Live Photo compatibility materialization; repository/session Live Photo role state remains authoritative for runtime behavior. |
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
 | `.iPhoto/cache/detail-surfaces/v3/` | SQLite-indexed, rebuildable neutral RGBA8/sRGB Detail surfaces keyed by source identity, decoder contract, orientation, and LOD; trusted hits validate indexed header/stat metadata without scanning the full payload, and sidecar revision is excluded. |
@@ -482,10 +509,57 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/manifest.bak/` | Manifest/links backup area. |
 | `.iPhoto/locks/` | File-level locks for JSON sidecars. |
 
-Implementation stages may continue storing scan facts and some user state in the
-same SQLite file, but repository APIs and merge behavior must maintain the
-logical boundary: scans may rebuild facts and must not implicitly delete durable
-choices.
+Scan facts and some user state share the same SQLite file, but repository APIs
+and merge behavior must maintain the logical boundary: scans may rebuild facts
+and must not implicitly delete durable choices.
+
+### Album Names And Compatibility
+
+Album naming is part of folder discovery and persistence, independent of the
+presentation entry point.
+
+#### Filesystem case stability
+
+`.iPhoto` (`WORK_DIR_NAME`) is the canonical runtime work-directory spelling for
+new libraries on every platform.
+
+Linux filesystems are case-sensitive, so a directory rename that only changes
+letter case is a real path migration, not a harmless spelling cleanup. Treat
+lowercase `.iphoto` as a legacy-compatible alias only: code may read and exclude
+it when it already exists, but new libraries must create `.iPhoto`.
+
+Do not change managed library names such as `.iPhoto`, `.iphoto`,
+`.iphoto.album.json`, or `.iPhoto/manifest.json` by case alone unless the
+change includes an explicit migration plan, compatibility reads for existing
+libraries, and focused tests on a case-sensitive filesystem.
+
+#### Reserved album directories
+
+Album creation and rename flows must reject directory names reserved for
+internal library infrastructure. Today the reserved names are:
+
+- `.iPhoto` and legacy `.iphoto` case variants
+- `.Trash`
+- `exported`
+
+These names are intentionally hidden by the library scan layer and therefore
+must never be accepted as user album names. If a create/rename flow allows one
+of them, the album can appear to "disappear" because the directory still exists
+on disk but is filtered out of the visible album tree/dashboard.
+
+Implementation rules:
+
+- Keep the validation in the library layer so every entry point stays aligned
+  (`album dashboard`, sidebar menus, and any future CLI/API path).
+- Keep the reserved-name list in a single shared source of truth used by both
+  name validation and album discovery.
+- Raise a normal `LibraryError` path such as `AlbumOperationError` with a clear
+  user-facing message; UI surfaces should only display the warning and should
+  not duplicate the rule locally.
+- Add regression coverage when touching album naming logic:
+  library tests should verify reserved names are rejected and existing albums
+  remain listed, while UI tests should verify reserved-name rename attempts show
+  a warning instead of removing the album from the dashboard.
 
 ## Core Flows
 
@@ -498,6 +572,7 @@ sequenceDiagram
     participant Runtime as RuntimeContext
     participant Feature as Feature Bundles
     participant Coordinator as DesktopCoordinatorRuntime
+    participant Probe as Library Probe Helper
     participant Session as LibrarySession
     participant Infra as Infrastructure
 
@@ -507,8 +582,11 @@ sequenceDiagram
     UI-->>Paint: firstPainted
     Paint->>Feature: preload modules and complete non-native Detail features
     Feature->>Coordinator: construct, bind, and start
-    Coordinator->>Runtime: request saved-library probe
-    Runtime->>Session: create library-scoped session
+    Coordinator->>Probe: request saved-library preparation
+    Probe->>Infra: prepare/recover schema off the GUI thread
+    Probe-->>Coordinator: prepared library + identity credential
+    Coordinator->>Runtime: commit current validated preparation
+    Runtime->>Session: consume credential and create library-scoped session
     Session->>Infra: bind SQLite/cache/people/pets/maps/edit adapters
     Runtime-->>Coordinator: commit validated library and bind session surfaces
     Coordinator->>Coordinator: select and warm first Gallery window
@@ -521,6 +599,35 @@ Multimedia, and Maps rendering remain demand-loaded by their owning workflow.
 The GUI delays the saved-library metadata scan until the first gallery warm-up
 signals readiness, with a bounded timer fallback so an empty or failed gallery
 cannot suppress scanning indefinitely.
+
+### Library Preparation And Schema Recovery
+
+Desktop library preparation uses the killable helper in
+`bootstrap/library_probe.py`; schema creation, versioned migration, and bounded
+album discovery must not block the GUI thread. The controller has separate
+probe and migration timeouts and rejects cancelled or superseded results.
+Headless entry points may prepare synchronously outside the GUI.
+
+- Opening a current schema must not repeat full-table repair/backfill. Schema
+  changes use versioned migrations and explicit upgrade tests.
+- Versioned upgrades of an existing older index create an online SQLite backup
+  and atomic migration-state record before migration. Use the SQLite backup API
+  so committed WAL content is included; copying the main DB file is insufficient.
+- The tested compatible, complete unversioned-schema adoption path is a
+  transactionally revalidated fast path without a new backup. Do not extend it
+  to unrecognized schemas or use it to bypass migration recovery.
+- Interrupted upgrades resume or restore a validated backup. Failed recovery
+  preserves evidence; a newer schema is rejected with `future_schema`, never
+  reset or downgraded. Cleanup failure remains a warning with recoverable state.
+- Prepared-library credentials capture root, database identity, and schema
+  version. Validate them at commit and consume the validated capability once;
+  reject replaced/changed databases, including schema changes still in WAL.
+
+The implementation contracts are covered by
+`tests/application/test_library_probe.py` and
+`tests/application/test_runtime_context.py`. Native retries, switching libraries,
+and shutdown also follow the
+[startup manual matrix](requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md).
 
 ### Open Collection
 
@@ -584,6 +691,10 @@ visible until the replacement is drawn. Current/previous/next GPU residency is
 bounded by both three textures and 192MB. Initial uploads do not generate
 mipmaps. Source changes invalidate neutral surfaces and textures; sidecar changes
 replace render state only.
+The GPU still-residency limit is not a total process RSS bound: CPU/mmap,
+RenderSession references, upload staging, and RAW intermediate allocations have
+separate ownership. Unified accounting remains tracked in
+[TD-890-02](technical-debt/PR_890.md).
 
 Media preview defaults to QRhi/Metal on macOS and QRhi/OpenGL on Windows and
 Linux. Windows D3D11 remains an explicit Detail-only experiment with unsupported
@@ -664,18 +775,52 @@ consume rows committed by later metadata scans. The Face and Pet workers and
 their databases remain independent; failure or a missing optional runtime in
 one must not block the other.
 
+Model availability failures preserve pending work and use the shared
+installation workflow below. Context-specific loading and status rules live in
+the [People](misc/PEOPLE_RECOGNITION_RUNTIME.md) and
+[Pets](misc/PETS_RECOGNITION_RUNTIME.md) runtime references.
+
+### Recognition Extension Installation
+
 `RuntimeContext.recognition_extensions` lazily composes the process-scoped
-installer for the official People & Pets ZIP. Settings can install the bundle
-before any library is bound. The map and recognition installers share archive
-verification, private copying, extraction checks, and filesystem locking.
-Recognition workers resolve local models and retain `pending` / `retry` rows
-on availability failures. After activation, a missing model triggers one silent
-installation of the combined ZIP. If that fails, the desktop recovery prompt
-offers the browser and offline import. Successful installation resumes the affected
-workers only after the current library has passed the activation gate.
-See [Pets recognition runtime](misc/PETS_RECOGNITION_RUNTIME.md) for paths
-and [packaged validation](requirements/PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md)
-for release checks.
+installer for the official combined People & Pets ZIP. Settings can download,
+open the browser, or import the verified ZIP offline without a bound library.
+It installs both model sets, not Python dependencies, into the user-writable
+root selected by `utils/recognition_model_paths.py`:
+
+| Platform | Combined model root |
+| --- | --- |
+| macOS | `~/Library/Application Support/iPhoto/extensions/recognition/v1/models` |
+| Windows | `%LOCALAPPDATA%/iPhoto/extensions/recognition/v1/models` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/iPhoto/extensions/recognition/v1/models` |
+
+People reads `buffalo_s/` and Pets reads `pets/`. Explicit model overrides take
+precedence; existing context-specific caches and bundled models remain readable.
+Local lookup also retains the previous installation under `.backup/models`
+while an interrupted promotion is recoverable. Bundled model data is a read-only
+fallback, not the installer target.
+
+The desktop controller permits one automatic ZIP installation attempt per app
+run, shared by both workers and triggered only after the recognition activation
+gate. Failure offers one browser/file recovery prompt. An invalid Face override
+has a separate fix/unset warning and does not consume that download attempt.
+`IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` suppresses automatic installation triggered
+by Pets; it does not disable installation through People or Settings.
+
+Workers load local models; the People pipeline disables InsightFace downloads.
+The ZIP supplies YOLOX and verified DINOv2 TorchScript plus its metadata even
+though the DINOv2 manifest's individual `torchscript_url` is `null`.
+Promotion verifies archive and model contents under the shared installer lock.
+Keep the previous usable installation recoverable on failure. On shutdown,
+cancel acquisition and suppress late callbacks; after success, resume only
+affected workers for the current library after its activation gate and worker
+exit. Manual success uses the shared installed toast; silent success does not
+open an extra notification.
+
+Installer/controller checks and real packaged scenarios are owned by the
+[People & Pets validation matrix](requirements/PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md).
+Shared archive/locking changes also require
+[Map regressions](requirements/MAP_EXTENSION_INSTALL_VALIDATION.md).
 
 ### Assign Location
 
@@ -683,13 +828,16 @@ for release checks.
 sequenceDiagram
     participant UI as Info Panel
     participant Coordinator as PlaybackCoordinator
+    participant Service as LocationAssignmentService
     participant Repository as LocationAssignmentRepositoryPort
     participant Queue as LocationFileWriteQueue
     participant Writer as MetadataWriterPort
 
     UI->>Coordinator: confirm(asset, lat, lon, name)
-    Coordinator->>Repository: assign_location(...)
-    Repository-->>Coordinator: local state + durable write job
+    Coordinator->>Service: assign(...)
+    Service->>Repository: atomic local state + durable write job
+    Repository-->>Service: persisted job
+    Service-->>Coordinator: assignment + job
     Coordinator->>Queue: enqueue(job)
     Queue->>Writer: write GPS
     alt write fails
@@ -699,9 +847,25 @@ sequenceDiagram
     Coordinator-->>UI: refresh local location state
 ```
 
-The local assignment is authoritative. ExifTool failures are warnings and do not
-roll back local state; pending durable write-back jobs are recovered on the next
-session.
+The local assignment is authoritative. The asset update and
+`metadata_write_jobs` insertion share a transaction before enqueueing or file
+I/O. A newer assignment supersedes older queued/failed jobs for that asset;
+already-superseded jobs must not be submitted as fresh writes. This is not a
+cancellation guarantee for a write already in progress.
+
+Queue binding recovers `queued`/`writing` jobs; an interrupted `writing` job is
+verified before retrying the file write. Failed jobs retain their diagnostic
+state for explicit retry. Enqueueing or ExifTool failure produces a warning and
+must not roll back the local assignment. Library relocation/rename must retarget
+unfinished jobs alongside indexed assets. See the
+[trash/rename guardrail](misc/TRASH_RESTORE_STATE_GUARDRAILS.md).
+
+The current GUI coordinator/queue still compose concrete assignment/job
+repositories and the writer. This is an existing boundary gap tracked in
+[location write-back debt](technical-debt/CURRENT_CONTRACT_GAPS.md#cg-02-location-write-back-composition),
+not a pattern for new GUI persistence. Regression coverage includes
+`tests/gui/services/test_location_file_write_queue.py` and
+`tests/gui/coordinators/test_playback_coordinator.py`.
 
 ### Thumbnail Rendering
 
@@ -766,7 +930,7 @@ The guardrails enforce:
 
 - runtime `AppContext` imports are not reintroduced;
 - coordinators do not import collection-store implementation types directly;
-- vNext layer boundaries are respected;
+- runtime layer boundaries are respected;
 - `application/` does not import GUI or concrete persistence;
 - `infrastructure/` does not import GUI;
 - production runtime does not import quarantined legacy paths or old model
@@ -779,8 +943,9 @@ before the broader test suite.
 
 Static coverage is partial: the lower-layer GUI import check currently omits
 `pets/` and `recognition/`, and the import checker's `src/iPhoto` root excludes
-`src/maps/`. Extending that coverage is follow-up work; passing the current
-checks does not waive the documented dependency rules.
+`src/maps/`. Coverage work is tracked in
+[CG-01](technical-debt/CURRENT_CONTRACT_GAPS.md#cg-01-architecture-checker-coverage);
+passing the current checks does not waive the documented dependency rules.
 
 ## Decision Log
 
@@ -845,7 +1010,7 @@ durable coordination state in the People state repository.
 
 ## Acceptance Criteria
 
-The current production source satisfies the vNext architecture criteria when:
+Changes are assessed against these architecture criteria:
 
 - GUI, CLI, watchers, and workers enter through `RuntimeContext`,
   `LibrarySession`, and application/session surfaces.
@@ -881,7 +1046,7 @@ decode, graphics, or compositor evidence.
 ### Runtime, Session, And Scan
 
 ```bash
-.venv/bin/python -m pytest tests/application/test_runtime_context.py tests/application/test_library_session.py tests/application/test_scan_library_use_case.py -q
+.venv/bin/python -m pytest tests/application/test_runtime_context.py tests/application/test_library_session.py tests/application/test_library_probe.py tests/application/test_scan_library_use_case.py -q
 ```
 
 Scan publishing and query changes also follow the

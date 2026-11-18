@@ -143,6 +143,7 @@ class ScanCoordinatorMixin:
         self._live_scan_buffer.clear()
 
         # Pass library root to scanner so all assets go to global database
+        relocation_roots = getattr(self, "_watch_scan_relocation_roots", {}).pop(root, None)
         worker = ScannerWorker(
             root,
             include,
@@ -152,6 +153,8 @@ class ScanCoordinatorMixin:
             scan_service=getattr(self, "_scan_service", None),
             root_only=root_only,
             finalize_scan=True,
+            reconcile_missing_scope=relocation_roots is not None,
+            relocation_roots=relocation_roots or (),
         )
         self._current_scanner_worker = worker
         signals.progressUpdated.connect(self.scanProgress)
@@ -643,6 +646,12 @@ class ScanCoordinatorMixin:
             self.scanFinished.emit(root, False)
             self._start_next_deferred_scan()
             return
+        if getattr(worker, "reconciliation_deferred", False):
+            self._watch_scan_relocation_roots.setdefault(root, worker.relocation_roots or ())
+            self._watch_service.refresh()
+            self.scanFinished.emit(root, False)
+            self._start_next_deferred_scan()
+            return
 
         # A startup metadata scan only prepares the Gallery index.  People and
         # Pets are feature-scoped services and their model workers are started
@@ -656,7 +665,7 @@ class ScanCoordinatorMixin:
         self._start_next_deferred_scan()
 
         # Root media pairing completed in the scan worker with the scoped rows.
-        if not worker.root_only:
+        if not worker.root_only and not getattr(worker, "reconciled_missing_scope", False):
             self._scan_thread_pool.start(_PairingWorker(root, worker.scan_service))
 
     def _on_scan_error(self, worker: ScannerWorker, root: Path, message: str) -> None:

@@ -20,6 +20,8 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import uuid
+from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -32,6 +34,10 @@ from ...infrastructure.services.performance_events import (
     emit_perf_event,
     explain_enabled,
     monotonic_ms,
+)
+from ...infrastructure.services.thumbnail_cache_keys import (
+    thumbnail_cache_file_for_key,
+    thumbnail_cache_key,
 )
 from ...people.status import normalize_face_status
 from ...pets.status import normalize_pet_status
@@ -389,6 +395,154 @@ class AssetRepository:
                         [*chunk, *chunk],
                     )
                 conn.execute(f"DELETE FROM assets WHERE rel IN ({placeholders})", chunk)
+        self._clear_collection_anchor_cache()
+
+    def relocate_rows(
+        self,
+        destinations: Mapping[str, str],
+        *,
+        expected_asset_ids: Mapping[str, str],
+    ) -> None:
+        """Move verified scan rows without dropping their durable user choices."""
+
+        if not destinations:
+            return
+        if (
+            set(destinations) & set(destinations.values())
+            or len(set(destinations.values())) != len(destinations)
+        ):
+            raise ValueError("Asset relocation paths must be distinct")
+        now = _utc_ms()
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            sources = {}
+            source_rels = list(destinations)
+            for offset in range(0, len(source_rels), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = source_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join("?" for _ in chunk)
+                for source, asset_id, partner in conn.execute(
+                    f"SELECT rel, id, live_partner_rel FROM assets WHERE rel IN ({placeholders})", chunk
+                ):
+                    if asset_id != expected_asset_ids[source]:
+                        raise ValueError(f"Asset changed during relocation: {source}")
+                    sources[source] = partner
+            for source in sources:
+                destination = destinations[source]
+                parent = Path(destination).parent
+                existing = conn.execute("SELECT id FROM assets WHERE rel = ?", (destination,)).fetchone()
+                if existing is not None and existing[0] != expected_asset_ids[source]:
+                    raise ValueError(f"Destination asset changed during relocation: {destination}")
+                conn.execute("DELETE FROM assets WHERE rel = ?", (destination,))
+                # Update in place so even optional metadata columns survive.
+                # Path-based rendering and recognition facts need a fresh scan.
+                conn.execute(
+                    "UPDATE assets SET rel = ?, parent_album_path = ?, "
+                    "thumbnail_state = 'stale', micro_thumbnail = NULL, "
+                    "thumb_cache_key = NULL, thumb_revision = NULL, "
+                    "face_status = NULL, pet_status = NULL, "
+                    "index_revision = COALESCE(index_revision, 0) + 1, "
+                    "index_updated_at_ms = ? WHERE rel = ?",
+                    (destination, parent.as_posix() if parent != Path(".") else "", now, source),
+                )
+                conn.execute(
+                    "UPDATE metadata_write_jobs SET asset_rel = ?, asset_path = ?, "
+                    "updated_at = ? WHERE asset_rel = ? AND status IN ('queued', 'writing', 'failed')",
+                    (destination, str(self.library_root / destination), now, source),
+                )
+            # Follow the reciprocal pair's primary key, rather than scanning
+            # every library row once for each relocated asset.
+            for source, partner in sources.items():
+                if partner:
+                    conn.execute(
+                        "UPDATE assets SET live_partner_rel = ?, "
+                        "index_revision = COALESCE(index_revision, 0) + 1, "
+                        "index_updated_at_ms = ? WHERE rel = ? AND live_partner_rel = ?",
+                        (destinations[source], now, destinations.get(partner, partner), source),
+                    )
+        self._clear_collection_anchor_cache()
+
+    def remap_album_paths(self, old_root: Path, new_root: Path) -> None:
+        """Retarget a known rename while keeping ready thumbnails and user state."""
+
+        old_rel = old_root.relative_to(self.library_root).as_posix()
+        new_rel = new_root.relative_to(self.library_root).as_posix()
+        if old_rel == "." or new_rel == "." or old_root == new_root:
+            raise ValueError("Album rename requires two distinct library subdirectories")
+        # '/' sorts immediately before '0'. These binary prefix bounds use the
+        # path index and treat case and wildcard characters literally.
+        source_bounds = (old_rel + "/", old_rel + "0")
+        target_bounds = (new_rel + "/", new_rel + "0")
+        suffix_start = len(old_rel) + 1
+        now = _utc_ms()
+        cache_moves: list[tuple[str, str]] = []
+        cache_namespace = uuid.uuid4().hex
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            if conn.execute(
+                "SELECT 1 FROM assets WHERE rel >= ? AND rel < ? LIMIT 1",
+                target_bounds,
+            ).fetchone() is not None:
+                raise ValueError(f"Destination album already has indexed assets: {new_root}")
+            cached_rows = conn.execute(
+                "SELECT rel, thumb_cache_key FROM assets WHERE rel >= ? AND rel < ? "
+                "AND thumb_cache_key IS NOT NULL AND thumb_cache_key != ''",
+                source_bounds,
+            ).fetchall()
+            for rel, old_key in cached_rows:
+                destination = new_root / Path(rel).relative_to(old_rel)
+                # Do not adopt a historical destination JPEG when the source
+                # artifact is missing or locked. Each rename owns fresh keys.
+                new_key = f"{thumbnail_cache_key(destination)}-{cache_namespace}"
+                conn.execute("UPDATE assets SET thumb_cache_key = ? WHERE rel = ?", (new_key, rel))
+                cache_moves.append((old_key, new_key))
+            # Revisions include the absolute path. Forget that desired revision
+            # without hiding ready rows; a worker establishes it on cache miss.
+            conn.execute(
+                "UPDATE assets SET rel = ? || substr(rel, ?), "
+                "parent_album_path = ? || substr(parent_album_path, ?), "
+                "thumb_revision = NULL, "
+                "index_revision = COALESCE(index_revision, 0) + 1, index_updated_at_ms = ? "
+                "WHERE rel >= ? AND rel < ?",
+                (new_rel, suffix_start, new_rel, suffix_start, now, *source_bounds),
+            )
+            conn.execute(
+                "UPDATE assets SET live_partner_rel = ? || substr(live_partner_rel, ?), "
+                "index_revision = COALESCE(index_revision, 0) + 1, index_updated_at_ms = ? "
+                "WHERE live_partner_rel >= ? AND live_partner_rel < ?",
+                (new_rel, suffix_start, now, *source_bounds),
+            )
+            jobs = conn.execute(
+                "SELECT job_id, asset_rel FROM metadata_write_jobs "
+                "WHERE asset_rel >= ? AND asset_rel < ? AND status IN ('queued', 'writing', 'failed')",
+                source_bounds,
+            ).fetchall()
+            for job_id, asset_rel in jobs:
+                destination = new_root / Path(asset_rel).relative_to(old_rel)
+                conn.execute(
+                    "UPDATE metadata_write_jobs SET asset_rel = ?, asset_path = ?, "
+                    "updated_at = ? WHERE job_id = ?",
+                    (destination.relative_to(self.library_root).as_posix(),
+                     str(destination), now, job_id),
+                )
+            # Completed album scans remain complete at their new paths. Keep
+            # timestamps intact so the latest-job ordering does not change.
+            old_scan_root = old_root.as_posix()
+            conn.execute(
+                "UPDATE scan_jobs SET root = ? || substr(root, ?) "
+                "WHERE root = ? OR (root >= ? AND root < ?)",
+                (new_root.as_posix(), len(old_scan_root) + 1, old_scan_root,
+                 old_scan_root + "/", old_scan_root + "0"),
+            )
+        # Move only indexed artifacts, without traversing or decoding media.
+        # Old path keys must be free for future files created at those paths.
+        cache_dir = self.path.parent / "cache" / "thumbs"
+        for old_key, new_key in cache_moves:
+            try:
+                thumbnail_cache_file_for_key(cache_dir, old_key).replace(
+                    thumbnail_cache_file_for_key(cache_dir, new_key)
+                )
+            except FileNotFoundError:
+                pass  # Disposable cache misses are repaired by thumbnail workers.
+            except OSError as exc:
+                logger.warning("Failed to retarget renamed thumbnail %s: %s", old_key, exc)
         self._clear_collection_anchor_cache()
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:
@@ -1639,6 +1793,9 @@ class AssetRepository:
             if thumb_cache_key is not None:
                 change_guards.append("COALESCE(thumb_cache_key, '') != ?")
                 change_params.append(thumb_cache_key)
+            if expected_revision is not None:
+                change_guards.append("thumb_revision IS NOT ?")
+                change_params.append(expected_revision)
             changed = self._db_manager.execute_in_transaction(
                 f"""
                 UPDATE assets

@@ -1,6 +1,5 @@
 import logging
 import os
-import shutil
 import threading
 import time
 from collections import OrderedDict, deque
@@ -320,6 +319,7 @@ class ThumbnailCacheService(QObject):
 
         self._memory_cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._memory_bytes: Dict[str, int] = {}
+        self._resident_paths: Dict[str, Path] = {}
         self._memory_used_bytes = 0
         self._staging_used_bytes = 0
         self._active_decode_reservations: Dict[str, int] = {}
@@ -1630,6 +1630,8 @@ class ThumbnailCacheService(QObject):
                     result.image,
                     allow_overcommit=result.kind is ThumbnailRequestKind.VISIBLE,
                 )
+                if stored:
+                    self._resident_paths[key] = result.path
                 convert_ms = max(0.0, monotonic_ms() - convert_started)
                 emit_perf_event(
                     "thumbnail_pixmap_converted",
@@ -2121,13 +2123,16 @@ class ThumbnailCacheService(QObject):
             self._handle_prefetch_failure(path, size, reason, generation, kind)
             return
         key = self._cache_key(path, size)
-        self._visible_active_tokens.pop(key, None)
+        active_token = self._visible_active_tokens.pop(key, None)
         self._active_decode_reservations.pop(key, None)
         self._active_decode_kinds.pop(key, None)
         self._pending_tasks.discard(key)
         desired_generation = self._pending_generations.pop(key, generation)
         self._queued_tasks.pop(key, None)
         self._active_tasks = max(0, self._active_tasks - 1)
+        if active_token is not None and active_token.cancel_reason == "album_renamed":
+            self._drain_generation_queue()
+            return
         if (
             not self._is_shutting_down
             and (
@@ -2353,6 +2358,7 @@ class ThumbnailCacheService(QObject):
 
         for memory_key in memory_keys:
             del self._memory_cache[memory_key]
+            self._resident_paths.pop(memory_key, None)
             self._memory_used_bytes = max(
                 0,
                 self._memory_used_bytes - self._memory_bytes.pop(memory_key, 0),
@@ -2440,44 +2446,113 @@ class ThumbnailCacheService(QObject):
         self,
         old_root: Path,
         new_root: Path,
-        *,
-        size: QSize | None = None,
     ) -> None:
-        """Copy cached thumbnails from an album's old path to its renamed path."""
+        """Move resident pixmap ownership before the renamed Gallery is reopened.
 
-        if size is None:
-            size = QSize(512, 512)
-        if not new_root.exists():
-            return
-        try:
-            paths = [path for path in new_root.rglob("*") if path.is_file()]
-        except OSError:
+        Disk artifacts belong to the session repository. This operation only
+        visits bounded in-memory slots and viewport leases, with no media I/O.
+        """
+
+        old_root, new_root = Path(old_root), Path(new_root)
+        if old_root == new_root or self._is_shutting_down:
             return
 
-        for new_path in paths:
+        def retarget(path: Path) -> Path:
             try:
-                rel = new_path.relative_to(new_root)
+                return new_root / path.relative_to(old_root)
             except ValueError:
-                continue
-            old_path = old_root / rel
-            old_key = self._cache_key(old_path, size)
-            new_key = self._cache_key(new_path, size)
-            if old_key in self._memory_cache and new_key not in self._memory_cache:
-                self._add_to_memory(new_key, self._memory_cache[old_key])
+                return path
 
-            old_disk_file = thumbnail_cache_file_for_key(
-                self._disk_cache_path,
-                self._disk_cache_key(old_path),
+        keys: dict[str, str] = {}
+        destination_keys: set[str] = set()
+
+        def track(path: Path, size: QSize) -> None:
+            renamed = retarget(path)
+            if renamed != path:
+                keys[self._cache_key(path, size)] = self._cache_key(renamed, size)
+            elif path.is_relative_to(new_root):
+                destination_keys.add(self._cache_key(path, size))
+
+        for surface_id, demand in tuple(self._surface_demands.items()):
+            for path in (*demand.visible_paths, *demand.guard_paths, *demand.speculative_paths):
+                track(path, demand.size)
+            self._surface_demands[surface_id] = replace(
+                demand,
+                visible_paths=tuple(retarget(path) for path in demand.visible_paths),
+                guard_paths=tuple(retarget(path) for path in demand.guard_paths),
+                speculative_paths=tuple(retarget(path) for path in demand.speculative_paths),
+                # Path-dependent disk keys/revisions will arrive with fresh rows.
+                candidates=tuple(
+                    candidate for candidate in demand.candidates
+                    if retarget(candidate.path) == candidate.path
+                ),
             )
-            new_disk_file = thumbnail_cache_file_for_key(
-                self._disk_cache_path,
-                self._disk_cache_key(new_path),
-            )
-            if old_disk_file.exists() and not new_disk_file.exists():
-                try:
-                    shutil.copy2(old_disk_file, new_disk_file)
-                except OSError:
-                    pass
+        for request in (*self._queued_tasks.values(), *self._prefetch_queued.values()):
+            track(request.path, request.size)
+        for result in (*self._publish_visible, *self._publish_guard, *self._publish_prefetch):
+            track(result.path, result.size)
+
+        # Discard historical destination pixels, including slots with no source
+        # counterpart. A missing source must never adopt an unrelated old image.
+        for key, path in tuple(self._resident_paths.items()):
+            if path.is_relative_to(new_root):
+                destination_keys.add(key)
+                self._memory_cache.pop(key, None)
+                self._resident_paths.pop(key, None)
+                self._memory_used_bytes -= self._memory_bytes.pop(key, 0)
+                self._slot_releases += 1
+
+        # Rekey the native surface itself; copying would temporarily double the
+        # live budget and could evict the very visible tiles being preserved.
+        slots: OrderedDict[str, QPixmap] = OrderedDict()
+        for key, pixmap in self._memory_cache.items():
+            path = self._resident_paths.get(key)
+            renamed = retarget(path) if path is not None else None
+            if renamed is not None and renamed != path:
+                new_key = f"{self._disk_cache_key(renamed)}:{key.rsplit(':', 1)[1]}"
+                keys[key] = new_key
+                self._resident_paths.pop(key)
+                self._resident_paths[new_key] = renamed
+                self._memory_bytes[new_key] = self._memory_bytes.pop(key)
+                key = new_key
+            slots[key] = pixmap
+        self._memory_cache = slots
+        affected_keys = set(keys) | destination_keys
+        for key in affected_keys | set(keys.values()):
+            self._desired_revisions.pop(key, None)
+            self._thumbnail_states.pop(key, None)
+            self._failure_until.pop(key, None)
+            self._prefetch_l2_miss_until.pop(key, None)
+        for key in affected_keys:
+            token = self._visible_active_tokens.get(key)
+            if token is not None:
+                token.cancel("album_renamed")
+            self._queued_tasks.pop(key, None)
+            self._pending_generations.pop(key, None)
+            self._pending_tasks.discard(key)
+            self._visible_queued_at.pop(key, None)
+            self._cancel_prefetch_key(key, preserve_demand=True)
+        self._visible_queue = deque(key for key in self._visible_queue if key not in affected_keys)
+        for queue in (self._publish_visible, self._publish_guard, self._publish_prefetch):
+            retained = [
+                result for result in queue
+                if not result.path.is_relative_to(old_root)
+                and not result.path.is_relative_to(new_root)
+            ]
+            queue.clear()
+            queue.extend(retained)
+        self._publish_keys = {
+            self._cache_key(result.path, result.size)
+            for result in (*self._publish_visible, *self._publish_guard, *self._publish_prefetch)
+        }
+        self._recompute_staging_bytes()
+        self._pinned_keys = {keys.get(key, key) for key in self._pinned_keys}
+        self._current_guard_keys = {keys.get(key, key) for key in self._current_guard_keys}
+        if self._current_l1_demand_keys is not None:
+            self._current_l1_demand_keys = {
+                keys.get(key, key) for key in self._current_l1_demand_keys
+            }
+        self._prefetch_key_order = [keys.get(key, key) for key in self._prefetch_key_order]
 
     def _cache_key(self, path: Path, size: QSize) -> str:
         return f"{self._disk_cache_key(path)}:{size.width()}x{size.height()}"
@@ -2582,6 +2657,7 @@ class ThumbnailCacheService(QObject):
             return False
 
         pixmap = self._memory_cache.pop(victim_key)
+        self._resident_paths.pop(victim_key, None)
         old_bytes = self._memory_bytes.pop(victim_key, image_bytes)
         if not self._overwrite_pixmap_slot(pixmap, image):
             self._memory_used_bytes = max(0, self._memory_used_bytes - old_bytes)
@@ -2629,6 +2705,7 @@ class ThumbnailCacheService(QObject):
         had_slot = key in self._memory_cache
         if had_slot:
             self._memory_cache.pop(key, None)
+            self._resident_paths.pop(key, None)
             self._memory_used_bytes = max(0, self._memory_used_bytes - old_bytes)
             self._slot_releases += 1
 
@@ -2687,6 +2764,7 @@ class ThumbnailCacheService(QObject):
         return True
 
     def _release_all_l1_slots(self, reason: str) -> None:
+        self._resident_paths.clear()
         released = len(self._memory_cache)
         if not released:
             self._pool_warm = False
@@ -2712,6 +2790,7 @@ class ThumbnailCacheService(QObject):
                 self._memory_used_bytes - self._memory_bytes.pop(key, 0),
             )
             self._memory_cache.pop(key, None)
+            self._resident_paths.pop(key, None)
             self._slot_releases += int(had_slot)
             emit_perf_event(
                 "thumbnail_l1_write_discarded",
@@ -2752,11 +2831,11 @@ class ThumbnailCacheService(QObject):
             return
         if key in self._memory_cache:
             self._memory_cache.pop(key, None)
+            self._resident_paths.pop(key, None)
             self._memory_used_bytes = max(0, self._memory_used_bytes - old_bytes)
             self._memory_bytes.pop(key, None)
             self._slot_releases += 1
-        # This compatibility path is used by exceptional cache remaps and tests.
-        # Own a distinct native surface so one key can never mutate another key's
+        # Compatibility insertion owns a distinct surface so one key cannot mutate another key's
         # slot when the steady-state publisher later rebinds it in place.
         owned_pixmap = pixmap.copy()
         if owned_pixmap.isNull():
@@ -2870,6 +2949,7 @@ class ThumbnailCacheService(QObject):
             if key in protected:
                 continue
             self._memory_cache.pop(key, None)
+            self._resident_paths.pop(key, None)
             self._slot_releases += 1
             self._memory_used_bytes = max(
                 0,
@@ -2909,6 +2989,7 @@ class ThumbnailCacheService(QObject):
             if evicted_key is None:
                 break
             self._memory_cache.pop(evicted_key, None)
+            self._resident_paths.pop(evicted_key, None)
             self._slot_releases += 1
             self._memory_used_bytes -= self._memory_bytes.pop(evicted_key, 0)
             emit_perf_event(
@@ -3117,7 +3198,7 @@ class ThumbnailCacheService(QObject):
             return None
         if cancellation is not None and cancellation.cancelled():
             return None
-        if thumbnail_state == "stale":
+        if thumbnail_state == "stale" or thumb_revision is None:
             if self._publish_thumbnail_ready(path, artifact):
                 self._thumbnail_states[self._cache_key(path, size)] = "ready"
         if size == artifact.image.size():

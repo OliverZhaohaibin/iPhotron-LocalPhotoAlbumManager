@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+import stat
+import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,6 +29,7 @@ from ..config import (
 )
 from ..errors import (
     AlbumNotFoundError,
+    AlbumOperationError,
     IndexCorruptedError,
     IPhotoError,
     ManifestInvalidError,
@@ -42,6 +46,7 @@ from ..domain.models.scan import ScanBatchCommitted
 from ..io.scanner_adapter import process_media_paths
 from ..media_classifier import ALL_IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ..path_normalizer import compute_album_path
+from ..utils.hashutils import compute_file_id
 from ..utils.jsonio import read_json
 from ..utils.logging import get_logger
 from ..utils.pathutils import ensure_work_dir, resolve_work_dir
@@ -90,6 +95,39 @@ class LibraryScanService:
             thumbnail_cache_dir=self._thumbnail_cache_dir(),
         )
         self._repository_factory = repository_factory or get_global_repository
+        self._album_path_lock = threading.RLock()
+        self._album_path_generation = 0
+
+    def rename_album(self, old_root: Path, new_root: Path) -> None:
+        """Commit a known folder rename before any presentation queries reopen it."""
+
+        from ..application.services.album_manifest_service import Album
+
+        old_root = Path(old_root)
+        new_root = Path(new_root)
+        if not self._album_path(old_root) or not self._album_path(new_root):
+            raise ValueError("Album rename must remain inside the active library")
+        # Pairing can materialize .iPhoto under an album. Serialize it with the
+        # filesystem move so a queued old-path task cannot recreate the folder.
+        with self._album_path_lock:
+            old_root.rename(new_root)
+            try:
+                Album.open(new_root)
+                self._repository().remap_album_paths(old_root, new_root)
+            except Exception as exc:
+                new_root.rename(old_root)
+                Album.open(old_root)
+                raise AlbumOperationError(f"Failed to update the renamed album: {exc}") from exc
+            self._album_path_generation += 1
+
+    @contextmanager
+    def _scan_commit_guard(
+        self, generation: int, is_cancelled: Callable[[], bool]
+    ) -> Iterator[bool]:
+        # Cancellation alone cannot stop a batch already waiting to commit.
+        # Keep validation, persistence and publication atomic with path remaps.
+        with self._album_path_lock:
+            yield generation == self._album_path_generation and not is_cancelled()
 
     def prepare_album_open(
         self,
@@ -170,6 +208,14 @@ class LibraryScanService:
     ) -> ScanLibraryResult:
         """Scan *root* using the shared application use case."""
 
+        with self._album_path_lock:
+            path_generation = self._album_path_generation
+
+        def scan_cancelled() -> bool:
+            return path_generation != self._album_path_generation or (
+                is_cancelled is not None and is_cancelled()
+            )
+
         scan_started_ms = _monotonic_ms()
         scan_started_at_ms = _utc_ms()
         stage_elapsed_ms: dict[str, float] = {}
@@ -247,7 +293,7 @@ class LibraryScanService:
                     exclude=resolved_exclude,
                     existing_index=existing_index,
                     progress_callback=progress_callback,
-                    is_cancelled=is_cancelled,
+                    is_cancelled=scan_cancelled,
                     row_transform=self._library_relative_transform(scan_root),
                     scan_batch_callback=scan_batch_callback,
                     batch_failed_callback=batch_failed_callback,
@@ -259,6 +305,7 @@ class LibraryScanService:
                     scan_started_at_ms=scan_started_at_ms,
                     scan_stage_elapsed_ms=stage_elapsed_ms,
                     recursive=not root_only,
+                    commit_guard=lambda: self._scan_commit_guard(path_generation, scan_cancelled),
                 )
             )
             stage_elapsed_ms[ScanStage.METADATA.value] = round(
@@ -281,7 +328,7 @@ class LibraryScanService:
                 stage=ScanStage.VISIBLE_PUBLISH.value,
                 status=(
                     "cancelled"
-                    if is_cancelled is not None and is_cancelled()
+                    if scan_cancelled()
                     else "scanned"
                 ),
                 processed_count=len(result.rows),
@@ -303,6 +350,8 @@ class LibraryScanService:
                     "stage_elapsed_ms": stage_elapsed_ms,
                 },
             )
+        if path_generation != self._album_path_generation:
+            raise AlbumOperationError("Album paths changed during the scan; please retry the scan.")
         return result
 
     def rescan_album(
@@ -346,16 +395,19 @@ class LibraryScanService:
     def finalize_scan(self, root: Path, rows: Iterable[dict[str, Any]]) -> None:
         """Persist additive scan side effects after a successful scan."""
 
-        scan_root = Path(root)
-        materialized_rows = [dict(row) for row in rows]
-        repository = self._repository()
-        update_index_snapshot(
-            scan_root,
-            materialized_rows,
-            library_root=self.library_root,
-            repository=repository,
-        )
-        self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
+        with self._album_path_lock:
+            scan_root = Path(root)
+            if not scan_root.is_dir():
+                raise AlbumNotFoundError(f"Album directory is unavailable: {scan_root}")
+            materialized_rows = [dict(row) for row in rows]
+            repository = self._repository()
+            update_index_snapshot(
+                scan_root,
+                materialized_rows,
+                library_root=self.library_root,
+                repository=repository,
+            )
+            self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
 
     def finalize_scan_result(
         self,
@@ -420,6 +472,140 @@ class LibraryScanService:
 
         self._mark_scan_job_finalized(scan_root, current_scan_job_id, scope=scan_scope)
         return materialized_rows
+
+    def reconcile_missing_album_scope(
+        self,
+        root: Path,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
+        relocation_roots: Iterable[Path] = (),
+    ) -> bool | None:
+        """Migrate verified renames before pruning a missing scope.
+
+        Return True for a handled scope, False when it needs a normal scan, or
+        None when stale relocation hints require a fresh watcher snapshot.
+        """
+
+        scan_root = Path(root)
+        album_path = self._album_path(scan_root)
+        if not album_path or RECENTLY_DELETED_DIR_NAME in Path(album_path).parts:
+            return False
+
+        def scope_is_missing() -> bool:
+            try:
+                info = scan_root.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                return True
+            return not stat.S_ISDIR(info.st_mode)
+
+        if not scope_is_missing():
+            return False
+        # A disconnected library is not evidence that its albums were deleted.
+        if not self.library_root.is_dir():
+            raise AlbumNotFoundError(f"Library directory is unavailable: {self.library_root}")
+        if is_cancelled is not None and is_cancelled():
+            return True
+        repository = self._repository()
+        rows = [
+            {"rel": str(row["rel"]), "id": row.get("id")}
+            for row in repository.read_album_assets(
+                album_path,
+                include_subalbums=True,
+                sort_by_date=False,
+                filter_hidden=False,
+            )
+            if row.get("rel")
+        ]
+        # Newly discovered scopes are only hints: filenames alone cannot prove
+        # a rename. Verify content identity before moving any persisted state.
+        candidates = [
+            Path(candidate)
+            for candidate in relocation_roots
+            if (relative := self._album_path(Path(candidate)))
+            and RECENTLY_DELETED_DIR_NAME not in Path(relative).parts
+        ]
+
+        def candidates_are_available() -> bool:
+            for candidate in candidates:
+                try:
+                    if not stat.S_ISDIR(candidate.stat().st_mode):
+                        return False
+                except (FileNotFoundError, NotADirectoryError):
+                    return False
+            return True
+
+        # A hinted destination may move again before its watcher notification
+        # arrives. Missing hints invalidate the evidence for pruning source rows.
+        if rows and not candidates_are_available():
+            return None
+        verified_by_scope: dict[tuple[Path, Path], dict[str, str]] = {}
+        target_ids: dict[Path, str] = {}
+        source_album = Path(album_path)
+        for row in rows:
+            if is_cancelled is not None and is_cancelled():
+                return True
+            source = str(row["rel"])
+            asset_id = str(row.get("id") or "")
+            if not asset_id:
+                continue
+            source_path = Path(source)
+            # The prune boundary may cover a deleted parent whose children
+            # moved independently. Verify each source album's relative paths.
+            for parent in source_path.relative_to(source_album).parents:
+                source_scope = source_album / parent
+                subpath = source_path.relative_to(source_scope)
+                for candidate in candidates:
+                    target = candidate / subpath
+                    try:
+                        target_id = target_ids.get(target)
+                        if target_id is None and target.is_file():
+                            target_id = f"as_{compute_file_id(target)}"
+                            target_ids[target] = target_id
+                        if target_id == asset_id:
+                            verified_by_scope.setdefault((source_scope, candidate), {})[
+                                source
+                            ] = target.relative_to(self.library_root).as_posix()
+                    except (FileNotFoundError, NotADirectoryError):
+                        continue
+        matches_by_source: dict[str, set[str]] = {}
+        for (source_scope, candidate), verified in verified_by_scope.items():
+            # Prefer a whole-subtree rename only with strictly stronger evidence
+            # than its nested source/destination mappings. Ties stay ambiguous.
+            if any(
+                verified.keys() < verified_by_scope[ancestor].keys()
+                for source_parent in (source_scope, *source_scope.parents)
+                for target_parent in (candidate, *candidate.parents)
+                if (ancestor := (source_parent, target_parent)) in verified_by_scope
+            ):
+                continue
+            for source, destination in verified.items():
+                matches_by_source.setdefault(source, set()).add(destination)
+        destinations: dict[str, str] = {}
+        expected_ids: dict[str, str] = {}
+        for row in rows:
+            source = str(row["rel"])
+            matches = matches_by_source.get(source, set())
+            if len(matches) > 1:
+                raise ValueError(f"Ambiguous relocated asset; retaining source state: {source}")
+            if matches:
+                destinations[source] = matches.pop()
+                expected_ids[source] = str(row["id"])
+        # Recheck after the read: a queued notification may outlive a rename or
+        # temporary disappearance. A recreated scope must follow a normal scan.
+        if not scope_is_missing():
+            return False
+        if not self.library_root.is_dir():
+            raise AlbumNotFoundError(f"Library directory is unavailable: {self.library_root}")
+        if is_cancelled is not None and is_cancelled():
+            return True
+        if rows and not candidates_are_available():
+            return None
+        if destinations:
+            repository.relocate_rows(destinations, expected_asset_ids=expected_ids)
+        remaining = [str(row["rel"]) for row in rows if row["rel"] not in destinations]
+        if remaining:
+            repository.remove_rows(remaining, clear_live_partners=True)
+        return True
 
     def refresh_restored_album(
         self,
@@ -522,7 +708,13 @@ class LibraryScanService:
     def pair_album(self, root: Path, *, root_only: bool = False) -> list[LiveGroup]:
         """Rebuild Live Photo roles and derived links for *root*."""
 
+        with self._album_path_lock:
+            return self._pair_existing_album(root, root_only=root_only)
+
+    def _pair_existing_album(self, root: Path, *, root_only: bool) -> list[LiveGroup]:
         scan_root = Path(root)
+        if not scan_root.is_dir():
+            return []
         album_path = self._album_path(scan_root)
         repository = self._repository()
         if root_only:
@@ -620,18 +812,21 @@ class LibraryScanService:
     ) -> "list[LiveGroup]":
         """Rebuild links using already materialized rows for *root*."""
 
-        scan_root = Path(root)
-        materialized = [dict(row) for row in rows]
-        active_repository = repository or self._repository()
-        album_path = self._album_path(scan_root)
-        if album_path:
-            materialized = self._album_relative_rows(materialized, album_path)
-        return ensure_links(
-            scan_root,
-            materialized,
-            library_root=self.library_root,
-            repository=active_repository,
-        )
+        with self._album_path_lock:
+            scan_root = Path(root)
+            if not scan_root.is_dir():
+                return []
+            materialized = [dict(row) for row in rows]
+            active_repository = repository or self._repository()
+            album_path = self._album_path(scan_root)
+            if album_path:
+                materialized = self._album_relative_rows(materialized, album_path)
+            return ensure_links(
+                scan_root,
+                materialized,
+                library_root=self.library_root,
+                repository=active_repository,
+            )
 
     def sync_manifest_favorites(
         self,

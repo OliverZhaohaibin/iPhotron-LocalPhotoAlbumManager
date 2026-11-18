@@ -68,26 +68,154 @@ def _reconcile(
     service.reconcile_demand(demand)
 
 
-def test_thumbnail_cache_service_remaps_album_disk_cache(tmp_path: Path) -> None:
-    cache_dir = tmp_path / "thumbs"
-    service = ThumbnailCacheService(cache_dir)
-    old_album = tmp_path / "Trips"
-    new_album = tmp_path / "Renamed Trips"
-    old_photo = old_album / "photo.jpg"
-    new_photo = new_album / "photo.jpg"
-    new_photo.parent.mkdir(parents=True)
-    new_photo.write_bytes(b"image")
+def _publish_resident(service, path, size, color="blue"):
+    image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor(color))
+    service._stage_result(ThumbnailLoadResult(
+        path, size, image, service._current_generation, ThumbnailRequestKind.VISIBLE,
+    ))
+    service._drain_publish_queue()
+    pixmap = service.peek_full_thumbnail(path, size)
+    assert pixmap is not None
+    return pixmap
 
-    size = QSize(512, 512)
-    old_key = service._disk_cache_key(old_photo)
-    new_key = service._disk_cache_key(new_photo)
-    old_cache_file = cache_dir / f"{old_key}.jpg"
-    new_cache_file = cache_dir / f"{new_key}.jpg"
-    old_cache_file.write_bytes(b"cached-thumbnail")
 
-    service.remap_album_paths(old_album, new_album, size=size)
+@pytest.mark.parametrize("platform", ["darwin", "win32", "linux"])
+def test_album_rename_keeps_resident_pixmaps_and_surface_leases_without_io(
+    tmp_path: Path, qapp, platform: str
+) -> None:
+    policy = replace(
+        ThumbnailRuntimePolicy.detect(), platform=platform, memory_limit_bytes=16 * 1024**2,
+    )
+    service = ThumbnailCacheService(tmp_path / "thumbs", runtime_policy=policy)
+    service._max_active_jobs = 0
+    old = tmp_path / "Old"
+    final = tmp_path / "Final"
+    size, small = QSize(512, 512), QSize(64, 64)
+    photo, guard, cold = (old / name for name in ("photo.jpg", "Nested/guard.jpg", "cold.jpg"))
+    other = tmp_path / "Other" / "photo.jpg"
+    try:
+        slots = {
+            (photo, 512): _publish_resident(service, photo, size),
+            (guard, 512): _publish_resident(service, guard, size),
+            (cold, 512): _publish_resident(service, cold, size),
+            (other, 512): _publish_resident(service, other, size),
+            (photo, 64): _publish_resident(service, photo, small),
+        }
+        service.upsert_surface_demand("gallery", ThumbnailDemandSnapshot(
+            1, size, (photo, other), (guard,), (cold,),
+            candidates=(ThumbnailPrefetchCandidate(
+                guard, "old-disk-key", "guard", thumb_revision="old-revision",
+            ),),
+        ))
+        service.upsert_surface_demand("filmstrip", ThumbnailDemandSnapshot(1, small, (photo,)))
+        before = service.memory_snapshot()
 
-    assert new_cache_file.read_bytes() == b"cached-thumbnail"
+        with (
+            patch.object(Path, "stat", side_effect=AssertionError("rename must be memory-only")),
+            patch.object(Path, "rglob", side_effect=AssertionError("rename must not traverse media")),
+            patch.object(service, "_start_generation") as start,
+        ):
+            service.remap_album_paths(old, tmp_path / "New")
+            service.remap_album_paths(tmp_path / "New", final)
+
+        start.assert_not_called()
+        assert service.memory_snapshot() == before
+        for (path, bucket), pixmap in slots.items():
+            renamed = final / path.relative_to(old) if path.is_relative_to(old) else path
+            assert service.peek_full_thumbnail(renamed, QSize(bucket, bucket)) is pixmap
+            if renamed != path:
+                assert service.peek_full_thumbnail(path, QSize(bucket, bucket)) is None
+        assert service._surface_demands["gallery"].guard_paths == (final / "Nested/guard.jpg",)
+        assert service._surface_demands["gallery"].candidates == ()
+        assert service._surface_demands["filmstrip"].visible_paths == (final / "photo.jpg",)
+        # Fresh path-dependent revisions must not evict the transferred image.
+        service.upsert_surface_demand("gallery", ThumbnailDemandSnapshot(
+            2, size, (final / "photo.jpg", other),
+            candidates=(ThumbnailPrefetchCandidate(
+                final / "photo.jpg", "new-disk-key", "guard", thumb_revision="new-revision",
+            ),),
+        ))
+        assert service.peek_full_thumbnail(final / "photo.jpg", size) is slots[(photo, 512)]
+        # Reusing the old media path owns a separate native surface.
+        service.upsert_surface_demand("gallery", ThumbnailDemandSnapshot(
+            3, size, (final / "photo.jpg", photo, other),
+        ))
+        replacement = _publish_resident(service, photo, size, "red")
+        assert replacement is not slots[(photo, 512)]
+        assert slots[(photo, 512)].toImage().pixelColor(0, 0).blue() > 200
+        service.release_surface_demand("gallery")
+        service._evict_l1_until(0)
+        assert service.peek_full_thumbnail(final / "photo.jpg", small) is slots[(photo, 64)]
+        assert set(service._resident_paths) == set(service._memory_cache)
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("source_resident", [False, True])
+def test_album_rename_discards_historical_destination_pixmaps(
+    tmp_path: Path, qapp, source_resident: bool
+) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    old, new = tmp_path / "Old", tmp_path / "New"
+    size = QSize(64, 64)
+    try:
+        _publish_resident(service, new / "photo.jpg", size, "red")
+        _publish_resident(service, new / "missing-source.jpg", size, "red")
+        source = _publish_resident(service, old / "photo.jpg", size) if source_resident else None
+        service.remap_album_paths(old, new)
+        assert service.peek_full_thumbnail(new / "photo.jpg", size) is source
+        assert service.peek_full_thumbnail(new / "missing-source.jpg", size) is None
+        assert service.memory_snapshot().slot_count == int(source_resident)
+        assert service.memory_snapshot().l1_bytes == int(source_resident) * 64 * 64 * 4
+    finally:
+        service.shutdown()
+
+
+def test_album_rename_rejects_late_old_path_worker_results(tmp_path: Path, qapp) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    old, new = tmp_path / "Old", tmp_path / "New"
+    path, size = old / "photo.jpg", QSize(64, 64)
+    try:
+        original = _publish_resident(service, path, size)
+        key = service._cache_key(path, size)
+        service._visible_active_tokens[key] = _CancellationToken()
+        service._active_decode_reservations[key] = 64 * 64 * 4
+        service._active_tasks = 1
+        service.remap_album_paths(old, new)
+        stale = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+        stale.fill(QColor("red"))
+        service._handle_generation_result(path, size, stale)
+        service._drain_publish_queue()
+        assert service.peek_full_thumbnail(new / "photo.jpg", size) is original
+        assert service.peek_full_thumbnail(path, size) is None
+        assert key not in service._failure_until
+        assert service.memory_snapshot().active_reservation_bytes == 0
+        assert service._active_tasks == 0
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("cleanup", ["invalidate", "evict", "disk_cache_changed", "shutdown"])
+def test_resident_path_tracking_is_released_with_native_slots(tmp_path: Path, qapp, cleanup) -> None:
+    service = ThumbnailCacheService(tmp_path / "thumbs")
+    path = tmp_path / "photo.jpg"
+    try:
+        _publish_resident(service, path, QSize(64, 64))
+        assert service._resident_paths
+        if cleanup == "invalidate":
+            service.invalidate(path)
+        elif cleanup == "evict":
+            service._evict_l1_until(0)
+        elif cleanup == "disk_cache_changed":
+            service.set_disk_cache_path(tmp_path / "other-thumbs")
+        else:
+            service.shutdown()
+        assert not service._resident_paths
+        assert not service._memory_cache
+        assert service.memory_snapshot().l1_bytes == 0
+    finally:
+        service.shutdown()
 
 
 def test_render_thumbnail_skips_color_stats_without_sidecar(tmp_path: Path) -> None:

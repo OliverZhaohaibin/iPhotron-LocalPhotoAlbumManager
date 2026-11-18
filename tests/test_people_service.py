@@ -2832,6 +2832,258 @@ def _edit_request(service, asset_id, annotation_id, target):
     )
 
 
+def _replace_cross_kind_assignment_source(people, pets, source):
+    """Model the new UUIDs emitted by detection while retaining stable geometry keys."""
+    from dataclasses import replace
+
+    if source == "person":
+        repo = people.repository()
+        old = next(face for face in repo.get_all_faces() if face.face_id == "FA")
+        faces = [
+            replace(face, face_id="FA-rescanned") if face.face_id == "FA" else face
+            for face in repo.get_all_faces()
+        ]
+        persons = [
+            replace(person, key_face_id="FA-rescanned")
+            if person.key_face_id == "FA" else person
+            for person in repo.get_all_person_records()
+        ]
+        repo.replace_all(faces, persons)
+        return "person", "FA", "FA-rescanned", "photo", old.face_key
+    repo = pets.repository()
+    old = repo.get_detection("DP")
+    fresh = replace(old, detection_id="DP-rescanned")
+    if source == "pet_incremental":
+        repo.replace_assets_incrementally([old.asset_id], [fresh], distance_threshold=0.42)
+    else:
+        detections = [
+            fresh if detection.detection_id == "DP" else detection
+            for detection in repo.get_all_detections()
+        ]
+        records = [
+            replace(pet, key_detection_id=fresh.detection_id)
+            if pet.key_detection_id == "DP" else pet
+            for pet in repo.get_all_pet_records()
+        ]
+        repo.replace_all(detections, records)
+    return "pet", "DP", "DP-rescanned", "pet-photo", old.pet_key
+
+
+@pytest.mark.parametrize("source", ["person", "pet_incremental", "pet_rebuild"])
+@pytest.mark.parametrize("legacy_assignment", [False, True])
+def test_cross_kind_assignment_survives_new_detection_ids(
+    recognition_edit_library, source, legacy_assignment
+):
+    from contextlib import closing
+
+    _root, people, pets, _edits, _merges = recognition_edit_library
+    kind = "person" if source == "person" else "pet"
+    old_id = "FA" if kind == "person" else "DP"
+    target = "pet:P" if kind == "person" else "person:A"
+    if kind == "person":
+        people.repository().state_repository.move_manual_face("FB", "B")
+    group = people.create_group([target, "person:B"])
+    assert group is not None
+    assert ("photo" if kind == "person" else "pet-photo") not in people.group_asset_ids(
+        group.group_id
+    )
+    assert people.reassign_detection_identity(
+        source_kind=kind, source_annotation_id=old_id, target_identity=target
+    )
+    state = people.repository().state_repository
+    if legacy_assignment:
+        # Old installations persisted the UUID alone. Upgrade must capture its
+        # stable key while the old runtime row is still available.
+        with closing(state._connect()) as connection:
+            connection.execute(
+                "UPDATE annotation_identity_assignments SET source_annotation_key = NULL"
+            )
+            connection.commit()
+        # Migration happens on the repository's first snapshot write after upgrade.
+        if kind == "pet":
+            repository = pets.repository()
+            pets._repository = PetRepository(
+                repository.db_path, repository.state_repository.db_path
+            )
+
+    _, _, fresh_id, asset_id, stable_key = _replace_cross_kind_assignment_source(
+        people, pets, source
+    )
+    service = people if kind == "person" else pets
+    annotations = (
+        service.list_asset_face_annotations(asset_id)
+        if kind == "person" else service.list_asset_pet_annotations(asset_id)
+    )
+    annotation = next(
+        row for row in annotations
+        if getattr(row, "face_id", getattr(row, "detection_id", None)) == fresh_id
+    )
+    assert (annotation.canonical_identity_kind, annotation.canonical_identity_id) == tuple(
+        target.split(":")
+    )
+    if kind == "person":
+        assert asset_id in pets.pet_asset_ids("P")
+        assert asset_id not in people.cluster_asset_ids("A")
+    else:
+        assert asset_id in people.cluster_asset_ids("A")
+        assert asset_id not in pets.pet_asset_ids("P")
+    assert asset_id in people.group_asset_ids(group.group_id)
+    reopened = FaceStateRepository(state.db_path)
+    assert reopened.get_annotation_identity_assignments([(kind, fresh_id)]) == {
+        (kind, fresh_id): tuple(target.split(":"))
+    }
+    with closing(reopened._connect()) as connection:
+        assert connection.execute(
+            "SELECT source_annotation_key FROM annotation_identity_assignments"
+        ).fetchone()[0] == stable_key
+
+
+@pytest.mark.parametrize("source", ["person", "pet_incremental"])
+@pytest.mark.parametrize("operation", ["move", "delete", "new_identity"])
+def test_rescanned_cross_kind_assignment_can_be_cleared(
+    recognition_edit_library, source, operation
+):
+    _root, people, pets, _edits, _merges = recognition_edit_library
+    kind = "person" if source == "person" else "pet"
+    assert people.reassign_detection_identity(
+        source_kind=kind,
+        source_annotation_id="FA" if kind == "person" else "DP",
+        target_identity="pet:P" if kind == "person" else "person:A",
+    )
+    _, old_id, fresh_id, _, _ = _replace_cross_kind_assignment_source(people, pets, source)
+    if kind == "person":
+        changed = (
+            people.move_face_to_person(fresh_id, "A") if operation == "move"
+            else people.delete_face(fresh_id) if operation == "delete"
+            else people.move_face_to_new_person(fresh_id, "New person")
+        )
+    else:
+        changed = (
+            pets.move_detection_to_pet(fresh_id, "P") if operation == "move"
+            else pets.delete_detection(fresh_id) if operation == "delete"
+            else pets.move_detection_to_new_pet(fresh_id, "New pet")
+        )
+    assert changed
+    assert people.repository().state_repository.get_annotation_identity_assignments(
+        [(kind, old_id), (kind, fresh_id)]
+    ) == {}
+
+
+@pytest.mark.parametrize("source", ["person", "pet_rebuild"])
+def test_cross_kind_assignment_survives_empty_runtime_rebuild(
+    recognition_edit_library, source
+):
+    from dataclasses import replace
+
+    _root, people, pets, _edits, _merges = recognition_edit_library
+    kind = "person" if source == "person" else "pet"
+    source_id = "FA" if kind == "person" else "DP"
+    target = "pet:P" if kind == "person" else "person:A"
+    assert people.reassign_detection_identity(
+        source_kind=kind, source_annotation_id=source_id, target_identity=target
+    )
+    repo = people.repository() if kind == "person" else pets.repository()
+    if kind == "person":
+        detections = [
+            replace(face, face_id=f"rebuilt-{face.face_id}") for face in repo.get_all_faces()
+        ]
+        records = [
+            replace(person, key_face_id=f"rebuilt-{person.key_face_id}")
+            for person in repo.get_all_person_records()
+        ]
+    else:
+        detections = [
+            replace(pet, detection_id=f"rebuilt-{pet.detection_id}")
+            for pet in repo.get_all_detections()
+        ]
+        records = [
+            replace(pet, key_detection_id=f"rebuilt-{pet.key_detection_id}")
+            for pet in repo.get_all_pet_records()
+        ]
+    repo.replace_all([], [])
+    # A choice remains durable while its disposable runtime detection is absent.
+    repo.replace_all(detections, records)
+    assert people.repository().state_repository.get_annotation_identity_assignments(
+        [(kind, f"rebuilt-{source_id}")]
+    ) == {(kind, f"rebuilt-{source_id}"): tuple(target.split(":"))}
+    asset_id = "photo" if kind == "person" else "pet-photo"
+    assert asset_id in (
+        pets.pet_asset_ids("P") if kind == "person" else people.cluster_asset_ids("A")
+    )
+
+
+@pytest.mark.parametrize("source", ["person", "pet_incremental"])
+def test_cross_kind_assignment_recovery_keeps_stable_detection_key(
+    recognition_edit_library, monkeypatch, source
+):
+    import iPhoto.people.service as service_module
+
+    _root, people, pets, _edits, _merges = recognition_edit_library
+    kind = "person" if source == "person" else "pet"
+    target = "pet:P" if kind == "person" else "person:A"
+
+    def fail_before_assignment(*args, **kwargs):
+        raise OSError("interrupted before assignment")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            service_module,
+            "apply_detection_assignment_with_group_refresh",
+            fail_before_assignment,
+        )
+        with pytest.raises(OSError, match="interrupted before assignment"):
+            people.reassign_detection_identity(
+                source_kind=kind,
+                source_annotation_id="FA" if kind == "person" else "DP",
+                target_identity=target,
+            )
+    _, _, fresh_id, asset_id, stable_key = _replace_cross_kind_assignment_source(
+        people, pets, source
+    )
+    journal = people._ensure_mutation_coordinator()
+    pending = journal.unfinished()
+    assert pending[0].payload["source_annotation_key"] == stable_key
+    assert journal.recover_pending()
+    assert journal.unfinished() == ()
+    state = people.repository().state_repository
+    assert state.get_annotation_identity_assignments([(kind, fresh_id)]) == {
+        (kind, fresh_id): tuple(target.split(":"))
+    }
+    assert asset_id in (
+        pets.pet_asset_ids("P") if kind == "person" else people.cluster_asset_ids("A")
+    )
+
+
+def test_annotation_assignment_schema_upgrade_preserves_existing_rows(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    path = tmp_path / "face_state.db"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE annotation_identity_assignments (
+                source_kind TEXT NOT NULL,
+                source_annotation_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(source_kind, source_annotation_id)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO annotation_identity_assignments VALUES (?, ?, ?, ?, ?)",
+            ("person", "manual-face", "pet", "P", "2026-01-01"),
+        )
+        connection.commit()
+    state = FaceStateRepository(path)
+    assert state.get_annotation_identity_assignments([("person", "manual-face")]) == {
+        ("person", "manual-face"): ("pet", "P")
+    }
+    assert state.clear_annotation_identity_assignment("person", "manual-face")
+
+
 def test_manual_inline_correction_preserves_other_faces_and_record(recognition_edit_library):
     from dataclasses import replace
     from iPhoto.domain.recognition_edits import RecognitionEditStatus

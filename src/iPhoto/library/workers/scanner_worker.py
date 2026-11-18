@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ...bootstrap.library_scan_service import LibraryScanService
+from ...errors import AlbumNotFoundError
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
 
@@ -46,6 +47,8 @@ class ScannerWorker(QRunnable):
         *,
         root_only: bool = False,
         finalize_scan: bool = False,
+        reconcile_missing_scope: bool = False,
+        relocation_roots: Iterable[Path] = (),
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -58,11 +61,15 @@ class ScannerWorker(QRunnable):
         self._scan_service = scan_service
         self.root_only = root_only
         self._finalize_scan = finalize_scan
+        self._reconcile_missing_scope = reconcile_missing_scope
+        self._relocation_roots = tuple(relocation_roots)
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
         self._scan_job_id: str | None = None
         self._scan_started_at_ms: int | None = None
+        self.reconciled_missing_scope = False
+        self.reconciliation_deferred = False
 
     @property
     def root(self) -> Path:
@@ -81,6 +88,12 @@ class ScannerWorker(QRunnable):
         """Return the database root used by this worker."""
 
         return self._library_root
+
+    @property
+    def relocation_roots(self) -> tuple[Path, ...] | None:
+        """Return reconciliation hints, or None when this is a normal scan."""
+
+        return self._relocation_roots if self._reconcile_missing_scope else None
 
     @property
     def scan_service(self) -> LibraryScanService:
@@ -125,6 +138,27 @@ class ScannerWorker(QRunnable):
 
         rows: List[dict] = []
         try:
+            if self._finalize_scan and self._reconcile_missing_scope:
+                reconcile = getattr(self.scan_service, "reconcile_missing_album_scope", None)
+                relocation_options = (
+                    {"relocation_roots": self._relocation_roots} if self._relocation_roots else {}
+                )
+                if callable(reconcile):
+                    reconciled = reconcile(
+                        self._root,
+                        is_cancelled=lambda: self._is_cancelled,
+                        **relocation_options,
+                    )
+                    if reconciled is None:
+                        self.reconciliation_deferred = True
+                        return
+                    if reconciled is True:
+                        self.reconciled_missing_scope = True
+                        return
+            # An older queued scan may run after a rename but before the
+            # watcher reconciliation that carries its destination hints.
+            if self._finalize_scan and not self._root.is_dir():
+                raise AlbumNotFoundError(f"Album directory is unavailable: {self._root}")
             ensure_work_dir(self._root)
 
             # Emit an initial indeterminate update

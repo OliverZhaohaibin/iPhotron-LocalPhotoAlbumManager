@@ -71,21 +71,33 @@ def _describe_album(path: Path) -> tuple[str, bool]:
     return path.name, marker.exists()
 
 
+def _snapshot_entry_is_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(path.stat().st_mode)
+    except FileNotFoundError:
+        if path.is_symlink():
+            return False
+        # A disappeared entry may be a renamed album. Retry the snapshot instead
+        # of publishing an omission that could discard its persisted state.
+        raise
+    except NotADirectoryError:
+        raise
+    except OSError:
+        return False
+
+
 def _tree_snapshot(entries: list[Path]) -> tuple[AlbumNode, ...]:
     nodes: list[AlbumNode] = []
     for entry in entries:
         if entry.name.casefold() in _RESERVED_NAMES:
             continue
-        try:
-            if not entry.is_dir():
-                continue
-        except OSError:
+        if not _snapshot_entry_is_dir(entry):
             continue
         title, has_manifest = _describe_album(entry)
         nodes.append(AlbumNode(entry, 1, title, has_manifest))
         children = sorted(entry.iterdir(), key=lambda item: item.name.casefold())
         for child in children:
-            if not child.is_dir() or child.name.casefold() in _RESERVED_NAMES:
+            if child.name.casefold() in _RESERVED_NAMES or not _snapshot_entry_is_dir(child):
                 continue
             child_title, child_manifest = _describe_album(child)
             nodes.append(AlbumNode(child, 2, child_title, child_manifest))
@@ -232,6 +244,12 @@ class _LibraryWatchWorker(QObject):
         # Native directory notifications can miss in-place writes to root files.
         self._emit_snapshot(changed_paths)
 
+    @Slot()
+    def refresh(self) -> None:
+        request = self._request
+        if request is not None:
+            self._emit_snapshot((request.root,))
+
     def _emit_snapshot(
         self, changed_paths: tuple[Path, ...], *, check_root_media: bool = True
     ) -> None:
@@ -328,6 +346,7 @@ class LibraryWatchService(QObject):
 
     resultReady = Signal(object)
     _configureRequested = Signal(object)
+    _refreshRequested = Signal()
     _cancelRequested = Signal(int)
     _shutdownRequested = Signal()
 
@@ -343,6 +362,7 @@ class LibraryWatchService(QObject):
         self._thread.started.connect(self._worker.initialize)
         self._thread.finished.connect(self._worker.deleteLater)
         self._configureRequested.connect(self._worker.configure)
+        self._refreshRequested.connect(self._worker.refresh)
         self._cancelRequested.connect(self._worker.cancel)
         self._shutdownRequested.connect(self._worker.shutdown)
         self._worker.resultReady.connect(self._forward_result)
@@ -385,6 +405,12 @@ class LibraryWatchService(QObject):
             self._cancelRequested.emit(self._generation)
         self._generation += 1
         self._configured_paths = ()
+
+    def refresh(self) -> None:
+        """Request fresh relocation hints without doing storage I/O in the caller."""
+
+        if not self._closed:
+            self._refreshRequested.emit()
 
     def shutdown(self) -> None:
         self._closed = True

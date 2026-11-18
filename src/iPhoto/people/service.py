@@ -588,6 +588,9 @@ class PeopleService:
         with journal.mutation_scope():
             if not journal.recover_pending():
                 return False
+            payload["source_annotation_key"] = FaceStateRepository(
+                paths.state_db_path
+            ).annotation_identity_key(source_kind, source_annotation_id)
             operation_id = journal.try_prepare("recognition_detection_assignment", payload)
             if operation_id is None:
                 return False

@@ -92,6 +92,8 @@ class FaceRepository:
         operation_kind: str = "people_scan_commit",
     ) -> None:
         self.initialize()
+        if self._state_repo is not None:
+            self._state_repo.backfill_annotation_identity_keys("person")
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM persons")
             conn.execute("DELETE FROM faces")
@@ -366,7 +368,9 @@ class FaceRepository:
                     )
                 face_id = str(payload.get("face_id") or "")
                 if face_id:
-                    self._state_repo.clear_annotation_identity_assignment("person", face_id)
+                    self._state_repo.clear_annotation_identity_assignment(
+                        "person", face_id, source_annotation_key=face_key or None
+                    )
             elif operation_kind == "people_move_face_new":
                 new_person_id = str(payload.get("new_person_id") or "")
                 new_name = payload.get("new_name")

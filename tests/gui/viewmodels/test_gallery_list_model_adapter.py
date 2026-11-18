@@ -740,6 +740,62 @@ def test_surface_snapshots_peek_their_own_bucket(adapter, mock_store, mock_thumb
     assert sizes == [QSize(512, 512), QSize(512, 512)]
 
 
+def test_album_rename_keeps_gallery_and_filmstrip_tiles_full_before_reload(
+    tmp_path: Path, mock_store,
+) -> None:
+    from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinatorRuntime
+
+    thumbnails = ThumbnailCacheService(tmp_path / "thumbs")
+    old, new = tmp_path / "Old", tmp_path / "New"
+    size = QSize(512, 512)
+    image = QImage(size, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.blue)
+    micro = image.scaled(QSize(16, 16))
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=old / "photo.jpg", micro_thumbnail=micro,
+    )
+    adapter = GalleryListModelAdapter(mock_store, thumbnails)
+    runtime = DesktopCoordinatorRuntime.__new__(DesktopCoordinatorRuntime)
+    runtime._thumbnail_service = thumbnails
+    runtime._context = MagicMock()
+    runtime._context.library.root.return_value = tmp_path
+    runtime._pinned_items_service = MagicMock()
+    runtime._gallery_vm = MagicMock()
+    try:
+        thumbnails._stage_result(ThumbnailLoadResult(
+            old / "photo.jpg", size, image, 0, ThumbnailRequestKind.VISIBLE,
+        ))
+        thumbnails._drain_publish_queue()
+        original = adapter.tile_snapshot(0).full_pixmap
+        assert original is not None
+
+        def check_pinned_refresh(*_args, **_kwargs):
+            assert thumbnails.peek_full_thumbnail(new / "photo.jpg", size) is original
+
+        def reopen_gallery(*_args):
+            mock_store.asset_at.return_value = _make_dto(
+                abs_path=new / "photo.jpg", micro_thumbnail=micro,
+                thumb_cache_key="renamed-disk-artifact", thumb_revision=None,
+            )
+            for surface_id in ("gallery", "filmstrip"):
+                snapshot = adapter.tile_snapshot(0, surface_id)
+                assert snapshot.loading_state == "full"
+                assert snapshot.full_pixmap is original
+                assert snapshot.full_pixmap.size() == size
+
+        runtime._pinned_items_service.remap_album_path.side_effect = check_pinned_refresh
+        runtime._gallery_vm.handle_album_renamed.side_effect = reopen_gallery
+        with patch.object(
+            thumbnails, "_load_or_render_thumbnail",
+            side_effect=AssertionError("a painted tile must not reload after rename"),
+        ):
+            runtime._on_album_renamed(old, new)
+        runtime._gallery_vm.handle_album_renamed.assert_called_once_with(old, new)
+    finally:
+        thumbnails.shutdown()
+
+
 def test_release_surface_discards_queued_window_and_hint_work(
     adapter,
     mock_store,

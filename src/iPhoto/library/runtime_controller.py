@@ -111,6 +111,7 @@ class LibraryRuntimeController(
         self._debounce.setInterval(500)
         self._pending_watch_paths: set[Path] = set()
         self._watch_scan_queue: list[tuple[Path, bool]] = []
+        self._watch_scan_relocation_roots: dict[Path, tuple[Path, ...]] = {}
         # ``_watch_suspend_depth`` tracks how many in-flight operations asked us to
         # ignore file-system notifications. We use a counter instead of a boolean
         # to correctly handle nested operations that may overlap (e.g., multiple
@@ -122,6 +123,7 @@ class LibraryRuntimeController(
         self._watch_service = LibraryWatchService(self)
         self._watch_service.resultReady.connect(self._on_background_watch_result)
         self._background_watch_generation = 0
+        self._background_watch_polling = False
 
         # Scanner State
         self._current_scanner_worker: Optional[ScannerWorker] = None
@@ -203,6 +205,7 @@ class LibraryRuntimeController(
         self._delivered_recognition_event_ids.clear()
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
+        self._watch_scan_relocation_roots.clear()
         self._root = Path(prepared.root)
         self._deleted_dir = None
         self._geotagged_assets_cache = None
@@ -229,6 +232,7 @@ class LibraryRuntimeController(
         storage_profile = getattr(prepared, "storage_profile", None)
         storage_kind = getattr(storage_profile, "kind", prepared.storage_kind)
         polling = storage_kind in {"network", "removable"} or prepared.storage_kind == "slow"
+        self._background_watch_polling = polling
         watch_paths = (self._root, *(node.path for node in self._nodes.values()))
         scan_service = self.scan_service
         self._background_watch_generation = self._watch_service.configure(
@@ -259,6 +263,7 @@ class LibraryRuntimeController(
         self._recognition_scans_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
+        self._watch_scan_relocation_roots.clear()
         self._face_scan_status_message = None
         self._pet_scan_status_message = None
         self._unbind_people_index_coordinator()
@@ -349,6 +354,7 @@ class LibraryRuntimeController(
         self._live_scan_root = None
         self._pending_watch_paths.clear()
         self._watch_scan_queue.clear()
+        self._watch_scan_relocation_roots.clear()
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         self._unbind_people_index_coordinator()
@@ -391,6 +397,43 @@ class LibraryRuntimeController(
             self.treeUpdated.emit()
         changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
+        removed = previous_paths - nodes.keys()
+        # Share a prune boundary for the subtree; the session still verifies
+        # each nested source album before removing any unmatched rows.
+        removed_scopes = sorted(
+            path for path in removed if not any(parent in removed for parent in path.parents)
+        )
+        added = nodes.keys() - previous_paths
+        # A newly added parent can contain the actual relocated album. Scan
+        # scopes may be deduplicated, but every added album is a relocation hint.
+        relocation_roots = tuple(sorted(added))
+        # Pending reconciliation may outlive more than one external rename.
+        # A fresh snapshot replaces vanished hints and retries deferred scopes.
+        pending_reconciliations = set(self._watch_scan_relocation_roots)
+        for path, candidates in self._watch_scan_relocation_roots.items():
+            self._watch_scan_relocation_roots[path] = tuple(sorted(
+                (set(candidates) | added) & nodes.keys()
+            ))
+        worker = self._current_scanner_worker
+        active_candidates = getattr(worker, "relocation_roots", None)
+        if added and active_candidates is not None:
+            # A dispatched worker already captured its hints. Cancel before its
+            # destructive step and retry through the same serialized scan queue.
+            path = worker.root
+            candidates = self._watch_scan_relocation_roots.get(path, ())
+            self._watch_scan_relocation_roots[path] = tuple(sorted(
+                (set(candidates) | set(active_candidates) | added) & nodes.keys()
+            ))
+            worker.cancel()
+            if path not in removed_scopes:
+                removed_scopes.append(path)
+        for path in removed_scopes:
+            self._watch_scan_relocation_roots.setdefault(path, relocation_roots)
+        # Missing scopes cannot pass the normal existing-directory deduplication.
+        # The scan worker revalidates them before applying scoped reconciliation.
+        reconcile_scopes = sorted(set(removed_scopes) | pending_reconciliations)
+        if reconcile_scopes:
+            self._queue_watcher_scan_roots(reconcile_scopes, rescan_after_active=True)
         self._start_watcher_scans(changed)
 
     def face_scan_status_message(self) -> str | None:
@@ -863,7 +906,7 @@ class LibraryRuntimeController(
             raise LibraryUnavailableError("Basic Library path has not been configured.")
         return self._root
 
-    def _refresh_tree(self) -> None:
+    def _refresh_tree(self, *, notify: bool = True) -> None:
         if self._root is None:
             self._albums = []
             self._children = {}
@@ -872,7 +915,8 @@ class LibraryRuntimeController(
             self._geotagged_assets_cache = None
             self._geotagged_assets_cache_root = None
             self._rebuild_watches()
-            self.treeUpdated.emit()
+            if notify:
+                self.treeUpdated.emit()
             return
         previous_albums = self._albums
         previous_children = self._children
@@ -907,7 +951,8 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache = None
         self._geotagged_assets_cache_root = None
         self._rebuild_watches()
-        self.treeUpdated.emit()
+        if notify:
+            self.treeUpdated.emit()
 
 
 __all__ = ["GeotaggedAsset", "LibraryRuntimeController"]

@@ -89,6 +89,12 @@ class ScannerWorker(QRunnable):
         return self._library_root
 
     @property
+    def relocation_roots(self) -> tuple[Path, ...] | None:
+        """Return reconciliation hints, or None when this is a normal scan."""
+
+        return self._relocation_roots if self._reconcile_missing_scope else None
+
+    @property
     def scan_service(self) -> LibraryScanService:
         """Return the session scan service used by this worker."""
 

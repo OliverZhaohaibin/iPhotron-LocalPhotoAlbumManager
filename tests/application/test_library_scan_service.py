@@ -222,6 +222,48 @@ def test_ambiguous_album_relocation_does_not_discard_user_state(tmp_path: Path) 
     assert store.get_rows_by_rels(["Old/photo.jpg"]) == before
 
 
+@pytest.mark.parametrize("source_has_nested_photo", [False, True])
+def test_nested_relocation_candidates_require_stronger_subtree_evidence(
+    tmp_path: Path, source_has_nested_photo: bool
+) -> None:
+    destination = tmp_path / "New"
+    nested = destination / "Nested"
+    nested.mkdir(parents=True)
+    for directory in (destination, nested):
+        (directory / "photo.jpg").write_bytes(b"identical media in separate albums")
+    asset_id = f"as_{compute_file_id(destination / 'photo.jpg')}"
+    source_rels = ["Old/photo.jpg"]
+    if source_has_nested_photo:
+        source_rels.append("Old/Nested/photo.jpg")
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": rel, "id": asset_id, "is_favorite": True, "location": rel}
+        for rel in source_rels
+    ])
+    before = store.get_rows_by_rels(source_rels)
+    service = LibraryScanService(tmp_path)
+
+    if source_has_nested_photo:
+        assert service.reconcile_missing_album_scope(
+            tmp_path / "Old", relocation_roots=(nested, destination)
+        )
+        assert not store.get_rows_by_rels(source_rels)
+        for rel in source_rels:
+            destination_rel = rel.replace("Old/", "New/", 1)
+            row = store.get_rows_by_rels([destination_rel])[destination_rel]
+            assert row["is_favorite"]
+            assert row["location"] == rel
+    else:
+        # The parent and child both match the only source photo; hierarchy alone
+        # cannot distinguish the actual moved album from a separate copy.
+        with pytest.raises(ValueError, match="Ambiguous relocated asset"):
+            service.reconcile_missing_album_scope(
+                tmp_path / "Old", relocation_roots=(nested, destination)
+            )
+        assert store.get_rows_by_rels(source_rels) == before
+        assert not store.get_rows_by_rels(["New/photo.jpg", "New/Nested/photo.jpg"])
+
+
 def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     library_root.mkdir()

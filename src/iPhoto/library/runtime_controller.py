@@ -400,11 +400,28 @@ class LibraryRuntimeController(
             path for path in removed if not any(parent in removed for parent in path.parents)
         )
         added = nodes.keys() - previous_paths
-        relocation_roots = tuple(sorted(
-            path for path in added if not any(parent in added for parent in path.parents)
-        ))
+        # A newly added parent can contain the actual relocated album. Scan
+        # scopes may be deduplicated, but every added album is a relocation hint.
+        relocation_roots = tuple(sorted(added))
+        # Pending reconciliation may outlive more than one external rename.
+        # Keep later destinations available until the source task starts.
+        for path, candidates in self._watch_scan_relocation_roots.items():
+            self._watch_scan_relocation_roots[path] = tuple(sorted(set(candidates) | added))
+        worker = self._current_scanner_worker
+        active_candidates = getattr(worker, "relocation_roots", None)
+        if added and active_candidates is not None:
+            # A dispatched worker already captured its hints. Cancel before its
+            # destructive step and retry through the same serialized scan queue.
+            path = worker.root
+            candidates = self._watch_scan_relocation_roots.get(path, ())
+            self._watch_scan_relocation_roots[path] = tuple(sorted(
+                set(candidates) | set(active_candidates) | added
+            ))
+            worker.cancel()
+            if path not in removed_scopes:
+                removed_scopes.append(path)
         for path in removed_scopes:
-            self._watch_scan_relocation_roots[path] = relocation_roots
+            self._watch_scan_relocation_roots.setdefault(path, relocation_roots)
         # Missing scopes cannot pass the normal existing-directory deduplication.
         # The scan worker revalidates them before applying scoped reconciliation.
         if removed_scopes:

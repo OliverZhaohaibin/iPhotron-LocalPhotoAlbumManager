@@ -495,6 +495,104 @@ def test_album_rename_preserves_state_when_an_older_scan_has_not_started(qapp, t
         controller.shutdown()
 
 
+def test_album_move_into_new_parent_preserves_local_state(qapp, tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    old = root / "Old"
+    old.mkdir()
+    Image.new("RGB", (16, 16), "red").save(old / "photo.jpg")
+    controller = LibraryRuntimeController()
+    try:
+        controller.bind_path(root)
+        repository = get_global_repository(root)
+        gps = {"lat": 52.5, "lon": 13.4}
+        repository.write_rows([{
+            "rel": "Old/photo.jpg", "id": f"as_{compute_file_id(old / 'photo.jpg')}",
+            "is_favorite": True, "gps": gps, "location": "Local place",
+        }])
+        controller._background_watch_generation = 1
+        parent = root / "Parent"
+        parent.mkdir()
+        destination = parent / "Old"
+        old.rename(destination)
+
+        with patch.object(controller._scan_thread_pool, "start", side_effect=lambda task: task.run()):
+            controller._on_background_watch_result(LibraryWatchResult(
+                1, (root,), (
+                    AlbumNode(parent, 1, "Parent", False),
+                    AlbumNode(destination, 2, "Old", False),
+                ),
+            ))
+
+        assert not repository.get_rows_by_rels(["Old/photo.jpg"])
+        row = repository.get_rows_by_rels(["Parent/Old/photo.jpg"])["Parent/Old/photo.jpg"]
+        assert row["is_favorite"]
+        assert row["gps"] == gps
+        assert row["location"] == "Local place"
+        assert row["thumbnail_state"] == "ready"
+        assert row["thumb_cache_key"]
+    finally:
+        controller.shutdown()
+
+
+@pytest.mark.parametrize("active_album", ["Old", "Other", None])
+@pytest.mark.parametrize("nested_destination", [False, True])
+def test_queued_album_reconciliation_follows_successive_renames(
+    qapp, tmp_path: Path, active_album: str | None, nested_destination: bool
+) -> None:
+    root = tmp_path.resolve()
+    old = root / "Old"
+    old.mkdir()
+    other = root / "Other"
+    other.mkdir()
+    Image.new("RGB", (16, 16), "red").save(old / "photo.jpg")
+    controller = LibraryRuntimeController()
+    try:
+        controller.bind_path(root)
+        repository = get_global_repository(root)
+        gps = {"lat": 52.5, "lon": 13.4}
+        repository.write_rows([{
+            "rel": "Old/photo.jpg", "id": f"as_{compute_file_id(old / 'photo.jpg')}",
+            "is_favorite": True, "gps": gps, "location": "Local place",
+        }])
+        controller._background_watch_generation = 1
+        other_node = AlbumNode(other, 1, "Other", False)
+        pending = []
+        with patch.object(controller._scan_thread_pool, "start", side_effect=pending.append):
+            if active_album is not None:
+                controller.start_scanning(root / active_album, ["*.jpg"], [])
+            temporary = root / "Temporary"
+            old.rename(temporary)
+            controller._on_background_watch_result(LibraryWatchResult(
+                1, (root,), (other_node, AlbumNode(temporary, 1, "Temporary", False)),
+            ))
+            parent = root / "Parent" if nested_destination else root
+            parent.mkdir(exist_ok=True)
+            destination = parent / "Final"
+            temporary.rename(destination)
+            nodes = [
+                other_node,
+                AlbumNode(destination, 2 if nested_destination else 1, "Final", False),
+            ]
+            if nested_destination:
+                nodes.append(AlbumNode(parent, 1, "Parent", False))
+            controller._on_background_watch_result(LibraryWatchResult(1, (root,), tuple(nodes)))
+            while pending:
+                pending.pop(0).run()
+
+        assert not old.exists()
+        assert not temporary.exists()
+        assert not repository.get_rows_by_rels(["Old/photo.jpg", "Temporary/photo.jpg"])
+        destination_rel = (destination / "photo.jpg").relative_to(root).as_posix()
+        row = repository.get_rows_by_rels([destination_rel])[destination_rel]
+        assert row["is_favorite"]
+        assert row["gps"] == gps
+        assert row["location"] == "Local place"
+        assert row["thumbnail_state"] == "ready"
+        assert row["thumb_cache_key"]
+    finally:
+        controller.shutdown()
+
+
 @pytest.mark.parametrize("root_only", [False, True])
 def test_queued_root_scan_does_not_recreate_an_unavailable_library(
     qapp, tmp_path: Path, root_only: bool

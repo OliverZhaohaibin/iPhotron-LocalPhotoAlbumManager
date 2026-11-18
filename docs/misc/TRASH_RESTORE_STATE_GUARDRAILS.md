@@ -22,6 +22,12 @@ This note protects Recently Deleted, restore metadata, and durable user state.
   location write jobs before pruning missing album rows. Match relative media
   paths and asset IDs derived from file content; filenames alone must not
   transfer user state.
+- Relocation hints must include newly discovered child albums, even when scan
+  scopes are deduplicated to their parents, and accumulate later destinations
+  while reconciliation is queued. Dispatched reconciliation must be cancelled
+  and retried with fresh hints when new destinations arrive. Nested hints may
+  be discarded only when an ancestor verifies strictly more of the same source
+  rows; tied matches stay ambiguous and retain source state.
 
 ## Focused Checks
 

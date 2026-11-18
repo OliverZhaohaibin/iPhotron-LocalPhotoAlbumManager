@@ -470,8 +470,9 @@ class LibraryScanService:
             if (relative := self._album_path(Path(candidate)))
             and RECENTLY_DELETED_DIR_NAME not in Path(relative).parts
         ]
-        destinations: dict[str, str] = {}
-        expected_ids: dict[str, str] = {}
+        verified_by_candidate: dict[Path, dict[str, str]] = {
+            candidate: {} for candidate in candidates
+        }
         for row in rows:
             if is_cancelled is not None and is_cancelled():
                 return True
@@ -480,19 +481,39 @@ class LibraryScanService:
             if not asset_id:
                 continue
             subpath = Path(source).relative_to(album_path)
-            matches = set()
             for candidate in candidates:
                 target = candidate / subpath
                 try:
                     if target.is_file() and f"as_{compute_file_id(target)}" == asset_id:
-                        matches.add(target.relative_to(self.library_root).as_posix())
+                        verified_by_candidate[candidate][source] = target.relative_to(
+                            self.library_root
+                        ).as_posix()
                 except (FileNotFoundError, NotADirectoryError):
                     continue
+        matches_by_source: dict[str, set[str]] = {}
+        for candidate, verified in verified_by_candidate.items():
+            # A renamed subtree also publishes its child albums as hints.
+            # Ignore a child mapping only when an ancestor explains strictly
+            # more of the same source rows. Equal or unrelated matches remain
+            # ambiguous rather than transferring choices to a possible copy.
+            if any(
+                verified.keys() < verified_by_candidate[parent].keys()
+                for parent in candidate.parents
+                if parent in verified_by_candidate
+            ):
+                continue
+            for source, destination in verified.items():
+                matches_by_source.setdefault(source, set()).add(destination)
+        destinations: dict[str, str] = {}
+        expected_ids: dict[str, str] = {}
+        for row in rows:
+            source = str(row["rel"])
+            matches = matches_by_source.get(source, set())
             if len(matches) > 1:
                 raise ValueError(f"Ambiguous relocated asset; retaining source state: {source}")
             if matches:
                 destinations[source] = matches.pop()
-                expected_ids[source] = asset_id
+                expected_ids[source] = str(row["id"])
         # Recheck after the read: a queued notification may outlive a rename or
         # temporary disappearance. A recreated scope must follow a normal scan.
         if not scope_is_missing():

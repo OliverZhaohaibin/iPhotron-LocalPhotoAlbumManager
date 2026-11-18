@@ -244,6 +244,12 @@ class _LibraryWatchWorker(QObject):
         # Native directory notifications can miss in-place writes to root files.
         self._emit_snapshot(changed_paths)
 
+    @Slot()
+    def refresh(self) -> None:
+        request = self._request
+        if request is not None:
+            self._emit_snapshot((request.root,))
+
     def _emit_snapshot(
         self, changed_paths: tuple[Path, ...], *, check_root_media: bool = True
     ) -> None:
@@ -340,6 +346,7 @@ class LibraryWatchService(QObject):
 
     resultReady = Signal(object)
     _configureRequested = Signal(object)
+    _refreshRequested = Signal()
     _cancelRequested = Signal(int)
     _shutdownRequested = Signal()
 
@@ -355,6 +362,7 @@ class LibraryWatchService(QObject):
         self._thread.started.connect(self._worker.initialize)
         self._thread.finished.connect(self._worker.deleteLater)
         self._configureRequested.connect(self._worker.configure)
+        self._refreshRequested.connect(self._worker.refresh)
         self._cancelRequested.connect(self._worker.cancel)
         self._shutdownRequested.connect(self._worker.shutdown)
         self._worker.resultReady.connect(self._forward_result)
@@ -397,6 +405,12 @@ class LibraryWatchService(QObject):
             self._cancelRequested.emit(self._generation)
         self._generation += 1
         self._configured_paths = ()
+
+    def refresh(self) -> None:
+        """Request fresh relocation hints without doing storage I/O in the caller."""
+
+        if not self._closed:
+            self._refreshRequested.emit()
 
     def shutdown(self) -> None:
         self._closed = True

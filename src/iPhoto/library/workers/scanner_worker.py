@@ -69,6 +69,7 @@ class ScannerWorker(QRunnable):
         self._scan_job_id: str | None = None
         self._scan_started_at_ms: int | None = None
         self.reconciled_missing_scope = False
+        self.reconciliation_deferred = False
 
     @property
     def root(self) -> Path:
@@ -142,13 +143,18 @@ class ScannerWorker(QRunnable):
                 relocation_options = (
                     {"relocation_roots": self._relocation_roots} if self._relocation_roots else {}
                 )
-                if callable(reconcile) and reconcile(
-                    self._root,
-                    is_cancelled=lambda: self._is_cancelled,
-                    **relocation_options,
-                ) is True:
-                    self.reconciled_missing_scope = True
-                    return
+                if callable(reconcile):
+                    reconciled = reconcile(
+                        self._root,
+                        is_cancelled=lambda: self._is_cancelled,
+                        **relocation_options,
+                    )
+                    if reconciled is None:
+                        self.reconciliation_deferred = True
+                        return
+                    if reconciled is True:
+                        self.reconciled_missing_scope = True
+                        return
             # An older queued scan may run after a rename but before the
             # watcher reconciliation that carries its destination hints.
             if self._finalize_scan and not self._root.is_dir():

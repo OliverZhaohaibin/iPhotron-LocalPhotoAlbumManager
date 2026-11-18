@@ -646,6 +646,12 @@ class ScanCoordinatorMixin:
             self.scanFinished.emit(root, False)
             self._start_next_deferred_scan()
             return
+        if getattr(worker, "reconciliation_deferred", False):
+            self._watch_scan_relocation_roots.setdefault(root, worker.relocation_roots or ())
+            self._watch_service.refresh()
+            self.scanFinished.emit(root, False)
+            self._start_next_deferred_scan()
+            return
 
         # A startup metadata scan only prepares the Gallery index.  People and
         # Pets are feature-scoped services and their model workers are started

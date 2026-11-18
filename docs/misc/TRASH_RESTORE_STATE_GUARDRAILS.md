@@ -32,6 +32,9 @@ This note protects Recently Deleted, restore metadata, and durable user state.
   and retried with fresh hints when new destinations arrive. Nested hints may
   be discarded only when an ancestor verifies strictly more of the same source
   rows; tied matches stay ambiguous and retain source state.
+- A relocation destination disappearing before or during verification invalidates
+  those hints. Retain every source row, request a fresh worker tree snapshot, and
+  retry the deferred source scope with current hints before pruning or migrating.
 - In-app album rename must commit indexed paths, Live Photo partners, pending
   location jobs, and completed scan scopes before the renamed album is opened.
   Move indexed thumbnail artifacts to fresh cache keys and retain ready state

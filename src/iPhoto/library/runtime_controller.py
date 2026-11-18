@@ -408,9 +408,12 @@ class LibraryRuntimeController(
         # scopes may be deduplicated, but every added album is a relocation hint.
         relocation_roots = tuple(sorted(added))
         # Pending reconciliation may outlive more than one external rename.
-        # Keep later destinations available until the source task starts.
+        # A fresh snapshot replaces vanished hints and retries deferred scopes.
+        pending_reconciliations = set(self._watch_scan_relocation_roots)
         for path, candidates in self._watch_scan_relocation_roots.items():
-            self._watch_scan_relocation_roots[path] = tuple(sorted(set(candidates) | added))
+            self._watch_scan_relocation_roots[path] = tuple(sorted(
+                (set(candidates) | added) & nodes.keys()
+            ))
         worker = self._current_scanner_worker
         active_candidates = getattr(worker, "relocation_roots", None)
         if added and active_candidates is not None:
@@ -419,7 +422,7 @@ class LibraryRuntimeController(
             path = worker.root
             candidates = self._watch_scan_relocation_roots.get(path, ())
             self._watch_scan_relocation_roots[path] = tuple(sorted(
-                set(candidates) | set(active_candidates) | added
+                (set(candidates) | set(active_candidates) | added) & nodes.keys()
             ))
             worker.cancel()
             if path not in removed_scopes:
@@ -428,8 +431,9 @@ class LibraryRuntimeController(
             self._watch_scan_relocation_roots.setdefault(path, relocation_roots)
         # Missing scopes cannot pass the normal existing-directory deduplication.
         # The scan worker revalidates them before applying scoped reconciliation.
-        if removed_scopes:
-            self._queue_watcher_scan_roots(removed_scopes, rescan_after_active=True)
+        reconcile_scopes = sorted(set(removed_scopes) | pending_reconciliations)
+        if reconcile_scopes:
+            self._queue_watcher_scan_roots(reconcile_scopes, rescan_after_active=True)
         self._start_watcher_scans(changed)
 
     def face_scan_status_message(self) -> str | None:

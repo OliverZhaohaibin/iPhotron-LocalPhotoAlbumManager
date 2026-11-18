@@ -739,3 +739,114 @@ def test_queued_root_scan_does_not_recreate_an_unavailable_library(
         assert not root.exists()
     finally:
         controller.shutdown()
+
+
+@pytest.mark.parametrize("nested_destination", [False, True])
+@pytest.mark.parametrize("delete_destination", [False, True])
+def test_album_reconciliation_waits_for_a_late_successive_rename_snapshot(
+    qapp, tmp_path: Path, nested_destination: bool, delete_destination: bool
+) -> None:
+    root = tmp_path.resolve()
+    old = root / "Old"
+    old.mkdir()
+    Image.new("RGB", (16, 16), "red").save(old / "photo.jpg")
+    controller = LibraryRuntimeController()
+    try:
+        controller.bind_path(root)
+        repository = get_global_repository(root)
+        gps = {"lat": 52.5, "lon": 13.4}
+        repository.write_rows([{
+            "rel": "Old/photo.jpg", "id": f"as_{compute_file_id(old / 'photo.jpg')}",
+            "is_favorite": True, "gps": gps, "location": "Manual location",
+        }])
+        before = repository.get_rows_by_rels(["Old/photo.jpg"])
+        controller._background_watch_generation = 1
+        pending = []
+        with (
+            patch.object(controller._scan_thread_pool, "start", side_effect=pending.append),
+            patch.object(controller._watch_service, "refresh") as refresh,
+        ):
+            temporary = root / "Temporary"
+            old.rename(temporary)
+            controller._on_background_watch_result(LibraryWatchResult(
+                1, (root,), (AlbumNode(temporary, 1, "Temporary", False),),
+            ))
+            parent = root / "Parent" if nested_destination else root
+            parent.mkdir(exist_ok=True)
+            destination = parent / "Final"
+            if delete_destination:
+                shutil.rmtree(temporary)
+            else:
+                temporary.rename(destination)
+            # The first worker runs before the next watcher snapshot arrives.
+            worker = pending.pop(0)
+            worker.run()
+            assert worker.reconciliation_deferred
+            assert not worker.failed
+            assert repository.get_rows_by_rels(before) == before
+            refresh.assert_called_once_with()
+
+            nodes = []
+            if not delete_destination:
+                nodes.append(AlbumNode(destination, 2 if nested_destination else 1, "Final", False))
+            if nested_destination:
+                nodes.append(AlbumNode(parent, 1, "Parent", False))
+            controller._on_background_watch_result(LibraryWatchResult(1, (root,), tuple(nodes)))
+            while pending:
+                pending.pop(0).run()
+
+        assert not repository.get_rows_by_rels(["Old/photo.jpg", "Temporary/photo.jpg"])
+        assert not controller._watch_scan_relocation_roots
+        if not delete_destination:
+            rel = (destination / "photo.jpg").relative_to(root).as_posix()
+            row = repository.get_rows_by_rels([rel])[rel]
+            assert row["is_favorite"]
+            assert row["gps"] == gps
+            assert row["location"] == "Manual location"
+            assert row["thumbnail_state"] == "ready"
+            assert row["thumb_cache_key"]
+    finally:
+        controller.shutdown()
+
+
+def test_deferred_reconciliation_refreshes_without_another_native_notification(
+    qapp, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    old = root / "Old"
+    old.mkdir()
+    Image.new("RGB", (16, 16), "red").save(old / "photo.jpg")
+    controller = LibraryRuntimeController()
+    watcher = _LibraryWatchWorker()
+    watcher._watcher = _FakeWatcher()  # type: ignore[assignment]
+    try:
+        controller.bind_path(root)
+        repository = get_global_repository(root)
+        repository.write_rows([{
+            "rel": "Old/photo.jpg", "id": f"as_{compute_file_id(old / 'photo.jpg')}",
+            "is_favorite": True, "location": "Manual location",
+        }])
+        controller._background_watch_generation = 1
+        watcher.resultReady.connect(controller._on_background_watch_result)
+        watcher.configure(LibraryWatchRequest(1, root, (root, old), False))
+        pending = []
+        with (
+            patch.object(controller._scan_thread_pool, "start", side_effect=pending.append),
+            patch.object(controller._watch_service, "refresh", side_effect=watcher.refresh) as refresh,
+        ):
+            temporary = root / "Temporary"
+            old.rename(temporary)
+            watcher._on_directory_changed(str(root))
+            temporary.rename(root / "Final")
+            while pending:
+                pending.pop(0).run()
+
+        refresh.assert_called_once_with()
+        assert not repository.get_rows_by_rels(["Old/photo.jpg", "Temporary/photo.jpg"])
+        row = repository.get_rows_by_rels(["Final/photo.jpg"])["Final/photo.jpg"]
+        assert row["is_favorite"]
+        assert row["location"] == "Manual location"
+        assert row["thumbnail_state"] == "ready"
+        assert not controller._watch_scan_relocation_roots
+    finally:
+        controller.shutdown()

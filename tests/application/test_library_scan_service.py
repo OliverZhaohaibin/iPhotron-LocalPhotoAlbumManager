@@ -202,6 +202,52 @@ def test_missing_album_reconciliation_only_relocates_matching_assets(
         assert not relocated
 
 
+@pytest.mark.parametrize("move_during_verification", [False, True])
+def test_missing_album_reconciliation_defers_when_a_destination_disappears(
+    tmp_path: Path, move_during_verification: bool
+) -> None:
+    old = tmp_path / "Old"
+    old.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        (old / name).write_bytes(name.encode())
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": f"Old/{name}", "id": f"as_{compute_file_id(old / name)}",
+         "is_favorite": True, "location": "Manual location"}
+        for name in ("a.jpg", "b.jpg")
+    ])
+    before = store.get_rows_by_rels(["Old/a.jpg", "Old/b.jpg"])
+    temporary = tmp_path / "Temporary"
+    final = tmp_path / "Final"
+    old.rename(temporary)
+    if not move_during_verification:
+        temporary.rename(final)
+
+    def move_after_hash(path: Path) -> str:
+        asset_id = compute_file_id(path)
+        temporary.rename(final)
+        return asset_id
+
+    service = LibraryScanService(tmp_path)
+    with patch.object(
+        scan_service_module, "compute_file_id",
+        side_effect=move_after_hash if move_during_verification else compute_file_id,
+    ):
+        assert service.reconcile_missing_album_scope(
+            old, relocation_roots=(temporary,)
+        ) is None
+
+    assert store.get_rows_by_rels(before) == before
+    assert not store.get_rows_by_rels([
+        "Temporary/a.jpg", "Temporary/b.jpg", "Final/a.jpg", "Final/b.jpg",
+    ])
+    assert service.reconcile_missing_album_scope(old, relocation_roots=(final,))
+    assert not store.get_rows_by_rels(before)
+    for row in store.get_rows_by_rels(["Final/a.jpg", "Final/b.jpg"]).values():
+        assert row["is_favorite"]
+        assert row["location"] == "Manual location"
+
+
 def test_ambiguous_album_relocation_does_not_discard_user_state(tmp_path: Path) -> None:
     candidates = [tmp_path / name for name in ("New", "Copy")]
     for candidate in candidates:

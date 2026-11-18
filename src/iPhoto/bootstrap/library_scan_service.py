@@ -479,8 +479,12 @@ class LibraryScanService:
         *,
         is_cancelled: Callable[[], bool] | None = None,
         relocation_roots: Iterable[Path] = (),
-    ) -> bool:
-        """Reconcile a missing scope, migrating verified renames before pruning."""
+    ) -> bool | None:
+        """Migrate verified renames before pruning a missing scope.
+
+        Return True for a handled scope, False when it needs a normal scan, or
+        None when stale relocation hints require a fresh watcher snapshot.
+        """
 
         scan_root = Path(root)
         album_path = self._album_path(scan_root)
@@ -520,6 +524,20 @@ class LibraryScanService:
             if (relative := self._album_path(Path(candidate)))
             and RECENTLY_DELETED_DIR_NAME not in Path(relative).parts
         ]
+
+        def candidates_are_available() -> bool:
+            for candidate in candidates:
+                try:
+                    if not stat.S_ISDIR(candidate.stat().st_mode):
+                        return False
+                except (FileNotFoundError, NotADirectoryError):
+                    return False
+            return True
+
+        # A hinted destination may move again before its watcher notification
+        # arrives. Missing hints invalidate the evidence for pruning source rows.
+        if rows and not candidates_are_available():
+            return None
         verified_by_scope: dict[tuple[Path, Path], dict[str, str]] = {}
         target_ids: dict[Path, str] = {}
         source_album = Path(album_path)
@@ -580,6 +598,8 @@ class LibraryScanService:
             raise AlbumNotFoundError(f"Library directory is unavailable: {self.library_root}")
         if is_cancelled is not None and is_cancelled():
             return True
+        if rows and not candidates_are_available():
+            return None
         if destinations:
             repository.relocate_rows(destinations, expected_asset_ids=expected_ids)
         remaining = [str(row["rel"]) for row in rows if row["rel"] not in destinations]

@@ -7,6 +7,8 @@ restore operations.
 
 - Apply optimistic UI updates only after the backend accepts and queues the
   operation.
+- Build move overlays and remove fallback selection rows only for the submitted
+  plan's sources. Skipped or rejected files must not acquire pending move state.
 - Delete/move/restore must preserve pending overlays across aggregate views,
   physical albums, favorites, videos, Recently Deleted, and deep windows.
 - Pending source rows must be hidden from source queries, and pending

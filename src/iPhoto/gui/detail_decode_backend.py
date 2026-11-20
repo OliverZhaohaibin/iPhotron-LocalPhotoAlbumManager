@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
-from PySide6.QtGui import QColorSpace, QImage, QImageReader
+from PySide6.QtGui import QColorSpace, QImage, QImageIOHandler, QImageReader, QTransform
 
 from iPhoto.core.color_resolver import ColorStats
 from iPhoto.core.raw_processor import is_raw_extension
@@ -341,7 +341,8 @@ class RawStillDecodeBackend:
                     thumb,
                     rawpy,
                     target,
-                    orientation=prepared.source_identity.orientation,
+                    orientation=_raw_orientation(raw, prepared.source_identity.orientation),
+                    display_size=raw_size,
                 )
                 emit_detail_event(
                     "raw_thumb_decode",
@@ -505,16 +506,11 @@ def probe_raw_source_identity(identity: AssetSourceIdentity) -> AssetSourceIdent
     try:
         with rawpy.imread(str(identity.path)) as raw:
             size = _raw_visible_size(raw, identity)
-            flip = _raw_flip(raw)
+            orientation = _raw_orientation(raw, identity.orientation)
     except Exception as exc:  # noqa: BLE001 - LibRaw exposes format-specific failures
         raise RuntimeError(f"Unable to probe RAW geometry: {exc}") from exc
     if size.isEmpty() or not size.isValid():
         raise RuntimeError("RAW decoder did not report valid source geometry")
-    orientation = identity.orientation
-    if flip in (5, 6):
-        orientation = 8 if flip == 5 else 6
-    elif flip == 3:
-        orientation = 3
     return AssetSourceIdentity.create(
         identity.path,
         size_bytes=identity.size_bytes,
@@ -531,6 +527,10 @@ def _raw_flip(raw: Any) -> int:
         return int(getattr(raw.sizes, "flip", 0) or 0)
     except (AttributeError, TypeError, ValueError):
         return 0
+
+
+def _raw_orientation(raw: Any, indexed_orientation: int) -> int:
+    return {3: 3, 5: 8, 6: 6}.get(_raw_flip(raw), indexed_orientation)
 
 
 def _raw_visible_size(raw: Any, identity: AssetSourceIdentity) -> QSize:
@@ -592,9 +592,11 @@ def _qimage_from_raw_thumb(
     target: QSize,
     *,
     orientation: int = 1,
+    display_size: QSize | None = None,
 ) -> QImage:
     if thumb is None:
         return QImage()
+    display = display_size or target
     if thumb.format == rawpy.ThumbFormat.JPEG:
         payload = QByteArray(bytes(thumb.data))
         buffer = QBuffer(payload)
@@ -604,22 +606,50 @@ def _qimage_from_raw_thumb(
             reader = QImageReader(buffer, b"JPEG")
             reader.setAutoTransform(True)
             intrinsic = reader.size()
+            embedded = reader.transformation()
+            transform = QTransform()
+            if embedded == QImageIOHandler.Transformation.TransformationNone:
+                transform = _raw_preview_transform(orientation, intrinsic, display)
             if intrinsic.isValid() and not intrinsic.isEmpty():
                 reader_target = target
-                if orientation in (5, 6, 7, 8):
-                    reader_target = QSize(target.height(), target.width())
+                if (
+                    transform.m12() != 0
+                    or embedded & QImageIOHandler.Transformation.TransformationRotate90
+                ):
+                    reader_target = target.transposed()
                 scaled = intrinsic.scaled(
                     reader_target,
                     Qt.AspectRatioMode.KeepAspectRatio,
                 )
                 if scaled.width() < intrinsic.width() or scaled.height() < intrinsic.height():
                     reader.setScaledSize(scaled)
-            return reader.read()
+            return reader.read().transformed(transform)
         finally:
             buffer.close()
     if thumb.format == rawpy.ThumbFormat.BITMAP:
-        return _qimage_from_array(thumb.data)
+        image = _qimage_from_array(thumb.data)
+        transform = _raw_preview_transform(orientation, image.size(), display)
+        return image.transformed(transform)
     return QImage()
+
+
+def _raw_preview_transform(
+    orientation: int, intrinsic: QSize, display: QSize
+) -> QTransform:
+    """Orient sensor-order pixels when the preview has no independent transform."""
+
+    transform = QTransform()
+    if orientation in (5, 6, 7, 8):
+        # Some cameras bake the quarter turn into the preview itself. Only
+        # non-square sizes distinguish the display axes from the sensor axes.
+        preview_axis = intrinsic.width() - intrinsic.height()
+        display_axis = display.width() - display.height()
+        if preview_axis * display_axis > 0:
+            return transform
+    if orientation in (2, 4, 5, 7):
+        transform.scale(-1, 1)
+    degrees = {3: 180, 4: 180, 5: 90, 6: 90, 7: -90, 8: -90}.get(orientation, 0)
+    return transform.rotate(degrees)
 
 
 def _postprocess_raw(raw: Any, *, half_size: bool) -> Any:

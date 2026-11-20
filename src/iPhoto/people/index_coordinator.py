@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -90,7 +91,7 @@ class PeopleIndexCoordinator(QObject):
         try:
             with self._journal.try_mutation_scope() as acquired:
                 if acquired and self._recover_operations_locked():
-                    self._repository().prune_synced_runtime_commits()
+                    self._prune_runtime_commits_locked()
         except Exception as exc:  # noqa: BLE001
             self._recovery_error = exc
             LOGGER.error(
@@ -732,8 +733,20 @@ class PeopleIndexCoordinator(QObject):
             },
             lambda: self._scheduleEmit.emit(event),
         )
-        if self._journal.unfinished_head() is None:
-            repository.prune_synced_runtime_commits()
+        self._prune_runtime_commits_locked(repository)
+
+    def _prune_runtime_commits_locked(self, repository: FaceRepository | None = None) -> None:
+        """Trim finalized markers on a best-effort basis under the mutation lease."""
+
+        try:
+            if self._journal.unfinished_head() is None:
+                (repository or self._repository()).prune_synced_runtime_commits()
+        except (sqlite3.Error, OSError):
+            LOGGER.warning(
+                "Could not prune finalized People runtime commits for %s",
+                self._library_root,
+                exc_info=True,
+            )
 
     def _reject_operation_locked(self, operation_id: str, error: str) -> None:
         self._journal.transition(operation_id, "finalized", error=error)

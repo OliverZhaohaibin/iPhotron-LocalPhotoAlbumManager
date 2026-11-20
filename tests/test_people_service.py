@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2691,6 +2692,45 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
     assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "done"
     assert repository.get_runtime_commit(pending.operation_id) is None
     assert repository.get_runtime_commit("newer") is not None
+
+
+def test_face_scan_worker_keeps_done_when_runtime_history_pruning_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    global_repo = get_global_repository(tmp_path)
+    global_repo.write_rows([
+        {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"},
+    ])
+    service = create_people_service(tmp_path)
+    try:
+        coordinator = service.coordinator
+        assert coordinator is not None
+        prune = Mock(side_effect=sqlite3.OperationalError("database is locked"))
+        monkeypatch.setattr(FaceRepository, "prune_synced_runtime_commits", prune)
+        pipeline = SimpleNamespace(
+            distance_threshold=0.6,
+            min_samples=2,
+            detect_faces_for_rows=Mock(return_value=[
+                DetectedAssetFaces(asset_id="asset-a", asset_rel="album/a.jpg", faces=[]),
+            ]),
+        )
+        monkeypatch.setattr(
+            "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
+            lambda **_kwargs: pipeline,
+        )
+        worker = FaceScanWorker(tmp_path, people_service=service)
+        worker.finish_input()
+
+        worker.run()
+
+        assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "done"
+        assert not coordinator.recovery_pending
+        prune.assert_called_once()
+        assert "Could not prune finalized People runtime commits" in caplog.text
+    finally:
+        service.shutdown()
 
 
 def test_face_scan_worker_does_not_mark_retry_after_committed_snapshot_error(

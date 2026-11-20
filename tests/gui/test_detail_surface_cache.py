@@ -219,11 +219,17 @@ def test_disk_store_uses_v3_sqlite_index(tmp_path: Path) -> None:
     assert (store.root / "index.sqlite3").is_file()
 
 
-def test_disk_store_misses_surfaces_from_old_imageio_decoder_contract(tmp_path: Path) -> None:
-    request = _request(tmp_path / "alpha.png")
+@pytest.mark.parametrize(
+    ("filename", "backend", "previous_contract"),
+    [("alpha.png", "imageio", 2), ("portrait.dng", "rawpy", 3), ("portrait.dng", "rawpy", 4)],
+)
+def test_disk_store_misses_surfaces_from_old_decoder_contract(
+    tmp_path: Path, filename: str, backend: str, previous_contract: int
+) -> None:
+    request = _request(tmp_path / filename)
     previous_store = NeutralSurfaceStore(tmp_path)
-    with patch.object(surface_cache_module, "_DECODE_SEMANTICS_CONTRACT", 2):
-        assert previous_store.write(request, replace(_surface(request), backend="imageio"))
+    with patch.object(surface_cache_module, "_DECODE_SEMANTICS_CONTRACT", previous_contract):
+        assert previous_store.write(request, replace(_surface(request), backend=backend))
         previous_store.close()
 
     current_store = NeutralSurfaceStore(tmp_path)

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -37,40 +40,86 @@ class RecognitionMutationOutcome[T]:
 
 @dataclass(slots=True)
 class _ExecutionLease:
-    lock: threading.RLock
+    identity: tuple[int, int] | Path
     references: int = 0
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    handlers_lock: threading.RLock = field(default_factory=threading.RLock)
+    _held: bool = False
+
+    @contextmanager
+    def try_hold_locked(self, path: Path) -> Iterator[bool]:
+        if self._held:
+            yield True
+            return
+        # A nonblocking OS lock spans commits to all recognition databases.
+        # Closing the handle or exiting the process releases it.
+        with path.open("a+b") as handle:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, 0)
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                yield False
+                return
+            self._held = True
+            try:
+                yield True
+            finally:
+                self._held = False
 
 
 RecoveryHandler = Callable[[RecognitionOperation], bool]
 EventSubscriber = Callable[[RecognitionOutboxEvent], None]
 
 
-_EXECUTION_LOCKS: dict[Path, _ExecutionLease] = {}
+_EXECUTION_LOCKS: dict[tuple[int, int] | Path, _ExecutionLease] = {}
 _EXECUTION_LOCKS_GUARD = threading.Lock()
+_LEASE_RETRY_SECONDS = 0.1
 
 
-def _acquire_execution_lease(library_root: Path) -> threading.RLock:
-    """Return the process-wide lifecycle lease for one recognition library."""
+def _reset_execution_leases_after_fork() -> None:
+    # POSIX record locks belong to the parent's PID. A child must acquire its
+    # own OS lock even when its spawning thread was inside a mutation.
+    global _EXECUTION_LOCKS_GUARD
+    _EXECUTION_LOCKS_GUARD = threading.Lock()
+    for lease in _EXECUTION_LOCKS.values():
+        lease.lock = threading.RLock()
+        lease.handlers_lock = threading.RLock()
+        lease._held = False
 
-    resolved = Path(library_root).resolve()
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_execution_leases_after_fork)
+
+
+def _acquire_execution_lease(library_root: Path) -> _ExecutionLease:
+    """Share thread reentrancy and an OS-backed lease for one library."""
+
+    # Case aliases must share one descriptor lifetime for POSIX record locks.
+    info = library_root.stat()
+    identity = (info.st_dev, info.st_ino) if info.st_ino else library_root
     with _EXECUTION_LOCKS_GUARD:
-        lease = _EXECUTION_LOCKS.get(resolved)
+        lease = _EXECUTION_LOCKS.get(identity)
         if lease is None:
-            lease = _ExecutionLease(threading.RLock())
-            _EXECUTION_LOCKS[resolved] = lease
+            lease = _ExecutionLease(identity)
+            _EXECUTION_LOCKS[identity] = lease
         lease.references += 1
-        return lease.lock
+        return lease
 
 
-def _release_execution_lease(library_root: Path) -> None:
-    resolved = Path(library_root).resolve()
+def _release_execution_lease(lease: _ExecutionLease) -> None:
     with _EXECUTION_LOCKS_GUARD:
-        lease = _EXECUTION_LOCKS.get(resolved)
-        if lease is None:
-            return
         lease.references -= 1
-        if lease.references <= 0:
-            _EXECUTION_LOCKS.pop(resolved, None)
+        if lease.references == 0:
+            _EXECUTION_LOCKS.pop(lease.identity)
 
 
 class RecognitionMutationCoordinator:
@@ -83,12 +132,12 @@ class RecognitionMutationCoordinator:
 
     def __init__(self, library_root: Path) -> None:
         self._library_root = Path(library_root).resolve()
-        self._journal = RecognitionOperationJournal(
-            ensure_work_dir(self._library_root) / "recognition" / "operations.db"
-        )
-        self._execution_lock = _acquire_execution_lease(self._library_root)
+        directory = ensure_work_dir(self._library_root) / "recognition"
+        directory.mkdir(exist_ok=True)
+        self._journal = RecognitionOperationJournal(directory / "operations.db")
+        self._lock_path = directory / "operations.lock"
+        self._lease = _acquire_execution_lease(self._library_root)
         self._closed = False
-        self._lock = threading.RLock()
         self._handlers: dict[str, list[RecoveryHandler]] = {}
         self._subscribers: list[EventSubscriber] = []
         self._recovery_error: Exception | None = None
@@ -107,9 +156,40 @@ class RecognitionMutationCoordinator:
 
     @property
     def execution_lock(self) -> threading.RLock:
-        """The shared lease that covers a mutation's complete apply lifecycle."""
+        """Serialize in-process lifecycle changes with writes."""
 
-        return self._execution_lock
+        return self._lease.lock
+
+    @contextmanager
+    def try_mutation_scope(self) -> Iterator[bool]:
+        """Return busy immediately when another process owns this library."""
+
+        with self.execution_lock:
+            if self._closed:
+                yield False
+                return
+            with self._lease.try_hold_locked(self._lock_path) as acquired:
+                if not acquired:
+                    self._recovery_error = BlockingIOError("Another process is updating recognition.")
+                yield acquired
+
+    @contextmanager
+    def wait_for_mutation_scope(self, *, is_cancelled: Callable[[], bool]) -> Iterator[bool]:
+        """Retry the lease for a background batch that has already run inference."""
+
+        lock = self.execution_lock
+        while not self._closed and not is_cancelled():
+            if not lock.acquire(timeout=_LEASE_RETRY_SECONDS):
+                continue
+            try:
+                with self.try_mutation_scope() as acquired:
+                    if acquired:
+                        yield not is_cancelled()
+                        return
+            finally:
+                lock.release()
+            time.sleep(_LEASE_RETRY_SECONDS)
+        yield False
 
     @contextmanager
     def mutation_scope(self) -> Iterator[None]:
@@ -121,9 +201,11 @@ class RecognitionMutationCoordinator:
         durable journal head.
         """
 
-        with self._execution_lock:
-            if self._closed:
-                raise RuntimeError("Recognition mutation coordinator is closed.")
+        with self.try_mutation_scope() as acquired:
+            if not acquired:
+                if self._closed:
+                    raise RuntimeError("Recognition mutation coordinator is closed.")
+                raise BlockingIOError("Another process is updating recognition.")
             yield
 
     def register_recovery_handler(
@@ -131,7 +213,7 @@ class RecognitionMutationCoordinator:
         kinds: set[str | RecognitionOperationKind],
         handler: RecoveryHandler,
     ) -> None:
-        with self._lock:
+        with self._lease.handlers_lock:
             if self._closed:
                 raise RuntimeError("Recognition mutation coordinator is closed.")
             for kind in kinds:
@@ -141,7 +223,7 @@ class RecognitionMutationCoordinator:
                     handlers.insert(0, handler)
 
     def subscribe(self, subscriber: EventSubscriber) -> None:
-        with self._lock:
+        with self._lease.handlers_lock:
             if self._closed:
                 raise RuntimeError("Recognition mutation coordinator is closed.")
             if subscriber not in self._subscribers:
@@ -149,7 +231,7 @@ class RecognitionMutationCoordinator:
         self.dispatch_pending()
 
     def unsubscribe(self, subscriber: EventSubscriber) -> None:
-        with self._lock:
+        with self._lease.handlers_lock:
             if subscriber in self._subscribers:
                 self._subscribers.remove(subscriber)
 
@@ -158,16 +240,18 @@ class RecognitionMutationCoordinator:
 
         if self._closed:
             return
-        with self._execution_lock, self._lock:
+        with self.execution_lock, self._lease.handlers_lock:
             if self._closed:
                 return
             self._handlers.clear()
             self._subscribers.clear()
             self._closed = True
-        _release_execution_lease(self._library_root)
+        _release_execution_lease(self._lease)
 
     def recover_pending(self) -> bool:
-        with self.mutation_scope(), self._lock:
+        with self.try_mutation_scope() as acquired, self._lease.handlers_lock:
+            if not acquired:
+                return False
             try:
                 while (operation := self._journal.unfinished_head()) is not None:
                     if operation.state == RecognitionOperationState.COMMITTED and self._subscribers:
@@ -181,6 +265,15 @@ class RecognitionMutationCoordinator:
                             f"{operation.kind}/{operation.operation_id}."
                         )
                         return False
+                    if operation.state == RecognitionOperationState.PREPARED:
+                        # Admission and the applying transition are separate durable
+                        # writes. Claim interrupted admission before replaying it.
+                        self.transition(
+                            operation.operation_id,
+                            RecognitionOperationState.APPLYING,
+                            expected_state=RecognitionOperationState.PREPARED,
+                        )
+                        continue
                     if not any(handler(operation) for handler in tuple(handlers)):
                         self._recovery_error = RuntimeError(
                             "Recognition operation recovery is incomplete for "
@@ -198,7 +291,9 @@ class RecognitionMutationCoordinator:
         kind: str | RecognitionOperationKind,
         payload: dict[str, Any],
     ) -> str | None:
-        with self.mutation_scope(), self._lock:
+        with self.try_mutation_scope() as acquired, self._lease.handlers_lock:
+            if not acquired:
+                return None
             operation_id = self._journal.try_prepare(kind, payload)
             if operation_id is None:
                 return None
@@ -250,7 +345,7 @@ class RecognitionMutationCoordinator:
     ) -> str:
         """Persist an event before delivery, then finalize its CAS acknowledgment."""
 
-        with self.mutation_scope(), self._lock:
+        with self.mutation_scope(), self._lease.handlers_lock:
             event_id = self._journal.commit_outbox(operation_id, event)
             dispatch()
             if not self._journal.mark_dispatched(operation_id):
@@ -266,19 +361,27 @@ class RecognitionMutationCoordinator:
             self._journal.mark_published(operation_id)
 
     def unfinished(self) -> tuple[RecognitionOperation, ...]:
-        with self.mutation_scope():
+        with self.execution_lock:
+            if self._closed:
+                raise RuntimeError("Recognition mutation coordinator is closed.")
             return self._journal.unfinished()
 
     def unfinished_head(self) -> RecognitionOperation | None:
-        with self.mutation_scope():
+        with self.execution_lock:
+            if self._closed:
+                raise RuntimeError("Recognition mutation coordinator is closed.")
             return self._journal.unfinished_head()
 
     def pending_events(self) -> tuple[RecognitionOutboxEvent, ...]:
-        with self.mutation_scope():
+        with self.execution_lock:
+            if self._closed:
+                raise RuntimeError("Recognition mutation coordinator is closed.")
             return self._journal.pending_events()
 
     def dispatch_pending(self) -> bool:
-        with self.mutation_scope(), self._lock:
+        with self.try_mutation_scope() as acquired, self._lease.handlers_lock:
+            if not acquired:
+                return False
             for event in self._journal.pending_events():
                 try:
                     for subscriber in tuple(self._subscribers):

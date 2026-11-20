@@ -91,20 +91,6 @@ hide_unused_pyside_assetdownloader() {
   echo "Temporarily hiding unused PySide Qt.labs.assetdownloader for Nuitka 4.0.x..."
 }
 
-find_built_app_bundle() {
-  local preferred_app="$OUTPUT_DIR/main.app"
-
-  if [[ -d "$preferred_app" ]]; then
-    printf '%s\n' "$preferred_app"
-    return
-  fi
-
-  local app_bundle
-  app_bundle="$(find "$OUTPUT_DIR" -maxdepth 3 -type d -name "*.app" -print -quit)"
-  [[ -n "$app_bundle" ]] || die "Nuitka did not produce a .app bundle under $OUTPUT_DIR"
-  printf '%s\n' "$app_bundle"
-}
-
 stage_map_tiles_into_app() {
   local app_bundle="$1"
   local app_macos_dir="$app_bundle/Contents/MacOS"
@@ -188,6 +174,7 @@ resign_app_bundle() {
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+ENTRY_SCRIPT="$ROOT_DIR/src/entrypoint.py"
 
 PYTHON_BIN="${PYTHON:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-dist}"
@@ -290,7 +277,7 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 
 require_command_or_path "$PYTHON_BIN"
-require_path "$ROOT_DIR/src/entrypoint.py"
+require_path "$ENTRY_SCRIPT"
 require_path "$ROOT_DIR/src/iPhoto/schemas"
 require_path "$ROOT_DIR/src/iPhoto/gui/ui/icon"
 require_path "$ROOT_DIR/src/iPhoto/gui/ui/qml"
@@ -448,13 +435,14 @@ fi
 
 nuitka_args+=("--macos-app-icon=$ICON_PATH")
 
-nuitka_args+=("$ROOT_DIR/src/entrypoint.py")
+nuitka_args+=("$ENTRY_SCRIPT")
 
 hide_unused_pyside_assetdownloader
 echo "Building macOS app bundle with Nuitka..."
 "$PYTHON_BIN" "${nuitka_args[@]}"
 
-APP_BUNDLE="$(find_built_app_bundle)"
+APP_BUNDLE="$OUTPUT_DIR/$(basename "$ENTRY_SCRIPT" .py).app"
+require_path "$APP_BUNDLE/Contents/MacOS/iPhotron"
 stage_map_tiles_into_app "$APP_BUNDLE"
 "$PYTHON_BIN" "$ROOT_DIR/scripts/sync_macos_map_extension.py" --repair-app-bundle "$APP_BUNDLE"
 resign_staged_map_runtime "$APP_BUNDLE"
@@ -472,5 +460,4 @@ resign_app_bundle "$APP_BUNDLE"
   --asset "$ROOT_DIR/src/iPhoto/resources/i18n" \
   --output "$OUTPUT_DIR/build-manifest.json"
 
-echo "Build complete. App bundles:"
-find "$OUTPUT_DIR" -maxdepth 3 -name "*.app" -print
+echo "Build complete: $APP_BUNDLE"

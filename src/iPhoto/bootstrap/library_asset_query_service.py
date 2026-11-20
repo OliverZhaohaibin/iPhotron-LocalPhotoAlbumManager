@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -23,12 +25,17 @@ from ..domain.models.query import (
     PageResult,
     SortDirection,
     SortOrder,
+    ThumbnailReadyResult,
+    ThumbnailState,
     WindowResult,
 )
 from ..domain.models.scan import ScanBatchCommitted
+from ..infrastructure.services.thumbnail_artifact import thumbnail_artifact_lock, thumbnail_revision
 from ..io.scanner_adapter import ensure_scan_thumbnail
 from ..path_normalizer import compute_album_path
 from ..utils.pathutils import ensure_work_dir
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class _CallbackSignal:
@@ -89,6 +96,7 @@ class LibraryAssetQueryService:
         self._thumbnail_backfill_lock = threading.Lock()
         self._thumbnail_backfill_pending: set[tuple[str, int, int, str]] = set()
         self._thumbnail_backfill_shutdown = False
+        self.thumbnail_ready_committed = _CallbackSignal()
         self.thumbnail_backfill_completed = _CallbackSignal()
         self.thumbnail_backfill_failed = _CallbackSignal()
         self.thumbnail_backfill_progress = _CallbackSignal()
@@ -412,23 +420,26 @@ class LibraryAssetQueryService:
         update_thumbnail_ready = getattr(repository, "update_thumbnail_ready", None)
         if not callable(update_thumbnail_ready):
             return 0
-        if self._thumbnail_backfill_shutdown or not self._can_use_collection_api(query):
+        if not self._can_use_collection_api(query):
             return 0
 
         request_key = (root.as_posix(), max(0, int(first)), max(0, int(limit)), repr(query))
         with self._thumbnail_backfill_lock:
-            if request_key in self._thumbnail_backfill_pending:
+            if self._thumbnail_backfill_shutdown or request_key in self._thumbnail_backfill_pending:
                 return 0
             self._thumbnail_backfill_pending.add(request_key)
-
-        self._thumbnail_backfill_executor.submit(
-            self._discover_and_run_thumbnail_backfill,
-            request_key,
-            Path(root),
-            copy.deepcopy(query),
-            max(0, int(first)),
-            max(0, int(limit)),
-        )
+            try:
+                self._thumbnail_backfill_executor.submit(
+                    self._discover_and_run_thumbnail_backfill,
+                    request_key,
+                    Path(root),
+                    copy.deepcopy(query),
+                    request_key[1],
+                    request_key[2],
+                )
+            except Exception:
+                self._thumbnail_backfill_pending.discard(request_key)
+                raise
         return 1
 
     def thumbnail_backfill_pending(self) -> bool:
@@ -440,92 +451,114 @@ class LibraryAssetQueryService:
     def shutdown(self) -> None:
         """Stop background thumbnail backfill work during session teardown."""
 
-        self._thumbnail_backfill_shutdown = True
-        self._thumbnail_backfill_executor.shutdown(wait=False, cancel_futures=True)
         with self._thumbnail_backfill_lock:
+            self._thumbnail_backfill_shutdown = True
             self._thumbnail_backfill_pending.clear()
+        self._thumbnail_backfill_executor.shutdown(wait=False, cancel_futures=True)
 
     def _run_thumbnail_backfill(
         self,
-        request_key: tuple[str, int, int, str],
         root: Path,
         album_path: str | None,
         candidates: list[dict[str, Any]],
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         repository = self._repository()
-        update_thumbnail_ready = getattr(repository, "update_thumbnail_ready", None)
-        if not callable(update_thumbnail_ready):
-            with self._thumbnail_backfill_lock:
-                self._thumbnail_backfill_pending.discard(request_key)
-            return
-        try:
-            ready_rows: list[dict[str, Any]] = []
-            total = len(candidates)
-            for index, row in enumerate(candidates, start=1):
-                view_rel = row.get("rel")
-                if not isinstance(view_rel, str) or not view_rel:
-                    self.thumbnail_backfill_progress.emit(root, index, total)
-                    continue
-                library_rel = f"{album_path}/{view_rel}" if album_path else view_rel
-                abs_path = root / view_rel
-                thumbnail = ensure_scan_thumbnail(
-                    abs_path,
-                    str(row.get("id") or library_rel),
-                    thumbnail_cache_dir=self._thumbnail_cache_dir(),
-                    prefer_cached_micro=True,
-                    refresh_cache=str(row.get("thumbnail_state") or "") == "stale",
-                    expected_revision=str(row.get("thumb_revision") or "") or None,
-                )
-                row_revision = str(row.get("thumb_revision") or "") or None
-                rendered_revision = getattr(thumbnail, "thumb_revision", None)
-                if thumbnail.thumb_error:
-                    if not str(row.get("thumb_cache_key") or "").strip():
-                        error_kwargs: dict[str, Any] = {
-                            "error": thumbnail.thumb_error
-                        }
-                        if row_revision is not None:
-                            error_kwargs["expected_revision"] = row_revision
-                        update_thumbnail_ready(library_rel, **error_kwargs)
-                    self.thumbnail_backfill_progress.emit(root, index, total)
-                    continue
-                ready_kwargs: dict[str, Any] = {
-                    "micro_thumbnail": thumbnail.micro_thumbnail,
-                    "thumb_cache_key": thumbnail.thumb_cache_key,
-                }
-                if rendered_revision is not None:
-                    ready_kwargs["expected_revision"] = rendered_revision
-                published = bool(
-                    update_thumbnail_ready(library_rel, **ready_kwargs)
-                )
-                if not published:
-                    self.thumbnail_backfill_progress.emit(root, index, total)
-                    continue
-                ready_row = dict(row)
-                ready_row["thumbnail_state"] = "ready"
-                ready_row["micro_thumbnail"] = thumbnail.micro_thumbnail
-                ready_row["thumb_cache_key"] = thumbnail.thumb_cache_key
-                ready_row["thumb_revision"] = rendered_revision or row_revision
-                ready_row["thumb_error"] = None
-                ready_rows.append(ready_row)
+        ready_rows: list[dict[str, Any]] = []
+        total = len(candidates)
+        for index, row in enumerate(candidates, start=1):
+            if self._thumbnail_backfill_shutdown:
+                break
+            view_rel = row.get("rel")
+            if not isinstance(view_rel, str) or not view_rel:
                 self.thumbnail_backfill_progress.emit(root, index, total)
-            batch = ScanBatchCommitted(
-                job_id=(
-                    "thumbnail-backfill:"
-                    f"{request_key[0]}:{request_key[1]}:{request_key[2]}"
-                ),
-                root=root,
-                collection_revision=0,
-                ready_count=len(ready_rows),
-                rows=ready_rows,
-                stage_elapsed_ms={},
+                continue
+            library_rel = f"{album_path}/{view_rel}" if album_path else view_rel
+            asset_path = root / view_rel
+            asset_id = str(row.get("id") or "")
+            row_revision = str(row.get("thumb_revision") or "") or None
+            thumbnail = ensure_scan_thumbnail(
+                asset_path,
+                asset_id or library_rel,
+                thumbnail_cache_dir=self._thumbnail_cache_dir(),
+                prefer_cached_micro=True,
+                refresh_cache=row.get("thumbnail_state") == "stale",
+                expected_revision=row_revision,
             )
-            with self._thumbnail_backfill_lock:
-                should_emit = not self._thumbnail_backfill_shutdown
-            if should_emit:
-                self.thumbnail_backfill_completed.emit(batch)
-        finally:
-            with self._thumbnail_backfill_lock:
-                self._thumbnail_backfill_pending.discard(request_key)
+            if self._thumbnail_backfill_shutdown:
+                break
+            row_guard = {
+                "expected_asset_id": asset_id,
+                "expected_index_revision": int(row["index_revision"] or 0) if "index_revision" in row else None,
+            }
+            if thumbnail.thumb_error:
+                if not str(row.get("thumb_cache_key") or "").strip():
+                    repository.update_thumbnail_ready(
+                        library_rel, error=thumbnail.thumb_error,
+                        expected_revision=row_revision, **row_guard,
+                    )
+            else:
+                rendered_revision = getattr(thumbnail, "thumb_revision", None) or row_revision
+                published = repository.update_thumbnail_ready(
+                    library_rel, micro_thumbnail=thumbnail.micro_thumbnail,
+                    thumb_cache_key=thumbnail.thumb_cache_key,
+                    expected_revision=rendered_revision, **row_guard,
+                )
+                if not published and asset_id and rendered_revision:
+                    published = self._retry_failed_thumbnail_backfill(
+                        repository, asset_path, library_rel,
+                        asset_id=asset_id, revision=rendered_revision, thumbnail=thumbnail,
+                    )
+                if published:
+                    ready_rows.append({
+                        **row,
+                        "thumbnail_state": "ready",
+                        "micro_thumbnail": thumbnail.micro_thumbnail,
+                        "thumb_cache_key": thumbnail.thumb_cache_key,
+                        "thumb_revision": rendered_revision,
+                        "thumb_error": None,
+                    })
+            self.thumbnail_backfill_progress.emit(root, index, total)
+        return ready_rows
+
+    def _retry_failed_thumbnail_backfill(
+        self,
+        repository: AssetRepositoryPort,
+        asset_path: Path,
+        library_rel: str,
+        *,
+        asset_id: str,
+        revision: str,
+        thumbnail: ThumbnailReadyResult,
+    ) -> bool:
+        """Publish a valid result after another job recorded a decode failure."""
+
+        current = repository.get_rows_by_rels([library_rel]).get(library_rel)
+        if (
+            current is None
+            or current.get("id") != asset_id
+            or current.get("thumbnail_state") != ThumbnailState.FAILED.value
+            or current.get("thumb_revision") not in (None, revision)
+        ):
+            return False
+
+        # A legacy failed row may have no recorded revision. Recheck the source
+        # and sidecar against the rendered result before retrying the row CAS.
+        with thumbnail_artifact_lock(asset_path):
+            if self._thumbnail_backfill_shutdown or thumbnail_revision(asset_path) != revision:
+                return False
+            return repository.update_thumbnail_ready(
+                library_rel,
+                micro_thumbnail=thumbnail.micro_thumbnail,
+                thumb_cache_key=thumbnail.thumb_cache_key,
+                expected_revision=revision,
+                expected_asset_id=asset_id,
+                expected_index_revision=int(current.get("index_revision") or 0),
+            )
+
+    def _finish_thumbnail_backfill_request(self, request_key: tuple[str, int, int, str]) -> bool:
+        with self._thumbnail_backfill_lock:
+            self._thumbnail_backfill_pending.discard(request_key)
+            return not self._thumbnail_backfill_shutdown
 
     def _discover_and_run_thumbnail_backfill(
         self,
@@ -537,26 +570,31 @@ class LibraryAssetQueryService:
     ) -> None:
         """Discover and process old-library micro gaps away from the Gallery loader."""
 
-        with self._thumbnail_backfill_lock:
-            if self._thumbnail_backfill_shutdown:
-                self._thumbnail_backfill_pending.discard(request_key)
-                return
+        if self._thumbnail_backfill_shutdown:
+            return
+        started = False
         try:
             candidates = self.read_thumbnail_backfill_candidates(root, query, first, limit)
+            if self._thumbnail_backfill_shutdown:
+                return
+            started = True
             self.thumbnail_backfill_progress.emit(root, 0, len(candidates))
-            self._run_thumbnail_backfill(
-                request_key,
-                root,
-                self.album_path_for(root),
-                candidates,
-            )
+            ready_rows = self._run_thumbnail_backfill(root, self.album_path_for(root), candidates)
         except Exception as exc:
-            with self._thumbnail_backfill_lock:
-                self._thumbnail_backfill_pending.discard(request_key)
-                should_emit = not self._thumbnail_backfill_shutdown
-            if should_emit:
+            if self._finish_thumbnail_backfill_request(request_key):
+                if not started:
+                    self.thumbnail_backfill_progress.emit(root, 0, 0)
                 self.thumbnail_backfill_failed.emit(root, str(exc))
             raise
+        if self._finish_thumbnail_backfill_request(request_key):
+            self.thumbnail_backfill_completed.emit(ScanBatchCommitted(
+                job_id=f"thumbnail-backfill:{request_key[0]}:{first}:{limit}",
+                root=root,
+                collection_revision=0,
+                ready_count=len(ready_rows),
+                rows=ready_rows,
+                stage_elapsed_ms={},
+            ))
 
     def find_row_by_path(self, query: CollectionQuery | AssetQuery, path: Path) -> int | None:
         """Locate *path* in a collection without materialising every row."""
@@ -624,17 +662,39 @@ class LibraryAssetQueryService:
         cache_key: str,
         micro_thumbnail: bytes,
     ) -> bool:
-        updater = getattr(self._repository(), "update_thumbnail_ready", None)
+        if self._thumbnail_backfill_shutdown:
+            return False
+        repository = self._repository()
+        updater = getattr(repository, "update_thumbnail_ready", None)
         if not callable(updater):
             return False
-        return bool(
-            updater(
-                self._library_relative_path(path),
-                micro_thumbnail=micro_thumbnail,
-                thumb_cache_key=cache_key,
-                expected_revision=revision,
-            )
+        rel = unicodedata.normalize("NFC", self._library_relative_path(path))
+        published = updater(
+            rel,
+            micro_thumbnail=micro_thumbnail,
+            thumb_cache_key=cache_key,
+            expected_revision=revision,
         )
+        if published and not self._thumbnail_backfill_shutdown:
+            try:
+                row = repository.get_rows_by_rels([rel]).get(rel)
+                if (
+                    row is not None
+                    and row.get("thumbnail_state") == ThumbnailState.READY.value
+                    and row.get("thumb_cache_key") == cache_key
+                    and row.get("thumb_revision") == revision
+                ):
+                    self.thumbnail_ready_committed.emit(ScanBatchCommitted(
+                        job_id="thumbnail-ready",
+                        root=self.library_root,
+                        collection_revision=0,
+                        ready_count=1,
+                        rows=[row],
+                        stage_elapsed_ms={},
+                    ))
+            except Exception:
+                _LOGGER.exception("Could not notify Gallery of committed thumbnail readiness")
+        return bool(published)
 
     def location_cache_writer(self, root: Path) -> _ScopedLocationCacheWriter:
         """Return an object compatible with legacy asset-entry location writes."""

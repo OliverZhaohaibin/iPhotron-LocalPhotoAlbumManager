@@ -41,8 +41,7 @@ from ..index_sync_service import (
     update_index_snapshot,
 )
 from ..infrastructure.services.filesystem_media_scanner import FilesystemMediaScanner
-from ..domain.models.scan import ScanStage
-from ..domain.models.scan import ScanBatchCommitted
+from ..domain.models.scan import ScanBatchCommitted, ScanStage, scan_job_completed
 from ..io.scanner_adapter import process_media_paths
 from ..media_classifier import ALL_IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ..path_normalizer import compute_album_path
@@ -167,7 +166,6 @@ class LibraryScanService:
                 rows = self.finalize_scan_result(
                     scan_root,
                     result.rows,
-                    pair_live=False,
                     preserve_modified_after_ms=result.scan_started_at_ms,
                     current_scan_job_id=result.scan_job_id,
                 )
@@ -392,7 +390,9 @@ class LibraryScanService:
             self.sync_manifest_favorites(Path(root))
         return rows
 
-    def finalize_scan(self, root: Path, rows: Iterable[dict[str, Any]]) -> None:
+    def finalize_scan(
+        self, root: Path, rows: Iterable[dict[str, Any]], *, pair_live: bool = True,
+    ) -> None:
         """Persist additive scan side effects after a successful scan."""
 
         with self._album_path_lock:
@@ -407,7 +407,8 @@ class LibraryScanService:
                 library_root=self.library_root,
                 repository=repository,
             )
-            self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
+            if pair_live:
+                self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
 
     def finalize_scan_result(
         self,
@@ -419,6 +420,7 @@ class LibraryScanService:
         preserve_modified_after_ms: int | None = None,
         current_scan_job_id: str | None = None,
         root_only: bool = False,
+        watched_albums: frozenset[Path] = frozenset(),
     ) -> list[dict[str, Any]]:
         """Persist scan completion side effects for one scope.
 
@@ -452,7 +454,7 @@ class LibraryScanService:
                 # A partial snapshot cannot replace the library index or links.
                 self._repository().merge_scan_rows(materialized_rows)
             else:
-                self.finalize_scan(scan_root, materialized_rows)
+                self.finalize_scan(scan_root, materialized_rows, pair_live=False)
             lifecycle_service.reconcile_missing_scan_rows(
                 scan_root,
                 materialized_rows,
@@ -460,6 +462,7 @@ class LibraryScanService:
                 preserve_modified_after_ms=preserve_modified_after_ms,
                 current_scan_job_id=current_scan_job_id,
                 root_only=root_only,
+                watched_albums=watched_albums,
             )
             if pair_live:
                 if root_only:
@@ -670,7 +673,7 @@ class LibraryScanService:
             )
 
         latest = self._newer_scan_job(exact, covering)
-        return self._scan_job_completed(latest)
+        return scan_job_completed(latest)
 
     def scan_specific_files(
         self,
@@ -1002,12 +1005,6 @@ class LibraryScanService:
         if self._album_path(scan_root):
             return self.library_root / rel
         return scan_root / rel
-
-    @staticmethod
-    def _scan_job_completed(job: dict[str, Any] | None) -> bool:
-        if not job:
-            return False
-        return str(job.get("status") or "") == "completed" and job.get("finished_at") is not None
 
     @staticmethod
     def _newer_scan_job(

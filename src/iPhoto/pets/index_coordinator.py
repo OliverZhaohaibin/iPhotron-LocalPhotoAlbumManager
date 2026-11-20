@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, Qt, QTimer, Signal, Slot
 
 from iPhoto.application.ports.pets import PetAssetRepositoryPort
 from iPhoto.recognition.assignment_recovery import (
@@ -40,6 +40,7 @@ from .scan_session import PetScanSession
 from .status import PET_STATUS_DONE, PET_STATUS_FAILED, PET_STATUS_PENDING, PET_STATUS_RETRY
 
 LOGGER = get_logger()
+_PeopleBoxes = dict[str, tuple[tuple[int, int, int, int], ...]]
 
 _PET_JOURNAL_KINDS = {
     "pet_scan_commit",
@@ -99,7 +100,6 @@ class PetIndexCoordinator(QObject):
             self._library_root
         )
         self._owns_journal = mutation_coordinator is None
-        self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PET_JOURNAL_KINDS,
             self._recover_registered_pet_operation,
@@ -111,10 +111,18 @@ class PetIndexCoordinator(QObject):
         )
         self._pet_repository.initialize()
         self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
+        self._pending_overlap_asset_ids: set[str] = set()
+        self._pending_people_boxes: Callable[[Iterable[str]], _PeopleBoxes] | None = None
+        self._overlap_retry = QTimer(self)
+        self._overlap_retry.setSingleShot(True)
+        self._overlap_retry.setInterval(200)
+        self._overlap_retry.timeout.connect(self._retry_people_overlap_reconciliation)
         self._recovery_error: Exception | None = None
         self._last_mutation_failure: PetMutationFailure | None = None
         try:
-            with self._lock:
+            with self._journal.try_mutation_scope() as acquired:
+                if not acquired:
+                    return
                 if not self._journal.recover_pending():
                     raise self._journal.recovery_error or RuntimeError(
                         "Pets recognition recovery is incomplete."
@@ -144,7 +152,7 @@ class PetIndexCoordinator(QObject):
         self,
         asset_repository: PetAssetRepositoryPort | None,
     ) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._asset_repository = asset_repository
 
     def submit_detected_batch(
@@ -167,8 +175,8 @@ class PetIndexCoordinator(QObject):
         if not detected_batch:
             return None
 
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -399,8 +407,8 @@ class PetIndexCoordinator(QObject):
     def rename_pet(self, pet_id: str, name_or_none: str | None) -> PetSnapshotEvent | None:
         if not pet_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -427,8 +435,8 @@ class PetIndexCoordinator(QObject):
     def set_pet_hidden(self, pet_id: str, hidden: bool) -> bool:
         if not pet_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             if not self._ensure_recovered_locked():
                 return False
@@ -457,8 +465,8 @@ class PetIndexCoordinator(QObject):
     def set_pet_cover(self, pet_id: str, detection_id: str) -> bool:
         if not pet_id or not detection_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             if not self._ensure_recovered_locked():
                 return False
@@ -485,10 +493,10 @@ class PetIndexCoordinator(QObject):
             return changed
 
     def merge_pets(self, source_pet_id: str, target_pet_id: str) -> PetMergeOutcome:
-        with self._lock:
+        with self._journal.try_mutation_scope() as acquired:
             if self._shutdown_requested:
                 return PetMergeOutcome(False, PetMutationFailure.SHUTTING_DOWN)
-            if not self._ensure_recovered_locked():
+            if not acquired or not self._ensure_recovered_locked():
                 return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -532,8 +540,8 @@ class PetIndexCoordinator(QObject):
     def prepare_clustering_pipeline(self, *, clustering_pipeline_target: str) -> int:
         """Durably queue an upgrade without running clustering before scan drain."""
 
-        with self._lock:
-            if self._shutdown_requested or not self._ensure_recovered_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._ensure_recovered_locked():
                 return 0
             return self._repository().prepare_clustering_pipeline(
                 target_version=clustering_pipeline_target
@@ -544,8 +552,8 @@ class PetIndexCoordinator(QObject):
         *,
         clustering_pipeline_target: str,
     ) -> bool:
-        with self._lock:
-            if self._shutdown_requested or not self._ensure_recovered_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._ensure_recovered_locked():
                 return False
             return self._repository().has_pending_clustering_consolidation(
                 target_version=clustering_pipeline_target
@@ -560,8 +568,8 @@ class PetIndexCoordinator(QObject):
     ) -> PetClusteringConsolidationResult | None:
         """Consolidate only components reachable from durable pending seeds."""
 
-        with self._lock:
-            if self._shutdown_requested or not self._ensure_recovered_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
             if not repository.has_pending_clustering_consolidation(
@@ -639,8 +647,8 @@ class PetIndexCoordinator(QObject):
             return result
 
     def delete_detection(self, detection_id: str) -> PetSnapshotEvent | None:
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -668,9 +676,52 @@ class PetIndexCoordinator(QObject):
                 changed_pet_ids=result.changed_pet_ids,
             )
 
+    def reconcile_people_overlaps_when_available(
+        self,
+        asset_ids: Iterable[str],
+        people_boxes_provider: Callable[[Iterable[str]], _PeopleBoxes],
+    ) -> PetSnapshotEvent | None:
+        """Keep People changes pending through transient lease contention."""
+
+        if self._shutdown_requested:
+            return None
+        self._pending_overlap_asset_ids.update(asset_ids)
+        self._pending_people_boxes = people_boxes_provider
+        if self._overlap_retry.isActive():
+            return None
+        return self._reconcile_pending_people_overlaps()
+
+    @Slot()
+    def _retry_people_overlap_reconciliation(self) -> None:
+        try:
+            self._reconcile_pending_people_overlaps()
+        except Exception:
+            LOGGER.exception(
+                "Failed to reconcile People-priority pet detections for %s", self._library_root,
+            )
+
+    def _reconcile_pending_people_overlaps(self) -> PetSnapshotEvent | None:
+        provider = self._pending_people_boxes
+        if self._shutdown_requested or not self._pending_overlap_asset_ids or provider is None:
+            return None
+        with self._journal.try_mutation_scope() as acquired:
+            if self._shutdown_requested:
+                return None
+            if not acquired:
+                self._overlap_retry.start()
+                return None
+            if not self._ensure_recovered_locked():
+                return None
+            asset_ids = tuple(sorted(self._pending_overlap_asset_ids))
+            event = self._reconcile_people_overlaps_locked(provider(asset_ids))
+            self._pending_overlap_asset_ids.difference_update(asset_ids)
+            if not self._pending_overlap_asset_ids:
+                self._pending_people_boxes = None
+            return event
+
     def reconcile_people_overlaps(
         self,
-        people_boxes_by_asset_id: dict[str, tuple[tuple[int, int, int, int], ...]],
+        people_boxes_by_asset_id: _PeopleBoxes,
         *,
         distance_threshold: float = DEFAULT_PET_DISTANCE_THRESHOLD,
     ) -> PetSnapshotEvent | None:
@@ -678,88 +729,95 @@ class PetIndexCoordinator(QObject):
 
         if not people_boxes_by_asset_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
-            repository = self._repository()
-            scoped_asset_ids = tuple(people_boxes_by_asset_id)
-            previous_detections = repository.get_detections_by_asset_ids(scoped_asset_ids)
-            removed = []
-            for detection in previous_detections:
-                overlap_decision = _pet_people_overlap_decision(
-                    (
-                        detection.box_x,
-                        detection.box_y,
-                        detection.box_w,
-                        detection.box_h,
-                    ),
-                    people_boxes_by_asset_id.get(detection.asset_id, ()),
-                    image_dimensions=(
-                        detection.image_width,
-                        detection.image_height,
-                    ),
-                )
-                if not overlap_decision.suppressed:
-                    continue
-                LOGGER.info(
-                    "Reconciled pet detection %s for asset %s: reason=%s "
-                    "pet_to_face_area_ratio=%.3f pet_image_coverage=%.3f "
-                    "iou_threshold=%.2f smaller_box_coverage_threshold=%.2f "
-                    "larger_pet_ratio=%.2f mural_image_coverage_threshold=%.2f",
-                    detection.detection_id,
-                    detection.asset_id,
-                    overlap_decision.reason,
-                    overlap_decision.pet_to_face_area_ratio,
-                    overlap_decision.pet_image_coverage,
-                    PET_PEOPLE_IOU_THRESHOLD,
-                    PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD,
-                    PET_PEOPLE_LARGER_PET_RATIO,
-                    PET_PEOPLE_MURAL_IMAGE_COVERAGE_THRESHOLD,
-                )
-                removed.append(detection)
-            if not removed:
-                return None
+            return self._reconcile_people_overlaps_locked(people_boxes_by_asset_id)
 
-            removed_ids = {detection.detection_id for detection in removed}
-            changed_asset_ids = tuple(
-                dict.fromkeys(detection.asset_id for detection in removed if detection.asset_id)
+    def _reconcile_people_overlaps_locked(
+        self, people_boxes_by_asset_id: _PeopleBoxes,
+    ) -> PetSnapshotEvent | None:
+        if not people_boxes_by_asset_id:
+            return None
+        repository = self._repository()
+        scoped_asset_ids = tuple(people_boxes_by_asset_id)
+        previous_detections = repository.get_detections_by_asset_ids(scoped_asset_ids)
+        removed = []
+        for detection in previous_detections:
+            overlap_decision = _pet_people_overlap_decision(
+                (
+                    detection.box_x,
+                    detection.box_y,
+                    detection.box_w,
+                    detection.box_h,
+                ),
+                people_boxes_by_asset_id.get(detection.asset_id, ()),
+                image_dimensions=(
+                    detection.image_width,
+                    detection.image_height,
+                ),
             )
-            operation_id = self._try_prepare_operation_locked(
-                "pet_overlap_reconcile",
-                {
-                    "asset_ids": list(scoped_asset_ids),
-                    "changed_asset_ids": list(changed_asset_ids),
-                },
+            if not overlap_decision.suppressed:
+                continue
+            LOGGER.info(
+                "Reconciled pet detection %s for asset %s: reason=%s "
+                "pet_to_face_area_ratio=%.3f pet_image_coverage=%.3f "
+                "iou_threshold=%.2f smaller_box_coverage_threshold=%.2f "
+                "larger_pet_ratio=%.2f mural_image_coverage_threshold=%.2f",
+                detection.detection_id,
+                detection.asset_id,
+                overlap_decision.reason,
+                overlap_decision.pet_to_face_area_ratio,
+                overlap_decision.pet_image_coverage,
+                PET_PEOPLE_IOU_THRESHOLD,
+                PET_PEOPLE_SMALLER_BOX_COVERAGE_THRESHOLD,
+                PET_PEOPLE_LARGER_PET_RATIO,
+                PET_PEOPLE_MURAL_IMAGE_COVERAGE_THRESHOLD,
             )
-            if operation_id is None:
-                return None
-            commit_result = repository.delete_detections_transactionally(
-                removed_ids,
-                operation_id=operation_id,
-                operation_kind="pet_overlap_reconcile",
-            )
-            repository.prune_unreferenced_thumbnails(commit_result.previous_thumbnail_paths)
-            return self._emit_journaled_snapshot(
-                operation_id,
-                changed_asset_ids=changed_asset_ids,
-                added_pet_ids=commit_result.added_pet_ids,
-                updated_pet_ids=commit_result.updated_pet_ids,
-                removed_pet_ids=commit_result.removed_pet_ids,
-            )
+            removed.append(detection)
+        if not removed:
+            return None
+
+        removed_ids = {detection.detection_id for detection in removed}
+        changed_asset_ids = tuple(
+            dict.fromkeys(detection.asset_id for detection in removed if detection.asset_id)
+        )
+        operation_id = self._try_prepare_operation_locked(
+            "pet_overlap_reconcile",
+            {
+                "asset_ids": list(scoped_asset_ids),
+                "changed_asset_ids": list(changed_asset_ids),
+            },
+        )
+        if operation_id is None:
+            return None
+        commit_result = repository.delete_detections_transactionally(
+            removed_ids,
+            operation_id=operation_id,
+            operation_kind="pet_overlap_reconcile",
+        )
+        repository.prune_unreferenced_thumbnails(commit_result.previous_thumbnail_paths)
+        return self._emit_journaled_snapshot(
+            operation_id,
+            changed_asset_ids=changed_asset_ids,
+            added_pet_ids=commit_result.added_pet_ids,
+            updated_pet_ids=commit_result.updated_pet_ids,
+            removed_pet_ids=commit_result.removed_pet_ids,
+        )
 
     def move_detection_to_pet(
         self,
         detection_id: str,
         target_pet_id: str,
     ) -> PetSnapshotEvent | None:
-        with self._lock:
+        with self._journal.try_mutation_scope() as acquired:
             self._last_mutation_failure = None
             if self._shutdown_requested:
                 self._last_mutation_failure = PetMutationFailure.SHUTTING_DOWN
                 return None
-            if not self._ensure_recovered_locked():
+            if not acquired or not self._ensure_recovered_locked():
                 self._last_mutation_failure = PetMutationFailure.RECOVERY_PENDING
                 return None
             repository = self._repository()
@@ -803,8 +861,8 @@ class PetIndexCoordinator(QObject):
         new_pet_id: str,
         new_name: str | None,
     ) -> PetSnapshotEvent | None:
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -839,11 +897,14 @@ class PetIndexCoordinator(QObject):
             )
 
     def begin_shutdown(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = True
+            self._overlap_retry.stop()
+            self._pending_overlap_asset_ids.clear()
+            self._pending_people_boxes = None
 
     def resume(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = False
 
     def close(self) -> None:

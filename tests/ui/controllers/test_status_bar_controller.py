@@ -221,3 +221,18 @@ def test_thumbnail_failure_hides_in_progress_feedback(qapp: QApplication) -> Non
     assert progress.maximum() == 0
     assert controller._progress_context is None
     assert status_bar.currentMessage() == "Thumbnail update failed."
+
+
+def test_thumbnail_backfill_reset_releases_retired_library_progress(qapp: QApplication) -> None:
+    controller, status_bar, _action = _make_controller(qapp)
+    root = Path("/library")
+    controller.handle_thumbnail_backfill_progress(root, 0, 5)
+    controller.reset_thumbnail_backfill()
+
+    assert status_bar.progress_bar.isHidden()
+    assert status_bar.currentMessage() == ""
+
+    controller.handle_thumbnail_backfill_progress(root, 0, 1)
+    controller.handle_thumbnail_backfill_completed(root)
+    assert status_bar.progress_bar.isHidden()
+    assert status_bar.currentMessage() == "Thumbnails updated."

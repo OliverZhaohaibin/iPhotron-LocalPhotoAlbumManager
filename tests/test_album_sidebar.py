@@ -396,7 +396,7 @@ def test_sidebar_pinned_album_rename_updates_album_tree(
 def test_renamed_pinned_album_does_not_leave_old_directory_or_selection(
     tmp_path: Path, qapp: QApplication, pin_child: bool
 ) -> None:
-    from iPhoto.library.scan_coordinator import _PairingWorker
+    from iPhoto.library.workers.scanner_worker import ScannerSignals, ScannerWorker
 
     root = tmp_path / "Library"
     old = root / "Trip"
@@ -413,10 +413,15 @@ def test_renamed_pinned_album_does_not_leave_old_directory_or_selection(
             old, new, library_root=root, fallback_label=new.name
         ))
         sidebar.select_pinned_item(pinned_service.items_for_library(root)[0])
-        pending_pairing = _PairingWorker(old, manager.scan_service)
+        pending_scan = ScannerWorker(
+            old, [], [], ScannerSignals(),
+            scan_service=manager.scan_service,
+            finalize_scan=True,
+        )
 
         manager.rename_album(manager.list_albums()[0], "Renamed Trip")
-        pending_pairing.run()
+        pending_scan.run()
+        assert pending_scan.failed
         manager._refresh_tree()
         qapp.processEvents()
 

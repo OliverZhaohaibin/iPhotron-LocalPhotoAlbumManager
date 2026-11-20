@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from PIL import Image
 
 from iPhoto.application.services.recognition_merge_service import RecognitionMergeService
+from iPhoto.application.services.recognition_query_service import RecognitionQueryService
 from iPhoto.bootstrap.library_people_service import (
     create_people_asset_repository,
     create_people_service,
@@ -733,7 +735,7 @@ def test_people_hidden_mutation_routes_through_index_coordinator(tmp_path: Path)
     coordinator.set_person_hidden.assert_called_once_with("person-a", True)
 
 
-def test_people_service_merge_allows_hidden_state_difference(tmp_path: Path) -> None:
+def test_people_service_merge_rejects_hidden_state_difference(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
 
@@ -760,10 +762,11 @@ def test_people_service_merge_allows_hidden_state_difference(tmp_path: Path) -> 
     )
     assert service.set_cluster_hidden("person-a", True) is True
 
-    assert service.merge_clusters("person-a", "person-b") is True
+    assert service.merge_clusters("person-a", "person-b") is False
     summaries = service.list_clusters(include_hidden=True, include_candidates=True)
-    assert [summary.person_id for summary in summaries] == ["person-b"]
-    assert summaries[0].is_hidden is False
+    assert {s.person_id: s.is_hidden for s in summaries} == {"person-a": True, "person-b": False}
+    assert service.set_cluster_hidden("person-b", True)
+    assert service.merge_clusters("person-a", "person-b")
 
 
 def test_pending_assignment_blocks_people_identity_mutations_then_merge_retargets(
@@ -1645,7 +1648,7 @@ def test_pet_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> Non
     assert pet_service.build_pet_query("pet-a").asset_ids == []
 
 
-def test_manual_cross_merge_allows_hidden_state_mismatch(tmp_path: Path) -> None:
+def test_manual_cross_merge_rejects_hidden_state_mismatch(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
     get_global_repository(library_root).write_rows(
@@ -1685,9 +1688,12 @@ def test_manual_cross_merge_allows_hidden_state_mismatch(tmp_path: Path) -> None
 
     result = people_service.merge_identities("person:person-a", "pet:pet-a")
 
-    assert result is not None and result.merged is True
-    assert people_service.has_cluster("person-a") is False
+    assert result is None
+    assert people_service.has_cluster("person-a") is True
     assert pet_service.has_pet("pet-a") is True
+    assert people_repository.state_repository.get_identity_redirects() == []
+    assert pet_service.set_pet_hidden("pet-a", True)
+    assert people_service.merge_identities("person:person-a", "pet:pet-a").merged
 
 
 def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:
@@ -1876,6 +1882,47 @@ def test_asset_face_annotations_skip_manual_person_redirected_to_pet(tmp_path: P
     assert annotations[0].canonical_identity_kind == "pet"
     assert annotations[0].canonical_identity_id == "pet-a"
     assert annotations[0].canonical_display_name == "Miso"
+
+
+@pytest.mark.parametrize("operation", ["delete", "move"])
+def test_edit_of_one_manual_face_preserves_remaining_person_state(tmp_path, operation):
+    for asset in ("a", "b"):
+        _write_image(tmp_path, f"{asset}.jpg")
+    get_global_repository(tmp_path).write_rows([
+        {"rel": f"{asset}.jpg", "id": asset, "media_type": 0} for asset in ("a", "b")
+    ])
+    people = create_people_service(tmp_path)
+    first = people.add_manual_face(
+        asset_id="a", requested_box=(40, 50, 80, 80), name_or_none="Alice", person_id=None,
+    )
+    remaining = people.add_manual_face(
+        asset_id="b", requested_box=(40, 50, 80, 80), name_or_none=None, person_id=first.person_id,
+    )
+    other = people.add_manual_face(
+        asset_id="b", requested_box=(200, 50, 80, 80), name_or_none="Bob", person_id=None,
+    )
+    group = people.create_group([first.person_id, other.person_id])
+    assert group is not None
+    assert people.set_cluster_cover(first.person_id, remaining.face_id)
+    people.set_cluster_order([other.person_id, first.person_id])
+    assert people.set_cluster_hidden(first.person_id, True)
+    if operation == "delete":
+        assert people.delete_face(first.face_id)
+    else:
+        assert people.move_face_to_person(first.face_id, other.person_id)
+    people.shutdown()
+
+    reopened = create_people_service(tmp_path)
+    alice = next(s for s in reopened.list_clusters(include_hidden=True) if s.person_id == first.person_id)
+    assert (alice.name, alice.is_hidden, alice.face_count) == ("Alice", True, 1)
+    repo = reopened.repository()
+    cover = repo.state_repository.get_person_cover(first.person_id)
+    assert cover.face_id == remaining.face_id and cover.is_custom
+    assert repo.state_repository.get_person_order_map([first.person_id, other.person_id]) == {
+        other.person_id: 0, first.person_id: 1,
+    }
+    assert set(repo.get_group(group.group_id).member_person_ids) == {first.person_id, other.person_id}
+    assert repo.get_common_asset_ids_for_group(group.group_id) == ["b"]
 
 
 def test_merge_manual_only_people_keeps_profiles_embedding_free(tmp_path: Path) -> None:
@@ -2300,6 +2347,7 @@ def test_people_index_coordinator_commits_realtime_dashboard_snapshot(tmp_path: 
 
     assert event is not None
     assert event.changed_asset_ids == ("asset-new",)
+    assert event.changed_group_ids == (group.group_id,)
     assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "done"
 
     summaries, groups, pending = service.load_dashboard()
@@ -2344,7 +2392,7 @@ def test_face_scan_worker_skips_commit_when_cancelled_mid_batch(tmp_path: Path) 
 
     assert committed is False
     coordinator.submit_detected_batch.assert_not_called()
-    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
+    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "pending"
 
 
 @pytest.mark.parametrize("reason", ["runtime", "incomplete", "invalid_override"])
@@ -2386,12 +2434,14 @@ def test_face_scan_worker_marks_retry_error_failed_on_second_attempt(tmp_path: P
     global_repo.write_rows(
         [
             {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "retry"},
+            {"rel": "album/copy.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"},
         ]
     )
     worker = FaceScanWorker(tmp_path)
     messages: list[str] = []
     worker.statusChanged.connect(messages.append)
-    coordinator = Mock(submit_detected_batch=Mock(return_value=None))
+    coordinator = worker._people_service.coordinator
+    assert coordinator is not None
     pipeline = SimpleNamespace(
         detect_faces_for_rows=Mock(
             return_value=[
@@ -2415,12 +2465,70 @@ def test_face_scan_worker_marks_retry_error_failed_on_second_attempt(tmp_path: P
     )
 
     assert committed is False
-    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "failed"
+    rows = global_repo.get_rows_by_rels(["album/a.jpg", "album/copy.jpg"])
+    assert rows["album/a.jpg"]["face_status"] == "failed"
+    assert rows["album/copy.jpg"]["face_status"] == "done"
     assert messages == [
         "Some assets could not be face scanned and will be retried after a rescan."
     ]
-    coordinator.submit_detected_batch.assert_called_once()
-    assert coordinator.submit_detected_batch.call_args.args[0] == []
+    assert coordinator._journal.unfinished() == ()
+
+
+def test_face_scan_failures_cannot_consume_retry_from_stale_attempt(tmp_path: Path) -> None:
+    store = get_global_repository(tmp_path)
+    store.write_rows([{"rel": "a.jpg", "id": "a", "media_type": 0, "face_status": "pending"}])
+    service = create_people_service(tmp_path)
+    try:
+        coordinator = service.coordinator
+        assert coordinator is not None
+        failure = DetectedAssetFaces("a", "a.jpg", [], error="decode failed")
+        for _ in range(2):
+            coordinator.submit_detected_batch(
+                [failure], distance_threshold=0.6, min_samples=2,
+                attempted_statuses={"a.jpg": "pending"},
+            )
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == "retry"
+
+        coordinator.submit_detected_batch(
+            [failure], distance_threshold=0.6, min_samples=2,
+            attempted_statuses={"a.jpg": "retry"},
+        )
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == "failed"
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("commit_snapshot", [False, True])
+def test_people_scan_recovers_failed_status_bookkeeping(tmp_path: Path, commit_snapshot: bool) -> None:
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "broken.jpg", "id": "broken", "media_type": 0, "face_status": "retry"},
+        {"rel": "good.jpg", "id": "good", "media_type": 0, "face_status": "pending"},
+    ])
+    service = create_people_service(tmp_path)
+    try:
+        coordinator = service.coordinator
+        assert coordinator is not None
+        detected = [DetectedAssetFaces("broken", "broken.jpg", [], error="decode failed")]
+        if commit_snapshot:
+            detected.append(DetectedAssetFaces("good", "good.jpg", []))
+        error_type = PeopleSnapshotCommittedError if commit_snapshot else RuntimeError
+        with patch.object(store, "update_face_statuses", side_effect=RuntimeError("locked")):
+            with pytest.raises(error_type):
+                coordinator.submit_detected_batch(
+                    detected, distance_threshold=0.6, min_samples=2,
+                    attempted_statuses={"broken.jpg": "retry", "good.jpg": "pending"},
+                )
+        interrupted = coordinator._journal.unfinished_head()
+        assert interrupted is not None
+        assert interrupted.payload["failed_asset_ids"] == ["broken"]
+        assert coordinator._journal.recover_pending()
+        assert coordinator._journal.unfinished() == ()
+        rows = store.get_rows_by_rels(["broken.jpg", "good.jpg"])
+        assert rows["broken.jpg"]["face_status"] == "failed"
+        assert rows["good.jpg"]["face_status"] == ("done" if commit_snapshot else "pending")
+    finally:
+        service.shutdown()
 
 
 def test_face_pipeline_suppresses_missing_file_after_cancellation(
@@ -2621,6 +2729,143 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
     assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "pending"
     assert call_count["value"] == 3
 
+    # This runtime marker is synced, but the journal still owes bookkeeping and
+    # event delivery. Age it beyond the history limit while recovery is blocked.
+    from iPhoto.people import face_repository
+
+    monkeypatch.setattr(face_repository, "_RUNTIME_COMMIT_HISTORY_LIMIT", 1)
+    pending = coordinator._journal.unfinished_head()
+    marker = repository.get_runtime_commit(pending.operation_id)
+    assert marker["state_synced"]
+    assert marker["changed_asset_ids"] == ["asset-new", "asset-shared"]
+    assert set(marker["changed_person_ids"]) == {"person-a", summaries[0].person_id}
+    repository.record_runtime_commit("newer", {"operation_kind": "people_scan_commit"}, state_synced=True)
+    restarted = get_people_index_coordinator(
+        library_root, asset_repository=create_people_asset_repository(library_root)
+    )
+    assert restarted._journal.recovery_pending
+    assert repository.get_runtime_commit(pending.operation_id) == marker
+
+    monkeypatch.setattr(global_repo, "update_face_statuses", original_update_face_statuses)
+    recovered = get_people_index_coordinator(
+        library_root, asset_repository=create_people_asset_repository(library_root)
+    )
+    assert recovered._journal.unfinished() == ()
+    assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "done"
+    assert repository.get_runtime_commit(pending.operation_id) is None
+    assert repository.get_runtime_commit("newer") is not None
+
+
+@pytest.mark.parametrize("dispatch", ["live", "recovered", "legacy-recovered"])
+def test_people_scan_refreshes_annotations_for_faces_reclustered_outside_the_batch(
+    tmp_path: Path, qapp, dispatch: str,
+) -> None:
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "existing.jpg", "id": "existing", "media_type": 0, "face_status": "done"},
+        {"rel": "other.jpg", "id": "other", "media_type": 0, "face_status": "done"},
+        {"rel": "new.jpg", "id": "new", "media_type": 0, "face_status": "pending"},
+    ])
+    people = create_people_service(tmp_path)
+    pets = create_pet_service(tmp_path)
+    try:
+        repository = people.repository()
+        coordinator = people.coordinator
+        assert repository is not None and coordinator is not None
+
+        def unassigned_face(asset_id: str, embedding: list[float]) -> FaceRecord:
+            return _face_record_with_embedding(
+                face_id=asset_id,
+                face_key=f"key-{asset_id}",
+                asset_id=asset_id,
+                asset_rel=f"{asset_id}.jpg",
+                person_id=None,
+                embedding=np.asarray(embedding, dtype=np.float32),
+            )
+
+        repository.replace_all([
+            unassigned_face("existing", [1.0, 0.0]),
+            unassigned_face("other", [0.0, 1.0]),
+        ], [])
+        query = RecognitionQueryService(tmp_path, people_service=people, pet_service=pets)
+        assert query.load_asset_annotations("existing").faces[0].canonical_identity_id is None
+        unchanged = query.load_asset_annotations("other")
+        events = []
+        coordinator.snapshotCommitted.connect(events.append)
+        coordinator.snapshotCommitted.connect(lambda event: query.invalidate(event.changed_asset_ids))
+
+        detected = [DetectedAssetFaces("new", "new.jpg", [unassigned_face("new", [1.0, 0.0])])]
+        options = dict(distance_threshold=0.6, min_samples=2)
+        if dispatch == "live":
+            assert coordinator.submit_detected_batch(detected, **options) is not None
+        else:
+            with patch.object(store, "update_face_statuses", side_effect=RuntimeError("locked")):
+                with pytest.raises(PeopleSnapshotCommittedError):
+                    coordinator.submit_detected_batch(detected, **options)
+            pending = coordinator._journal.unfinished_head()
+            assert pending is not None
+            if dispatch == "legacy-recovered":
+                marker = repository.get_runtime_commit(pending.operation_id)
+                assert marker is not None
+                marker.pop("scan_changes_complete")
+                marker["changed_asset_ids"] = ["new"]
+                repository.record_runtime_commit(pending.operation_id, marker, state_synced=True)
+            assert coordinator._journal.recover_pending()
+
+        qapp.processEvents()
+        assert len(events) == 1
+        expected_assets = {"existing", "new"}
+        if dispatch == "legacy-recovered":
+            expected_assets.add("other")
+        else:
+            assert query.load_asset_annotations("other") is unchanged
+        assert set(events[0].changed_asset_ids) == expected_assets
+        assigned = query.load_asset_annotations("existing").faces[0].canonical_identity_id
+        assert assigned is not None
+        assert events[0].changed_person_ids == (assigned,)
+    finally:
+        pets.shutdown()
+        people.shutdown()
+
+
+def test_face_scan_worker_keeps_done_when_runtime_history_pruning_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    global_repo = get_global_repository(tmp_path)
+    global_repo.write_rows([
+        {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "pending"},
+    ])
+    service = create_people_service(tmp_path)
+    try:
+        coordinator = service.coordinator
+        assert coordinator is not None
+        prune = Mock(side_effect=sqlite3.OperationalError("database is locked"))
+        monkeypatch.setattr(FaceRepository, "prune_synced_runtime_commits", prune)
+        pipeline = SimpleNamespace(
+            distance_threshold=0.6,
+            min_samples=2,
+            detect_faces_for_rows=Mock(return_value=[
+                DetectedAssetFaces(asset_id="asset-a", asset_rel="album/a.jpg", faces=[]),
+            ]),
+        )
+        monkeypatch.setattr(
+            "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
+            lambda **_kwargs: pipeline,
+        )
+        worker = FaceScanWorker(tmp_path, people_service=service)
+        worker.finish_input()
+
+        worker.run()
+
+        assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "done"
+        assert not coordinator.recovery_pending
+        prune.assert_called_once()
+        assert "Could not prune finalized People runtime commits" in caplog.text
+    finally:
+        service.shutdown()
+
 
 def test_face_scan_worker_does_not_mark_retry_after_committed_snapshot_error(
     tmp_path: Path,
@@ -2721,7 +2966,7 @@ def test_face_scan_worker_reports_unexpected_batch_error_reason(
 
     worker.run()
 
-    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
+    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "pending"
     assert messages == ["Face scanning paused: compiled dependency missing"]
 
 

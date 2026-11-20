@@ -11,7 +11,6 @@ import pytest
 from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeFailure,
     IdentityMergeRefreshPolicy,
-    IdentityRef,
     RecognitionMergeService,
 )
 from iPhoto.bootstrap.library_pet_service import create_pet_service
@@ -85,15 +84,16 @@ def test_routes_all_directions_with_typed_identity(
     getattr(owner, called_method).assert_called_once_with(*called_args)
 
 
-def test_manual_merge_allows_hidden_state_mismatch() -> None:
+@pytest.mark.parametrize("source,target", [("person:same", "pet:same"), ("pet:same", "person:same")])
+def test_manual_merge_rejects_hidden_state_mismatch(source, target) -> None:
     people, pets = _services(person_hidden=False, pet_hidden=True)
     service = RecognitionMergeService(people, pets)
 
-    outcome = service.merge(IdentityRef("person", "same"), IdentityRef("pet", "same"))
+    outcome = service.merge(source, target)
 
-    assert outcome.merged is True
-    assert outcome.failure is None
-    people.merge_identities.assert_called_once_with("person:same", "pet:same")
+    assert not outcome.merged
+    assert outcome.failure is IdentityMergeFailure.HIDDEN_STATE_MISMATCH
+    people.merge_identities.assert_not_called()
 
 
 def test_merge_holds_library_lease_from_hidden_check_through_mutation(tmp_path) -> None:

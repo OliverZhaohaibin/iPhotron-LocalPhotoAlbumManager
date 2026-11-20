@@ -52,6 +52,7 @@ from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAda
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 
 if TYPE_CHECKING:
+    from iPhoto.bootstrap.library_probe import LibraryProbeController
     from iPhoto.gui.coordinators.edit_coordinator import EditCoordinator
     from iPhoto.gui.ui.main_window import MainWindow
 
@@ -394,14 +395,13 @@ class DesktopCoordinatorRuntime(QObject):
 
         self.gallery = GalleryCoordinator(
             context=context,
-            facade=self._facade,
             navigation=self._navigation,
             asset_model=self._asset_list_vm,
+            request_library_switch=self._dialog.request_library_switch,
             gallery_viewmodel=self._gallery_vm,
             library_root_getter=self._library_root,
             asset_query_service_getter=self._asset_query_service,
             asset_state_service_getter=self._asset_state_service,
-            library_rebind_preflight=self._library_rebind_preflight,
             parent=self,
         )
         self.detail = DetailCoordinator(
@@ -469,6 +469,12 @@ class DesktopCoordinatorRuntime(QObject):
         preflight = getattr(edit, "preflight_library_rebind", None)
         return bool(preflight()) if callable(preflight) else not edit.is_editing()
 
+    def set_library_probe_controller(self, probe: LibraryProbeController) -> None:
+        self._dialog.set_library_probe_controller(probe)
+
+    def has_pending_library_switch(self) -> bool:
+        return self._dialog.has_pending_library_switch()
+
     def _handle_asset_metadata_updated(self, event: AssetMetadataUpdated) -> None:
         asset_path = event.asset_path
         if asset_path is None:
@@ -503,6 +509,9 @@ class DesktopCoordinatorRuntime(QObject):
 
         location_info = getattr(self, "_location_info", None)
         try:
+            dialog = getattr(self, "_dialog", None)
+            if dialog is not None:
+                dialog.cancel_library_switch()
             recognition_extension = getattr(self, "_recognition_extension", None)
             if recognition_extension is not None:
                 recognition_extension.shutdown()
@@ -727,6 +736,7 @@ class DesktopCoordinatorRuntime(QObject):
         self._asset_list_vm.thumbnailBackfillFailed.connect(
             self._status_bar.handle_thumbnail_backfill_failed
         )
+        self._asset_list_vm.thumbnailBackfillReset.connect(self._status_bar.reset_thumbnail_backfill)
 
         self._facade.loadStarted.connect(self._status_bar.handle_load_started)
         self._facade.loadProgress.connect(self._status_bar.handle_load_progress)

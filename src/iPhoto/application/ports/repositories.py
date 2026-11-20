@@ -176,6 +176,8 @@ class AssetRepositoryPort(Protocol):
         thumb_cache_key: str | None = None,
         error: str | None = None,
         expected_revision: str | None = None,
+        expected_asset_id: str | None = None,
+        expected_index_revision: int | None = None,
     ) -> bool:
         """Conditionally publish thumbnail readiness for one row."""
 

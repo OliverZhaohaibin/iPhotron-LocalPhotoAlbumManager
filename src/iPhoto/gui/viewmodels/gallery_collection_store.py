@@ -166,6 +166,7 @@ class GalleryCollectionStore:
         self._pending_scan_sort_keys: set[tuple[str, str]] = set()
         self._thumbnail_backfill_windows: set[tuple[int, int]] = set()
         self._thumbnail_backfill_pending = False
+        self._pending_thumbnail_ready_refresh = False
         self._direct_mode = False
         self._collection_revision = 0
         self._request_generation = 0
@@ -1205,6 +1206,8 @@ class GalleryCollectionStore:
         self,
         first: int,
         last: int,
+        *,
+        refresh_after_commit: bool = False,
     ) -> None:
         if (
             self._window_request_handler is None
@@ -1221,6 +1224,7 @@ class GalleryCollectionStore:
             view_first + limit - 1,
             demand_generation=0,
             priority=0,
+            refresh_after_commit=refresh_after_commit,
         )
 
     def _request_async_chunk(
@@ -1234,6 +1238,7 @@ class GalleryCollectionStore:
         purpose: str = "viewport",
         selection_anchor_retry_attempt: int = 0,
         surface_id: str = "gallery",
+        refresh_after_commit: bool = False,
     ) -> bool:
         if (
             self._window_request_handler is None
@@ -1301,6 +1306,7 @@ class GalleryCollectionStore:
                     selection_anchor_retry_attempt
                 ),
                 surface_id=str(surface_id),
+                refresh_after_commit=refresh_after_commit,
             )
         )
         if self._selection_anchor is not None:
@@ -1463,20 +1469,32 @@ class GalleryCollectionStore:
         revision = getattr(batch, "collection_revision", None)
         if isinstance(revision, int):
             self._collection_revision = max(self._collection_revision, revision)
-        if is_thumbnail_backfill:
-            self._thumbnail_backfill_windows.clear()
-            self._thumbnail_backfill_pending = False
         if root is None:
             return False
+        finished_active_backfill = is_thumbnail_backfill and self.finish_thumbnail_backfill(Path(root))
         if not rows:
             if (
-                is_thumbnail_backfill
+                finished_active_backfill
                 and not self._pending_scan_rels
                 and not self._pending_scan_sort_keys
             ):
                 self._pending_scan_refresh = False
             return False
-        return self._record_scan_rows(Path(root), list(rows))
+        recorded = self._record_scan_rows(Path(root), list(rows))
+        if recorded and job_id == "thumbnail-ready":
+            # A ready-only query may have excluded this asset. Refresh even
+            # when no cached row or sort bound identifies its new position.
+            self._pending_thumbnail_ready_refresh = True
+        return recorded
+
+    def finish_thumbnail_backfill(self, root: Path) -> bool:
+        """Release the current selection's backfill requests after a terminal event."""
+
+        if not self._library_roots_match(root, self._active_root or self._library_root):
+            return False
+        self._thumbnail_backfill_windows.clear()
+        self._thumbnail_backfill_pending = False
+        return True
 
     def handle_scan_finished(self, root: Path, success: bool) -> None:
         if not success or self._current_query is None or self._active_root is None:
@@ -1499,7 +1517,9 @@ class GalleryCollectionStore:
     def flush_pending_scan_refresh(self) -> None:
         """Refresh the visible window after recorded scan/backfill rows."""
 
-        if not self._pending_scan_refresh or self._current_query is None:
+        thumbnail_ready = self._pending_thumbnail_ready_refresh
+        self._pending_thumbnail_ready_refresh = False
+        if (not thumbnail_ready and not self._pending_scan_refresh) or self._current_query is None:
             self._pending_scan_refresh = False
             self._pending_scan_rels.clear()
             self._pending_scan_sort_keys.clear()
@@ -1509,10 +1529,14 @@ class GalleryCollectionStore:
             last = max(0, self.INITIAL_VISIBLE_ROWS - 1)
         else:
             first, last = self._visible_range
-            if first != 0 and not self._pending_scan_affects_visible_window(first, last):
+            if (
+                not thumbnail_ready
+                and first != 0
+                and not self._pending_scan_affects_visible_window(first, last)
+            ):
                 return
         if self._window_request_handler is not None:
-            self._request_async_window(first, last)
+            self._request_async_window(first, last, refresh_after_commit=thumbnail_ready)
             return
         self._reload_window_for_visible_range(
             first,
@@ -1887,6 +1911,7 @@ class GalleryCollectionStore:
                 self.thumbnail_backfill_scheduled.emit()
             return queued
         except Exception as exc:
+            self._thumbnail_backfill_windows.discard(request_key)
             emit_perf_event(
                 "gallery_thumbnail_backfill_failed",
                 first=window_first,
@@ -2319,6 +2344,7 @@ class GalleryCollectionStore:
         self._pending_scan_sort_keys.clear()
         self._thumbnail_backfill_windows.clear()
         self._thumbnail_backfill_pending = False
+        self._pending_thumbnail_ready_refresh = False
         self._pending_row_loads.clear()
         self._pending_window_generations.clear()
         self._demand_generation = 0

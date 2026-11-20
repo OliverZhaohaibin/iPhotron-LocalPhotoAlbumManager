@@ -1,15 +1,312 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
 from iPhoto.recognition.operation_journal import RecognitionOperationJournal
+
+
+def _hold_unfinished_operation(root, pipe):
+    owner = RecognitionMutationCoordinator(root)
+    with owner.mutation_scope():
+        operation_id = owner.prepare("pet_rename", {"pet_id": "a", "name": "Miso"})
+        pipe.send(operation_id)
+        if pipe.poll(15):
+            pipe.recv()
+        os._exit(0)  # Exercise process death before the applying transition.
+
+
+def _check_forked_leases(owner, root, pipe):
+    new_owner = RecognitionMutationCoordinator(root)
+    for _ in range(2):
+        acquired = []
+        for coordinator in (owner, new_owner):
+            with coordinator.try_mutation_scope() as held:
+                acquired.append(held)
+        pipe.send(acquired)
+        if not pipe.poll(10):
+            return
+        pipe.recv()
+
+
+def _hold_scan_lease(root, pipe):
+    from iPhoto.cache.index_store import get_global_repository
+
+    owner = RecognitionMutationCoordinator(root)
+    try:
+        with owner.mutation_scope():
+            pipe.send("locked")
+            if pipe.poll(15) and pipe.recv() == "finish-asset":
+                get_global_repository(root).update_face_status("asset", "done")
+    finally:
+        owner.close()
+        pipe.close()
+
+
+def _finish_face_scan_during_inference(root, pipe):
+    from iPhoto.bootstrap.library_people_service import create_people_service
+    from iPhoto.people.pipeline import DetectedAssetFaces
+
+    service = create_people_service(root)
+    try:
+        if pipe.poll(15):
+            pipe.recv()
+            event = service.coordinator.submit_detected_batch(
+                [DetectedAssetFaces("asset", "a.jpg", [])],
+                distance_threshold=0.6,
+                min_samples=2,
+            )
+            pipe.send(event is not None)
+    finally:
+        service.shutdown()
+        pipe.close()
+
+
+@pytest.mark.parametrize("stale_result", ["asset-error", "cancelled", "runtime-error", "batch-error"])
+def test_stale_face_worker_cannot_overwrite_another_process_commit(
+    tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch, stale_result: str,
+) -> None:
+    from iPhoto.bootstrap.library_people_service import create_people_service
+    from iPhoto.cache.index_store import get_global_repository
+    from iPhoto.library.workers.face_scan_worker import FaceScanWorker
+    from iPhoto.people.pipeline import DetectedAssetFaces
+
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "a.jpg", "id": "asset", "media_type": 0,
+         "face_status": "retry" if stale_result == "asset-error" else "pending"},
+    ])
+    service = create_people_service(tmp_path)
+    worker = FaceScanWorker(tmp_path, people_service=service)
+    worker.finish_input()
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    process = ctx.Process(target=_finish_face_scan_during_inference, args=(tmp_path, child))
+    process.start()
+    child.close()
+
+    def detect(_rows, **_kwargs):
+        # This commit must finish while inference is still in flight.
+        parent.send("finish")
+        if not parent.poll(10) or not parent.recv():
+            pytest.fail("Competing process could not commit during inference")
+        if stale_result == "cancelled":
+            worker.cancel()
+        elif stale_result == "runtime-error":
+            raise RuntimeError("batch could not initialize")
+        elif stale_result == "batch-error":
+            raise ValueError("batch could not run")
+        return [DetectedAssetFaces("asset", "a.jpg", [], error="decode failed")]
+
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
+        lambda **_kwargs: SimpleNamespace(
+            detect_faces_for_rows=detect, distance_threshold=0.6, min_samples=2,
+        ),
+    )
+    try:
+        worker.run()
+        process.join(5)
+        assert process.exitcode == 0
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == "done"
+        assert service.coordinator._journal.unfinished() == ()
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+        service.shutdown()
+
+
+@pytest.mark.parametrize("while_busy", ["release", "cancel", "finish-asset", "fail-asset"])
+def test_face_worker_keeps_detected_batch_while_another_process_holds_lease(
+    tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch, while_busy: str,
+) -> None:
+    from PySide6.QtTest import QSignalSpy
+
+    from iPhoto.bootstrap.library_people_service import create_people_service
+    from iPhoto.cache.index_store import get_global_repository
+    from iPhoto.library.workers.face_scan_worker import FaceScanWorker
+    from iPhoto.people.pipeline import DetectedAssetFaces
+
+    store = get_global_repository(tmp_path)
+    starting_status = "retry" if while_busy == "fail-asset" else "pending"
+    store.write_rows([
+        {"rel": "copy.jpg", "id": "asset", "media_type": 0, "face_status": "done"},
+        {"rel": "a.jpg", "id": "asset", "media_type": 0, "face_status": starting_status},
+    ])
+    service = create_people_service(tmp_path)
+    coordinator = service.coordinator
+    assert coordinator is not None
+    error = "decode failed" if while_busy == "fail-asset" else None
+    detect = Mock(return_value=[DetectedAssetFaces("asset", "a.jpg", [], error)])
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
+        lambda **_kwargs: SimpleNamespace(
+            detect_faces_for_rows=detect, distance_threshold=0.6, min_samples=2,
+        ),
+    )
+    worker = FaceScanWorker(tmp_path, people_service=service)
+    worker.finish_input()
+    committed = QSignalSpy(worker.peopleIndexUpdated)
+    retried_lease = threading.Event()
+    busy_attempts = 0
+    try_scope = coordinator._journal.try_mutation_scope
+
+    @contextmanager
+    def observe_contention():
+        nonlocal busy_attempts
+        with try_scope() as acquired:
+            if not acquired:
+                busy_attempts += 1
+                if busy_attempts == 2:
+                    retried_lease.set()
+            yield acquired
+
+    monkeypatch.setattr(coordinator._journal, "try_mutation_scope", observe_contention)
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    process = ctx.Process(target=_hold_scan_lease, args=(tmp_path, child))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(10) and parent.recv() == "locked"
+        worker.start()
+        assert retried_lease.wait(5)
+        detect.assert_called_once()
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == starting_status
+        if while_busy == "cancel":
+            worker.cancel()
+            assert worker.wait(5000)
+        parent.send(while_busy)
+        process.join(5)
+        assert process.exitcode == 0
+        assert worker.wait(5000)
+        qapp.processEvents()
+
+        detect.assert_called_once()
+        assert committed.count() == int(while_busy == "release")
+        expected_status = {"cancel": "pending", "fail-asset": "failed"}.get(while_busy, "done")
+        rows = store.get_rows_by_rels(["a.jpg", "copy.jpg"])
+        assert rows["a.jpg"]["face_status"] == expected_status
+        assert rows["copy.jpg"]["face_status"] == "done"
+        assert coordinator._journal.unfinished() == ()
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+        worker.cancel()
+        worker.wait(5000)
+        service.shutdown()
+
+
+@pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(), reason="POSIX fork")
+@pytest.mark.parametrize("alias_name", ["Library", "library"], ids=["same-path", "case-alias"])
+def test_fork_child_can_only_acquire_after_parent_releases(tmp_path, alias_name):
+    root = tmp_path / "Library"
+    root.mkdir()
+    alias = tmp_path / alias_name
+    if not alias.is_dir():
+        pytest.skip("case-sensitive filesystem")
+
+    ctx = multiprocessing.get_context("fork")
+    parent, child = ctx.Pipe()
+    owner = RecognitionMutationCoordinator(root)
+    alias_owner = RecognitionMutationCoordinator(alias)
+    process = ctx.Process(target=_check_forked_leases, args=(owner, root, child))
+    try:
+        with owner.mutation_scope():
+            with alias_owner.try_mutation_scope() as acquired:
+                assert acquired
+            alias_owner.close()
+            process.start()
+            child.close()
+            assert parent.poll(5)
+            assert parent.recv() == [False, False]
+        parent.send("retry")
+        assert parent.poll(5)
+        assert parent.recv() == [True, True]
+        parent.send("finish")
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+        alias_owner.close()
+        owner.close()
+
+
+def test_competing_process_cannot_recover_live_owner_and_recovers_after_exit(tmp_path):
+    import numpy as np
+
+    from iPhoto.bootstrap.library_pet_service import create_pet_service
+    from iPhoto.people.index_coordinator import PeopleIndexCoordinator
+    from iPhoto.pets.records import PetMutationFailure, PetRecord
+    from iPhoto.pets.repository_utils import utc_now_iso
+
+    owner = RecognitionMutationCoordinator(tmp_path)
+    pets = create_pet_service(tmp_path, mutation_coordinator=owner)
+    now = utc_now_iso()
+    repo = pets.repository()
+    repo.initialize()
+    pet = PetRecord(
+        pet_id="a", name=None, key_detection_id="d", detection_count=1,
+        center_embedding=np.array([1.0], dtype=np.float32), embedding_dim=1,
+        created_at=now, updated_at=now,
+    )
+    repo.state_repository.ensure_runtime_candidates([pet], [])
+
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    process = ctx.Process(target=_hold_unfinished_operation, args=(tmp_path, child))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(10)
+        operation_id = parent.recv()
+        competing = RecognitionMutationCoordinator(tmp_path)
+        people = PeopleIndexCoordinator(tmp_path, mutation_coordinator=competing)
+        assert not competing.recover_pending()
+        assert competing.try_prepare("people_rename", {}) is None
+        assert pets.merge_pets("a", "b").failure is PetMutationFailure.RECOVERY_PENDING
+        assert not people.set_person_hidden("a", True)
+        assert competing.unfinished_head().operation_id == operation_id
+        assert competing.unfinished_head().state == "prepared"
+        people.close()
+        competing.close()
+        other = RecognitionMutationCoordinator(tmp_path / "other")
+        assert other.recover_pending()
+        other.close()
+        parent.send("exit")
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+
+    assert owner.recover_pending()
+    assert owner.unfinished() == ()
+    assert owner.pending_events() == ()
+    assert repo.state_repository.get_profile("a").name == "Miso"
+    assert pets.set_pet_hidden("a", True)
+    pets.shutdown()
+    owner.close()
 
 
 def test_unfinished_operations_follow_insertion_sequence(tmp_path: Path) -> None:

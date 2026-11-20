@@ -114,7 +114,12 @@ class RecognitionMergeService:
     def merge(self, source: IdentityRef | str, target: IdentityRef | str) -> IdentityMergeOutcome:
         if self._journal is None:
             return self._merge_locked(source, target)
-        with self._journal.mutation_scope():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired:
+                return IdentityMergeOutcome(
+                    False, IdentityRef.parse(source), IdentityRef.parse(target),
+                    IdentityMergeFailure.RECOVERY_PENDING,
+                )
             return self._merge_locked(source, target)
 
     def _merge_locked(
@@ -158,6 +163,10 @@ class RecognitionMergeService:
                 source_ref,
                 target_ref,
                 IdentityMergeFailure.NOT_FOUND,
+            )
+        if source_hidden != target_hidden:
+            return IdentityMergeOutcome(
+                False, source_ref, target_ref, IdentityMergeFailure.HIDDEN_STATE_MISMATCH
             )
         if source_ref.kind == target_ref.kind == "person":
             changed_asset_ids = tuple(

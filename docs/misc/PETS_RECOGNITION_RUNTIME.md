@@ -110,6 +110,9 @@ suppressing the known mural-shaped false positive. Confidence does not override
 this geometry decision. Suppressed boxes are discarded before crop embedding
 and thumbnail generation and are absent from dashboard cards, pet gallery
 queries, detail annotations, and overlays.
+When People updates overlap with a recognition write in another process, Pets
+retains the affected assets in the active session and retries reconciliation
+with current People boxes after acquiring the shared mutation lease.
 
 Each accepted crop receives:
 

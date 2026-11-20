@@ -33,6 +33,9 @@ class IndexStorePeopleAssetRepository:
             for asset_id, row in self._repository().get_rows_by_ids(asset_ids).items()
         }
 
+    def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
+        return self._repository().get_rows_by_rels(rels)
+
     def read_rows_by_face_status(
         self,
         statuses: Iterable[str],
@@ -46,8 +49,18 @@ class IndexStorePeopleAssetRepository:
     def update_face_status(self, asset_id: str, status: str) -> None:
         self._repository().update_face_status(asset_id, status)
 
-    def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
-        self._repository().update_face_statuses(asset_ids, status)
+    def update_face_statuses(
+        self,
+        asset_ids: Iterable[str],
+        status: str,
+        *,
+        expected_statuses: tuple[str | None, ...] | None = None,
+    ) -> None:
+        repository = self._repository()
+        if expected_statuses is None:
+            repository.update_face_statuses(asset_ids, status)
+        else:
+            repository.update_face_statuses(asset_ids, status, expected_statuses=expected_statuses)
 
     def reset_face_statuses_for_pipeline_upgrade(self) -> int:
         return int(self._repository().reset_face_statuses_for_pipeline_upgrade())

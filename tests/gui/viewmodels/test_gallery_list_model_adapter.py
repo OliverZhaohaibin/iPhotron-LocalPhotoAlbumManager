@@ -11,6 +11,8 @@ from PySide6.QtCore import QModelIndex, QSize, Qt, QTimer
 from PySide6.QtGui import QImage
 
 from iPhoto.application.dtos import AssetDTO
+from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
+from iPhoto.cache.index_store.repository import AssetRepository
 from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.gallery_demand import build_viewport_demand
 from iPhoto.gui.ui.models.roles import Roles
@@ -26,6 +28,7 @@ from iPhoto.gui.viewmodels.gallery_tile import GalleryTileSnapshot
 from iPhoto.gui.viewmodels.gallery_window_loader import (
     GallerySelectionAnchor,
     GallerySelectionAnchorRetryTicket,
+    GalleryWindowResult,
 )
 from iPhoto.infrastructure.services.thumbnail_cache_service import (
     ThumbnailCacheService,
@@ -52,6 +55,7 @@ class _Signal:
 
 class _BackfillService:
     def __init__(self) -> None:
+        self.thumbnail_ready_committed = _Signal()
         self.thumbnail_backfill_completed = _Signal()
         self.thumbnail_backfill_failed = _Signal()
         self.thumbnail_backfill_progress = _Signal()
@@ -576,6 +580,70 @@ def test_startup_window_backfill_and_thumbnail_publish_keep_event_loop_responsiv
         thumbnails.shutdown()
 
 
+@pytest.mark.parametrize("ready_before_window_result", [False, True])
+def test_gallery_refreshes_when_an_independent_worker_makes_a_thumbnail_ready(
+    tmp_path: Path, mock_thumb_service, ready_before_window_result: bool,
+) -> None:
+    root = tmp_path.resolve()
+    path = root / "edited.jpg"
+    path.touch()
+    repository = AssetRepository(root)
+    repository.write_rows([{
+        "rel": path.name, "id": "edited", "media_type": 0, "w": 16, "h": 16,
+        "thumbnail_state": "stale", "thumb_cache_key": "existing-key", "thumb_revision": "edit",
+    }])
+    service = LibraryAssetQueryService(root, repository_factory=lambda _root: repository)
+    adapter = GalleryListModelAdapter.create(
+        asset_query_service=service, thumbnail_service=mock_thumb_service, library_root=root,
+    )
+    requests = []
+    adapter.store.set_window_request_handler(requests.append)
+
+    def publish() -> None:
+        assert service.publish_thumbnail_ready(
+            path, revision="edit", cache_key="existing-key", micro_thumbnail=b"micro",
+        )
+
+    try:
+        adapter.store.load_selection(root, query=AssetQuery())
+        previous = requests.pop(0)
+        empty = service.read_gallery_asset_window(root, previous.query, 0, previous.limit)
+        assert empty.total_count == 0
+
+        if ready_before_window_result:
+            publish()
+        adapter.store.apply_window_result(GalleryWindowResult(
+            generation=previous.generation, first=0, last=0, rows={},
+            total_count=empty.total_count, collection_revision=empty.collection_revision,
+            requested_revision=previous.collection_revision,
+        ))
+        if not ready_before_window_result:
+            publish()
+        assert adapter.rowCount() == 0
+
+        service.thumbnail_backfill_completed.emit(SimpleNamespace(
+            job_id="thumbnail-backfill:test", root=root, rows=[],
+        ))
+        adapter._flush_pending_scan_batches()
+        refresh = requests.pop(0)
+        assert refresh.refresh_after_commit
+        assert requests == []
+        window = service.read_gallery_asset_window(root, refresh.query, 0, refresh.limit)
+        row = window.rows[0]
+        adapter.store.apply_window_result(GalleryWindowResult(
+            generation=refresh.generation, first=0, last=0,
+            rows={0: scan_row_to_dto(root, row["rel"], row)},
+            total_count=window.total_count, collection_revision=window.collection_revision,
+            requested_revision=refresh.collection_revision,
+        ))
+        assert adapter.rowCount() == 1
+        assert adapter.store.asset_at(0).abs_path == path
+    finally:
+        adapter.rebind_asset_query_service(None, None)
+        service.shutdown()
+        repository.close()
+
+
 def test_rebind_asset_query_service_moves_backfill_completion_signal(
     mock_store,
     mock_thumb_service,
@@ -587,34 +655,61 @@ def test_rebind_asset_query_service_moves_backfill_completion_signal(
 
     adapter.rebind_asset_query_service(new_service, Path("/library"))
 
-    assert (
-        adapter._handle_thumbnail_backfill_completed
-        not in old_service.thumbnail_backfill_completed.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_completed
-        in new_service.thumbnail_backfill_completed.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_progress
-        not in old_service.thumbnail_backfill_progress.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_progress
-        in new_service.thumbnail_backfill_progress.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_failed
-        not in old_service.thumbnail_backfill_failed.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_failed
-        in new_service.thumbnail_backfill_failed.handlers
-    )
+    for name in ("thumbnail_backfill_completed", "thumbnail_backfill_progress", "thumbnail_backfill_failed"):
+        assert not getattr(old_service, name).handlers
+        assert len(getattr(new_service, name).handlers) == 1
     mock_store.rebind_asset_query_service.assert_called_once_with(
         new_service,
         Path("/library"),
     )
+
+
+def test_library_rebind_discards_queued_backfill_events_for_same_path(
+    mock_store, mock_thumb_service, qapp,
+):
+    old_service = _BackfillService()
+    new_service = _BackfillService()
+    mock_store.asset_query_service = old_service
+    mock_store.record_scan_batch.return_value = True
+    adapter = GalleryListModelAdapter(mock_store, mock_thumb_service)
+    adapter._scan_batch_timer.setInterval(60_000)
+    root = Path("/library")
+    progress, completed, failures, resets = [], [], [], []
+    adapter.thumbnailBackfillProgress.connect(lambda *args: progress.append(args))
+    adapter.thumbnailBackfillCompleted.connect(completed.append)
+    adapter.thumbnailBackfillFailed.connect(lambda *args: failures.append(args))
+    adapter.thumbnailBackfillReset.connect(lambda: resets.append(True))
+    batch = SimpleNamespace(root=root, rows=[{"rel": "old.jpg"}])
+
+    # One completion has reached the model but is waiting for the refresh timer.
+    old_service.thumbnail_backfill_completed.emit(batch)
+    mock_store.record_scan_batch.assert_called_once_with(batch)
+    mock_store.record_scan_batch.reset_mock()
+
+    def emit_old_events():
+        old_service.thumbnail_ready_committed.emit(batch)
+        old_service.thumbnail_backfill_progress.emit(root, 0, 1)
+        old_service.thumbnail_backfill_completed.emit(batch)
+        old_service.thumbnail_backfill_failed.emit(root, "old decode error")
+
+    worker = threading.Thread(target=emit_old_events)
+    worker.start()
+    worker.join()
+    adapter.rebind_asset_query_service(new_service, root)
+    qapp.processEvents()
+    adapter._flush_pending_scan_batches()
+
+    mock_store.record_scan_batch.assert_not_called()
+    mock_store.flush_pending_scan_refresh.assert_not_called()
+    mock_store.finish_thumbnail_backfill.assert_not_called()
+    assert (progress, completed, failures) == ([], [], [])
+    assert resets == [True]
+
+    new_service.thumbnail_backfill_progress.emit(root, 0, 1)
+    new_service.thumbnail_backfill_failed.emit(root, "current decode error")
+    assert progress == [(root, 0, 1)]
+    assert failures == [(root, "current decode error")]
+    mock_store.finish_thumbnail_backfill.assert_called_once_with(root)
 
 
 def test_backfill_progress_is_relayed_from_query_service(mock_thumb_service):

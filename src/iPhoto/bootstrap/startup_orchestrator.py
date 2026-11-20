@@ -85,6 +85,7 @@ class StartupOrchestrator(QObject):
     """Own the one-shot transition from a shown shell to app initialisation."""
 
     phaseChanged = Signal(object)  # noqa: N815 - Qt signal naming convention
+    firstPaintRequested = Signal()  # noqa: N815
     interactiveReady = Signal(object)  # noqa: N815 - Qt signal naming convention
     libraryReady = Signal(object)  # noqa: N815 - Qt signal naming convention
     startupDegraded = Signal(object)  # noqa: N815 - Qt signal naming convention
@@ -101,6 +102,7 @@ class StartupOrchestrator(QObject):
         self._started_ns = time.perf_counter_ns()
         self._continuation: Callable[[], None] | None = None
         self._continuation_started = False
+        self._paint_requested = False
         self._cancelled = False
         self._terminal_generations: set[int] = set()
         self._milestones: set[tuple[int, StartupPhase]] = set()
@@ -123,6 +125,7 @@ class StartupOrchestrator(QObject):
         self._started_ns = time.perf_counter_ns()
         self._continuation = None
         self._continuation_started = False
+        self._paint_requested = False
         self._cancelled = False
         self._attempt = StartupAttempt(self._generation)
         self.transition(StartupPhase.BOOTSTRAP)
@@ -136,9 +139,9 @@ class StartupOrchestrator(QObject):
         self._attempt.register_cleanup(callback)
 
     def shell_shown(self, continuation: Callable[[], None]) -> None:
-        """Arm the paint fast path and an independent liveness watchdog."""
+        """Wait for a real paint, with one watchdog-triggered update request."""
 
-        if self._cancelled:
+        if self._cancelled or self._is_terminal() or self._continuation_started:
             return
         self._continuation = continuation
         self.transition(StartupPhase.SHELL_SHOWN)
@@ -184,6 +187,8 @@ class StartupOrchestrator(QObject):
         if self._is_terminal():
             return False
         self._terminal_generations.add(self._generation)
+        self._watchdog.stop()
+        self._continuation = None
         mark(stage, generation=self._generation, **details)
         if self._attempt is not None and self._attempt.generation == self._generation:
             self._attempt.close()
@@ -232,7 +237,6 @@ class StartupOrchestrator(QObject):
     def degrade(self, failure: StartupFailure) -> None:
         if self._cancelled or self._is_terminal():
             return
-        self._watchdog.stop()
         self._emit_terminal(
             "startup.degraded",
             failed_phase=failure.phase.value,
@@ -248,7 +252,6 @@ class StartupOrchestrator(QObject):
             return
         if self._cancelled or self._is_terminal():
             return
-        self._watchdog.stop()
         self._emit_terminal(
             "startup.failed",
             failed_phase=failure.phase.value,
@@ -261,15 +264,12 @@ class StartupOrchestrator(QObject):
     def complete(self) -> None:
         if self._cancelled or self._is_terminal():
             return
-        self._watchdog.stop()
         self.transition(StartupPhase.IDLE)
 
     def cancel(self) -> None:
         if self._cancelled or self._is_terminal():
             return
         self._cancelled = True
-        self._watchdog.stop()
-        self._continuation = None
         self._phase = StartupPhase.CANCELLED
         snapshot = self.snapshot(reason="cancelled")
         self._emit_terminal("startup.cancelled")
@@ -288,12 +288,25 @@ class StartupOrchestrator(QObject):
         )
 
     def _on_watchdog(self) -> None:
+        if self._phase is not StartupPhase.SHELL_SHOWN or self._is_terminal():
+            return
+        if self._paint_requested:
+            self.fail(StartupFailure(
+                phase=StartupPhase.SHELL_SHOWN,
+                message="The main window did not paint.",
+                recoverable=False,
+                code="first_paint_timeout",
+                suggested_action="restart",
+            ))
+            return
         _LOGGER.warning("First-paint startup watchdog fired after %dms", self._watchdog_ms)
         mark("startup.first_paint_watchdog", generation=self._generation)
-        self._run_continuation("watchdog")
+        self._paint_requested = True
+        self._watchdog.start(self._watchdog_ms)
+        self.firstPaintRequested.emit()
 
     def _run_continuation(self, reason: str) -> None:
-        if self._cancelled or self._continuation_started:
+        if self._phase is not StartupPhase.SHELL_SHOWN or self._is_terminal():
             return
         callback = self._continuation
         if callback is None:

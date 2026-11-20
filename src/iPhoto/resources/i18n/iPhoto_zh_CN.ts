@@ -980,6 +980,14 @@
             <source>People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.</source>
             <translation>隐藏和可见状态的人物不能合并。请先将两张人物卡片都设为隐藏或可见。</translation>
         </message>
+        <message>
+            <source>Make both cards visible or both hidden before merging them.</source>
+            <translation>请先将两张卡片都设为可见，或都设为隐藏，再进行合并。</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Cards</source>
+            <translation>无法合并卡片</translation>
+        </message>
     </context>
     <context>
         <name>AlbumSidebar</name>

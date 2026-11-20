@@ -220,6 +220,9 @@ construct and start `DesktopCoordinatorRuntime`, probe and commit the saved
 library, select and warm the initial Gallery collection, and finally schedule
 idle startup work such as the deferred metadata scan. This is an architecture
 constraint rather than a timer-based optimization.
+The first-paint watchdog requests one normal Qt update when paint is delayed.
+If the next interval expires without a paint, startup records a terminal
+failure and exits. The watchdog cannot activate post-paint work.
 
 `Ui_MainWindow.ensure_feature()` owns the on-demand lifetime of the detail,
 preview, Map, People, and Albums bundles. It caches each bundle and emits
@@ -352,6 +355,16 @@ state guards and recovery handlers must not be bypassed. The coordinator owns
 Unfinished operations and pending event dispatch survive session restarts and
 snapshot rebuilds. Delivery is at-least-once, using stable event ids; recovery
 must retain this behavior rather than assuming a published event cannot replay.
+People scan commits persist the affected asset and identity IDs with the
+runtime snapshot, including assignments changed outside the current batch.
+Live delivery and recovery replay use the same change set.
+Writers and recovery handlers acquire the same cross-process lease before
+inspecting unfinished work. A second process can retry after the owner exits
+or finishes the operation. Background People scans retain detected batches
+while waiting for the lease, and skip assets that another owner already finished.
+Asset-level failures use the same lease and journal. The asset index accepts a
+failure transition only from its expected pending or retry state. Cancelling
+or aborting the batch leaves individual assets eligible for a later scan.
 
 ### Large Library Query And Scan Contracts
 
@@ -503,6 +516,7 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/pets/pet_state.db` | Durable Pets profiles, names, covers, hidden flags, rejected keys, and merge redirects. |
 | `.iPhoto/pets/thumbnails/` | Cropped pet thumbnails; after a successful commit, prune only displaced candidates unreferenced by runtime detections or durable covers. Never sweep in-flight crops. |
 | `.iPhoto/recognition/operations.db` | Durable recognition mutation journal and event outbox; unfinished recovery and pending dispatch must survive restarts and runtime snapshot rebuilds. |
+| `.iPhoto/recognition/operations.lock` | Writers and recovery handlers hold an operating-system file lock for the duration of a recognition mutation. Process exit releases the lock. |
 | `.ipo` sidecars | Durable non-destructive edit instructions next to source media. |
 | `.iphoto.album.json` / `.iPhoto/manifest.json` | Folder-local album metadata formats. |
 | `.iphoto.album` | Legacy album marker compatibility file. |
@@ -607,6 +621,17 @@ Desktop library preparation uses the killable helper in
 album discovery must not block the GUI thread. The controller has separate
 probe and migration timeouts and rejects cancelled or superseded results.
 Headless entry points may prepare synchronously outside the GUI.
+Direct repository opens share the helper's backup and recovery workflow.
+Schema preparation serializes upgrades and recovery through an operating-system
+lock on `.iPhoto/startup-migration.lock`.
+
+The helper selects the library's existing work directory, including the legacy
+`.iphoto` spelling, and checks the latest full-library scan for completion.
+Manual library selection and opening an album outside the active library use
+the same helper as startup. Each selection supersedes the earlier request and
+waits for a retired child to release its migration lock. The existing session
+stays active during preparation. The commit checks the request, library epoch,
+and database credential before unbinding the active library.
 
 - Opening a current schema must not repeat full-table repair/backfill. Schema
   changes use versioned migrations and explicit upgrade tests.
@@ -752,6 +777,12 @@ sequenceDiagram
 Scanning has one application use case. Qt workers adapt threading/progress, and
 CLI uses the same session surface without Qt. UI scan batches are ready-only and
 carry full thumbnail cache keys so visible media rows are immediately drawable.
+Replacing an asset invalidates both ends of its old Live Photo pair in the same
+transaction as the metadata merge. Favorites, trash state, and restore metadata
+remain durable. Scans that skip pairing keep unaffected pairs and leave the
+compatibility links snapshot to the next pairing pass.
+Desktop scan finalization commits Live Photo roles before recording completion
+and notifying Gallery of the finished scan.
 Metadata commits may create or update Face/Pet `pending`, `retry`, `done`, and
 `skipped` bookkeeping, but scanning does not itself activate model workers.
 Application startup, metadata-scan completion, persisted `pending`/`retry` rows,

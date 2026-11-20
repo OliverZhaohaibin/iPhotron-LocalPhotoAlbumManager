@@ -359,12 +359,12 @@ def scan_album(
                 try:
                     stat = p.stat()
                     # Validate cache
-                    cached_ts = cached.get("ts")
-                    current_ts = int(stat.st_mtime * 1_000_000)
-                    source_unchanged = (
-                        cached.get("bytes") == stat.st_size
-                        and abs((cached_ts or 0) - current_ts) <= 1_000_000
-                    )
+                    cached_mtime_ns = cached.get("source_mtime_ns")
+                    if cached_mtime_ns:
+                        mtime_matches = cached_mtime_ns == stat.st_mtime_ns
+                    else:
+                        mtime_matches = cached.get("ts") == int(stat.st_mtime * 1_000_000)
+                    source_unchanged = cached.get("bytes") == stat.st_size and mtime_matches
                     if source_unchanged:
                         cached = dict(cached)
                         cached["source_mtime_ns"] = int(stat.st_mtime_ns)
@@ -526,16 +526,6 @@ def _refresh_cached_thumbnail(
     return row
 
 
-_THUMBNAIL_ROW_FIELDS = (
-    "thumbnail_state",
-    "micro_thumbnail",
-    "thumb_cache_key",
-    "thumb_updated_at",
-    "thumb_error",
-    "thumb_revision",
-)
-
-
 def _refresh_cached_metadata_rows(
     root: Path,
     items: list[tuple[Path, Dict[str, Any]]],
@@ -558,26 +548,42 @@ def _refresh_cached_metadata_rows(
             or lookup.get(unicodedata.normalize("NFD", path.as_posix()))
             or {}
         )
+        refreshed = dict(cached)
+        source_replaced = False
         try:
-            refreshed = _metadata_provider.normalize_metadata(root, path, raw)
+            extracted = _metadata_provider.normalize_metadata(root, path, raw)
         except Exception:
             LOGGER.warning("Metadata-only backfill failed for %s", path, exc_info=True)
-            refreshed = dict(cached)
-        for field in _THUMBNAIL_ROW_FIELDS:
-            if field in cached:
-                refreshed[field] = cached[field]
+        else:
+            # A legacy row may only have a coarse mtime. A different content
+            # hash is a replacement, even when its size and timestamp match.
+            source_replaced = bool(
+                cached.get("id") and extracted.get("id") and cached["id"] != extracted["id"]
+            )
+            if source_replaced:
+                refreshed = extracted
             else:
-                refreshed.pop(field, None)
-        try:
-            refreshed["source_mtime_ns"] = int(path.stat().st_mtime_ns)
-        except OSError:
-            pass
+                # The source is unchanged. Optional metadata readers may have
+                # fewer fields than the original scan (and synthesize a date).
+                for field, value in extracted.items():
+                    if value is not None and refreshed.get(field) in (None, ""):
+                        refreshed[field] = value
+                if _has_indexed_orientation(extracted):
+                    refreshed["image_orientation"] = extracted["image_orientation"]
+                if _has_indexed_geometry(extracted):
+                    refreshed["w"], refreshed["h"] = extracted["w"], extracted["h"]
+                    refreshed["aspect_ratio"] = int(extracted["w"]) / int(extracted["h"])
 
         indexed_revision = str(cached.get("thumb_revision") or "").strip()
         revision = thumbnail_revision(path)
         refreshed["thumb_revision"] = revision
-        if indexed_revision != revision and (
-            indexed_revision or path.with_suffix(".ipo").is_file()
+        inputs_changed = indexed_revision != revision and (
+            bool(indexed_revision) or path.with_suffix(".ipo").is_file()
+        )
+        if (
+            source_replaced
+            or inputs_changed
+            or not _cached_thumbnail_ready(path, refreshed, thumbnail_cache_dir)
         ):
             refreshed = _refresh_cached_thumbnail(
                 path,

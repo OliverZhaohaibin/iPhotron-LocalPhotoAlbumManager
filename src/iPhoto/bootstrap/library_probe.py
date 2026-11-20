@@ -38,9 +38,11 @@ from ..config import (
     ALBUM_MANIFEST_NAMES,
     ALL_WORK_DIR_NAMES,
     EXPORT_DIR_NAME,
+    GLOBAL_INDEX_DB_NAME,
     RECENTLY_DELETED_DIR_NAME,
     WORK_DIR_NAME,
 )
+from ..utils.pathutils import resolve_work_dir
 
 _RESERVED_NAMES = frozenset(
     name.casefold()
@@ -480,11 +482,14 @@ def _snapshot_albums(root: Path) -> tuple[tuple[PreparedAlbum, ...], tuple[str, 
 def _database_snapshot(
     root: Path, on_migration_changed: Callable[[bool], None] | None
 ) -> tuple[Path, int, bool, tuple[str, ...]]:
-    database_path = root / WORK_DIR_NAME / "global_index.db"
+    work_dir = resolve_work_dir(root) or root / WORK_DIR_NAME
+    database_path = work_dir / GLOBAL_INDEX_DB_NAME
     # Schema creation/migration is intentionally performed in this killable
     # helper, never on the GUI thread.  Versioned migrations make the common
     # already-current path a constant-time PRAGMA check.
     from ..cache.index_store.migrations import SchemaMigrator
+    from ..cache.index_store.queries import QueryBuilder
+    from ..domain.models.scan import scan_job_completed
 
     migration_started = False
 
@@ -500,15 +505,13 @@ def _database_snapshot(
     if migration_started and on_migration_changed is not None:
         on_migration_changed(False)
     with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
+        connection.row_factory = sqlite3.Row
         try:
-            row = connection.execute(
-                "SELECT 1 FROM scan_jobs WHERE status = 'completed' "
-                "AND scope = 'library' AND root = ? LIMIT 1",
-                (root.as_posix(),),
-            ).fetchone()
+            sql, params = QueryBuilder.build_latest_scan_job(root.as_posix(), "library")
+            row = connection.execute(sql, params).fetchone()
         except sqlite3.OperationalError:
             row = None
-    return database_path, schema_version, row is not None, warnings
+    return database_path, schema_version, scan_job_completed(dict(row) if row else None), warnings
 
 
 def _unix_mount_profile(path: Path) -> StorageProfile | None:
@@ -657,11 +660,13 @@ class LibraryProbeController(QObject):
 
     ready = Signal(object)
     failed = Signal(object)
+    superseded = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._process: QProcess | None = None
         self._request: LibraryProbeRequest | None = None
+        self._retiring_processes: set[QProcess] = set()
         self._stdout = bytearray()
         self._stderr = bytearray()
         self._migrating = False
@@ -671,8 +676,17 @@ class LibraryProbeController(QObject):
         self._termination_callbacks: set[Callable[[], None]] = set()
 
     def start(self, request: LibraryProbeRequest) -> None:
+        previous = self._request
         self.cancel()
         self._request = request
+        if previous is not None:
+            self.superseded.emit(previous.request_id)
+        self._start_pending_request()
+
+    def _start_pending_request(self) -> None:
+        request = self._request
+        if request is None or self._process is not None or self._retiring_processes:
+            return
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
         process.readyReadStandardOutput.connect(self._read_stdout_from_sender)
@@ -699,10 +713,21 @@ class LibraryProbeController(QObject):
             return
         self._stop_process(process)
 
+    def shutdown(self) -> None:
+        """Stop children even when the GUI event loop has stopped processing timers."""
+
+        self.cancel()
+        for process in tuple(self._retiring_processes):
+            if process.state() != QProcess.ProcessState.NotRunning:
+                process.kill()
+
     def _stop_process(self, process: QProcess) -> None:
         if process.state() == QProcess.ProcessState.NotRunning:
             process.deleteLater()
             return
+        # A replacement probe can open the same database. Wait for the old
+        # child to exit and release its migration lock before launching it.
+        self._retiring_processes.add(process)
         process.terminate()
 
         def _kill_if_running() -> None:
@@ -719,6 +744,11 @@ class LibraryProbeController(QObject):
         # Some PySide/macOS builds otherwise discard static singleShot callables.
         self._termination_callbacks.add(_kill_if_running)
         QTimer.singleShot(250, _kill_if_running)
+
+    def _retire_process(self, process: QProcess) -> None:
+        self._retiring_processes.discard(process)
+        process.deleteLater()
+        self._start_pending_request()
 
     def _emit_failure(self, failure: LibraryProbeFailure) -> None:
         process = self._process
@@ -775,6 +805,8 @@ class LibraryProbeController(QObject):
 
     def _on_error(self, process: QProcess, error: QProcess.ProcessError) -> None:
         if process is not self._process or self._request is None:
+            if process in self._retiring_processes and error == QProcess.ProcessError.FailedToStart:
+                self._retire_process(process)
             return
         if error == QProcess.ProcessError.FailedToStart:
             self._emit_failure(
@@ -803,7 +835,7 @@ class LibraryProbeController(QObject):
     ) -> None:
         request = self._request
         if process is not self._process or request is None:
-            process.deleteLater()
+            self._retire_process(process)
             return
         self._read_stdout(process)
         self._read_stderr(process)
@@ -838,7 +870,11 @@ class LibraryProbeController(QObject):
             if prepared.request_id != request.request_id:
                 raise ValueError("request id mismatch")
             root = prepared.root
-            expected_database = root / WORK_DIR_NAME / "global_index.db"
+            # The helper selected the on-disk spelling. Keep GUI validation
+            # lexical here; the repository checks its selected path on bind.
+            allowed_databases = {
+                root / name / GLOBAL_INDEX_DB_NAME for name in ALL_WORK_DIR_NAMES
+            }
             requested_root = Path(request.path).expanduser().absolute()
             root_matches = os.path.normcase(os.fspath(requested_root)) == os.path.normcase(
                 os.fspath(root)
@@ -858,7 +894,7 @@ class LibraryProbeController(QObject):
                 not root.is_absolute()
                 or Path(os.path.normpath(root)) != root
                 or not root_matches
-                or prepared.database_path != expected_database
+                or prepared.database_path not in allowed_databases
                 or not album_paths_valid
             ):
                 self.failed.emit(_failure(request.request_id, "root_mismatch"))

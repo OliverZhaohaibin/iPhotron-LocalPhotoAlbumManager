@@ -15,6 +15,11 @@ def test_application_startup_exits_through_normal_interpreter_shutdown(
     env.update(
         {
             "IPHOTO_DISABLE_OPENGL": "1",
+            "IPHOTO_STARTUP_BENCHMARK": "1",
+            "IPHOTO_STARTUP_PROFILE": "1",
+            "IPHOTO_SETTINGS_PATH": str(tmp_path / "settings.json"),
+            "IPHOTO_STARTUP_PROFILE_PATH": str(tmp_path / "startup.jsonl"),
+            "IPHOTO_STARTUP_PROFILE_SALT": "isolated-startup-smoke",
             "IPHOTO_STARTUP_BENCHMARK_AUTO_EXIT_MS": "0",
             "NUMBA_DISABLE_JIT": "1",
             "QT_QPA_PLATFORM": "offscreen",

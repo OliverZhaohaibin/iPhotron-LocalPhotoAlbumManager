@@ -70,6 +70,7 @@ class _IdentityChoice:
     name: str | None
     thumbnail_path: Path | None
     face_count: int
+    is_hidden: bool
 
 
 class _PeopleDashboardLoaderSignals(QObject):
@@ -979,8 +980,6 @@ class PeopleDashboardWidget(QWidget):
 
     def _merge_pet(self, summary: PetSummary) -> None:
         choices = self._merge_choices("pet", summary.pet_id)
-        if not choices:
-            return
         self._open_merge_dialog(
             f"pet:{summary.pet_id}",
             choices,
@@ -1119,8 +1118,6 @@ class PeopleDashboardWidget(QWidget):
 
     def _merge_person(self, summary: PersonSummary) -> None:
         choices = self._merge_choices("person", summary.person_id)
-        if not choices:
-            return
 
         self._open_merge_dialog(
             f"person:{summary.person_id}",
@@ -1134,10 +1131,11 @@ class PeopleDashboardWidget(QWidget):
         source_id: str,
     ) -> list[_IdentityChoice]:
         source_identity = f"{source_kind}:{source_id}"
+        source_hidden = self._identity_hidden(source_identity)
         return [
             choice
             for choice in self._group_dialog_choices()
-            if choice.person_id != source_identity
+            if choice.person_id != source_identity and choice.is_hidden == source_hidden
         ]
 
     def _open_merge_dialog(
@@ -1147,6 +1145,10 @@ class PeopleDashboardWidget(QWidget):
         *,
         title_text: str,
     ) -> None:
+        if not choices:
+            if len(self._summaries) + len(self._pet_summaries) > 1:
+                self._show_hidden_merge_warning()
+            return
         dialog = GroupPeopleDialog(
             choices,  # type: ignore[arg-type]
             title_text=title_text,
@@ -1187,6 +1189,7 @@ class PeopleDashboardWidget(QWidget):
                     name=summary.name or tr("PeopleDashboard", "Unnamed"),
                     thumbnail_path=summary.thumbnail_path,
                     face_count=summary.face_count,
+                    is_hidden=summary.is_hidden,
                 )
             )
         for summary in self._pet_summaries:
@@ -1196,6 +1199,7 @@ class PeopleDashboardWidget(QWidget):
                     name=self._pet_label(summary),
                     thumbnail_path=summary.thumbnail_path,
                     face_count=summary.detection_count,
+                    is_hidden=summary.is_hidden,
                 )
             )
         return choices
@@ -1216,6 +1220,9 @@ class PeopleDashboardWidget(QWidget):
         source_hidden = self._identity_hidden(source_identity)
         target_hidden = self._identity_hidden(target_identity)
         if source_hidden is None or target_hidden is None:
+            return False
+        if source_hidden != target_hidden:
+            self._show_hidden_merge_warning()
             return False
         if not MergeConfirmDialog.confirm(2, self):
             return False
@@ -1241,11 +1248,7 @@ class PeopleDashboardWidget(QWidget):
                 group_redirects=outcome.group_redirects,
             )
         elif outcome.failure == IdentityMergeFailure.HIDDEN_STATE_MISMATCH:
-            dialogs.show_information(
-                self,
-                self._hidden_state_merge_message(),
-                title=tr("PeopleDashboard", "Cannot Merge People"),
-            )
+            self._show_hidden_merge_warning()
         elif outcome.failure == IdentityMergeFailure.RECOVERY_PENDING:
             dialogs.show_information(
                 self,
@@ -1580,11 +1583,14 @@ class PeopleDashboardWidget(QWidget):
     def _empty_clusters_message(self) -> str:
         return tr("PeopleDashboard", "No People or Pets clusters yet. Run a scan to build groups.")
 
-    def _hidden_state_merge_message(self) -> str:
-        return tr(
-            "PeopleDashboard",
-            "Hidden and visible identity cards cannot be merged. Please make both cards "
-            "hidden or visible first.",
+    def _show_hidden_merge_warning(self) -> None:
+        dialogs.show_warning(
+            self,
+            tr(
+                "PeopleDashboard",
+                "Make both cards visible or both hidden before merging them.",
+            ),
+            title=tr("PeopleDashboard", "Cannot Merge Cards"),
         )
 
     def _schedule_visible_refresh(self) -> None:

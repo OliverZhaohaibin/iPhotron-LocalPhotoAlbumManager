@@ -88,7 +88,6 @@ class PackagedDetailBenchmarkHarness(QObject):
             for sample in samples
         ]
         self._queue = [sample for _ in range(repetitions) for sample in samples]
-        self._runtime.gallery.open_album_from_path(library_root)
         coordinator = self._runtime._playback._render_transaction_coordinator()
         coordinator.presented.connect(self._on_presented)
         coordinator.failed.connect(self._on_failed)
@@ -97,7 +96,11 @@ class PackagedDetailBenchmarkHarness(QObject):
         if dispatcher is not None:
             dispatcher.awake.connect(self._on_dispatcher_awake)
             dispatcher.aboutToBlock.connect(self._on_dispatcher_about_to_block)
-        QTimer.singleShot(100, self._dispatch_next)
+        self._runtime.gallery.open_album_from_path(
+            library_root,
+            on_opened=lambda: QTimer.singleShot(100, self._dispatch_next),
+            on_failed=lambda _message: self._finish("library_preparation_failed", exit_code=2),
+        )
 
     def _on_dispatcher_awake(self) -> None:
         self._gui_task_started_at = time.perf_counter()

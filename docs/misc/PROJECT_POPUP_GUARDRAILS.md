@@ -59,10 +59,8 @@ contract.
   guard.
 - The People UI must also block the action early and show the project-styled
   warning popup.
-- Keep the warning copy aligned with the historical behavior:
-  - Title: `Cannot Merge People`
-  - Body:
-    `People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.`
+- Use `Cannot Merge Cards` for the warning title for all identity kinds. The
+  message reads `Make both cards visible or both hidden before merging them.`
 
 ## Group disband contract
 

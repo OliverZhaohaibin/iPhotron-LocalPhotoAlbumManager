@@ -179,6 +179,17 @@ class StatusBarController(QObject):
 
         self._finish_thumbnail_backfill_request(failed=True)
 
+    def reset_thumbnail_backfill(self) -> None:
+        """Clear feedback for a library whose backfill jobs have been retired."""
+
+        self._thumbnail_backfill_active_requests = 0
+        self._thumbnail_backfill_session_failed = False
+        if self._progress_context == "thumbnail":
+            self._progress_bar.setVisible(False)
+            self._progress_bar.setRange(0, 0)
+            self._status_bar.clearMessage()
+            self._progress_context = None
+
     def _finish_thumbnail_backfill_request(self, *, failed: bool) -> None:
         """Consume one terminal event without hiding newer in-flight work."""
 

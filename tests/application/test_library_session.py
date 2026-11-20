@@ -97,14 +97,16 @@ def test_same_root_sessions_release_recognition_lease_by_reference_count(
     second_mutations = second.recognition_mutations
     first_people = first.people
     first_pets = first.pets
-    resolved = tmp_path.resolve()
+    lease = first_mutations._lease
 
     assert first_mutations.execution_lock is second_mutations.execution_lock
-    assert mutation_module._EXECUTION_LOCKS[resolved].references == 2
+    assert mutation_module._EXECUTION_LOCKS[lease.identity] is lease
+    assert lease.references == 2
 
     first.shutdown()
 
-    assert mutation_module._EXECUTION_LOCKS[resolved].references == 1
+    assert mutation_module._EXECUTION_LOCKS[lease.identity] is lease
+    assert lease.references == 1
     assert second_mutations.unfinished() == ()
     assert first_people.coordinator is None
     assert first_pets.coordinator is None
@@ -115,4 +117,5 @@ def test_same_root_sessions_release_recognition_lease_by_reference_count(
 
     second.shutdown()
 
-    assert resolved not in mutation_module._EXECUTION_LOCKS
+    assert lease.references == 0
+    assert lease.identity not in mutation_module._EXECUTION_LOCKS

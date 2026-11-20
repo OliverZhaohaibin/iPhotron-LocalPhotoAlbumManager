@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,7 +21,13 @@ from iPhoto.utils.pathutils import ensure_work_dir
 from .pipeline import DetectedAssetFaces
 from .repository import FaceRepository, ManualFaceRecord, PeopleGroupRecord
 from .scan_session import FaceScanSession
-from .status import FACE_STATUS_DONE, FACE_STATUS_RETRY
+from .status import (
+    FACE_STATUS_DONE,
+    FACE_STATUS_FAILED,
+    FACE_STATUS_PENDING,
+    FACE_STATUS_RETRY,
+    normalize_face_status,
+)
 
 LOGGER = get_logger()
 
@@ -79,7 +86,6 @@ class PeopleIndexCoordinator(QObject):
             self._library_root
         )
         self._owns_journal = mutation_coordinator is None
-        self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PEOPLE_JOURNAL_KINDS,
             self._recover_people_operation_locked,
@@ -89,8 +95,9 @@ class PeopleIndexCoordinator(QObject):
         # own thread regardless of which thread calls _emit_snapshot().
         self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
         try:
-            with self._lock:
-                self._recover_operations_locked()
+            with self._journal.try_mutation_scope() as acquired:
+                if acquired and self._recover_operations_locked():
+                    self._prune_runtime_commits_locked()
         except Exception as exc:  # noqa: BLE001
             self._recovery_error = exc
             LOGGER.error(
@@ -117,7 +124,7 @@ class PeopleIndexCoordinator(QObject):
     ) -> None:
         """Bind the current library asset-index adapter."""
 
-        with self._lock:
+        with self._journal.execution_lock:
             self._asset_repository = asset_repository
 
     def submit_detected_batch(
@@ -126,13 +133,22 @@ class PeopleIndexCoordinator(QObject):
         *,
         distance_threshold: float,
         min_samples: int,
+        is_cancelled: Callable[[], bool] | None = None,
+        attempted_statuses: Mapping[str, str | None] | None = None,
     ) -> PeopleSnapshotEvent | None:
         detected_batch = list(detected_results)
         if not detected_batch:
             return None
 
-        with self._lock:
-            if self._shutdown_requested:
+        scope = (
+            self._journal.try_mutation_scope()
+            if is_cancelled is None
+            else self._journal.wait_for_mutation_scope(
+                is_cancelled=lambda: self._shutdown_requested or is_cancelled(),
+            )
+        )
+        with scope as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             operation_id = self._try_prepare_operation_locked(
                 "people_scan_commit",
@@ -140,13 +156,51 @@ class PeopleIndexCoordinator(QObject):
             )
             if operation_id is None:
                 return None
+            if is_cancelled is not None and is_cancelled():
+                self._reject_operation_locked(operation_id, "scan_cancelled")
+                return None
+            if self._asset_repository is not None and (
+                is_cancelled is not None or attempted_statuses is not None
+            ):
+                # Another owner may have completed these assets before releasing
+                # the lease, including work just finalized by journal recovery.
+                # Look up the scanned paths because identical copies share IDs.
+                rows = self._asset_repository.get_rows_by_rels(
+                    result.asset_rel for result in detected_batch
+                )
+                detected_batch = [
+                    result for result in detected_batch
+                    if (row := rows.get(result.asset_rel)) is not None
+                    and row.get("id") == result.asset_id
+                    and (status := normalize_face_status(row.get("face_status")))
+                    in (None, FACE_STATUS_PENDING, FACE_STATUS_RETRY)
+                    and (
+                        not result.error or attempted_statuses is None
+                        or (result.asset_rel in attempted_statuses
+                            and status == attempted_statuses[result.asset_rel])
+                    )
+                ]
+                if not detected_batch:
+                    self._reject_operation_locked(operation_id, "no_pending_assets")
+                    return None
             repository = self._repository()
             session = FaceScanSession()
             done_ids, retry_ids = session.stage_detection_results(detected_batch)
+            failed_assets = {
+                item.asset_id for item in detected_batch
+                if item.error and attempted_statuses is not None
+                and attempted_statuses.get(item.asset_rel) == FACE_STATUS_RETRY
+            }
+            unsuccessful_ids = dict.fromkeys(retry_ids)
+            for asset_id in done_ids:
+                unsuccessful_ids.pop(asset_id, None)
+            failed_ids = [asset_id for asset_id in unsuccessful_ids if asset_id in failed_assets]
+            retry_ids = [asset_id for asset_id in unsuccessful_ids if asset_id not in failed_assets]
             operation_payload = {
                 "asset_ids": [result.asset_id for result in detected_batch],
                 "done_asset_ids": list(done_ids),
                 "retry_asset_ids": list(retry_ids),
+                "failed_asset_ids": failed_ids,
             }
             self._journal.transition(
                 operation_id,
@@ -155,6 +209,7 @@ class PeopleIndexCoordinator(QObject):
             )
             if not done_ids:
                 self._mark_retry_asset_ids(retry_ids)
+                self._mark_failed_asset_ids(failed_ids)
                 self._reject_operation_locked(operation_id, "no_committable_faces")
                 return None
 
@@ -165,16 +220,6 @@ class PeopleIndexCoordinator(QObject):
                 distance_threshold=distance_threshold,
                 min_samples=min_samples,
                 existing_faces=previous_faces,
-            )
-            done_id_set = set(done_ids)
-            changed_person_ids = tuple(
-                sorted(
-                    {
-                        str(face.person_id)
-                        for face in clustered_faces
-                        if face.person_id and face.asset_id in done_id_set
-                    }
-                )
             )
             session.commit(
                 repository,
@@ -188,7 +233,13 @@ class PeopleIndexCoordinator(QObject):
             )
             try:
                 self._mark_retry_asset_ids(retry_ids)
+                self._mark_failed_asset_ids(failed_ids)
                 self._mark_done_asset_ids(done_ids)
+                event = self._dispatch_runtime_commit_locked(
+                    operation_id,
+                    repository.get_runtime_commit(operation_id),
+                    status_changed_ids=(*retry_ids, *failed_ids),
+                )
             except Exception as exc:
                 LOGGER.error(
                     "People snapshot committed for %s, but bookkeeping failed: %s",
@@ -199,20 +250,14 @@ class PeopleIndexCoordinator(QObject):
                 raise PeopleSnapshotCommittedError(
                     "Face scan committed, but updating scan bookkeeping failed."
                 ) from exc
-            event = self._emit_snapshot(
-                operation_id=operation_id,
-                changed_asset_ids=tuple(done_ids + retry_ids),
-                changed_person_ids=changed_person_ids,
-                dispatch=False,
-            )
-            self._finish_operation_locked(operation_id, event)
+            self._prune_runtime_commits_locked(repository)
             return event
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> PeopleSnapshotEvent | None:
         if not person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -240,8 +285,8 @@ class PeopleIndexCoordinator(QObject):
     def set_person_cover(self, person_id: str, face_id: str) -> bool:
         if not person_id or not face_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             changed = repository.set_person_cover(person_id, face_id)
@@ -257,8 +302,8 @@ class PeopleIndexCoordinator(QObject):
 
         if not person_id:
             return False
-        with self._lock:
-            if self._shutdown_requested or not self._recover_operations_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._recover_operations_locked():
                 return False
             repository = self._repository()
             changed = repository.set_person_hidden(person_id, hidden)
@@ -285,8 +330,8 @@ class PeopleIndexCoordinator(QObject):
 
         if not face.face_id or not face.asset_id or not face.person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -332,8 +377,8 @@ class PeopleIndexCoordinator(QObject):
     def delete_face(self, face_id: str) -> PeopleSnapshotEvent | None:
         if not face_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -365,8 +410,8 @@ class PeopleIndexCoordinator(QObject):
     ) -> PeopleSnapshotEvent | None:
         if not face_id or not target_person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -403,8 +448,8 @@ class PeopleIndexCoordinator(QObject):
     ) -> PeopleSnapshotEvent | None:
         if not face_id or not new_person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -440,8 +485,8 @@ class PeopleIndexCoordinator(QObject):
 
     def set_person_order(self, person_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(person_id) for person_id in person_ids if person_id)
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             repository.set_person_order(ordered_ids)
@@ -451,8 +496,8 @@ class PeopleIndexCoordinator(QObject):
 
     def set_group_order(self, group_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(group_id) for group_id in group_ids if group_id)
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             repository.set_group_order(ordered_ids)
@@ -467,8 +512,8 @@ class PeopleIndexCoordinator(QObject):
     ) -> bool:
         if not source_person_id or not target_person_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -509,8 +554,8 @@ class PeopleIndexCoordinator(QObject):
         self,
         member_person_ids: Iterable[str],
     ) -> PeopleGroupRecord | None:
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             normalized_members = tuple(
@@ -546,8 +591,8 @@ class PeopleIndexCoordinator(QObject):
     def set_group_cover(self, group_id: str, asset_id: str) -> bool:
         if not group_id or not asset_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             changed = repository.set_group_cover_asset(group_id, asset_id)
@@ -561,8 +606,8 @@ class PeopleIndexCoordinator(QObject):
     def delete_group(self, group_id: str) -> bool:
         if not group_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -597,11 +642,11 @@ class PeopleIndexCoordinator(QObject):
         )
 
     def begin_shutdown(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = True
 
     def resume(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = False
 
     def close(self) -> None:
@@ -667,11 +712,20 @@ class PeopleIndexCoordinator(QObject):
             return False
         repository = self._repository()
         runtime_commit = repository.get_runtime_commit(operation.operation_id)
-        if runtime_commit is None:
-            if operation.kind == "people_scan_commit":
-                self._mark_retry_asset_ids(
-                    [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
+        if runtime_commit is not None:
+            runtime_commit = repository.complete_runtime_state_sync(operation.operation_id)
+            if runtime_commit is None:
+                raise RuntimeError(
+                    f"Missing People runtime commit during recovery: {operation.operation_id}"
                 )
+        status_changed_ids: tuple[str, ...] = ()
+        if operation.kind == "people_scan_commit":
+            retry_ids = [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
+            failed_ids = [str(value) for value in operation.payload.get("failed_asset_ids", ()) if value]
+            self._mark_retry_asset_ids(retry_ids)
+            self._mark_failed_asset_ids(failed_ids)
+            status_changed_ids = (*retry_ids, *failed_ids)
+        if runtime_commit is None:
             self._journal.transition(
                 operation.operation_id,
                 "finalized",
@@ -679,46 +733,59 @@ class PeopleIndexCoordinator(QObject):
                 error="superseded_before_runtime_commit",
             )
             return True
-        runtime_commit = repository.complete_runtime_state_sync(operation.operation_id)
-        if runtime_commit is None:
-            raise RuntimeError(
-                f"Missing People runtime commit during recovery: {operation.operation_id}"
-            )
         if operation.kind == "people_scan_commit":
-            self._mark_retry_asset_ids(
-                [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
-            )
             self._mark_done_asset_ids(
                 [str(value) for value in operation.payload.get("done_asset_ids", ()) if value]
             )
+            if not runtime_commit.get("scan_changes_complete"):
+                # Old scan markers recorded only the batch and cannot replay
+                # an exact delta. Refresh the current snapshot as well.
+                faces = repository.get_all_faces()
+                runtime_commit["changed_asset_ids"] = (
+                    *runtime_commit.get("changed_asset_ids", ()),
+                    *(face.asset_id for face in faces if face.asset_id),
+                )
+                runtime_commit["changed_person_ids"] = (
+                    *runtime_commit.get("changed_person_ids", ()),
+                    *(face.person_id for face in faces if face.person_id),
+                )
+        self._dispatch_runtime_commit_locked(
+            operation.operation_id, runtime_commit, status_changed_ids=status_changed_ids,
+        )
+        return True
+
+    def _dispatch_runtime_commit_locked(
+        self,
+        operation_id: str,
+        runtime_commit: dict[str, object] | None,
+        *,
+        status_changed_ids: Iterable[str] = (),
+    ) -> PeopleSnapshotEvent:
+        if runtime_commit is None:
+            raise RuntimeError(f"Missing People runtime commit: {operation_id}")
         event = self._emit_snapshot(
-            operation_id=operation.operation_id,
-            changed_asset_ids=tuple(runtime_commit.get("changed_asset_ids", ())),
+            operation_id=operation_id,
+            changed_asset_ids=(*runtime_commit.get("changed_asset_ids", ()), *status_changed_ids),
             changed_person_ids=tuple(runtime_commit.get("changed_person_ids", ())),
             changed_group_ids=tuple(runtime_commit.get("changed_group_ids", ())),
             person_redirects=dict(runtime_commit.get("person_redirects", {})),
             group_redirects=dict(runtime_commit.get("group_redirects", {})),
             dispatch=False,
         )
-        self._journal.commit_and_dispatch(
-            operation.operation_id,
-            {
-                "changed_asset_ids": list(event.changed_asset_ids),
-                "changed_person_ids": list(event.changed_person_ids),
-                "changed_group_ids": list(event.changed_group_ids),
-                "person_redirects": event.person_redirects,
-                "group_redirects": event.group_redirects,
-            },
-            lambda: self._scheduleEmit.emit(event),
-        )
-        return True
+        self._dispatch_operation_locked(operation_id, event)
+        return event
 
     def _finish_operation_locked(
         self,
         operation_id: str,
         event: PeopleSnapshotEvent,
     ) -> None:
-        self._repository().complete_runtime_state_sync(operation_id)
+        repository = self._repository()
+        repository.complete_runtime_state_sync(operation_id)
+        self._dispatch_operation_locked(operation_id, event)
+        self._prune_runtime_commits_locked(repository)
+
+    def _dispatch_operation_locked(self, operation_id: str, event: PeopleSnapshotEvent) -> None:
         self._journal.commit_and_dispatch(
             operation_id,
             {
@@ -731,6 +798,19 @@ class PeopleIndexCoordinator(QObject):
             lambda: self._scheduleEmit.emit(event),
         )
 
+    def _prune_runtime_commits_locked(self, repository: FaceRepository | None = None) -> None:
+        """Trim finalized markers on a best-effort basis under the mutation lease."""
+
+        try:
+            if self._journal.unfinished_head() is None:
+                (repository or self._repository()).prune_synced_runtime_commits()
+        except (sqlite3.Error, OSError):
+            LOGGER.warning(
+                "Could not prune finalized People runtime commits for %s",
+                self._library_root,
+                exc_info=True,
+            )
+
     def _reject_operation_locked(self, operation_id: str, error: str) -> None:
         self._journal.transition(operation_id, "finalized", error=error)
 
@@ -738,9 +818,19 @@ class PeopleIndexCoordinator(QObject):
         self._mark_asset_ids_with_status(done_ids, FACE_STATUS_DONE)
 
     def _mark_retry_asset_ids(self, retry_ids: list[str]) -> None:
-        self._mark_asset_ids_with_status(retry_ids, FACE_STATUS_RETRY)
+        self._mark_asset_ids_with_status(
+            retry_ids, FACE_STATUS_RETRY, expected_statuses=(None, FACE_STATUS_PENDING),
+        )
 
-    def _mark_asset_ids_with_status(self, asset_ids: list[str], status: str) -> None:
+    def _mark_failed_asset_ids(self, failed_ids: list[str]) -> None:
+        self._mark_asset_ids_with_status(
+            failed_ids, FACE_STATUS_FAILED, expected_statuses=(FACE_STATUS_RETRY,),
+        )
+
+    def _mark_asset_ids_with_status(
+        self, asset_ids: list[str], status: str, *,
+        expected_statuses: tuple[str | None, ...] | None = None,
+    ) -> None:
         if not asset_ids:
             return
         store = self._asset_repository
@@ -749,7 +839,10 @@ class PeopleIndexCoordinator(QObject):
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                store.update_face_statuses(asset_ids, status)
+                if expected_statuses is None:
+                    store.update_face_statuses(asset_ids, status)
+                else:
+                    store.update_face_statuses(asset_ids, status, expected_statuses=expected_statuses)
                 return
             except Exception as exc:
                 last_error = exc

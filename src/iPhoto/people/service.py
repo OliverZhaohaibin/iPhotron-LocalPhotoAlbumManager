@@ -460,6 +460,14 @@ class PeopleService:
     ) -> IdentityMergeResult | None:
         if self._library_root is None:
             return None
+        with self._ensure_mutation_coordinator().try_mutation_scope() as acquired:
+            if not acquired:
+                return None
+            return self._merge_identities_locked(source_identity, target_identity)
+
+    def _merge_identities_locked(
+        self, source_identity: str, target_identity: str
+    ) -> IdentityMergeResult | None:
         source = _parse_identity_id(source_identity)
         target = _parse_identity_id(target_identity)
         if source is None or target is None or source == target:
@@ -515,7 +523,7 @@ class PeopleService:
         target_hidden = self._identity_hidden(
             target_kind, target_id, person_summaries, pet_summaries
         )
-        if source_hidden is None or target_hidden is None:
+        if source_hidden is None or target_hidden is None or source_hidden != target_hidden:
             return None
 
         ensured = state_repository.merge_identity_redirect_and_groups(
@@ -585,8 +593,8 @@ class PeopleService:
             {"recognition_detection_assignment"},
             self._recover_assignment_operation,
         )
-        with journal.mutation_scope():
-            if not journal.recover_pending():
+        with journal.try_mutation_scope() as acquired:
+            if not acquired or not journal.recover_pending():
                 return False
             payload["source_annotation_key"] = FaceStateRepository(
                 paths.state_db_path

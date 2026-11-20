@@ -391,10 +391,6 @@ class LibraryRuntimeController(
         }
         self._nodes = nodes
         tree_changed = nodes != previous_nodes
-        if tree_changed:
-            self._geotagged_assets_cache = None
-            self._geotagged_assets_cache_root = None
-            self.treeUpdated.emit()
         changed = {path for path in result.changed_paths if path != self._root and path in nodes}
         changed.update(path for path in nodes if path not in previous_paths)
         removed = previous_paths - nodes.keys()
@@ -429,6 +425,12 @@ class LibraryRuntimeController(
                 removed_scopes.append(path)
         for path in removed_scopes:
             self._watch_scan_relocation_roots.setdefault(path, relocation_roots)
+        if tree_changed:
+            # Tree listeners can synchronously start a recursive scan. Publish
+            # only after its worker can capture all pending relocation scopes.
+            self._geotagged_assets_cache = None
+            self._geotagged_assets_cache_root = None
+            self.treeUpdated.emit()
         # Missing scopes cannot pass the normal existing-directory deduplication.
         # The scan worker revalidates them before applying scoped reconciliation.
         reconcile_scopes = sorted(set(removed_scopes) | pending_reconciliations)
@@ -862,6 +864,9 @@ class LibraryRuntimeController(
         self._pet_index_coordinator = None
 
     def _on_people_snapshot_committed(self, event: object) -> None:
+        sender = self.sender()
+        if sender is not None and sender is not self._people_index_coordinator:
+            return
         if self._recognition_event_was_delivered(event):
             return
         pet_service = self._pet_service

@@ -1123,7 +1123,7 @@ def test_group_menu_contains_disband_action(qapp: QApplication) -> None:
     assert "Disband Group" in [action.text() for action in menu.actions()]
 
 
-def test_merge_person_choices_include_different_hidden_state(qapp: QApplication) -> None:
+def test_merge_person_blocks_different_hidden_state(qapp: QApplication, monkeypatch) -> None:
     widget = PeopleDashboardWidget()
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z", True),
@@ -1132,7 +1132,15 @@ def test_merge_person_choices_include_different_hidden_state(qapp: QApplication)
 
     choices = widget._merge_choices("person", "person-a")
 
-    assert [choice.person_id for choice in choices] == ["person:person-b"]
+    assert choices == []
+    warning = Mock()
+    confirm = Mock()
+    monkeypatch.setattr(people_dashboard_widget.dialogs, "show_warning", warning)
+    monkeypatch.setattr(MergeConfirmDialog, "confirm", confirm)
+    assert not widget._confirm_merge("person:person-a", "person:person-b")
+    warning.assert_called_once()
+    assert warning.call_args.kwargs["title"] == "Cannot Merge Cards"
+    confirm.assert_not_called()
 
 
 def test_merge_person_reuses_group_people_dialog(monkeypatch, qapp: QApplication) -> None:
@@ -1336,7 +1344,7 @@ def test_right_click_pet_to_pet_uses_typed_merge_service_once(
     assert [card.identity_key for card in widget._board.visible_cards()] == ["pet:pet-b"]
 
 
-def test_merge_pet_choices_include_different_hidden_state(qapp: QApplication) -> None:
+def test_merge_pet_choices_exclude_different_hidden_state(qapp: QApplication) -> None:
     widget = PeopleDashboardWidget()
     widget._pet_summaries = [
         PetSummary("pet-a", "Miso", "det-a", 1, None, "2024-01-01T00:00:00Z", True),
@@ -1345,7 +1353,7 @@ def test_merge_pet_choices_include_different_hidden_state(qapp: QApplication) ->
 
     choices = widget._merge_choices("pet", "pet-a")
 
-    assert [choice.person_id for choice in choices] == ["pet:pet-b"]
+    assert choices == []
 
 
 @pytest.mark.parametrize(

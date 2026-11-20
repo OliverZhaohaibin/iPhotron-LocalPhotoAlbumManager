@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
 
+from iPhoto.bootstrap.library_scan_service import LibraryScanService
+from iPhoto.cache.index_store import get_global_repository
 from iPhoto.infrastructure.services.thumbnail_artifact import (
     publish_thumbnail_artifact,
     thumbnail_revision,
@@ -12,6 +15,29 @@ from iPhoto.infrastructure.services.thumbnail_artifact import (
 from iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataProvider
 from iPhoto.io import scanner_adapter
 from iPhoto.io.sidecar import save_adjustments
+from iPhoto.utils.hashutils import compute_file_id
+
+
+def test_incremental_scan_rechecks_same_size_media_with_new_source_mtime(tmp_path, monkeypatch):
+    asset = tmp_path / "replacement.png"
+    Image.new("RGB", (4, 4), "red").save(asset, compress_level=0)
+    original = asset.stat()
+    expected_id = f"as_{compute_file_id(asset)}"
+    existing = {asset.name: {
+        "rel": asset.name, "id": expected_id, "bytes": original.st_size,
+        "ts": int(original.st_mtime * 1_000_000),
+        "source_mtime_ns": original.st_mtime_ns, "image_orientation": 1,
+    }}
+    Image.new("RGB", (4, 4), "blue").save(asset, compress_level=0)
+    os.utime(asset, ns=(original.st_atime_ns, original.st_mtime_ns + 100_000_000))
+    assert asset.stat().st_size == original.st_size
+    replacement_id = f"as_{compute_file_id(asset)}"
+    assert replacement_id != expected_id
+    monkeypatch.setattr(scanner_adapter._metadata_provider, "get_metadata_batch", lambda _paths: [])
+
+    [row] = scanner_adapter.scan_album(tmp_path, ["**/*.png"], [], existing)
+
+    assert row["id"] == replacement_id
 
 
 def test_process_media_paths_falls_back_to_minimal_row_when_metadata_fails(
@@ -301,6 +327,42 @@ def test_orientation_backfill_preserves_revisioned_edited_thumbnail(
     assert rows[0]["image_orientation"] == 1
     assert rows[0]["thumb_revision"] == revision
     assert cache_file.read_bytes() == before
+
+
+def test_orientation_backfill_preserves_indexed_metadata_without_exiftool(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    asset = tmp_path / "photo.jpg"
+    orientation = Image.Exif()
+    orientation[274] = 6
+    Image.new("RGB", (40, 20)).save(asset, exif=orientation)
+    stat = asset.stat()
+    metadata = {
+        "make": "Apple", "content_id": "paired-id", "gps": {"lat": 51.1, "lon": 13.1},
+        "dt": "2008-05-20T09:12:00Z",
+    }
+    repository = get_global_repository(tmp_path)
+    repository.write_rows([{
+        **metadata, "rel": asset.name, "id": f"as_{compute_file_id(asset)}",
+        "ts": int(stat.st_mtime * 1_000_000), "bytes": stat.st_size,
+        "image_orientation": 0, "thumbnail_state": "stale", "is_favorite": False,
+    }])
+
+    def extract_after_favorite_change(_paths):
+        repository.set_favorite_status(asset.name, True)
+        return []
+
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider, "get_metadata_batch", extract_after_favorite_change,
+    )
+
+    LibraryScanService(tmp_path).rescan_album(tmp_path)
+
+    row = repository.get_rows_by_rels([asset.name])[asset.name]
+    assert {key: row[key] for key in metadata} == metadata
+    assert row["is_favorite"]
+    assert (row["w"], row["h"], row["image_orientation"], row["aspect_ratio"]) == (20, 40, 6, .5)
+    assert row["thumbnail_state"] == "ready" and row["thumb_cache_key"]
 
 
 def test_legacy_edited_row_without_revision_is_selectively_rebuilt(

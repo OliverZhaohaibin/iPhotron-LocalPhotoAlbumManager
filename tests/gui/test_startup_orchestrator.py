@@ -5,6 +5,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+from PySide6.QtCore import QEventLoop, QTimer
 
 from iPhoto.bootstrap import startup_orchestrator as orchestrator_module
 from iPhoto.bootstrap.startup_orchestrator import (
@@ -105,16 +106,48 @@ def test_first_paint_and_watchdog_start_continuation_once(qapp) -> None:
     assert orchestrator.phase is StartupPhase.INTERACTIVE
 
 
-def test_watchdog_recovers_missing_first_paint(qapp) -> None:
+def test_watchdog_reports_delay_and_waits_for_first_paint(qapp, monkeypatch) -> None:
     calls: list[str] = []
+    events: list[str] = []
+    monkeypatch.setattr(orchestrator_module, "mark", lambda stage, **details: events.append(stage))
     orchestrator = StartupOrchestrator(watchdog_ms=10)
     orchestrator.begin()
+    orchestrator.firstPaintRequested.connect(lambda: calls.append("requested paint"))
     orchestrator.shell_shown(lambda: calls.append("continued"))
 
     orchestrator._on_watchdog()
 
-    assert calls == ["continued"]
+    assert calls == ["requested paint"]
+    assert orchestrator.phase is StartupPhase.SHELL_SHOWN
+    assert "startup.first_paint_watchdog" in events
+    orchestrator.first_painted()
+    orchestrator.first_painted()
+    assert calls == ["requested paint", "continued"]
     assert orchestrator.phase is StartupPhase.INTERACTIVE
+
+
+def test_watchdog_terminates_unpainted_startup_without_running_continuation(qapp) -> None:
+    loop = QEventLoop()
+    failures: list[StartupFailure] = []
+    calls: list[str] = []
+    orchestrator = StartupOrchestrator(watchdog_ms=10)
+    orchestrator.begin()
+    orchestrator.register_cleanup(lambda: calls.append("cleaned up"))
+    orchestrator.startupDegraded.connect(failures.append)
+    orchestrator.startupDegraded.connect(loop.quit)
+    orchestrator.shell_shown(lambda: calls.append("continued"))
+
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(1000)
+    loop.exec()
+    timeout.stop()
+    orchestrator.first_painted()
+
+    assert orchestrator.phase is StartupPhase.FAILED
+    assert [failure.code for failure in failures] == ["first_paint_timeout"]
+    assert calls == ["cleaned up"]
 
 
 def test_callback_failure_becomes_degraded_state(qapp) -> None:

@@ -500,16 +500,19 @@ def test_settings_initialization_failure_emits_one_failed_terminal(
     assert terminals == ["startup.failed"]
 
 
-@pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
-@pytest.mark.parametrize("emit_startup_ready", (True, False))
-def test_main_creates_required_features_in_platform_safe_order(
+def _run_saved_library_startup(
     monkeypatch,
     platform: str,
     emit_startup_ready: bool,
-) -> None:
+    *,
+    supersede_at: str | None = None,
+    emit_first_paint: bool = True,
+):
     call_order: list[str] = []
     profile_marks: list[str] = []
     delayed_callbacks = []
+    probe_is_current = True
+    startup = None
     fake_color_role = type(
         "ColorRole",
         (),
@@ -548,7 +551,7 @@ def test_main_creates_required_features_in_platform_safe_order(
 
     class _FakeApp:
         def __init__(self, _args) -> None:
-            return None
+            self.exit_code = 0
 
         def palette(self):
             return _FakePalette()
@@ -562,7 +565,14 @@ def test_main_creates_required_features_in_platform_safe_order(
             # exec() returns, matching the real application lifecycle.
             for callback in list(delayed_callbacks):
                 callback()
-            return 0
+            if not emit_first_paint:
+                assert startup is not None
+                startup._on_watchdog()
+                startup._on_watchdog()
+            return self.exit_code
+
+        def exit(self, code: int) -> None:
+            self.exit_code = code
 
     class _FakeSignal:
         def __init__(self) -> None:
@@ -615,10 +625,18 @@ def test_main_creates_required_features_in_platform_safe_order(
             self.ui = _FakeUi()
             self.firstPainted = _FakeSignal()
 
+        def set_startup_orchestrator(self, orchestrator) -> None:
+            nonlocal startup
+            startup = orchestrator
+
         def show(self) -> None:
             assert profile_marks[-1] == "startup.show"
             call_order.append("show")
-            self.firstPainted.emit()
+            if emit_first_paint:
+                self.firstPainted.emit()
+
+        def update(self) -> None:
+            call_order.append("request-paint")
 
         def bind_coordinators(self, _lifecycle, _gallery, _detail) -> None:
             call_order.append("set_coordinator")
@@ -633,6 +651,7 @@ def test_main_creates_required_features_in_platform_safe_order(
                     "request_startup_library_probe": (
                         lambda self: SimpleNamespace(request_id="startup-request")
                     ),
+                    "is_current_startup_probe": lambda self, _request_id: probe_is_current,
                     "commit_prepared_library": (
                         lambda self, prepared, *, defer_scan=False: call_order.append(
                             f"commit:{prepared.request_id}:{defer_scan}"
@@ -653,15 +672,28 @@ def test_main_creates_required_features_in_platform_safe_order(
         def __init__(self, _parent=None) -> None:
             self.ready = _FakeSignal()
             self.failed = _FakeSignal()
+            self.superseded = _FakeSignal()
 
         def start(self, request) -> None:
+            nonlocal probe_is_current
             call_order.append(f"probe:{request.request_id}")
+            if supersede_at == "running":
+                probe_is_current = False
+                self.superseded.emit(request.request_id)
+                return
+            if supersede_at == "failure":
+                probe_is_current = False
+                self.failed.emit(SimpleNamespace(request_id=request.request_id))
+                return
             self.ready.emit(
                 SimpleNamespace(
                     request_id=request.request_id,
                     warnings=(),
                 )
             )
+            if supersede_at == "commit":
+                # The result was accepted and its commit is queued for the next GUI turn.
+                probe_is_current = False
 
         def cancel(self) -> None:
             call_order.append("probe:cancel")
@@ -766,7 +798,18 @@ def test_main_creates_required_features_in_platform_safe_order(
 
     from iPhoto.gui.main import main
 
-    assert main([]) == 0
+    assert main([]) == (0 if emit_first_paint else 1)
+    return call_order, profile_marks, delayed_callbacks
+
+
+@pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
+@pytest.mark.parametrize("emit_startup_ready", (True, False))
+def test_main_creates_required_features_in_platform_safe_order(
+    monkeypatch, platform: str, emit_startup_ready: bool
+) -> None:
+    call_order, profile_marks, delayed_callbacks = _run_saved_library_startup(
+        monkeypatch, platform, emit_startup_ready
+    )
 
     detail_index = call_order.index("feature:detail")
     prepare_index = call_order.index("prepare:detail")
@@ -781,7 +824,7 @@ def test_main_creates_required_features_in_platform_safe_order(
     assert "windows_detail.created" not in profile_marks
     assert "feature:preview" not in call_order
     assert "feature:people" not in call_order
-    # The shell becomes interactive immediately after the first-paint/watchdog
+    # The shell becomes interactive immediately after the first-paint
     # boundary; library probing and hidden feature creation must not retain the
     # global input filter.
     assert call_order.index("guard:release") < call_order.index("probe:startup-request")
@@ -796,6 +839,30 @@ def test_main_creates_required_features_in_platform_safe_order(
         callback()
     assert call_order.index("select") < call_order.index("scan")
     assert call_order.count("scan") == 1
+
+
+@pytest.mark.parametrize("supersede_at", ["running", "failure", "commit"])
+def test_superseded_startup_probe_preserves_interactive_selection(monkeypatch, supersede_at):
+    calls, _marks, _callbacks = _run_saved_library_startup(
+        monkeypatch, "linux", False, supersede_at=supersede_at
+    )
+    assert "commit:startup-request:True" not in calls
+    assert "select" not in calls
+    assert calls.count("warmup") == 1
+    assert calls.count("scan") == 1
+    assert "probe:cancel" not in calls
+
+
+def test_main_exits_if_update_cannot_obtain_first_paint(monkeypatch):
+    calls, _marks, _callbacks = _run_saved_library_startup(
+        monkeypatch, "linux", False, emit_first_paint=False,
+    )
+
+    assert calls.count("request-paint") == 1
+    assert calls.count("guard:release") == 1
+    assert "feature:detail" not in calls
+    assert "coordinator:create" not in calls
+    assert "probe:startup-request" not in calls
 
 
 def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> None:

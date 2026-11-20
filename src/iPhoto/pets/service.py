@@ -277,8 +277,9 @@ class PetService:
         )
         if not scoped_ids:
             return None
-        people_boxes = self.people_boxes_by_asset_ids(scoped_ids)
-        return coordinator.reconcile_people_overlaps(people_boxes)
+        return coordinator.reconcile_people_overlaps_when_available(
+            scoped_ids, self.people_boxes_by_asset_ids,
+        )
 
     def rename_pet(self, pet_id: str, new_name: str | None) -> bool:
         coordinator = self.coordinator

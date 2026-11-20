@@ -622,6 +622,65 @@ def test_album_move_into_new_parent_preserves_local_state(qapp, tmp_path: Path) 
         controller.shutdown()
 
 
+@pytest.mark.parametrize("scan_library", [True, False], ids=["library", "parent"])
+@pytest.mark.parametrize("notification", ["before-scan", "after-scan", "starts-scan"])
+def test_recursive_scan_leaves_missing_watched_album_for_relocation(
+    qapp, tmp_path: Path, scan_library: bool, notification: str,
+) -> None:
+    root = tmp_path.resolve()
+    parent = root / "Parent"
+    old, new, kept = (parent / name for name in ("Old", "New", "Kept"))
+    old.mkdir(parents=True)
+    kept.mkdir()
+    photo = old / "photo.jpg"
+    Image.new("RGB", (16, 16), "blue").save(photo)
+    controller = LibraryRuntimeController()
+    try:
+        controller.bind_path(root)
+        store = get_global_repository(root)
+        gps = {"lat": 51.1, "lon": 13.1}
+        store.write_rows([
+            {"rel": "Parent/Old/photo.jpg", "id": f"as_{compute_file_id(photo)}",
+             "gps": gps, "location": "My place", "is_favorite": True},
+            {"rel": "Parent/Kept/removed.jpg", "id": "removed"},
+        ])
+        controller._background_watch_generation = 1
+        snapshot = LibraryWatchResult(1, (parent,), (
+            AlbumNode(parent, 1, "Parent", False), AlbumNode(kept, 2, "Kept", False),
+            AlbumNode(new, 2, "New", False),
+        ))
+        pending = []
+        scan_root = root if scan_library else parent
+
+        def scan_from_updated_tree() -> None:
+            controller.treeUpdated.disconnect(scan_from_updated_tree)
+            controller.start_scanning(scan_root, ["**/*.jpg"], [])
+
+        with patch.object(controller._scan_thread_pool, "start", side_effect=pending.append):
+            if notification == "starts-scan":
+                controller.treeUpdated.connect(scan_from_updated_tree)
+            else:
+                controller.start_scanning(scan_root, ["**/*.jpg"], [])
+            old.rename(new)
+            if notification != "after-scan":
+                controller._on_background_watch_result(snapshot)
+            pending.pop(0).run()
+            assert store.get_rows_by_rels(["Parent/Old/photo.jpg"])
+            assert not store.get_rows_by_rels(["Parent/Kept/removed.jpg"])
+            if notification == "after-scan":
+                controller._on_background_watch_result(snapshot)
+            while pending:
+                pending.pop(0).run()
+
+        rows = store.get_rows_by_rels(["Parent/Old/photo.jpg", "Parent/New/photo.jpg"])
+        assert set(rows) == {"Parent/New/photo.jpg"}
+        current = rows["Parent/New/photo.jpg"]
+        assert current["is_favorite"] and current["gps"] == gps
+        assert current["location"] == "My place"
+    finally:
+        controller.shutdown()
+
+
 @pytest.mark.parametrize("nested_destination", [False, True])
 def test_moved_child_album_preserves_state_when_its_empty_parent_is_removed(
     qapp, tmp_path: Path, nested_destination: bool

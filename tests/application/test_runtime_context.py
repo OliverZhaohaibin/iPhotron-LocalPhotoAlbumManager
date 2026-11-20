@@ -39,6 +39,9 @@ class _FakeFacade:
     def __init__(self) -> None:
         self.scan_requests: list[tuple[Path, list[str], list[str], bool]] = []
 
+    def cancel_active_scans(self) -> None:
+        pass
+
     def scan_root_async(
         self,
         root: Path,
@@ -198,6 +201,7 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     context.asset_runtime = asset_runtime
     context._container = None
     context._pending_basic_library_path = root
+    context._startup_probe_ids = set()
     context._library_epoch = 0
     return context, library, asset_runtime
 
@@ -214,6 +218,84 @@ def test_library_epoch_advances_for_open_and_close(tmp_path: Path) -> None:
 
     assert opened_epoch == 1
     assert context.library_epoch == 2
+
+
+def test_explicit_bind_supersedes_saved_library_probe(tmp_path: Path) -> None:
+    from iPhoto.bootstrap.library_probe import ValidatedPreparedLibrary, probe_library
+
+    saved = tmp_path / "saved"
+    chosen = tmp_path / "chosen"
+    saved.mkdir()
+    chosen.mkdir()
+    context, library, _runtime = _runtime_context(saved)
+    request = context.request_startup_library_probe()
+    validated = ValidatedPreparedLibrary.create(probe_library(request))
+    assert context.is_current_startup_probe(request.request_id)
+
+    chosen_session = context.open_library(chosen)
+    try:
+        assert context.request_startup_library_probe() is None
+        assert not context.is_current_startup_probe(request.request_id)
+        with pytest.raises(RuntimeError, match="superseded"):
+            context.commit_validated_library(validated)
+        assert context.library_session is chosen_session
+        assert library.root() == chosen
+    finally:
+        context.close_library()
+
+
+def test_fresh_validated_switches_after_saved_library_startup(tmp_path: Path) -> None:
+    from iPhoto.bootstrap.library_probe import (
+        LibraryProbeRequest,
+        ValidatedPreparedLibrary,
+        probe_library,
+    )
+
+    saved, second, third = (tmp_path / name for name in ("saved", "second", "third"))
+    for root in (saved, second, third):
+        root.mkdir()
+    context, library, _runtime = _runtime_context(saved)
+    obsolete = ValidatedPreparedLibrary.create(probe_library(context.request_startup_library_probe()))
+    startup = ValidatedPreparedLibrary.create(probe_library(context.request_startup_library_probe()))
+
+    try:
+        context.commit_validated_library(startup)
+        for root in (second, third):
+            validated = ValidatedPreparedLibrary.create(probe_library(LibraryProbeRequest.create(root)))
+            session = context.commit_validated_library(validated)
+            assert library.root() == root
+            with pytest.raises(RuntimeError, match="already consumed"):
+                context.commit_validated_library(validated)
+            assert context.library_session is session
+        with pytest.raises(RuntimeError, match="superseded"):
+            context.commit_validated_library(obsolete)
+        assert context.library_session is session
+        assert library.root() == third
+    finally:
+        context.close_library()
+
+
+def test_requesting_a_switch_rejects_the_saved_library_before_the_new_commit(tmp_path: Path) -> None:
+    from iPhoto.bootstrap.library_probe import ValidatedPreparedLibrary, probe_library
+
+    saved, chosen = (tmp_path / name for name in ("saved", "chosen"))
+    saved.mkdir()
+    chosen.mkdir()
+    context, library, _runtime = _runtime_context(saved)
+    previous = context.request_startup_library_probe()
+    saved_result = ValidatedPreparedLibrary.create(probe_library(previous))
+
+    try:
+        replacement = context.request_library_switch_probe(chosen)
+        assert context.library_session is None
+        assert context.request_startup_library_probe() is None
+        assert not context.is_current_startup_probe(previous.request_id)
+        with pytest.raises(RuntimeError, match="superseded"):
+            context.commit_validated_library(saved_result)
+        context.commit_validated_library(ValidatedPreparedLibrary.create(probe_library(replacement)))
+        assert library.root() == chosen
+    finally:
+        context.close_library()
 
 
 def test_new_epoch_is_visible_before_session_bind_callback(tmp_path: Path) -> None:

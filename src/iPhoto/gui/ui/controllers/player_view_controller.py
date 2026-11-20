@@ -2517,7 +2517,7 @@ class PlayerViewController(QObject):
         return QImage(image) if image is not None and not image.isNull() else None
 
     def cancel_pending_image_requests(self) -> None:
-        """Invalidate still work when Detail or the current library is left."""
+        """Retire the foreground still and any deferred Live Photo restoration."""
 
         self._advance_surface_transition_epoch("requests_cancelled")
         self._request_generation += 1
@@ -2530,6 +2530,7 @@ class PlayerViewController(QObject):
         self._present_source = None
         self._present_started_at = None
         self._pending_still = None
+        self._defer_still_updates = False
         self._pending_layout_intent = None
         self._current_full_image = None
         self._active_asset_id = ""

@@ -254,7 +254,7 @@ def test_ready_thumbnail_collection_queries_use_visible_indexes(tmp_path: Path) 
         ).fetchall()
     assert visible_indexes
     assert all(
-        "thumbnail_state IN ('ready', 'stale')" in str(row[0])
+        "thumbnail_state = 'ready'" in str(row[0])
         and "thumb_cache_key" in str(row[0])
         for row in visible_indexes
     )
@@ -271,9 +271,9 @@ def test_ready_thumbnail_collection_queries_use_visible_indexes(tmp_path: Path) 
         sql, params = QueryBuilder.build_collection_query(query, limit=100)
         plan = _collection_query_plan(repository, query)
 
-        assert "thumbnail_state IN ('ready', 'stale')" in sql
+        assert "thumbnail_state = 'ready'" in sql
         assert "thumb_cache_key" in sql
-        assert "USING INDEX idx_assets_" in plan
+        assert "USING INDEX idx_assets_visible_" in plan or "USING INDEX idx_assets_gps" in plan
         assert "USE TEMP B-TREE" not in plan
 
 

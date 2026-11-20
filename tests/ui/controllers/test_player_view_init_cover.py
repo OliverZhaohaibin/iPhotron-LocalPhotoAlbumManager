@@ -431,6 +431,50 @@ class TestInitCoverTracking:
         assert controller._pending_still is None
         assert controller._pending_image_generation is None
 
+    def test_retired_zoom_decode_and_timer_cannot_reveal_photo_over_video(
+        self, controller, tmp_path, mocker,
+    ):
+        source = tmp_path / "previous.jpg"
+        controller._active_source_identity = AssetSourceIdentity.create(
+            source, width=6000, height=4000, source_mtime_ns=1,
+        )
+        controller._active_asset_id = "previous"
+        controller._image_viewer.resize(800, 600)
+        controller._current_decode_level = 1024
+        controller._pending_zoom_factor = 4
+        controller._request_generation = 1
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        controller._request_higher_lod()
+        late_request = schedule.call_args.args[0]
+        controller._lod_timer.start()
+
+        controller.cancel_pending_image_requests()
+        controller.begin_video_transition(2, interactive_when_ready=True)
+        surface = _surface(source, QImage(64, 48, QImage.Format.Format_RGBA8888))
+        controller._on_scheduled_image_ready(late_request.generation, surface)
+        controller._request_higher_lod()
+
+        assert schedule.call_count == 1
+        assert not controller._lod_timer.isActive()
+        assert controller._player_stack.currentWidget() is controller._video_area
+        assert controller._pending_video_generation == 2
+
+    def test_live_motion_keeps_its_inflight_still_until_restoration(self, controller, tmp_path):
+        source = tmp_path / "live.jpg"
+        surface = _surface(source, QImage(64, 48, QImage.Format.Format_RGBA8888))
+        controller._request_generation = 2
+        controller._loading_source = source
+        controller._loading_started_at = time.perf_counter()
+        controller.defer_still_updates(True)
+        controller.begin_video_transition(2, interactive_when_ready=False)
+        controller._on_scheduled_image_ready(2, surface)
+
+        assert controller._player_stack.currentWidget() is controller._video_area
+        controller.defer_still_updates(False)
+        assert controller.apply_pending_still()
+        assert controller._player_stack.currentWidget() is controller._image_viewer
+        assert controller._pending_image_key == surface.decode_key
+
     def test_primed_image_decode_failure_returns_to_placeholder(
         self,
         controller,

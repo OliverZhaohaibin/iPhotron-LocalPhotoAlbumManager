@@ -779,9 +779,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     active_probe: dict[str, object] = {}
 
-    def _clear_active_probe(generation: int) -> None:
+    def _cancel_active_startup_probe(generation: int) -> None:
         if int(active_probe.get("generation", -1)) == generation:
             active_probe.clear()
+            probe_controller.cancel()
 
     def _register_attempt_resources(generation: int) -> None:
         startup.register_cleanup(
@@ -790,10 +791,9 @@ def main(argv: list[str] | None = None) -> int:
         startup.register_cleanup(
             lambda generation=generation: startup_imports.cancel_generation(generation)
         )
-        startup.register_cleanup(probe_controller.cancel)
         startup.register_cleanup(startup_input_guard.release)
         startup.register_cleanup(
-            lambda generation=generation: _clear_active_probe(generation)
+            lambda generation=generation: _cancel_active_startup_probe(generation)
         )
 
     _register_attempt_resources(startup.generation)
@@ -805,12 +805,6 @@ def main(argv: list[str] | None = None) -> int:
             StartupPhase.CANCELLED,
         }:
             startup_jobs.cancel_generation(snapshot.generation)
-        if snapshot.phase in {
-            StartupPhase.DEGRADED,
-            StartupPhase.FAILED,
-            StartupPhase.CANCELLED,
-        }:
-            probe_controller.cancel()
 
     startup.phaseChanged.connect(_handle_startup_phase_changed)
 
@@ -964,10 +958,11 @@ def main(argv: list[str] | None = None) -> int:
             prerequisite=prerequisite,
         )
 
-    def _continue_after_library_ready(generation: int) -> None:
+    def _continue_after_library_ready(generation: int, *, select_initial: bool = True) -> None:
         if not startup.is_current(generation):
             return
         startup.transition(StartupPhase.LIBRARY_READY)
+        library_epoch = getattr(context, "library_epoch", None)
         startup_scan_enqueued = False
 
         def _run_idle_startup_jobs() -> None:
@@ -1034,11 +1029,12 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         def _select_initial_collection() -> None:
-            mark("startup_gallery.selection_requested")
-            if len(arguments) > 1:
-                coordinator_runtime.gallery.open_album_from_path(Path(arguments[1]))
-            else:
-                window.ui.sidebar.select_all_photos(emit_signal=True)
+            if select_initial and getattr(context, "library_epoch", None) == library_epoch:
+                mark("startup_gallery.selection_requested")
+                if len(arguments) > 1:
+                    coordinator_runtime.gallery.open_album_from_path(Path(arguments[1]))
+                else:
+                    window.ui.sidebar.select_all_photos(emit_signal=True)
             if not warmup_armed:
                 _enqueue_idle_startup_jobs()
 
@@ -1047,6 +1043,14 @@ def main(argv: list[str] | None = None) -> int:
             generation,
             _select_initial_collection,
         )
+
+    def _finish_if_probe_superseded(generation: int, request_id: str) -> bool:
+        check = getattr(context, "is_current_startup_probe", None)
+        if not callable(check) or check(request_id):
+            return False
+        mark("startup.probe.finished", generation=generation, result="superseded")
+        _continue_after_library_ready(generation, select_initial=False)
+        return True
 
     def _probe_ready(validated) -> None:
         generation = int(active_probe.get("generation", -1))
@@ -1059,15 +1063,17 @@ def main(argv: list[str] | None = None) -> int:
         ):
             return
         active_probe.clear()
-        mark(
-            "startup.probe.finished",
-            generation=generation,
-            result="success",
-            storage_kind=getattr(validated, "storage_kind", "unknown"),
-            warnings=validated.warnings,
-        )
 
         def _commit_validated_library() -> None:
+            if _finish_if_probe_superseded(generation, validated.request_id):
+                return
+            mark(
+                "startup.probe.finished",
+                generation=generation,
+                result="success",
+                storage_kind=getattr(validated, "storage_kind", "unknown"),
+                warnings=validated.warnings,
+            )
             committer(validated, defer_scan=True)
             restored = "migration_restored" in validated.warnings
             cleanup_pending = "migration_cleanup_pending" in validated.warnings
@@ -1105,6 +1111,8 @@ def main(argv: list[str] | None = None) -> int:
         ):
             return
         active_probe.clear()
+        if _finish_if_probe_superseded(generation, failure.request_id):
+            return
         mark(
             "startup.probe.finished",
             generation=generation,
@@ -1124,8 +1132,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    def _probe_superseded(request_id: str) -> None:
+        generation = int(active_probe.get("generation", -1))
+        if startup.is_current(generation) and request_id == active_probe.get("request_id"):
+            active_probe.clear()
+            _finish_if_probe_superseded(generation, request_id)
+
     probe_controller.ready.connect(_probe_ready)
     probe_controller.failed.connect(_probe_failed)
+    superseded = getattr(probe_controller, "superseded", None)
+    if superseded is not None:
+        superseded.connect(_probe_superseded)
 
     def _start_library_probe(generation: int) -> None:
         if not startup.is_current(generation):
@@ -1141,6 +1158,9 @@ def main(argv: list[str] | None = None) -> int:
         mark("startup.probe.started", generation=generation)
         if request is None or not callable(committer):
             active_probe.clear()
+            already_bound = getattr(context, "library_session", None) is not None
+            pending_switch = getattr(coordinator_runtime, "has_pending_library_switch", None)
+            switching = callable(pending_switch) and pending_switch()
             context.resume_startup_tasks(defer_scan=True)
             mark(
                 "startup.probe.finished",
@@ -1148,7 +1168,7 @@ def main(argv: list[str] | None = None) -> int:
                 result="unbound",
                 storage_kind="unbound",
             )
-            _continue_after_library_ready(generation)
+            _continue_after_library_ready(generation, select_initial=not (already_bound or switching))
             return
         active_probe.clear()
         active_probe.update(
@@ -1170,6 +1190,9 @@ def main(argv: list[str] | None = None) -> int:
             if not callable(coordinator_factory):
                 raise RuntimeError("desktop coordinator import returned no factory")
             coordinator_runtime = coordinator_factory(window, context)
+            set_library_probe_controller = getattr(coordinator_runtime, "set_library_probe_controller", None)
+            if callable(set_library_probe_controller):
+                set_library_probe_controller(probe_controller)
             window.bind_coordinators(
                 coordinator_runtime,
                 coordinator_runtime.gallery,
@@ -1266,8 +1289,12 @@ def main(argv: list[str] | None = None) -> int:
         startup.transition(StartupPhase.INTERACTIVE, reason="retry")
         _initialize_features_after_show(generation)
 
-    startup.startupDegraded.connect(
-        lambda failure: window.show_startup_recovery(
+    def _handle_startup_failure(failure: StartupFailure) -> None:
+        if failure.code == "first_paint_timeout":
+            _logger.error("%s", failure.message)
+            app.exit(1)
+            return
+        window.show_startup_recovery(
             failure.message,
             details=(
                 f"phase={failure.phase.value}; "
@@ -1279,7 +1306,8 @@ def main(argv: list[str] | None = None) -> int:
             retry_callback=_retry_startup,
             suggested_action=failure.suggested_action,
         )
-    )
+
+    startup.startupDegraded.connect(_handle_startup_failure)
     benchmark_exit_delay_ms = _benchmark_auto_exit_delay_ms()
     benchmark_exit_scheduled = False
 
@@ -1293,6 +1321,9 @@ def main(argv: list[str] | None = None) -> int:
     startup.startupCompleted.connect(_schedule_benchmark_exit)
     startup.startupDegraded.connect(_schedule_benchmark_exit)
     window.firstPainted.connect(startup.first_painted)
+    request_paint = getattr(window, "update", None)
+    if callable(request_paint):
+        startup.firstPaintRequested.connect(request_paint)
     # Arm before show(): test doubles and a few embedded Qt hosts can paint
     # synchronously from show(), and that event must not be lost.
     startup.shell_shown(_continue_after_shell)
@@ -1308,6 +1339,9 @@ def main(argv: list[str] | None = None) -> int:
         # immediately).  Cancel the attempt so its watchdog and registered
         # resources cannot fire against an already torn-down window.
         startup.cancel()
+        shutdown_probe = getattr(probe_controller, "shutdown", None)
+        if callable(shutdown_probe):
+            shutdown_probe()
         startup_jobs.close()
         startup_imports.close()
 

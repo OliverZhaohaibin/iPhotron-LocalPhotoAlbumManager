@@ -29,6 +29,7 @@ from iPhoto.bootstrap.library_probe import (
     _probe_process_command,
     probe_library,
 )
+from iPhoto.bootstrap.library_session import create_headless_library_session
 from iPhoto.cache.index_store.migrations import (
     CURRENT_SCHEMA_VERSION,
     MIGRATION_PROTOCOL_VERSION,
@@ -37,7 +38,12 @@ from iPhoto.cache.index_store.migrations import (
     SchemaMigrator,
     SchemaPreparationError,
 )
-from iPhoto.cache.index_store.repository import AssetRepository
+from iPhoto.cache.index_store.repository import (
+    AssetRepository,
+    get_global_repository,
+    mark_repository_prepared,
+    reset_global_repository,
+)
 from iPhoto.domain.models.query import CollectionQuery
 
 
@@ -89,26 +95,39 @@ def test_probe_returns_two_level_album_snapshot_without_creating_work_dir(
     assert prepared.storage_kind == "local"
 
 
-def test_probe_reads_schema_and_completed_scan_without_writing(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("status", "finished_at", "expected"),
+    [
+        ("completed", 2, True),
+        ("completed", None, False),
+        ("running", None, False),
+        ("failed", 2, False),
+    ],
+)
+def test_probe_reads_latest_library_scan(
+    tmp_path: Path, status: str, finished_at: int | None, expected: bool
+) -> None:
     library = tmp_path / "library"
     work_dir = library / ".iPhoto"
     work_dir.mkdir(parents=True)
     database = work_dir / "global_index.db"
+    SchemaMigrator.prepare_database(database)
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
-        connection.execute(
-            "CREATE TABLE scan_jobs (status TEXT NOT NULL, scope TEXT NOT NULL, root TEXT)"
-        )
-        connection.execute(
-            "INSERT INTO scan_jobs(status, scope, root) VALUES ('completed', 'library', ?)",
-            (library.as_posix(),),
+        connection.executemany(
+            "INSERT INTO scan_jobs(job_id, root, scope, status, started_at, updated_at, finished_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("old", library.as_posix(), "library", "completed", 1, 2, 2),
+                ("latest", library.as_posix(), "library", status, 2, 2, finished_at),
+                ("root-only", library.as_posix(), "root_media", "completed", 3, 3, 3),
+            ],
         )
 
     prepared = probe_library(LibraryProbeRequest.create(library))
     round_trip = PreparedLibrary.from_payload(prepared.to_payload())
 
     assert round_trip.schema_version == CURRENT_SCHEMA_VERSION
-    assert round_trip.scan_complete is True
+    assert round_trip.scan_complete is expected
     assert round_trip.database_path == database
 
 
@@ -283,6 +302,36 @@ def _downgrade_to_v1_without_video_columns(database: Path) -> None:
         connection.execute("ALTER TABLE assets DROP COLUMN video_rotation_cw")
         connection.execute("ALTER TABLE assets DROP COLUMN video_linux_180_hint")
         connection.execute("PRAGMA user_version = 1")
+
+
+def test_probe_upgrades_v5_visible_indexes_in_migration_phase(tmp_path: Path) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DROP INDEX idx_assets_visible_global")
+        connection.execute(
+            "CREATE INDEX idx_assets_visible_global ON assets "
+            "(live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
+            "WHERE thumbnail_state IN ('ready', 'stale') "
+            "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"
+        )
+        connection.execute("PRAGMA user_version = 5")
+    request = LibraryProbeRequest.create(tmp_path)
+    migration_changes: list[bool] = []
+
+    prepared = probe_library(request, on_migration_changed=migration_changes.append)
+
+    assert migration_changes == [True, False]
+    assert prepared.schema_version == CURRENT_SCHEMA_VERSION > 5
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT is_favorite FROM assets").fetchone() == (1,)
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_assets_visible_global'"
+        ).fetchone()[0]
+        assert "thumbnail_state = 'ready'" in index_sql
+    migration_changes.clear()
+    probe_library(request, on_migration_changed=migration_changes.append)
+    assert migration_changes == []
 
 
 def test_prepare_database_adopts_complete_branch_base_schema_without_migration(
@@ -1030,12 +1079,26 @@ def test_controller_ignores_late_result_after_cancel(qapp, tmp_path: Path) -> No
     assert failures == []
 
 
-@pytest.mark.parametrize("legacy_schema", [False, True])
-def test_controller_real_helper_round_trip(qapp, tmp_path: Path, legacy_schema: bool) -> None:
+def test_controller_shutdown_kills_child_without_waiting_for_timer(qapp, tmp_path: Path) -> None:
+    controller = LibraryProbeController()
+    process = _FakeProcess(running=True)
+    controller._process = process  # type: ignore[assignment]
+    controller._request = LibraryProbeRequest.create(tmp_path)
+
+    controller.shutdown()
+
+    assert process.killed
+    assert controller._request is None
+
+
+@pytest.mark.parametrize("existing_work_dir", [None, ".iPhoto", ".iphoto"])
+def test_controller_real_helper_round_trip(
+    qapp, tmp_path: Path, existing_work_dir: str | None
+) -> None:
     library = tmp_path / "library"
     library.mkdir()
-    if legacy_schema:
-        _create_legacy_database(library / ".iPhoto" / "global_index.db")
+    if existing_work_dir:
+        _create_legacy_database(library / existing_work_dir / "global_index.db")
     request = LibraryProbeRequest.create(library)
     controller = LibraryProbeController()
     ready = []
@@ -1053,6 +1116,61 @@ def test_controller_real_helper_round_trip(qapp, tmp_path: Path, legacy_schema: 
     assert ready[0].request_id == request.request_id
     assert ready[0].schema_version == CURRENT_SCHEMA_VERSION
     assert controller._process is None
+    prepared = ready[0].consume()
+    expected_dir = existing_work_dir or ".iPhoto"
+    assert prepared.database_path == library.resolve() / expected_dir / "global_index.db"
+    try:
+        mark_repository_prepared(prepared.root, prepared.credential)
+        repository = get_global_repository(prepared.root)
+        assert repository.path == prepared.database_path
+        if existing_work_dir:
+            with closing(sqlite3.connect(repository.path)) as connection:
+                rows = connection.execute("SELECT rel FROM assets").fetchall()
+                assert rows == [("album/photo.jpg",)]
+        workspace_names = [p.name for p in library.iterdir() if p.name.casefold() == ".iphoto"]
+        assert workspace_names == [expected_dir]
+    finally:
+        reset_global_repository()
+
+
+def test_controller_serializes_replacement_child_for_the_same_library(
+    qapp, tmp_path: Path, monkeypatch,
+) -> None:
+    real_command = _probe_process_command()
+    calls = []
+
+    def probe_command():
+        calls.append(True)
+        if len(calls) == 1:
+            return sys.executable, ["-c", "import time; time.sleep(10)"]
+        return real_command
+
+    monkeypatch.setattr(probe_module, "_probe_process_command", probe_command)
+    controller = LibraryProbeController()
+    superseded, ready, failures = [], [], []
+    controller.superseded.connect(superseded.append)
+    controller.ready.connect(ready.append)
+    controller.failed.connect(failures.append)
+    first = LibraryProbeRequest.create(tmp_path)
+    replacement = LibraryProbeRequest.create(tmp_path)
+    try:
+        controller.start(first)
+        child = controller._process
+        assert child.waitForStarted(1500)
+        controller.start(replacement)
+        assert superseded == [first.request_id]
+        assert calls == [True]
+
+        deadline = time.monotonic() + 5
+        while not ready and not failures and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+        assert failures == []
+        assert calls == [True, True]
+        assert [result.request_id for result in ready] == [replacement.request_id]
+    finally:
+        controller.cancel()
 
 
 @pytest.mark.parametrize(
@@ -1172,3 +1290,116 @@ def test_probe_process_command_uses_qt_application_path_when_packaged(
 
     assert program == packaged_executable
     assert arguments == ["--startup-library-probe", "--stdin"]
+
+
+@pytest.mark.parametrize("previous_committed", [False, True])
+def test_prepare_resumes_previous_release_migration_and_upgrades_to_current(
+    tmp_path: Path, previous_committed: bool
+) -> None:
+    database = tmp_path / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DROP INDEX idx_assets_live_content_id")
+        connection.execute("ALTER TABLE assets DROP COLUMN content_id_key")
+        connection.execute("UPDATE assets SET content_id = ' PAIR '")
+        connection.execute(f"PRAGMA user_version = {4 if previous_committed else 3}")
+
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION, migration_id="previous",
+        database_name=database.name, backup_name=f"{database.name}.migration-previous.bak",
+        source_version=3, target_version=4, stage="migration_pending", started_at_ms=1,
+    )
+    state_path = database.parent / MIGRATION_STATE_NAME
+    state_path.write_text(json.dumps(asdict(state)), encoding="utf-8")
+
+    assert SchemaMigrator.prepare_database(database) == (CURRENT_SCHEMA_VERSION, ())
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT content_id_key, is_favorite FROM assets").fetchone() == (
+            "pair", 1
+        )
+    assert not state_path.exists()
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_prepare_preserves_future_migration_marker(tmp_path: Path) -> None:
+    database = tmp_path / "global_index.db"
+    future = CURRENT_SCHEMA_VERSION + 1
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(f"PRAGMA user_version = {future}")
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION, migration_id="future",
+        database_name=database.name, backup_name=f"{database.name}.migration-future.bak",
+        source_version=CURRENT_SCHEMA_VERSION, target_version=future,
+        stage="migration_pending", started_at_ms=1,
+    )
+    state_path = tmp_path / MIGRATION_STATE_NAME
+    payload = json.dumps(asdict(state))
+    state_path.write_text(payload, encoding="utf-8")
+    with pytest.raises(SchemaPreparationError) as error:
+        SchemaMigrator.prepare_database(database)
+    assert error.value.code == "future_schema"
+    assert state_path.read_text(encoding="utf-8") == payload
+
+
+@pytest.mark.parametrize("database_version", [5, CURRENT_SCHEMA_VERSION], ids=["v5", "already-upgraded"])
+def test_headless_open_retires_older_marker_before_desktop_probe(
+    tmp_path: Path, database_version: int,
+) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(f"PRAGMA user_version = {database_version}")
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION,
+        migration_id="older-release",
+        database_name=database.name,
+        backup_name=f"{database.name}.migration-older-release.bak",
+        source_version=4,
+        target_version=5,
+        stage="migration_pending",
+        started_at_ms=1,
+    )
+    state_path = database.parent / MIGRATION_STATE_NAME
+    state_path.write_text(json.dumps(asdict(state)), encoding="utf-8")
+
+    session = create_headless_library_session(tmp_path)
+    try:
+        assert session.asset_queries.favorite_status_for_path(tmp_path / "album/photo.jpg") is True
+    finally:
+        session.shutdown()
+        reset_global_repository()
+
+    assert not state_path.exists()
+    assert probe_library(LibraryProbeRequest.create(tmp_path)).schema_version == CURRENT_SCHEMA_VERSION
+
+
+def test_direct_upgrade_backs_up_before_migrating_and_excludes_another_opener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("PRAGMA user_version = 5")
+
+    migrate = SchemaMigrator._migrate_to_v6
+    state_path = database.parent / MIGRATION_STATE_NAME
+    checked = False
+
+    def verify_backup_and_migrate(connection: sqlite3.Connection) -> None:
+        nonlocal checked
+        state = MigrationState.from_payload(json.loads(state_path.read_text(encoding="utf-8")))
+        with closing(sqlite3.connect(database.parent / state.backup_name)) as backup:
+            assert backup.execute("PRAGMA user_version").fetchone() == (5,)
+            assert backup.execute("SELECT is_favorite FROM assets WHERE rel = 'album/photo.jpg'").fetchone() == (1,)
+        with pytest.raises(SchemaPreparationError) as error:
+            probe_library(LibraryProbeRequest.create(tmp_path))
+        assert error.value.code == "migration_file_busy"
+        checked = True
+        migrate(connection)
+
+    monkeypatch.setattr(SchemaMigrator, "_migrate_to_v6", staticmethod(verify_backup_and_migrate))
+    repository = AssetRepository(tmp_path)
+    repository.close()
+
+    assert checked
+    assert not state_path.exists()

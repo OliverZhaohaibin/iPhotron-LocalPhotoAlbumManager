@@ -5,6 +5,7 @@ It isolates all schema-related concerns from the main repository logic.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sqlite3
@@ -14,10 +15,12 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import NoReturn
 
 from ...config import RECENTLY_DELETED_DIR_NAME
 from ...domain.models.core import normalise_content_id
 from ...utils.logging import get_logger
+from .queries import READY_THUMBNAIL_PREDICATE
 
 logger = get_logger()
 
@@ -25,9 +28,10 @@ logger = get_logger()
 # Version 2 adds cached video presentation metadata used by Gallery/Detail reads.
 # Opening an already migrated database must be O(1); in particular it must not
 # revisit every asset row on each desktop launch.
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
+_MIGRATION_LOCK_NAME = "startup-migration.lock"
 
 _ASSET_COLUMN_MIGRATIONS = {
     "parent_album_path": "ALTER TABLE assets ADD COLUMN parent_album_path TEXT",
@@ -192,7 +196,7 @@ def _classify_filesystem_error(exc: OSError, *, operation: str) -> str:
     return "migration_recovery_failed"
 
 
-def _raise_filesystem_error(exc: OSError, message: str, *, operation: str) -> None:
+def _raise_filesystem_error(exc: OSError, message: str, *, operation: str) -> NoReturn:
     raise SchemaPreparationError(
         _classify_filesystem_error(exc, operation=operation),
         message,
@@ -245,6 +249,51 @@ def _managed_connection(
             connection.commit()
     finally:
         connection.close()
+
+
+@contextmanager
+def _migration_lock(path: Path) -> Iterator[None]:
+    """Serialize backup, migration and cleanup across library openers."""
+
+    try:
+        handle = path.open("a+b")
+    except OSError as exc:
+        _raise_filesystem_error(exc, "Could not open migration lock", operation="migration_lock")
+    with handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise SchemaPreparationError(
+                    "migration_file_busy", "Another opener is preparing the library index",
+                    operation="migration_lock", native_code=_native_error_code(exc),
+                ) from exc
+            _raise_filesystem_error(exc, "Could not lock the library index", operation="migration_lock")
+        yield
+
+
+def _inspect_schema(database_path: Path) -> tuple[int, bool]:
+    try:
+        with _managed_connection(database_path) as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            return version, version == 0 and _schema_matches_v1(connection)
+    except sqlite3.OperationalError as exc:
+        raise SchemaPreparationError(
+            _classify_sqlite_operational_error(exc, fallback="db_open_failed"),
+            "Library index could not be opened",
+            operation="database_open",
+            native_code=_native_error_code(exc),
+        ) from exc
+    except sqlite3.DatabaseError as exc:
+        raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
 
 
 def _table_info(connection: sqlite3.Connection, table: str) -> list[tuple]:
@@ -434,15 +483,24 @@ class SchemaMigrator:
                     "migration_recovery_failed",
                     f"No migration is available for schema version {next_version}",
                 )
-            conn.execute("BEGIN IMMEDIATE")
             try:
+                conn.execute("BEGIN IMMEDIATE")
                 migration(conn)
                 conn.execute(f"PRAGMA user_version = {next_version}")
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                # Direct repository opens must also distinguish a failed
+                # migration write from index corruption.
+                raise SchemaPreparationError(
+                    _classify_sqlite_operational_error(exc, fallback="migration_failed"),
+                    "Library index migration failed",
+                    operation="migration_write",
+                    native_code=_native_error_code(exc),
+                ) from exc
             except Exception:
                 conn.rollback()
                 raise
-            else:
-                conn.commit()
             current_version = next_version
 
     @staticmethod
@@ -605,6 +663,13 @@ class SchemaMigrator:
         SchemaMigrator._create_indexes(conn)
 
     @staticmethod
+    def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+        """Rebuild Gallery and GPS indexes for the ready-only predicate."""
+
+        # Partial legacy schemas can be missing columns needed by some indexes.
+        SchemaMigrator._create_indexes(conn, strict=_schema_matches_v1(conn))
+
+    @staticmethod
     def prepare_database(
         database_path: Path,
         *,
@@ -622,7 +687,26 @@ class SchemaMigrator:
                 operation="workdir_create",
             )
         state_path = database_path.parent / MIGRATION_STATE_NAME
+        if not state_path.exists() and database_path.is_file():
+            version, _ = _inspect_schema(database_path)
+            if version == CURRENT_SCHEMA_VERSION and not state_path.exists():
+                return SchemaMigrator._initialize_database(database_path), ()
+            if version > CURRENT_SCHEMA_VERSION:
+                raise SchemaPreparationError(
+                    "future_schema", "Library index uses a newer schema version"
+                )
+
+        with _migration_lock(database_path.parent / _MIGRATION_LOCK_NAME):
+            return SchemaMigrator._prepare_upgrade(database_path, state_path, on_migration_started)
+
+    @staticmethod
+    def _prepare_upgrade(
+        database_path: Path,
+        state_path: Path,
+        on_migration_started: Callable[[], None] | None,
+    ) -> tuple[int, tuple[str, ...]]:
         state = _read_state(state_path)
+        recovering_migration = state is not None
         warnings: list[str] = []
 
         if state is not None:
@@ -630,23 +714,31 @@ class SchemaMigrator:
                 raise SchemaPreparationError(
                     "migration_recovery_failed", "Migration state targets another database"
                 )
+            if state.target_version > CURRENT_SCHEMA_VERSION:
+                raise SchemaPreparationError("future_schema", "Migration belongs to a newer application version")
             if on_migration_started is not None:
                 on_migration_started()
             backup_path = database_path.parent / state.backup_name
             current_ok = _integrity_ok(database_path)
-            current_version = -1
-            if current_ok:
-                with _managed_connection(database_path) as connection:
-                    current_version = int(
-                        connection.execute("PRAGMA user_version").fetchone()[0]
-                    )
-            if current_ok and current_version == state.target_version:
+            current_version = _inspect_schema(database_path)[0] if current_ok else -1
+            if current_version > CURRENT_SCHEMA_VERSION:
+                raise SchemaPreparationError("future_schema", "Library index uses a newer schema version")
+            # Older direct opens could commit further upgrades without closing
+            # the previous migration record. The verified database is authoritative.
+            if current_ok and current_version >= state.target_version:
                 if state.stage == "restored_migration_pending":
                     warnings.append("migration_restored")
                 if not _cleanup_migration(state_path, backup_path):
-                    warnings.append("migration_cleanup_pending")
-                return current_version, tuple(warnings)
-            if not current_ok:
+                    if current_version == CURRENT_SCHEMA_VERSION:
+                        return current_version, (*warnings, "migration_cleanup_pending")
+                    raise SchemaPreparationError(
+                        "migration_failed", "Could not clear the completed migration before upgrading",
+                        operation="migration_cleanup",
+                    )
+                # A newer release may still need to upgrade this database. Start
+                # its backup from the committed state, including subsequent edits.
+                state = None
+            elif not current_ok:
                 if not _integrity_ok(backup_path):
                     raise SchemaPreparationError(
                         "migration_recovery_failed",
@@ -656,9 +748,7 @@ class SchemaMigrator:
                 warnings.append("migration_restored")
                 state = replace(state, stage="restored_migration_pending")
                 _atomic_write_state(state_path, state)
-            elif not (
-                state.source_version <= current_version < state.target_version
-            ):
+            elif current_version < state.source_version:
                 raise SchemaPreparationError(
                     "migration_recovery_failed",
                     "Interrupted migration state does not match the library index",
@@ -666,21 +756,14 @@ class SchemaMigrator:
         else:
             backup_path = database_path.parent / "unused"
 
+        if state is not None and state.target_version < CURRENT_SCHEMA_VERSION:
+            # A restart between any two remaining version commits must still be
+            # recoverable using the original pre-migration backup.
+            state = replace(state, target_version=CURRENT_SCHEMA_VERSION)
+            _atomic_write_state(state_path, state)
+
         existed = database_path.is_file() and database_path.stat().st_size > 0
-        try:
-            with _managed_connection(database_path) as connection:
-                source_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-                can_adopt_v1 = source_version == 0 and _schema_matches_v1(connection)
-        except sqlite3.OperationalError as exc:
-            code = _classify_sqlite_operational_error(exc, fallback="db_open_failed")
-            raise SchemaPreparationError(
-                code,
-                "Library index could not be opened",
-                operation="database_open",
-                native_code=_native_error_code(exc),
-            ) from exc
-        except sqlite3.DatabaseError as exc:
-            raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
+        source_version, can_adopt_v1 = _inspect_schema(database_path)
 
         if source_version > CURRENT_SCHEMA_VERSION:
             raise SchemaPreparationError(
@@ -688,7 +771,7 @@ class SchemaMigrator:
             )
 
         if (
-            state is None
+            not recovering_migration
             and existed
             and source_version < CURRENT_SCHEMA_VERSION
             and on_migration_started is not None
@@ -706,6 +789,7 @@ class SchemaMigrator:
                     else:
                         SchemaMigrator._migrate_columns(connection)
                         SchemaMigrator._migrate_to_v5(connection)
+                        SchemaMigrator._migrate_to_v6(connection)
                         connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             except sqlite3.OperationalError as exc:
                 code = _classify_sqlite_operational_error(
@@ -760,25 +844,7 @@ class SchemaMigrator:
                 state = replace(state, stage="migration_pending")
             _atomic_write_state(state_path, state)
 
-        try:
-            with _managed_connection(database_path) as connection:
-                SchemaMigrator.initialize_schema(connection)
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        except SchemaPreparationError:
-            raise
-        except sqlite3.OperationalError as exc:
-            code = _classify_sqlite_operational_error(
-                exc, fallback="migration_failed"
-            )
-            raise SchemaPreparationError(
-                code,
-                "Library index migration failed",
-                operation="migration_write",
-                native_code=_native_error_code(exc),
-            ) from exc
-        except sqlite3.DatabaseError as exc:
-            raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
-
+        version = SchemaMigrator._initialize_database(database_path)
         if version != CURRENT_SCHEMA_VERSION or (
             requires_integrity_validation and not _integrity_ok(database_path)
         ):
@@ -791,6 +857,25 @@ class SchemaMigrator:
             if not _cleanup_migration(state_path, backup_path):
                 warnings.append("migration_cleanup_pending")
         return version, tuple(warnings)
+
+    @staticmethod
+    def _initialize_database(database_path: Path) -> int:
+        try:
+            with _managed_connection(database_path) as connection:
+                SchemaMigrator.initialize_schema(connection)
+                return int(connection.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.OperationalError as exc:
+            code = _classify_sqlite_operational_error(
+                exc, fallback="migration_failed"
+            )
+            raise SchemaPreparationError(
+                code,
+                "Library index migration failed",
+                operation="migration_write",
+                native_code=_native_error_code(exc),
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
 
     @staticmethod
     def _migrate_columns(conn: sqlite3.Connection) -> None:
@@ -902,7 +987,7 @@ class SchemaMigrator:
         )
 
     @staticmethod
-    def _create_indexes(conn: sqlite3.Connection) -> None:
+    def _create_indexes(conn: sqlite3.Connection, *, strict: bool = False) -> None:
         """Create all required indexes for optimal query performance.
         
         Args:
@@ -930,10 +1015,7 @@ class SchemaMigrator:
             visible_index_needs_refresh = (
                 index_name.startswith("idx_assets_visible_")
                 or index_name == "idx_assets_gps"
-            ) and (
-                "thumbnail_state IN ('ready', 'stale')" not in index_sql
-                or "TRIM(COALESCE(thumb_cache_key, '')) != ''" not in index_sql
-            )
+            ) and READY_THUMBNAIL_PREDICATE not in index_sql
             if columns and (
                 "rel" not in columns
                 or visible_index_needs_refresh
@@ -976,30 +1058,6 @@ class SchemaMigrator:
             ("CREATE INDEX IF NOT EXISTS idx_parent_album_path "
              "ON assets (parent_album_path)"),
 
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_global "
-             "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_album "
-             "ON assets (parent_album_path, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_media "
-             "ON assets (media_type, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_favorite "
-             "ON assets (is_favorite, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_gps "
-             "ON assets (has_gps, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_collection_global "
              "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_collection_album "
@@ -1010,6 +1068,27 @@ class SchemaMigrator:
              "ON assets (is_favorite, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_collection_gps "
              "ON assets (has_gps, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
+            # SQLite can break equal-cost ties in reverse creation order before
+            # statistics are available. Prefer the smaller ready-only indexes.
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_global "
+             "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_album "
+             "ON assets (parent_album_path, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_media "
+             "ON assets (media_type, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_favorite "
+             "ON assets (is_favorite, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_gps "
+             "ON assets (has_gps, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
             "CREATE INDEX IF NOT EXISTS idx_assets_rel_lookup ON assets (rel)",
             "CREATE INDEX IF NOT EXISTS idx_assets_id_lookup ON assets (id)",
             "CREATE INDEX IF NOT EXISTS idx_assets_live_content_id ON assets (content_id_key)",
@@ -1025,4 +1104,6 @@ class SchemaMigrator:
             try:
                 conn.execute(index_sql)
             except sqlite3.OperationalError as exc:
+                if strict:
+                    raise
                 logger.warning("Failed to create index: %s", exc)

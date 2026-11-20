@@ -5,11 +5,12 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
-from PySide6.QtGui import QColorSpace, QImage, QImageReader
+from PySide6.QtGui import QColorSpace, QImage, QImageIOHandler, QImageReader, QTransform
 
 from iPhoto.core.color_resolver import ColorStats
 from iPhoto.core.raw_processor import is_raw_extension
@@ -28,6 +29,7 @@ from iPhoto.utils.deps import load_pillow
 
 _MAX_DETAIL_SURFACE_BYTES = 192 * 1024 * 1024
 _WINDOWS_QT_PREFERRED_SUFFIXES = frozenset({".jpe", ".jpeg", ".jfif", ".jpg"})
+_RAW_FLIP_ORIENTATIONS = {1: 2, 2: 4, 3: 3, 4: 5, 5: 8, 6: 6, 7: 7}
 
 
 class DecodeCancelledError(RuntimeError):
@@ -341,7 +343,8 @@ class RawStillDecodeBackend:
                     thumb,
                     rawpy,
                     target,
-                    orientation=prepared.source_identity.orientation,
+                    orientation=_raw_orientation(raw, prepared.source_identity.orientation),
+                    display_size=raw_size,
                 )
                 emit_detail_event(
                     "raw_thumb_decode",
@@ -505,16 +508,11 @@ def probe_raw_source_identity(identity: AssetSourceIdentity) -> AssetSourceIdent
     try:
         with rawpy.imread(str(identity.path)) as raw:
             size = _raw_visible_size(raw, identity)
-            flip = _raw_flip(raw)
+            orientation = _raw_orientation(raw, identity.orientation)
     except Exception as exc:  # noqa: BLE001 - LibRaw exposes format-specific failures
         raise RuntimeError(f"Unable to probe RAW geometry: {exc}") from exc
     if size.isEmpty() or not size.isValid():
         raise RuntimeError("RAW decoder did not report valid source geometry")
-    orientation = identity.orientation
-    if flip in (5, 6):
-        orientation = 8 if flip == 5 else 6
-    elif flip == 3:
-        orientation = 3
     return AssetSourceIdentity.create(
         identity.path,
         size_bytes=identity.size_bytes,
@@ -533,6 +531,10 @@ def _raw_flip(raw: Any) -> int:
         return 0
 
 
+def _raw_orientation(raw: Any, indexed_orientation: int) -> int:
+    return _RAW_FLIP_ORIENTATIONS.get(_raw_flip(raw), indexed_orientation)
+
+
 def _raw_visible_size(raw: Any, identity: AssetSourceIdentity) -> QSize:
     sizes = getattr(raw, "sizes", None)
     width = _positive_int(getattr(sizes, "iwidth", 0))
@@ -541,9 +543,8 @@ def _raw_visible_size(raw: Any, identity: AssetSourceIdentity) -> QSize:
         width = _positive_int(getattr(sizes, "width", 0))
         height = _positive_int(getattr(sizes, "height", 0))
     if width <= 0 or height <= 0:
-        width = max(0, int(identity.width))
-        height = max(0, int(identity.height))
-    if _raw_flip(raw) in (5, 6):
+        return QSize(max(0, int(identity.width)), max(0, int(identity.height)))
+    if _raw_orientation(raw, identity.orientation) in (5, 6, 7, 8):
         width, height = height, width
     return QSize(width, height)
 
@@ -592,11 +593,14 @@ def _qimage_from_raw_thumb(
     target: QSize,
     *,
     orientation: int = 1,
+    display_size: QSize | None = None,
 ) -> QImage:
     if thumb is None:
         return QImage()
+    display = display_size or target
     if thumb.format == rawpy.ThumbFormat.JPEG:
-        payload = QByteArray(bytes(thumb.data))
+        jpeg = bytes(thumb.data)
+        payload = QByteArray(jpeg)
         buffer = QBuffer(payload)
         if not buffer.open(QIODevice.OpenModeFlag.ReadOnly):
             return QImage()
@@ -604,22 +608,70 @@ def _qimage_from_raw_thumb(
             reader = QImageReader(buffer, b"JPEG")
             reader.setAutoTransform(True)
             intrinsic = reader.size()
+            embedded = reader.transformation()
+            transform = QTransform()
+            if embedded == QImageIOHandler.Transformation.TransformationNone:
+                transform = _raw_preview_transform(orientation, intrinsic, display)
+                if transform is None or not transform.isIdentity():
+                    # Qt reports TransformationNone for both missing EXIF and
+                    # an explicit orientation of 1 on a display-ready preview.
+                    if _jpeg_declares_upright(jpeg):
+                        transform = QTransform()
+                    elif transform is None:
+                        return QImage()
             if intrinsic.isValid() and not intrinsic.isEmpty():
                 reader_target = target
-                if orientation in (5, 6, 7, 8):
-                    reader_target = QSize(target.height(), target.width())
+                if (
+                    transform.m12() != 0
+                    or embedded & QImageIOHandler.Transformation.TransformationRotate90
+                ):
+                    reader_target = target.transposed()
                 scaled = intrinsic.scaled(
                     reader_target,
                     Qt.AspectRatioMode.KeepAspectRatio,
                 )
                 if scaled.width() < intrinsic.width() or scaled.height() < intrinsic.height():
                     reader.setScaledSize(scaled)
-            return reader.read()
+            return reader.read().transformed(transform)
         finally:
             buffer.close()
     if thumb.format == rawpy.ThumbFormat.BITMAP:
-        return _qimage_from_array(thumb.data)
+        intrinsic = _raw_thumb_size(thumb, rawpy)
+        transform = _raw_preview_transform(orientation, intrinsic, display)
+        if transform is None:
+            return QImage()
+        image = _qimage_from_array(thumb.data)
+        return image.transformed(transform)
     return QImage()
+
+
+def _jpeg_declares_upright(jpeg: bytes) -> bool:
+    pillow = load_pillow()
+    if pillow is None:
+        return False
+    try:
+        with pillow.Image.open(BytesIO(jpeg)) as image:
+            return image.getexif().get(274) == 1
+    except (OSError, SyntaxError, ValueError, pillow.Image.DecompressionBombError):
+        return False
+
+
+def _raw_preview_transform(
+    orientation: int, intrinsic: QSize, display: QSize
+) -> QTransform | None:
+    """Infer simple quarter turns from the axes of an untagged preview."""
+
+    if orientation == 1:
+        return QTransform()
+    if orientation not in (6, 8) or intrinsic.isEmpty() or display.isEmpty():
+        return None
+    preview_axis = intrinsic.width() - intrinsic.height()
+    display_axis = display.width() - display.height()
+    if not preview_axis or not display_axis:
+        return None
+    if preview_axis * display_axis > 0:
+        return QTransform()
+    return QTransform().rotate(90 if orientation == 6 else -90)
 
 
 def _postprocess_raw(raw: Any, *, half_size: bool) -> Any:

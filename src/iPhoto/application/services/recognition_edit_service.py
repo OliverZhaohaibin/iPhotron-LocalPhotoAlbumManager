@@ -93,8 +93,8 @@ class RecognitionEditService:
         if not context.asset_id or not context.annotation_id:
             return self._rejected("not_found")
         try:
-            with self._mutations.mutation_scope():
-                if not self._mutations.recover_pending():
+            with self._mutations.try_mutation_scope() as acquired:
+                if not acquired or not self._mutations.recover_pending():
                     return self._rejected("recovery_pending")
                 # Bypass the presentation cache while holding the same lease as writes.
                 annotations = (

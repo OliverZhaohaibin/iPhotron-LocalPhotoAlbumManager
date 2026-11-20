@@ -39,6 +39,12 @@ Every generation has exactly one terminal event. Sensitive path fields are
 replaced by a stable, per-install salted identifier at the JSONL writer
 boundary.
 
+At 1.8 seconds without a paint, the watchdog records `startup.first_paint_watchdog`
+and requests a normal Qt update. If paint arrives during the next interval,
+check that `first_paint` precedes `interactive` and the post-paint jobs. If paint
+still has not arrived, expect `startup.failed` with code `first_paint_timeout`
+and process exit without any post-paint jobs.
+
 Packaged lifecycle validation must also confirm that no QRhi surface is created
 or reparented after `show()`. Failure to prepare the pre-show native hierarchy
 is terminal for that process; a retry may restart library startup only after a

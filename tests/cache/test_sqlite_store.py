@@ -34,15 +34,20 @@ def test_wal_mode_enabled(store: IndexStore, tmp_path: Path) -> None:
         assert mode.upper() == "WAL"
 
 
-def test_init_upgrades_collection_indexes_for_unique_keyset_order(
+@pytest.mark.parametrize("old_definition", [
+    "(live_role, is_deleted, thumbnail_state, sort_ts DESC, id DESC)",
+    "(live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
+    "WHERE thumbnail_state IN ('ready', 'stale') AND TRIM(COALESCE(thumb_cache_key, '')) != ''",
+])
+def test_init_upgrades_visible_collection_index(
     store: IndexStore,
     tmp_path: Path,
+    old_definition: str,
 ) -> None:
     with sqlite3.connect(store.path) as conn:
         conn.execute("DROP INDEX idx_assets_visible_global")
         conn.execute(
-            "CREATE INDEX idx_assets_visible_global "
-            "ON assets (live_role, is_deleted, thumbnail_state, sort_ts DESC, id DESC)"
+            f"CREATE INDEX idx_assets_visible_global ON assets {old_definition}"
         )
 
     IndexStore(tmp_path)
@@ -52,8 +57,12 @@ def test_init_upgrades_collection_indexes_for_unique_keyset_order(
             row[2]
             for row in conn.execute("PRAGMA index_info(idx_assets_visible_global)")
         ]
+        index_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_assets_visible_global'"
+        ).fetchone()[0]
 
     assert columns[-3:] == ["sort_ts", "id", "rel"]
+    assert "thumbnail_state = 'ready'" in index_sql
 
 
 def test_write_and_read_rows(store: IndexStore) -> None:

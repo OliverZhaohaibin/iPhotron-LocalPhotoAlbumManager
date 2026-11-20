@@ -44,6 +44,8 @@ from .repository_utils import (
 )
 from .state_repository import FaceStateRepository
 
+_RUNTIME_COMMIT_HISTORY_LIMIT = 1000
+
 
 @dataclass(frozen=True)
 class FaceMutationResult:
@@ -90,6 +92,7 @@ class FaceRepository:
         sync_runtime_state: bool = True,
         operation_id: str | None = None,
         operation_kind: str = "people_scan_commit",
+        scan_changes: FaceMutationResult | None = None,
     ) -> None:
         self.initialize()
         if self._state_repo is not None:
@@ -153,17 +156,18 @@ class FaceRepository:
                 person_rows,
             )
             if operation_id is not None:
+                changes = scan_changes or FaceMutationResult(
+                    changed_asset_ids=tuple(sorted({face.asset_id for face in faces if face.asset_id})),
+                    changed_person_ids=tuple(sorted({person.person_id for person in persons if person.person_id})),
+                )
                 self._write_runtime_commit(
                     conn,
                     operation_id,
                     {
                         "operation_kind": operation_kind,
-                        "changed_asset_ids": sorted(
-                            {face.asset_id for face in faces if face.asset_id}
-                        ),
-                        "changed_person_ids": sorted(
-                            {person.person_id for person in persons if person.person_id}
-                        ),
+                        "changed_asset_ids": changes.changed_asset_ids,
+                        "changed_person_ids": changes.changed_person_ids,
+                        "scan_changes_complete": scan_changes is not None,
                     },
                 )
             conn.commit()
@@ -279,6 +283,25 @@ class FaceRepository:
         payload["state_synced"] = bool(row["state_synced"])
         return payload
 
+    def prune_synced_runtime_commits(self) -> None:
+        """Trim old markers once the owning journal has finalized its operations."""
+
+        if not self._db_path.is_file():
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                DELETE FROM people_runtime_commits
+                WHERE state_synced = 1 AND rowid < (
+                    SELECT rowid FROM people_runtime_commits
+                    ORDER BY rowid DESC LIMIT 1 OFFSET ?
+                )
+                """,
+                (_RUNTIME_COMMIT_HISTORY_LIMIT - 1,),
+            )
+            conn.commit()
+
     def complete_runtime_state_sync(self, operation_id: str) -> dict[str, object] | None:
         payload = self.get_runtime_commit(operation_id)
         if payload is None or bool(payload.get("state_synced")):
@@ -358,6 +381,12 @@ class FaceRepository:
                 "people_move_face_new",
             }:
                 self._state_repo.sync_scan_results(persons, faces)
+            if operation_kind == "people_scan_commit":
+                payload["changed_group_ids"] = self._group_ids_for_identity_refs(
+                    IdentityRef("person", str(person_id))
+                    for person_id in payload.get("changed_person_ids", ())
+                    if person_id
+                )
             if operation_kind == "people_delete_face":
                 face_key = str(payload.get("face_key") or "")
                 if face_key:
@@ -390,20 +419,6 @@ class FaceRepository:
                     payload,
                     persons,
                 )
-            if operation_kind in {
-                "people_delete_face",
-                "people_move_face",
-                "people_move_face_new",
-            }:
-                active_ids = {person.person_id for person in persons if person.person_id}
-                for person_id in (
-                    str(value)
-                    for value in payload.get("changed_person_ids", ())
-                    if value
-                ):
-                    if person_id not in active_ids:
-                        self._state_repo.remove_person_from_groups(person_id)
-                        self._state_repo.delete_person_state(person_id)
             if operation_kind == "people_create_group":
                 group = self._state_repo.create_group(payload.get("members", ()))
                 if group is not None:
@@ -1228,7 +1243,8 @@ class FaceRepository:
         if self._state_repo is not None:
             hidden_map = self._state_repo.get_person_hidden_map((source_person_id, target_person_id))
             target_hidden = bool(hidden_map.get(target_person_id, False))
-        merged_hidden = target_hidden
+            if bool(hidden_map.get(source_person_id, False)) != target_hidden:
+                return False, {}
 
         self.initialize()
         group_redirects: dict[str, str | None] = {}
@@ -1381,7 +1397,7 @@ class FaceRepository:
                         "target_created_at": target_created_at,
                         "sample_count": len(merged_faces),
                         "evidence_asset_count": evidence_asset_count,
-                        "hidden_state": merged_hidden,
+                        "hidden_state": target_hidden,
                         "changed_asset_ids": sorted(
                             {face.asset_id for face in merged_faces if face.asset_id}
                         ),
@@ -1408,7 +1424,7 @@ class FaceRepository:
                 target_created_at=target_created_at,
                 sample_count=len(merged_faces),
                 evidence_asset_count=evidence_asset_count,
-                hidden_state=merged_hidden,
+                hidden_state=target_hidden,
             )
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()

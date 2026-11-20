@@ -59,7 +59,9 @@ _SCHEMA: Final = 3
 # below 2.  Contract 1 may contain Windows HEIC pixels that WIC had already
 # oriented and the old pipeline rotated a second time.
 # Contract 2 may contain premultiplied ImageIO pixels stored as straight RGBA.
-_DECODE_SEMANTICS_CONTRACT: Final = 3
+# Contract 3 may contain embedded RAW previews in sensor orientation.
+# Contract 4 may contain RAW previews that were already oriented before decode.
+_DECODE_SEMANTICS_CONTRACT: Final = 5
 _HEADER_SIZE: Final = 4096
 _WRITE_CHUNK_BYTES: Final = 4 * _MIB
 _ACCESS_AUDIT_INTERVAL: Final = 128

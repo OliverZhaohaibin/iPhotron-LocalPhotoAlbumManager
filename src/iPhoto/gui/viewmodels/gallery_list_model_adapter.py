@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -72,10 +73,11 @@ class GalleryListModelAdapter(QAbstractListModel):
     """Expose a pure Python collection store to Qt item views."""
 
     _scan_batch_received = QtSignal(object)
-    _thumbnail_backfill_completion_received = QtSignal(object)
+    _thumbnail_event_received = QtSignal(int, object, object)
     thumbnailBackfillProgress = QtSignal(Path, int, int)
     thumbnailBackfillCompleted = QtSignal(Path)
     thumbnailBackfillFailed = QtSignal(Path, str)
+    thumbnailBackfillReset = QtSignal()
     startupGalleryReady = QtSignal()
     startupFirstFrameReady = QtSignal()
 
@@ -116,7 +118,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._pending_selection_anchor_retry: (
             GallerySelectionAnchorRetryTicket | None
         ) = None
-        self._backfill_completion_source: Any | None = None
+        self._thumbnail_event_source: Any | None = None
+        self._thumbnail_event_generation = 0
+        self._thumbnail_event_connections: list[tuple[Any, Callable[..., None]]] = []
         self._startup_diag_logged_source = False
         self._startup_diag_logged_viewport = False
         self._startup_diag_logged_window = False
@@ -177,8 +181,8 @@ class GalleryListModelAdapter(QAbstractListModel):
             self._enqueue_scan_batch_on_ui_thread,
             Qt.ConnectionType.QueuedConnection,
         )
-        self._thumbnail_backfill_completion_received.connect(
-            self._enqueue_thumbnail_backfill_completion_on_ui_thread,
+        self._thumbnail_event_received.connect(
+            self._apply_thumbnail_event,
             Qt.ConnectionType.QueuedConnection,
         )
         self._store.set_window_request_handler(self._window_loader.request)
@@ -199,7 +203,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         thumbnail_status_connect = getattr(thumbnail_status_signal, "connect", None)
         if callable(thumbnail_status_connect):
             thumbnail_status_connect(self._on_thumbnail_status_changed)
-        self._bind_backfill_completion_signal(self._current_asset_query_service())
+        self._bind_thumbnail_events(self._current_asset_query_service())
         if _runtime_diag_enabled():
             self._runtime_diag_heartbeat_timer.start()
 
@@ -715,8 +719,8 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._demand_coordinator.reset()
         self._thumbnail_hint_request_id += 1
         self._thumbnail_hint_loader.cancel_pending()
+        self._bind_thumbnail_events(asset_query_service)
         self._store.rebind_asset_query_service(asset_query_service, library_root)
-        self._bind_backfill_completion_signal(asset_query_service)
 
     @Slot(object)
     def _schedule_selection_anchor_retry(self, ticket: object) -> None:
@@ -1663,57 +1667,52 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _current_asset_query_service(self) -> Any | None:
         return getattr(self._store, "asset_query_service", None)
 
-    def _bind_backfill_completion_signal(self, asset_query_service: Any | None) -> None:
-        if asset_query_service is self._backfill_completion_source:
+    def _bind_thumbnail_events(self, asset_query_service: Any | None) -> None:
+        if asset_query_service is self._thumbnail_event_source:
             return
 
-        old_signal = getattr(
-            self._backfill_completion_source,
-            "thumbnail_backfill_completed",
-            None,
-        )
-        old_disconnect = getattr(old_signal, "disconnect", None)
-        if callable(old_disconnect):
+        self._thumbnail_event_generation += 1
+        for signal, callback in self._thumbnail_event_connections:
+            disconnect = getattr(signal, "disconnect", None)
             try:
-                old_disconnect(self._handle_thumbnail_backfill_completed)
+                if callable(disconnect):
+                    disconnect(callback)
             except (RuntimeError, TypeError, ValueError):
                 pass
-        old_progress = getattr(
-            self._backfill_completion_source,
-            "thumbnail_backfill_progress",
-            None,
-        )
-        old_progress_disconnect = getattr(old_progress, "disconnect", None)
-        if callable(old_progress_disconnect):
-            try:
-                old_progress_disconnect(self._handle_thumbnail_backfill_progress)
-            except (RuntimeError, TypeError, ValueError):
-                pass
-        old_failed = getattr(
-            self._backfill_completion_source,
-            "thumbnail_backfill_failed",
-            None,
-        )
-        old_failed_disconnect = getattr(old_failed, "disconnect", None)
-        if callable(old_failed_disconnect):
-            try:
-                old_failed_disconnect(self._handle_thumbnail_backfill_failed)
-            except (RuntimeError, TypeError, ValueError):
-                pass
+        self._thumbnail_event_connections.clear()
+        self._scan_batch_timer.stop()
+        self._pending_scan_batch_count = 0
+        self._pending_thumbnail_backfill_completions.clear()
+        self.thumbnailBackfillReset.emit()
 
-        self._backfill_completion_source = asset_query_service
-        new_signal = getattr(asset_query_service, "thumbnail_backfill_completed", None)
-        new_connect = getattr(new_signal, "connect", None)
-        if callable(new_connect):
-            new_connect(self._handle_thumbnail_backfill_completed)
-        new_progress = getattr(asset_query_service, "thumbnail_backfill_progress", None)
-        new_progress_connect = getattr(new_progress, "connect", None)
-        if callable(new_progress_connect):
-            new_progress_connect(self._handle_thumbnail_backfill_progress)
-        new_failed = getattr(asset_query_service, "thumbnail_backfill_failed", None)
-        new_failed_connect = getattr(new_failed, "connect", None)
-        if callable(new_failed_connect):
-            new_failed_connect(self._handle_thumbnail_backfill_failed)
+        self._thumbnail_event_source = asset_query_service
+        for name, handler in (
+            ("thumbnail_ready_committed", self._enqueue_scan_batch_on_ui_thread),
+            ("thumbnail_backfill_completed", self._enqueue_thumbnail_backfill_completion_on_ui_thread),
+            ("thumbnail_backfill_progress", self._handle_thumbnail_backfill_progress),
+            ("thumbnail_backfill_failed", self._handle_thumbnail_backfill_failed),
+        ):
+            signal = getattr(asset_query_service, name, None)
+            connect = getattr(signal, "connect", None)
+            if callable(connect):
+                callback = partial(self._relay_thumbnail_event, self._thumbnail_event_generation, handler)
+                connect(callback)
+                self._thumbnail_event_connections.append((signal, callback))
+
+    def _relay_thumbnail_event(
+        self, generation: int, handler: Callable[..., None], *args: object,
+    ) -> None:
+        if QThread.currentThread() is self.thread():
+            self._apply_thumbnail_event(generation, handler, args)
+        else:
+            self._thumbnail_event_received.emit(generation, handler, args)
+
+    @Slot(int, object, object)
+    def _apply_thumbnail_event(
+        self, generation: int, handler: Callable[..., None], args: tuple[object, ...],
+    ) -> None:
+        if generation == self._thumbnail_event_generation:
+            handler(*args)
 
     def _handle_thumbnail_backfill_progress(
         self,
@@ -1723,15 +1722,8 @@ class GalleryListModelAdapter(QAbstractListModel):
     ) -> None:
         self.thumbnailBackfillProgress.emit(Path(root), int(current), int(total))
 
-    def _handle_thumbnail_backfill_completed(self, batch: object) -> None:
-        """Queue completion so it follows the Gallery's model refresh."""
-
-        if QThread.currentThread() is self.thread():
-            self._enqueue_thumbnail_backfill_completion_on_ui_thread(batch)
-        else:
-            self._thumbnail_backfill_completion_received.emit(batch)
-
     def _handle_thumbnail_backfill_failed(self, root: Path, error: str) -> None:
+        self._store.finish_thumbnail_backfill(Path(root))
         self.thumbnailBackfillFailed.emit(Path(root), str(error))
 
     def _snapshot_hash(self, count: int) -> bytes:

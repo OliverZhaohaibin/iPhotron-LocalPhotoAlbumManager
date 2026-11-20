@@ -1,6 +1,6 @@
 # 启动链路人工实机验收包
 
-更新日期：2026-09-04
+更新日期：2026-11-19
 
 > 当前启动合同以 [`docs/architecture.md`](../architecture.md) 为准。Windows、
 > macOS、Linux 均必须在 top-level `show()` 前完成隐藏 Detail shell 和三个
@@ -33,6 +33,15 @@
 每个平台还需用隔离图库覆盖
 [图库准备与恢复契约](../architecture.md#library-preparation-and-schema-recovery)：
 
+- 延迟首次绘制超过 1.8 秒，确认日志记录 `startup.first_paint_watchdog` 并请求 Qt 更新。
+  在下一次超时前恢复绘制，`first_paint` 应先于 `interactive`、Detail 多媒体初始化和图库探测。
+  如窗口在第二个 1.8 秒内仍未绘制，应记录 `first_paint_timeout` 并退出，且不运行后续任务。
+- 启动探测图库 A 时手动选择图库 B，分别让 A 返回成功、失败以及在提交前切库。
+  确认 B 和用户选择的相册保持可用，启动代次正常结束。
+- 手动打开需要迁移的旧图库，同时操作当前图库并连续选择两个目标。确认迁移期间窗口可响应，
+  最后一次有效选择才切换图库。目标不可用或验证失败时应保留当前图库。
+- 在区分大小写的卷上，用已有 `.iphoto/global_index.db` 和收藏的旧图库启动，
+  确认继续使用同一索引目录。若最近一次全库扫描中断，确认恢复浏览后重新排队扫描。
 - 当前 schema 重开不重复全表修复；旧 schema 的版本升级保留有效 SQLite
   在线备份及迁移状态，覆盖已提交 WAL 数据和升级中关窗后的恢复。
 - 兼容的完整无版本 schema 走事务内接纳路径；未知 schema 不得套用该快路径。

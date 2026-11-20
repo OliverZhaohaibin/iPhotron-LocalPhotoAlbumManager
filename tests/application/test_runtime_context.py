@@ -198,6 +198,7 @@ def _runtime_context(root: Path) -> tuple[RuntimeContext, _FakeLibrary, _FakeAss
     context.asset_runtime = asset_runtime
     context._container = None
     context._pending_basic_library_path = root
+    context._startup_probe_ids = set()
     context._library_epoch = 0
     return context, library, asset_runtime
 
@@ -236,6 +237,37 @@ def test_explicit_bind_supersedes_saved_library_probe(tmp_path: Path) -> None:
             context.commit_validated_library(validated)
         assert context.library_session is chosen_session
         assert library.root() == chosen
+    finally:
+        context.close_library()
+
+
+def test_fresh_validated_switches_after_saved_library_startup(tmp_path: Path) -> None:
+    from iPhoto.bootstrap.library_probe import (
+        LibraryProbeRequest,
+        ValidatedPreparedLibrary,
+        probe_library,
+    )
+
+    saved, second, third = (tmp_path / name for name in ("saved", "second", "third"))
+    for root in (saved, second, third):
+        root.mkdir()
+    context, library, _runtime = _runtime_context(saved)
+    obsolete = ValidatedPreparedLibrary.create(probe_library(context.request_startup_library_probe()))
+    startup = ValidatedPreparedLibrary.create(probe_library(context.request_startup_library_probe()))
+
+    try:
+        context.commit_validated_library(startup)
+        for root in (second, third):
+            validated = ValidatedPreparedLibrary.create(probe_library(LibraryProbeRequest.create(root)))
+            session = context.commit_validated_library(validated)
+            assert library.root() == root
+            with pytest.raises(RuntimeError, match="already consumed"):
+                context.commit_validated_library(validated)
+            assert context.library_session is session
+        with pytest.raises(RuntimeError, match="superseded"):
+            context.commit_validated_library(obsolete)
+        assert context.library_session is session
+        assert library.root() == third
     finally:
         context.close_library()
 

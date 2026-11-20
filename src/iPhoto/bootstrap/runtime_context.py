@@ -91,6 +91,7 @@ class RuntimeContext:
     )
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
     _startup_probe: tuple[str, int] | None = field(init=False, default=None, repr=False)
+    _startup_probe_ids: set[str] = field(init=False, default_factory=set, repr=False)
     _deferred_startup_scan_root: Path | None = field(init=False, default=None, repr=False)
 
     @property
@@ -263,6 +264,7 @@ class RuntimeContext:
             return None
         request = LibraryProbeRequest.create(candidate, timeout_ms=timeout_ms)
         self._startup_probe = (request.request_id, self.library_epoch)
+        self._startup_probe_ids.add(request.request_id)
         return request
 
     def is_current_startup_probe(self, request_id: str) -> bool:
@@ -352,20 +354,25 @@ class RuntimeContext:
 
         if (
             validated is not None
-            and self._startup_probe is not None
+            and validated.request_id in self._startup_probe_ids
             and not self.is_current_startup_probe(validated.request_id)
         ):
             raise RuntimeError("Startup library request was superseded")
+        if prepared is not None:
+            if validated is None:
+                raise ValueError("GUI prepared library commit requires validation")
+            # Check and consume the credential before tearing down the current session.
+            prepared = validated.consume()
         normalized = (
             Path(prepared.root)
             if prepared is not None
             else Path(root).expanduser().resolve()
         )
-        self.close_library()
-
         if prepared is None and (not normalized.exists() or not normalized.is_dir()):
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
 
+        self.close_library()
+        self._deferred_startup_scan_root = None
         if prepared is None:
             self.library_session = LibrarySession(
                 normalized,
@@ -373,10 +380,8 @@ class RuntimeContext:
                 bind_asset_runtime=False,
             )
         else:
-            if validated is None:
-                raise ValueError("GUI prepared library commit requires validation")
-            self.library_session = LibrarySession.from_validated(
-                validated,
+            self.library_session = LibrarySession.from_prepared(
+                prepared,
                 asset_runtime=self.asset_runtime,
                 bind_asset_runtime=False,
             )
@@ -448,7 +453,6 @@ class RuntimeContext:
         # when it happens before the saved-library helper has been launched.
         if prepared is None:
             self._pending_basic_library_path = None
-            self._deferred_startup_scan_root = None
         return self.library_session
 
     def close_library(self) -> None:

@@ -459,21 +459,52 @@ class TestInitCoverTracking:
         assert controller._player_stack.currentWidget() is controller._video_area
         assert controller._pending_video_generation == 2
 
-    def test_live_motion_keeps_its_inflight_still_until_restoration(self, controller, tmp_path):
+    def test_live_still_keeps_its_generation_until_revealed(self, controller, tmp_path, mocker):
         source = tmp_path / "live.jpg"
-        surface = _surface(source, QImage(64, 48, QImage.Format.Format_RGBA8888))
+        surface = _surface(source, QImage(1024, 768, QImage.Format.Format_RGBA8888))
+        controller._requires_post_submit_frame = False
         controller._request_generation = 2
+        controller._request_reason_by_generation[2] = "initial"
+        controller._active_asset_id = surface.decode_key.asset_id
+        controller._active_source_identity = AssetSourceIdentity.create(
+            source, width=4000, height=3000, source_mtime_ns=1,
+        )
         controller._loading_source = source
         controller._loading_started_at = time.perf_counter()
+        controller._image_viewer.resize(1600, 1200)
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
         controller.defer_still_updates(True)
         controller.begin_video_transition(2, interactive_when_ready=False)
         controller._on_scheduled_image_ready(2, surface)
 
+        controller._on_viewport_metrics_changed()
+        controller._lod_timer.stop()
+        controller._request_higher_lod()
+
         assert controller._player_stack.currentWidget() is controller._video_area
+        assert controller._request_generation == 2
+        schedule.assert_not_called()
+
+        controller.defer_live_badge_until_ready(2)
         controller.defer_still_updates(False)
         assert controller.apply_pending_still()
         assert controller._player_stack.currentWidget() is controller._image_viewer
         assert controller._pending_image_key == surface.decode_key
+
+        controller._request_higher_lod()
+        schedule.assert_not_called()
+        controller._image_viewer.stillFrameSubmitted.emit(surface.decode_key, 2)
+
+        assert controller._pending_image_generation is None
+        assert not controller._live_badge.isHidden()
+        presented.assert_called_once_with(source, 2)
+
+        controller._request_higher_lod()
+        request = schedule.call_args.args[0]
+        assert request.generation == 3
+        assert request.decode_level > surface.decode_level
 
     def test_primed_image_decode_failure_returns_to_placeholder(
         self,

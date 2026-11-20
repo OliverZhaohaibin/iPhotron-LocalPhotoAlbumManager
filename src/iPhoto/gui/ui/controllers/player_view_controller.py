@@ -1644,7 +1644,14 @@ class PlayerViewController(QObject):
 
     def _request_higher_lod(self) -> None:
         identity = self._active_source_identity
-        if identity is None or self._loading_source is not None:
+        # Viewport updates during Live Motion must keep the deferred still's
+        # generation intact until that still is submitted and revealed.
+        if (
+            identity is None
+            or self._loading_source is not None
+            or self.is_showing_video()
+            or self._pending_image_generation is not None
+        ):
             return
         self._request_generation += 1
         generation = self._request_generation
@@ -1889,9 +1896,8 @@ class PlayerViewController(QObject):
                 self._finalize_image_surface_submission(source, submitted_generation)
                 return
 
-        # A newer LOD can be submitted while an older initial reveal still owns
-        # the Windows cover barrier.  Its presentation bookkeeping is current
-        # even though it must not release that older barrier.
+        # Resource invalidation can rearm an older cover while a newer LOD is
+        # already in flight. Accept its bookkeeping without releasing the cover.
         if submitted_generation != self._present_generation:
             return
         self._accept_still_frame_presented(source, submitted_generation)

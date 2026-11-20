@@ -864,6 +864,9 @@ class LibraryRuntimeController(
         self._pet_index_coordinator = None
 
     def _on_people_snapshot_committed(self, event: object) -> None:
+        sender = self.sender()
+        if sender is not None and sender is not self._people_index_coordinator:
+            return
         if self._recognition_event_was_delivered(event):
             return
         pet_service = self._pet_service

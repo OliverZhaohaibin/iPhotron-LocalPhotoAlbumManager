@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import multiprocessing
 import sys
 import threading
 from dataclasses import replace
@@ -11,9 +12,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from PIL import Image
+from PySide6.QtTest import QSignalSpy
 
 from iPhoto.bootstrap.library_pet_service import create_pet_service
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.people.face_repository import FaceRepository
 from iPhoto.people.records import FaceRecord, ManualFaceRecord, PersonRecord
@@ -49,6 +52,7 @@ from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 from iPhoto.pets.scan_session import PetScanSession
 from iPhoto.pets.state_repository import PetStateRepository
+from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
 class _FakePetAssetRepository:
@@ -2196,6 +2200,76 @@ def test_pet_reconciliation_removes_dscf6997_mural_detected_before_people(
     assert event is not None
     assert event.changed_asset_ids == ("asset-mural",)
     assert repository.get_all_detections() == []
+
+
+def _hold_recognition_lease(library_root, pipe) -> None:
+    journal = RecognitionMutationCoordinator(library_root)
+    try:
+        with journal.mutation_scope():
+            pipe.send(True)
+            if pipe.poll(10):
+                pipe.recv()
+    finally:
+        journal.close()
+        pipe.close()
+
+
+def test_people_snapshot_retries_pet_reconciliation_after_cross_process_contention(
+    tmp_path: Path, qapp, monkeypatch,
+) -> None:
+    service = create_pet_service(tmp_path)
+    repository = service.repository()
+    coordinator = service.coordinator
+    detection = _detection(detection_id="overlap")
+    assert coordinator.submit_detected_batch([
+        DetectedAssetPets(detection.asset_id, detection.asset_rel, [detection]),
+    ], distance_threshold=0.42) is not None
+    qapp.processEvents()
+    controller = LibraryRuntimeController()
+    controller.bind_pet_service(service)
+    people_events = QSignalSpy(controller.peopleSnapshotCommitted)
+    pet_events = QSignalSpy(controller.petSnapshotCommitted)
+    reads: list[tuple[str, ...]] = []
+    latest_boxes = {}
+
+    def people_boxes(asset_ids):
+        reads.append(tuple(asset_ids))
+        return latest_boxes
+
+    monkeypatch.setattr(service, "people_boxes_by_asset_ids", people_boxes)
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_hold_recognition_lease, args=(tmp_path, child))
+    process.start()
+    child.close()
+
+    try:
+        assert parent.poll(5) and parent.recv()
+        first = SimpleNamespace(event_id="first", changed_asset_ids=(detection.asset_id,))
+        second = SimpleNamespace(event_id="second", changed_asset_ids=("another",))
+        controller._on_people_snapshot_committed(first)
+        controller._on_people_snapshot_committed(second)
+        controller._on_people_snapshot_committed(first)
+        assert people_events.count() == 2
+        assert reads == []
+        assert repository.get_detection(detection.detection_id) is not None
+
+        latest_boxes[detection.asset_id] = ((10, 20, 80, 90),)
+        parent.send("release")
+        process.join(5)
+        assert process.exitcode == 0
+
+        assert pet_events.wait(3000)
+        assert pet_events.count() == 1
+        assert reads == [("another", detection.asset_id)]
+        assert repository.get_detection(detection.detection_id) is None
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+        controller.shutdown()
+        service.shutdown()
 
 
 def test_pet_scan_session_rolls_back_runtime_snapshot_when_state_sync_fails(

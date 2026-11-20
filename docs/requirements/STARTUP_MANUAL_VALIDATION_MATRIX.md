@@ -33,8 +33,9 @@
 每个平台还需用隔离图库覆盖
 [图库准备与恢复契约](../architecture.md#library-preparation-and-schema-recovery)：
 
-- 延迟首次绘制超过 1.8 秒，确认日志记录 `startup.first_paint_watchdog`。恢复窗口绘制后，
-  `first_paint` 应先于 `interactive`、Detail 多媒体初始化和图库探测。
+- 延迟首次绘制超过 1.8 秒，确认日志记录 `startup.first_paint_watchdog` 并请求 Qt 更新。
+  在下一次超时前恢复绘制，`first_paint` 应先于 `interactive`、Detail 多媒体初始化和图库探测。
+  如窗口在第二个 1.8 秒内仍未绘制，应记录 `first_paint_timeout` 并退出，且不运行后续任务。
 - 启动探测图库 A 时手动选择图库 B，分别让 A 返回成功、失败以及在提交前切库。
   确认 B 和用户选择的相册保持可用，启动代次正常结束。
 - 在区分大小写的卷上，用已有 `.iphoto/global_index.db` 和收藏的旧图库启动，

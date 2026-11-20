@@ -506,11 +506,13 @@ def _run_saved_library_startup(
     emit_startup_ready: bool,
     *,
     supersede_at: str | None = None,
+    emit_first_paint: bool = True,
 ):
     call_order: list[str] = []
     profile_marks: list[str] = []
     delayed_callbacks = []
     probe_is_current = True
+    startup = None
     fake_color_role = type(
         "ColorRole",
         (),
@@ -549,7 +551,7 @@ def _run_saved_library_startup(
 
     class _FakeApp:
         def __init__(self, _args) -> None:
-            return None
+            self.exit_code = 0
 
         def palette(self):
             return _FakePalette()
@@ -563,7 +565,14 @@ def _run_saved_library_startup(
             # exec() returns, matching the real application lifecycle.
             for callback in list(delayed_callbacks):
                 callback()
-            return 0
+            if not emit_first_paint:
+                assert startup is not None
+                startup._on_watchdog()
+                startup._on_watchdog()
+            return self.exit_code
+
+        def exit(self, code: int) -> None:
+            self.exit_code = code
 
     class _FakeSignal:
         def __init__(self) -> None:
@@ -616,10 +625,18 @@ def _run_saved_library_startup(
             self.ui = _FakeUi()
             self.firstPainted = _FakeSignal()
 
+        def set_startup_orchestrator(self, orchestrator) -> None:
+            nonlocal startup
+            startup = orchestrator
+
         def show(self) -> None:
             assert profile_marks[-1] == "startup.show"
             call_order.append("show")
-            self.firstPainted.emit()
+            if emit_first_paint:
+                self.firstPainted.emit()
+
+        def update(self) -> None:
+            call_order.append("request-paint")
 
         def bind_coordinators(self, _lifecycle, _gallery, _detail) -> None:
             call_order.append("set_coordinator")
@@ -776,7 +793,7 @@ def _run_saved_library_startup(
 
     from iPhoto.gui.main import main
 
-    assert main([]) == 0
+    assert main([]) == (0 if emit_first_paint else 1)
     return call_order, profile_marks, delayed_callbacks
 
 
@@ -828,6 +845,18 @@ def test_superseded_startup_probe_preserves_interactive_selection(monkeypatch, s
     assert "select" not in calls
     assert calls.count("warmup") == 1
     assert calls.count("scan") == 1
+
+
+def test_main_exits_if_update_cannot_obtain_first_paint(monkeypatch):
+    calls, _marks, _callbacks = _run_saved_library_startup(
+        monkeypatch, "linux", False, emit_first_paint=False,
+    )
+
+    assert calls.count("request-paint") == 1
+    assert calls.count("guard:release") == 1
+    assert "feature:detail" not in calls
+    assert "coordinator:create" not in calls
+    assert "probe:startup-request" not in calls
 
 
 def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> None:

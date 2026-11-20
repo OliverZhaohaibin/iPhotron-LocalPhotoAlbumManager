@@ -220,6 +220,9 @@ construct and start `DesktopCoordinatorRuntime`, probe and commit the saved
 library, select and warm the initial Gallery collection, and finally schedule
 idle startup work such as the deferred metadata scan. This is an architecture
 constraint rather than a timer-based optimization.
+The first-paint watchdog requests one normal Qt update when paint is delayed.
+If the next interval expires without a paint, startup records a terminal
+failure and exits. The watchdog cannot activate post-paint work.
 
 `Ui_MainWindow.ensure_feature()` owns the on-demand lifetime of the detail,
 preview, Map, People, and Albums bundles. It caches each bundle and emits

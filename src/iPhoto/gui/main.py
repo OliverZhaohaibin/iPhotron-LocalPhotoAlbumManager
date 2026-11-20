@@ -1281,8 +1281,12 @@ def main(argv: list[str] | None = None) -> int:
         startup.transition(StartupPhase.INTERACTIVE, reason="retry")
         _initialize_features_after_show(generation)
 
-    startup.startupDegraded.connect(
-        lambda failure: window.show_startup_recovery(
+    def _handle_startup_failure(failure: StartupFailure) -> None:
+        if failure.code == "first_paint_timeout":
+            _logger.error("%s", failure.message)
+            app.exit(1)
+            return
+        window.show_startup_recovery(
             failure.message,
             details=(
                 f"phase={failure.phase.value}; "
@@ -1294,7 +1298,8 @@ def main(argv: list[str] | None = None) -> int:
             retry_callback=_retry_startup,
             suggested_action=failure.suggested_action,
         )
-    )
+
+    startup.startupDegraded.connect(_handle_startup_failure)
     benchmark_exit_delay_ms = _benchmark_auto_exit_delay_ms()
     benchmark_exit_scheduled = False
 
@@ -1308,6 +1313,9 @@ def main(argv: list[str] | None = None) -> int:
     startup.startupCompleted.connect(_schedule_benchmark_exit)
     startup.startupDegraded.connect(_schedule_benchmark_exit)
     window.firstPainted.connect(startup.first_painted)
+    request_paint = getattr(window, "update", None)
+    if callable(request_paint):
+        startup.firstPaintRequested.connect(request_paint)
     # Arm before show(): test doubles and a few embedded Qt hosts can paint
     # synchronously from show(), and that event must not be lost.
     startup.shell_shown(_continue_after_shell)

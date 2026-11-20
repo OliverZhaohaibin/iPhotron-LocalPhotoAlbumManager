@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,7 +21,12 @@ from iPhoto.utils.pathutils import ensure_work_dir
 from .pipeline import DetectedAssetFaces
 from .repository import FaceRepository, ManualFaceRecord, PeopleGroupRecord
 from .scan_session import FaceScanSession
-from .status import FACE_STATUS_DONE, FACE_STATUS_RETRY
+from .status import (
+    FACE_STATUS_DONE,
+    FACE_STATUS_PENDING,
+    FACE_STATUS_RETRY,
+    normalize_face_status,
+)
 
 LOGGER = get_logger()
 
@@ -127,12 +132,20 @@ class PeopleIndexCoordinator(QObject):
         *,
         distance_threshold: float,
         min_samples: int,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> PeopleSnapshotEvent | None:
         detected_batch = list(detected_results)
         if not detected_batch:
             return None
 
-        with self._journal.try_mutation_scope() as acquired:
+        scope = (
+            self._journal.try_mutation_scope()
+            if is_cancelled is None
+            else self._journal.wait_for_mutation_scope(
+                is_cancelled=lambda: self._shutdown_requested or is_cancelled(),
+            )
+        )
+        with scope as acquired:
             if not acquired or self._shutdown_requested:
                 return None
             operation_id = self._try_prepare_operation_locked(
@@ -141,6 +154,27 @@ class PeopleIndexCoordinator(QObject):
             )
             if operation_id is None:
                 return None
+            if is_cancelled is not None:
+                if is_cancelled():
+                    self._reject_operation_locked(operation_id, "scan_cancelled")
+                    return None
+                # Another owner may have completed these assets before releasing
+                # the lease, including work just finalized by journal recovery.
+                # Look up the scanned paths because identical copies share IDs.
+                if self._asset_repository is not None:
+                    rows = self._asset_repository.get_rows_by_rels(
+                        result.asset_rel for result in detected_batch
+                    )
+                    detected_batch = [
+                        result for result in detected_batch
+                        if (row := rows.get(result.asset_rel)) is not None
+                        and row.get("id") == result.asset_id
+                        and normalize_face_status(row.get("face_status"))
+                        in (None, FACE_STATUS_PENDING, FACE_STATUS_RETRY)
+                    ]
+                    if not detected_batch:
+                        self._reject_operation_locked(operation_id, "no_pending_assets")
+                        return None
             repository = self._repository()
             session = FaceScanSession()
             done_ids, retry_ids = session.stage_detection_results(detected_batch)

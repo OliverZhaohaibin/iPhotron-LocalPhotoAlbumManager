@@ -12,6 +12,9 @@ class PeopleAssetRepositoryPort(Protocol):
     def get_rows_by_ids(self, asset_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
         """Return asset rows keyed by asset id."""
 
+    def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return asset rows keyed by library-relative path."""
+
     def read_rows_by_face_status(
         self,
         statuses: Iterable[str],

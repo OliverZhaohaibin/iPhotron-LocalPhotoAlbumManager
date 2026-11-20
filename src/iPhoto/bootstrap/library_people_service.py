@@ -33,6 +33,9 @@ class IndexStorePeopleAssetRepository:
             for asset_id, row in self._repository().get_rows_by_ids(asset_ids).items()
         }
 
+    def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
+        return self._repository().get_rows_by_rels(rels)
+
     def read_rows_by_face_status(
         self,
         statuses: Iterable[str],

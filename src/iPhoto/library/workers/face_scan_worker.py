@@ -268,6 +268,7 @@ class FaceScanWorker(QThread):
             retry_detected,
             distance_threshold=pipeline.distance_threshold,
             min_samples=pipeline.min_samples,
+            is_cancelled=lambda: self._cancelled,
         )
         return event is not None
 

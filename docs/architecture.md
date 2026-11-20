@@ -357,7 +357,8 @@ runtime snapshot, including assignments changed outside the current batch.
 Live delivery and recovery replay use the same change set.
 Writers and recovery handlers acquire the same cross-process lease before
 inspecting unfinished work. A second process can retry after the owner exits
-or finishes the operation.
+or finishes the operation. Background People scans retain detected batches
+while waiting for the lease, and skip assets that another owner already finished.
 
 ### Large Library Query And Scan Contracts
 

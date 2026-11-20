@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -81,6 +82,7 @@ EventSubscriber = Callable[[RecognitionOutboxEvent], None]
 
 _EXECUTION_LOCKS: dict[tuple[int, int] | Path, _ExecutionLease] = {}
 _EXECUTION_LOCKS_GUARD = threading.Lock()
+_LEASE_RETRY_SECONDS = 0.1
 
 
 def _reset_execution_leases_after_fork() -> None:
@@ -170,6 +172,24 @@ class RecognitionMutationCoordinator:
                 if not acquired:
                     self._recovery_error = BlockingIOError("Another process is updating recognition.")
                 yield acquired
+
+    @contextmanager
+    def wait_for_mutation_scope(self, *, is_cancelled: Callable[[], bool]) -> Iterator[bool]:
+        """Retry the lease for a background batch that has already run inference."""
+
+        lock = self.execution_lock
+        while not self._closed and not is_cancelled():
+            if not lock.acquire(timeout=_LEASE_RETRY_SECONDS):
+                continue
+            try:
+                with self.try_mutation_scope() as acquired:
+                    if acquired:
+                        yield not is_cancelled()
+                        return
+            finally:
+                lock.release()
+            time.sleep(_LEASE_RETRY_SECONDS)
+        yield False
 
     @contextmanager
     def mutation_scope(self) -> Iterator[None]:

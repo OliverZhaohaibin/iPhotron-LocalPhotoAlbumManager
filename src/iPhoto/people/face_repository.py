@@ -390,20 +390,6 @@ class FaceRepository:
                     payload,
                     persons,
                 )
-            if operation_kind in {
-                "people_delete_face",
-                "people_move_face",
-                "people_move_face_new",
-            }:
-                active_ids = {person.person_id for person in persons if person.person_id}
-                for person_id in (
-                    str(value)
-                    for value in payload.get("changed_person_ids", ())
-                    if value
-                ):
-                    if person_id not in active_ids:
-                        self._state_repo.remove_person_from_groups(person_id)
-                        self._state_repo.delete_person_state(person_id)
             if operation_kind == "people_create_group":
                 group = self._state_repo.create_group(payload.get("members", ()))
                 if group is not None:

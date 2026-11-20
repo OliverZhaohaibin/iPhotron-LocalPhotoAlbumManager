@@ -1882,6 +1882,47 @@ def test_asset_face_annotations_skip_manual_person_redirected_to_pet(tmp_path: P
     assert annotations[0].canonical_display_name == "Miso"
 
 
+@pytest.mark.parametrize("operation", ["delete", "move"])
+def test_edit_of_one_manual_face_preserves_remaining_person_state(tmp_path, operation):
+    for asset in ("a", "b"):
+        _write_image(tmp_path, f"{asset}.jpg")
+    get_global_repository(tmp_path).write_rows([
+        {"rel": f"{asset}.jpg", "id": asset, "media_type": 0} for asset in ("a", "b")
+    ])
+    people = create_people_service(tmp_path)
+    first = people.add_manual_face(
+        asset_id="a", requested_box=(40, 50, 80, 80), name_or_none="Alice", person_id=None,
+    )
+    remaining = people.add_manual_face(
+        asset_id="b", requested_box=(40, 50, 80, 80), name_or_none=None, person_id=first.person_id,
+    )
+    other = people.add_manual_face(
+        asset_id="b", requested_box=(200, 50, 80, 80), name_or_none="Bob", person_id=None,
+    )
+    group = people.create_group([first.person_id, other.person_id])
+    assert group is not None
+    assert people.set_cluster_cover(first.person_id, remaining.face_id)
+    people.set_cluster_order([other.person_id, first.person_id])
+    assert people.set_cluster_hidden(first.person_id, True)
+    if operation == "delete":
+        assert people.delete_face(first.face_id)
+    else:
+        assert people.move_face_to_person(first.face_id, other.person_id)
+    people.shutdown()
+
+    reopened = create_people_service(tmp_path)
+    alice = next(s for s in reopened.list_clusters(include_hidden=True) if s.person_id == first.person_id)
+    assert (alice.name, alice.is_hidden, alice.face_count) == ("Alice", True, 1)
+    repo = reopened.repository()
+    cover = repo.state_repository.get_person_cover(first.person_id)
+    assert cover.face_id == remaining.face_id and cover.is_custom
+    assert repo.state_repository.get_person_order_map([first.person_id, other.person_id]) == {
+        other.person_id: 0, first.person_id: 1,
+    }
+    assert set(repo.get_group(group.group_id).member_person_ids) == {first.person_id, other.person_id}
+    assert repo.get_common_asset_ids_for_group(group.group_id) == ["b"]
+
+
 def test_merge_manual_only_people_keeps_profiles_embedding_free(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()

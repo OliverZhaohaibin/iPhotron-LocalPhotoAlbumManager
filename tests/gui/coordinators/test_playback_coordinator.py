@@ -361,6 +361,10 @@ def test_handle_presentation_changed_renders_video_and_updates_header() -> None:
     )
     coordinator.assetChanged.emit.assert_called_once_with(0)
     coordinator._update_header.assert_called_once_with(presentation)
+    assert coordinator._player_view.method_calls[:2] == [
+        call.cancel_pending_image_requests(),
+        call.show_placeholder(""),
+    ]
     coordinator._select_filmstrip_row.assert_called_once_with(0)
     coordinator._render_presentation.assert_called_once_with(presentation)
 
@@ -616,6 +620,7 @@ def test_handle_presentation_changed_marks_live_photo_transaction_as_motion() ->
         PlaybackCoordinator._handle_presentation_changed(coordinator, presentation)
 
     assert coordinator._detail_render_transaction.media_kind == "live_motion"
+    coordinator._player_view.cancel_pending_image_requests.assert_not_called()
 
 
 def test_handle_presentation_changed_rerenders_same_asset_when_reload_token_changes() -> None:

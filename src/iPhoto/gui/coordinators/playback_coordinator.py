@@ -1108,6 +1108,10 @@ class PlaybackCoordinator(QObject):
         self._active_async_token = self._token_for_presentation(presentation)
         self._pending_video_token = None
         self._pending_location_token = None
+        if transaction.media_kind == "video":
+            # Retire photo decoding and zoom timers before yielding to the video
+            # route. A Live Photo keeps its paired still for the motion return.
+            self._player_view.cancel_pending_image_requests()
         self._player_view.show_placeholder("")
         QTimer.singleShot(
             0,

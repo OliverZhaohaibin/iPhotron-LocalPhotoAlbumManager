@@ -2031,7 +2031,7 @@ class GLImageViewer(QRhiWidget):
                 cover_scale = self._transform_controller.get_image_cover_scale()
 
                 time_value = time.monotonic() - self._time_base
-        
+
                 view_pan = self._transform_controller.get_pan_pixels()
 
                 effective_adjustments: dict[str, float] | Mapping[str, float]

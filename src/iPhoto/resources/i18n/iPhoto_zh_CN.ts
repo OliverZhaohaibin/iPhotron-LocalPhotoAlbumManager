@@ -988,6 +988,102 @@
             <source>Cannot Merge Cards</source>
             <translation>无法合并卡片</translation>
         </message>
+        <message>
+            <source>Name This Pet</source>
+            <translation>命名此宠物</translation>
+        </message>
+        <message>
+            <source>Delete Detection</source>
+            <translation>删除检测结果</translation>
+        </message>
+        <message>
+            <source>Rename Pet</source>
+            <translation>重命名宠物</translation>
+        </message>
+        <message>
+            <source>Merge Pet</source>
+            <translation>合并宠物</translation>
+        </message>
+        <message>
+            <source>Delete This Detection?</source>
+            <translation>删除此检测结果？</translation>
+        </message>
+        <message>
+            <source>Deleting this pet detection will hide this matched crop after future rescans.</source>
+            <translation>删除此宠物检测结果后，今后重新扫描时将隐藏对应的裁剪图像。</translation>
+        </message>
+        <message>
+            <source>Unnamed</source>
+            <translation>未命名</translation>
+        </message>
+        <message>
+            <source>Hide This Pet?</source>
+            <translation>隐藏此宠物？</translation>
+        </message>
+        <message>
+            <source>Hiding {name} will remove this pet from the People &amp; Pets view until you choose Show Hidden People or unhide it.</source>
+            <translation>隐藏 {name} 后，它将从“人物与宠物”视图中消失，直到你选择“显示隐藏人物”或取消隐藏。</translation>
+        </message>
+        <message>
+            <source>Hide Pet</source>
+            <translation>隐藏宠物</translation>
+        </message>
+        <message>
+            <source>Bind a Basic Library to see People &amp; Pets clusters.</source>
+            <translation>绑定基础图库以查看人物与宠物聚类。</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets appear here after a library is bound and scanned.</source>
+            <translation>绑定并扫描图库后，人物与宠物会显示在这里。</translation>
+        </message>
+        <message>
+            <source>Loading People &amp; Pets dashboard…</source>
+            <translation>正在加载人物与宠物面板…</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets is updating in the background. This page will retry shortly.</source>
+            <translation>人物与宠物数据正在后台更新，此页面将稍后重试。</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets could not be loaded. Please try refreshing the page.</source>
+            <translation>无法加载人物与宠物。请尝试刷新页面。</translation>
+        </message>
+        <message>
+            <source>Click a person, pet, or group card to open matching assets.</source>
+            <translation>点击人物、宠物或分组卡片可打开匹配项目。</translation>
+        </message>
+        <message>
+            <source>Scanning faces and pets in the background. This page will fill in as clusters are ready.</source>
+            <translation>正在后台扫描人脸和宠物。识别分组就绪后会陆续显示在此页面。</translation>
+        </message>
+        <message>
+            <source>No People or Pets clusters yet. Run a scan to build groups.</source>
+            <translation>还没有人物或宠物聚类。运行扫描以创建分组。</translation>
+        </message>
+        <message>
+            <source>Pet scanning is disabled.</source>
+            <translation>宠物扫描已禁用。</translation>
+        </message>
+        <message>
+            <source>Pet scanning is unavailable for this library.</source>
+            <translation>此图库无法扫描宠物。</translation>
+        </message>
+        <message>
+            <source>Pet scan consolidation paused: {reason}</source>
+            <translation>宠物扫描结果整合已暂停：{reason}</translation>
+        </message>
+        <message>
+            <source>Pet scanning paused: {reason}</source>
+            <translation>宠物扫描已暂停：{reason}</translation>
+        </message>
+        <message>
+            <source>Some assets need a pet-scan retry.</source>
+            <translation>部分项目需要重新扫描宠物。</translation>
+        </message>
+        <message>
+            <source>Some assets could not be pet scanned and were marked failed.</source>
+            <translation>部分项目未能完成宠物扫描，已标记为失败。</translation>
+        </message>
     </context>
     <context>
         <name>AlbumSidebar</name>

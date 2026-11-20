@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QCoreApplication, QThread, Signal
 
 from ...pets.errors import PetModelUnavailableError, PetRuntimeUnavailableError
 from ...pets.index_coordinator import (
@@ -87,7 +87,9 @@ class PetScanWorker(QThread):
 
     def run(self) -> None:  # type: ignore[override]
         if str(os.environ.get("IPHOTO_PET_SCAN_DISABLED", "")).strip() == "1":
-            self.statusChanged.emit("Pet scanning is disabled.")
+            self.statusChanged.emit(
+                QCoreApplication.translate("PeopleDashboard", "Pet scanning is disabled.")
+            )
             return
         if self._cancelled:
             return
@@ -107,7 +109,11 @@ class PetScanWorker(QThread):
 
         coordinator = self._pet_service.coordinator
         if coordinator is None:
-            self.statusChanged.emit("Pet scanning is unavailable for this library.")
+            self.statusChanged.emit(
+                QCoreApplication.translate(
+                    "PeopleDashboard", "Pet scanning is unavailable for this library."
+                )
+            )
             return
 
         while not self._cancelled:
@@ -138,7 +144,12 @@ class PetScanWorker(QThread):
                                     "Pet scan consolidation failed: %s", exc, exc_info=True
                                 )
                                 reason = str(exc).strip() or exc.__class__.__name__
-                                self.statusChanged.emit(f"Pet scan consolidation paused: {reason}")
+                                self.statusChanged.emit(
+                                    QCoreApplication.translate(
+                                        "PeopleDashboard",
+                                        "Pet scan consolidation paused: {reason}",
+                                    ).format(reason=reason)
+                                )
                                 return
                         return
                 continue
@@ -171,7 +182,11 @@ class PetScanWorker(QThread):
                 for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
                     self._queued_ids.discard(asset_id)
                 reason = str(exc).strip() or exc.__class__.__name__
-                self.statusChanged.emit(f"Pet scanning paused: {reason}")
+                self.statusChanged.emit(
+                    QCoreApplication.translate(
+                        "PeopleDashboard", "Pet scanning paused: {reason}"
+                    ).format(reason=reason)
+                )
                 return
 
     def _report_unavailable(
@@ -268,9 +283,15 @@ class PetScanWorker(QThread):
         failed_ids = [asset_id for asset_id in retry_id_set if asset_id in retry_source_ids]
 
         if first_retry_ids:
-            self.statusChanged.emit("Some assets need a pet-scan retry.")
+            self.statusChanged.emit(
+                QCoreApplication.translate("PeopleDashboard", "Some assets need a pet-scan retry.")
+            )
         if failed_ids:
-            self.statusChanged.emit("Some assets could not be pet scanned and were marked failed.")
+            self.statusChanged.emit(
+                QCoreApplication.translate(
+                    "PeopleDashboard", "Some assets could not be pet scanned and were marked failed."
+                )
+            )
         retry_detected = [
             item for item in detected if not item.asset_id or str(item.asset_id) not in failed_ids
         ]

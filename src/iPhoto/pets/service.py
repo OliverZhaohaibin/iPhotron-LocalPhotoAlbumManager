@@ -295,6 +295,14 @@ class PetService:
             return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
         return coordinator.merge_pets(source_pet_id, target_pet_id)
 
+    def resolve_pet_cover_detection(self, pet_id: str, asset_id: str) -> str | None:
+        """Find the pet's cover crop in a single gallery asset."""
+
+        if self._shutdown or not pet_id or not asset_id or not self._valid_asset_ids([asset_id]):
+            return None
+        repository = self.repository()
+        return repository.resolve_pet_cover_detection(pet_id, asset_id) if repository else None
+
     def set_pet_cover(self, pet_id: str, detection_id: str) -> bool:
         coordinator = self.coordinator
         return bool(coordinator and coordinator.set_pet_cover(pet_id, detection_id))

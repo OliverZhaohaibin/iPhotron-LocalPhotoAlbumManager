@@ -2387,19 +2387,20 @@ class PetRepository:
             ).fetchall()
             asset_rows = conn.execute(
                 """
-                SELECT pet_id, asset_id
+                SELECT pet_id, asset_id, detection_id
                 FROM pet_detections
                 WHERE pet_id IS NOT NULL
                 """
             ).fetchall()
         hidden_map: dict[str, bool] = {}
-        cover_paths: dict[str, str] = {}
+        covers: dict[str, tuple[str, str | None]] = {}
         profile_names: dict[str, str | None] = {}
         promotion_map = {}
         if self._state_repo is not None:
-            hidden_map, cover_paths, profile_names = self._state_repo.get_summary_state_maps()
+            hidden_map, covers, profile_names = self._state_repo.get_summary_state_maps()
             promotion_map = self._state_repo.get_promotion_records()
         effective_asset_sets: dict[str, set[str]] = {}
+        current_cover_detection_ids: dict[str, str] = {}
         for asset_row in asset_rows:
             runtime_pet_id = str(asset_row["pet_id"])
             canonical_pet_id = merge_redirects.get(runtime_pet_id, runtime_pet_id)
@@ -2407,6 +2408,9 @@ class PetRepository:
                 effective_asset_sets.setdefault(canonical_pet_id, set()).add(
                     str(asset_row["asset_id"])
                 )
+            cover = covers.get(canonical_pet_id)
+            if cover is not None and cover[1] and cover[1] == asset_row["detection_id"]:
+                current_cover_detection_ids[canonical_pet_id] = cover[1]
         effective_assets: dict[str, list[str]] = {
             pet_id: sorted(asset_ids) for pet_id, asset_ids in effective_asset_sets.items()
         }
@@ -2423,7 +2427,12 @@ class PetRepository:
             pet_id = str(row["pet_id"])
             if pet_id in merge_redirects:
                 continue
-            thumbnail_path = cover_paths.get(pet_id) or row["thumbnail_path"]
+            thumbnail_path = row["thumbnail_path"]
+            key_detection_id = str(row["key_detection_id"] or "")
+            if pet_id in covers:
+                thumbnail_path = covers[pet_id][0]
+                # A durable cover can still be displayed after its detection leaves the snapshot.
+                key_detection_id = current_cover_detection_ids.get(pet_id, "")
             resolved_thumbnail: Path | None = None
             if thumbnail_path:
                 resolved_thumbnail = (self._db_path.parent / str(thumbnail_path)).resolve()
@@ -2438,7 +2447,7 @@ class PetRepository:
                 PetSummary(
                     pet_id=pet_id,
                     name=name,
-                    key_detection_id=str(row["key_detection_id"] or ""),
+                    key_detection_id=key_detection_id,
                     detection_count=int(row["detection_count"] or 0),
                     thumbnail_path=resolved_thumbnail,
                     created_at=str(row["created_at"] or ""),
@@ -2775,16 +2784,42 @@ class PetRepository:
             return False
         return self._state_repo.set_pet_hidden(canonical_pet_id, hidden)
 
+    def resolve_pet_cover_detection(self, pet_id: str, asset_id: str) -> str | None:
+        return next(
+            (
+                annotation.detection_id
+                for annotation in self._cover_annotations_for_pet(pet_id, asset_id)
+                if annotation.thumbnail_path is not None
+            ),
+            None,
+        )
+
+    def _cover_annotations_for_pet(
+        self, pet_id: str, asset_id: str
+    ) -> Iterable[AssetPetAnnotation]:
+        if self._state_repo is None or not pet_id or not asset_id:
+            return
+        redirects = self._state_repo.get_merge_redirect_map()
+        for annotation in self.list_asset_pet_annotations(asset_id):
+            if (
+                annotation.pet_id is not None
+                and redirects.get(annotation.pet_id, annotation.pet_id) == pet_id
+                and annotation.canonical_identity_kind == "pet"
+                and annotation.canonical_identity_id == pet_id
+            ):
+                yield annotation
+
     def set_pet_cover(self, pet_id: str, detection_id: str) -> bool:
         if self._state_repo is None:
             return False
         detection = self.get_detection(detection_id)
         canonical_pet_id = self._canonical_existing_pet_id(pet_id)
-        if detection is None or canonical_pet_id is None or not detection.pet_id:
+        if detection is None or canonical_pet_id is None:
             return False
-        redirects = self._state_repo.get_merge_redirect_map()
-        detection_pet_id = redirects.get(detection.pet_id, detection.pet_id)
-        if detection_pet_id != canonical_pet_id:
+        if not any(
+            annotation.detection_id == detection_id
+            for annotation in self._cover_annotations_for_pet(canonical_pet_id, detection.asset_id)
+        ):
             return False
         return self._state_repo.set_pet_cover(canonical_pet_id, detection)
 

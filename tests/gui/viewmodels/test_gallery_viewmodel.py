@@ -659,19 +659,22 @@ def test_album_context_menu_state_exposes_album_semantics(tmp_path: Path) -> Non
     assert context.is_recently_deleted is False
 
 
-def test_people_context_menu_state_exposes_person_gallery_semantics(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("kind", "entity_id"), [("person", "person-a"), ("pet", "pet-a")])
+def test_people_context_menu_state_exposes_identity_gallery_semantics(
+    tmp_path: Path, kind: str, entity_id: str
+) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
 
     vm.open_people_cluster_gallery(
         AssetQuery(asset_ids=["asset-1"]),
-        kind="person",
-        entity_id="person-a",
+        kind=kind,
+        entity_id=entity_id,
     )
 
     context = vm.context_menu_state()
     assert context.gallery_section == "people_cluster_gallery"
-    assert context.entity_kind == "person"
-    assert context.entity_id == "person-a"
+    assert context.entity_kind == kind
+    assert context.entity_id == entity_id
     assert context.active_root == tmp_path
     assert context.is_cluster_gallery is True
 

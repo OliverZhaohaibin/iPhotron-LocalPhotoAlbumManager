@@ -20,7 +20,7 @@ MenuSurface = Literal[
     "info_panel",
 ]
 SelectionKind = Literal["empty", "assets"]
-EntityKind = Literal["album", "person", "group", None]
+EntityKind = Literal["album", "person", "group", "pet", None]
 
 
 @dataclass(frozen=True)

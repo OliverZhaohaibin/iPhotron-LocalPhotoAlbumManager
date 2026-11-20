@@ -193,6 +193,7 @@ class PeopleDashboardWidget(QWidget):
         self._pet_cards: dict[str, PetCard] = {}
         self._load_generation = 0
         self._loading = False
+        self._load_failure_retryable: bool | None = None
         self._last_pending_faces = 0
         self._last_pending_pets = 0
         self._index_version = 0
@@ -453,6 +454,7 @@ class PeopleDashboardWidget(QWidget):
         generation = self._load_generation
         index_version = self._index_version
         self._loading = True
+        self._load_failure_retryable = None
         library_root = self._service.library_root()
         if library_root is None:
             self._loading = False
@@ -510,6 +512,7 @@ class PeopleDashboardWidget(QWidget):
         self._card_build_timer.stop()
         self._pending_card_specs.clear()
         self._loading = False
+        self._load_failure_retryable = None
         if not is_bound:
             self._loaded_index_version = index_version
             self._last_pending_faces = 0
@@ -569,15 +572,16 @@ class PeopleDashboardWidget(QWidget):
         self,
         generation: int,
         index_version: int,
-        error: object,
+        _error: object,
         retryable: bool,
     ) -> None:
         if generation != self._load_generation:
             return
         self._loading = False
+        self._load_failure_retryable = retryable
+        self._set_load_failure_message(retryable)
         if retryable:
             self._pending_index_refresh = True
-            self._set_database_busy_message()
             if not self._summaries and not self._pet_summaries and not self._groups:
                 self._empty.show()
                 self._scroll.hide()
@@ -586,7 +590,6 @@ class PeopleDashboardWidget(QWidget):
             return
 
         self._loaded_index_version = index_version
-        self._set_load_failed_message(error)
         if not self._summaries and not self._pet_summaries and not self._groups:
             self._empty.show()
             self._scroll.hide()
@@ -881,12 +884,6 @@ class PeopleDashboardWidget(QWidget):
                     separator_before=True,
                 ),
                 MenuActionSpec(
-                    action_id="set_pet_cover",
-                    label=tr("PeopleDashboard", "Set as Cover"),
-                    on_trigger=lambda _ctx: self._set_pet_cover(summary),
-                    is_enabled=lambda _ctx: bool(summary.key_detection_id),
-                ),
-                MenuActionSpec(
                     action_id="delete_pet_detection",
                     label=tr("PeopleDashboard", "Delete Detection"),
                     on_trigger=lambda _ctx: self._delete_pet_detection(summary),
@@ -985,15 +982,6 @@ class PeopleDashboardWidget(QWidget):
             choices,
             title_text=tr("PeopleDashboard", "Merge Pet"),
         )
-
-    def _set_pet_cover(self, summary: PetSummary) -> None:
-        if summary.key_detection_id and self._pet_service.set_pet_cover(
-            summary.pet_id,
-            summary.key_detection_id,
-        ):
-            self._reload_after_mutation(
-                preserve_content=bool(self._summaries or self._pet_summaries)
-            )
 
     def _delete_pet_detection(self, summary: PetSummary) -> None:
         if not summary.key_detection_id:
@@ -1514,6 +1502,9 @@ class PeopleDashboardWidget(QWidget):
             if not self._summaries and not self._pet_summaries and not self._groups:
                 self._set_loading_message()
             return
+        if self._load_failure_retryable is not None:
+            self._set_load_failure_message(self._load_failure_retryable)
+            return
         if self._service.library_root() is None:
             self._set_unbound_message()
             return
@@ -1548,20 +1539,17 @@ class PeopleDashboardWidget(QWidget):
         self._message.setText(text)
         self._empty.setText(text)
 
-    def _set_database_busy_message(self) -> None:
-        text = tr(
-            "PeopleDashboard",
-            "People & Pets is updating in the background. This page will retry shortly.",
-        )
-        self._message.setText(text)
-        self._empty.setText(text)
-
-    def _set_load_failed_message(self, error: object) -> None:
-        del error
-        text = tr(
-            "PeopleDashboard",
-            "People & Pets could not be loaded. Please try refreshing the page.",
-        )
+    def _set_load_failure_message(self, retryable: bool) -> None:
+        if retryable:
+            text = tr(
+                "PeopleDashboard",
+                "People & Pets is updating in the background. This page will retry shortly.",
+            )
+        else:
+            text = tr(
+                "PeopleDashboard",
+                "People & Pets could not be loaded. Please try refreshing the page.",
+            )
         self._message.setText(text)
         self._empty.setText(text)
 

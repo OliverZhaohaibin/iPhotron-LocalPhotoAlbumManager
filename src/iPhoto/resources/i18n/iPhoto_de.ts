@@ -988,6 +988,102 @@
             <source>Cannot Merge Cards</source>
             <translation>Karten können nicht zusammengeführt werden</translation>
         </message>
+        <message>
+            <source>Name This Pet</source>
+            <translation>Dieses Haustier benennen</translation>
+        </message>
+        <message>
+            <source>Delete Detection</source>
+            <translation>Erkennung löschen</translation>
+        </message>
+        <message>
+            <source>Rename Pet</source>
+            <translation>Haustier umbenennen</translation>
+        </message>
+        <message>
+            <source>Merge Pet</source>
+            <translation>Haustier zusammenführen</translation>
+        </message>
+        <message>
+            <source>Delete This Detection?</source>
+            <translation>Diese Erkennung löschen?</translation>
+        </message>
+        <message>
+            <source>Deleting this pet detection will hide this matched crop after future rescans.</source>
+            <translation>Wenn Sie diese Haustiererkennung löschen, wird der zugehörige Bildausschnitt auch bei künftigen Scans ausgeblendet.</translation>
+        </message>
+        <message>
+            <source>Unnamed</source>
+            <translation>Unbenannt</translation>
+        </message>
+        <message>
+            <source>Hide This Pet?</source>
+            <translation>Dieses Haustier ausblenden?</translation>
+        </message>
+        <message>
+            <source>Hiding {name} will remove this pet from the People &amp; Pets view until you choose Show Hidden People or unhide it.</source>
+            <translation>Wenn Sie {name} ausblenden, verschwindet das Haustier aus der Ansicht „Personen &amp; Haustiere“, bis Sie „Ausgeblendete Personen anzeigen“ wählen oder das Haustier wieder einblenden.</translation>
+        </message>
+        <message>
+            <source>Hide Pet</source>
+            <translation>Haustier ausblenden</translation>
+        </message>
+        <message>
+            <source>Bind a Basic Library to see People &amp; Pets clusters.</source>
+            <translation>Verbinden Sie eine Basisbibliothek, um Personen- und Haustiercluster zu sehen.</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets appear here after a library is bound and scanned.</source>
+            <translation>Personen und Haustiere erscheinen hier, nachdem eine Bibliothek verbunden und gescannt wurde.</translation>
+        </message>
+        <message>
+            <source>Loading People &amp; Pets dashboard…</source>
+            <translation>Die Übersicht „Personen &amp; Haustiere“ wird geladen …</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets is updating in the background. This page will retry shortly.</source>
+            <translation>„Personen &amp; Haustiere“ wird im Hintergrund aktualisiert. Die Seite versucht es in Kürze erneut.</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets could not be loaded. Please try refreshing the page.</source>
+            <translation>„Personen &amp; Haustiere“ konnte nicht geladen werden. Bitte aktualisieren Sie die Seite.</translation>
+        </message>
+        <message>
+            <source>Click a person, pet, or group card to open matching assets.</source>
+            <translation>Klicken Sie auf die Karte einer Person, eines Haustiers oder einer Gruppe, um die zugehörigen Elemente zu öffnen.</translation>
+        </message>
+        <message>
+            <source>Scanning faces and pets in the background. This page will fill in as clusters are ready.</source>
+            <translation>Gesichter und Haustiere werden im Hintergrund gescannt. Die Cluster erscheinen hier, sobald sie bereit sind.</translation>
+        </message>
+        <message>
+            <source>No People or Pets clusters yet. Run a scan to build groups.</source>
+            <translation>Noch keine Personen- oder Haustiercluster. Starten Sie einen Scan, um Gruppen zu erstellen.</translation>
+        </message>
+        <message>
+            <source>Pet scanning is disabled.</source>
+            <translation>Der Haustierscan ist deaktiviert.</translation>
+        </message>
+        <message>
+            <source>Pet scanning is unavailable for this library.</source>
+            <translation>Der Haustierscan ist für diese Bibliothek nicht verfügbar.</translation>
+        </message>
+        <message>
+            <source>Pet scan consolidation paused: {reason}</source>
+            <translation>Die Gruppierung der Haustiererkennungen wurde angehalten: {reason}</translation>
+        </message>
+        <message>
+            <source>Pet scanning paused: {reason}</source>
+            <translation>Der Haustierscan wurde angehalten: {reason}</translation>
+        </message>
+        <message>
+            <source>Some assets need a pet-scan retry.</source>
+            <translation>Einige Elemente müssen erneut auf Haustiere gescannt werden.</translation>
+        </message>
+        <message>
+            <source>Some assets could not be pet scanned and were marked failed.</source>
+            <translation>Einige Elemente konnten nicht auf Haustiere gescannt werden und wurden als fehlgeschlagen markiert.</translation>
+        </message>
     </context>
     <context>
         <name>AlbumSidebar</name>

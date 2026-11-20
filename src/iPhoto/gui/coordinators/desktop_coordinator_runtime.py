@@ -373,6 +373,7 @@ class DesktopCoordinatorRuntime(QObject):
             gallery_viewmodel=self._gallery_vm,
             parent=self,
         )
+        self._context_menu.petCoverUpdated.connect(self._refresh_people_dashboard_after_pet_cover)
         _mark_domain_duration("desktop_shell.gallery_ui", gallery_ui_started_ns)
         bindings_started_ns = time.perf_counter_ns()
 
@@ -870,6 +871,13 @@ class DesktopCoordinatorRuntime(QObject):
         people_page = getattr(self._window.ui, "people_page", None)
         if people_page is not None:
             people_page.schedule_index_refresh()
+
+    def _refresh_people_dashboard_after_pet_cover(self) -> None:
+        # Cover commands also work before the scan gate wires snapshot delivery.
+        query_service = self._recognition_query_service()
+        if query_service is not None:
+            query_service.invalidate()
+        self._schedule_people_dashboard_refresh()
 
     def _bind_people_feature(self, people_page: object) -> None:
         """Attach the People dashboard only when the user first opens it."""

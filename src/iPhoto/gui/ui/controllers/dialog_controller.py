@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,14 +12,25 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QWidget
 
 from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
-from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
-from ....errors import LibraryError
 from ..widgets import dialogs
 
 if TYPE_CHECKING:
+    from ....bootstrap.library_probe import (
+        LibraryProbeController,
+        LibraryProbeFailure,
+        ValidatedPreparedLibrary,
+    )
     from ..widgets.chrome_status_bar import ChromeStatusBar
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingLibrarySwitch:
+    request_id: str
+    library_epoch: int
+    opened: Callable[[Path], None]
+    failed: Callable[[str], None]
 
 
 class DialogController:
@@ -35,6 +47,13 @@ class DialogController:
         self._context = context
         self._status = status_bar
         self._library_rebind_preflight = library_rebind_preflight
+        self._library_probe: LibraryProbeController | None = None
+        self._pending_library_switch: _PendingLibrarySwitch | None = None
+
+    def set_library_probe_controller(self, probe: LibraryProbeController) -> None:
+        self._library_probe = probe
+        probe.ready.connect(self._on_library_prepared)
+        probe.failed.connect(self._on_library_probe_failed)
 
     # ------------------------------------------------------------------
     # Public API
@@ -46,18 +65,7 @@ class DialogController:
         )
 
     def bind_library_dialog(self) -> Path | None:
-        if (
-            self._library_rebind_preflight is not None
-            and not self._library_rebind_preflight()
-        ):
-            dialogs.show_error(
-                self._parent,
-                QCoreApplication.translate(
-                    "DialogController",
-                    "Finish the current edit with Done, or press Escape to cancel it, before switching libraries.",
-                    None,
-                ),
-            )
+        if not self._can_switch_library(self.show_error):
             return None
         root = dialogs.select_directory(
             self._parent,
@@ -68,63 +76,86 @@ class DialogController:
             _logger.info("bind_library_dialog: user cancelled folder selection")
             return None
         _logger.info("bind_library_dialog: user selected folder %s", root)
-        try:
-            if self._context.library.root() is not None:
-                _logger.info("bind_library_dialog: cancelling active scans before rebind")
-                self._context.facade.cancel_active_scans()
-            self._context.open_library(root)
-            _logger.info(
-                "bind_library_dialog: bind_path succeeded, root=%s",
-                self._context.library.root(),
-            )
-        except LibraryError as exc:
-            _logger.error("bind_library_dialog: bind_path failed: %s", exc)
-            dialogs.show_error(self._parent, str(exc))
-            return None
-        bound_root = self._context.library.root()
-        if bound_root is not None:
-            self._context.settings.set("basic_library_path", str(bound_root))
-            self._start_initial_scan_if_needed(bound_root)
-            self._status.showMessage(
-                QCoreApplication.translate(
-                    "DialogController",
-                    "Basic Library bound to {path}",
-                    None,
-                ).format(path=bound_root)
-            )
-            try:
-                self._context.facade.open_album(bound_root)
-                _logger.info("bind_library_dialog: facade.open_album succeeded")
-            except Exception:
-                _logger.exception("bind_library_dialog: facade.open_album failed")
-            sidebar = getattr(getattr(self._parent, "ui", None), "sidebar", None)
-            if sidebar is not None:
-                _logger.info("bind_library_dialog: selecting All Photos in sidebar")
-                sidebar.select_all_photos(emit_signal=True)
-            else:
-                _logger.warning("bind_library_dialog: sidebar not found on parent")
-        else:
-            _logger.warning("bind_library_dialog: library.root() is None after bind_path")
-        return bound_root
+        return root if self.request_library_switch(root, self._finish_bind_library_dialog) else None
 
-    def _start_initial_scan_if_needed(self, bound_root: Path) -> None:
-        if self._context.library.is_scanning_path(bound_root):
-            return
-        scan_service = getattr(self._context.library, "scan_service", None)
-        is_complete = False
-        is_scan_scope_complete = getattr(scan_service, "is_scan_scope_complete", None)
-        if callable(is_scan_scope_complete):
-            try:
-                is_complete = bool(is_scan_scope_complete(bound_root))
-            except Exception:
-                is_complete = False
-        if is_complete:
-            return
-        self._context.facade.scan_root_async(
-            bound_root,
-            include=DEFAULT_INCLUDE,
-            exclude=DEFAULT_EXCLUDE,
+    def request_library_switch(
+        self,
+        root: Path,
+        on_opened: Callable[[Path], None],
+        *,
+        on_failed: Callable[[str], None] | None = None,
+    ) -> bool:
+        failed = on_failed or self.show_error
+        if not self._can_switch_library(failed):
+            return False
+        probe = self._library_probe
+        if probe is None:
+            from ....bootstrap.library_probe import LibraryProbeController
+
+            probe = LibraryProbeController(self._parent)
+            self.set_library_probe_controller(probe)
+        request = self._context.request_library_switch_probe(root)
+        self._pending_library_switch = _PendingLibrarySwitch(
+            request.request_id, self._context.library_epoch, on_opened, failed,
         )
+        probe.start(request)
+        return True
+
+    def cancel_library_switch(self) -> None:
+        if self._pending_library_switch is not None:
+            self._pending_library_switch = None
+            if self._library_probe is not None:
+                self._library_probe.cancel()
+
+    def has_pending_library_switch(self) -> bool:
+        return self._pending_library_switch is not None
+
+    def _can_switch_library(self, failed: Callable[[str], None]) -> bool:
+        if self._library_rebind_preflight is None or self._library_rebind_preflight():
+            return True
+        failed(QCoreApplication.translate(
+            "DialogController",
+            "Finish the current edit with Done, or press Escape to cancel it, before switching libraries.",
+            None,
+        ))
+        return False
+
+    def _take_library_switch(self, request_id: str) -> _PendingLibrarySwitch | None:
+        pending = self._pending_library_switch
+        if pending is None or pending.request_id != request_id:
+            return None
+        self._pending_library_switch = None
+        return pending if pending.library_epoch == self._context.library_epoch else None
+
+    def _on_library_prepared(self, validated: ValidatedPreparedLibrary) -> None:
+        pending = self._take_library_switch(validated.request_id)
+        if pending is None or not self._can_switch_library(pending.failed):
+            return
+        try:
+            session = self._context.commit_validated_library(validated, defer_scan=False)
+        except Exception as exc:
+            _logger.warning("Prepared library could not be bound", exc_info=True)
+            pending.failed(str(exc))
+            return
+        pending.opened(session.library_root)
+
+    def _on_library_probe_failed(self, failure: LibraryProbeFailure) -> None:
+        pending = self._take_library_switch(failure.request_id)
+        if pending is not None:
+            pending.failed(failure.message)
+
+    def _finish_bind_library_dialog(self, root: Path) -> None:
+        self._context.settings.set("basic_library_path", str(root))
+        self._status.showMessage(QCoreApplication.translate(
+            "DialogController", "Basic Library bound to {path}", None,
+        ).format(path=root))
+        try:
+            self._context.facade.open_album(root)
+        except Exception:
+            _logger.exception("bind_library_dialog: facade.open_album failed")
+        sidebar = getattr(getattr(self._parent, "ui", None), "sidebar", None)
+        if sidebar is not None:
+            sidebar.select_all_photos(emit_signal=True)
 
     def show_error(self, message: str) -> None:
         dialogs.show_error(self._parent, message)

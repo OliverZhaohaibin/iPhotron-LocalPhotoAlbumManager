@@ -39,6 +39,9 @@ class _FakeFacade:
     def __init__(self) -> None:
         self.scan_requests: list[tuple[Path, list[str], list[str], bool]] = []
 
+    def cancel_active_scans(self) -> None:
+        pass
+
     def scan_root_async(
         self,
         root: Path,
@@ -268,6 +271,29 @@ def test_fresh_validated_switches_after_saved_library_startup(tmp_path: Path) ->
             context.commit_validated_library(obsolete)
         assert context.library_session is session
         assert library.root() == third
+    finally:
+        context.close_library()
+
+
+def test_requesting_a_switch_rejects_the_saved_library_before_the_new_commit(tmp_path: Path) -> None:
+    from iPhoto.bootstrap.library_probe import ValidatedPreparedLibrary, probe_library
+
+    saved, chosen = (tmp_path / name for name in ("saved", "chosen"))
+    saved.mkdir()
+    chosen.mkdir()
+    context, library, _runtime = _runtime_context(saved)
+    previous = context.request_startup_library_probe()
+    saved_result = ValidatedPreparedLibrary.create(probe_library(previous))
+
+    try:
+        replacement = context.request_library_switch_probe(chosen)
+        assert context.library_session is None
+        assert context.request_startup_library_probe() is None
+        assert not context.is_current_startup_probe(previous.request_id)
+        with pytest.raises(RuntimeError, match="superseded"):
+            context.commit_validated_library(saved_result)
+        context.commit_validated_library(ValidatedPreparedLibrary.create(probe_library(replacement)))
+        assert library.root() == chosen
     finally:
         context.close_library()
 

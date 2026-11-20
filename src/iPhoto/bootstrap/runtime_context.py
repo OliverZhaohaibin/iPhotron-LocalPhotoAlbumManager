@@ -270,6 +270,16 @@ class RuntimeContext:
     def is_current_startup_probe(self, request_id: str) -> bool:
         return self._startup_probe == (request_id, self.library_epoch)
 
+    def request_library_switch_probe(self, root: Path) -> "LibraryProbeRequest":
+        """Give an explicit desktop selection precedence over the saved path."""
+
+        from .library_probe import LibraryProbeRequest
+
+        request = LibraryProbeRequest.create(root)
+        self._pending_basic_library_path = None
+        self._startup_probe = None
+        return request
+
     def commit_prepared_library(
         self,
         validated: "ValidatedPreparedLibrary",
@@ -371,6 +381,8 @@ class RuntimeContext:
         if prepared is None and (not normalized.exists() or not normalized.is_dir()):
             raise LibraryUnavailableError(f"Library path does not exist: {root}")
 
+        if prepared is not None and self.library_session is not None and self._facade is not None:
+            self._facade.cancel_active_scans()
         self.close_library()
         self._deferred_startup_scan_root = None
         if prepared is None:

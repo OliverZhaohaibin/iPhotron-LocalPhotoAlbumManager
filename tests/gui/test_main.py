@@ -672,10 +672,15 @@ def _run_saved_library_startup(
         def __init__(self, _parent=None) -> None:
             self.ready = _FakeSignal()
             self.failed = _FakeSignal()
+            self.superseded = _FakeSignal()
 
         def start(self, request) -> None:
             nonlocal probe_is_current
             call_order.append(f"probe:{request.request_id}")
+            if supersede_at == "running":
+                probe_is_current = False
+                self.superseded.emit(request.request_id)
+                return
             if supersede_at == "failure":
                 probe_is_current = False
                 self.failed.emit(SimpleNamespace(request_id=request.request_id))
@@ -836,7 +841,7 @@ def test_main_creates_required_features_in_platform_safe_order(
     assert call_order.count("scan") == 1
 
 
-@pytest.mark.parametrize("supersede_at", ["failure", "commit"])
+@pytest.mark.parametrize("supersede_at", ["running", "failure", "commit"])
 def test_superseded_startup_probe_preserves_interactive_selection(monkeypatch, supersede_at):
     calls, _marks, _callbacks = _run_saved_library_startup(
         monkeypatch, "linux", False, supersede_at=supersede_at
@@ -845,6 +850,7 @@ def test_superseded_startup_probe_preserves_interactive_selection(monkeypatch, s
     assert "select" not in calls
     assert calls.count("warmup") == 1
     assert calls.count("scan") == 1
+    assert "probe:cancel" not in calls
 
 
 def test_main_exits_if_update_cannot_obtain_first_paint(monkeypatch):

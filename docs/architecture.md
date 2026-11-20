@@ -627,10 +627,11 @@ lock on `.iPhoto/startup-migration.lock`.
 
 The helper selects the library's existing work directory, including the legacy
 `.iphoto` spelling, and checks the latest full-library scan for completion.
-Selecting a library while the helper runs supersedes its request. The queued
-commit verifies the startup request's library epoch before changing the active
-session. Subsequent validated switches use their own credentials and validate
-them before unbinding the active library.
+Manual library selection and opening an album outside the active library use
+the same helper as startup. Each selection supersedes the earlier request and
+waits for a retired child to release its migration lock. The existing session
+stays active during preparation. The commit checks the request, library epoch,
+and database credential before unbinding the active library.
 
 - Opening a current schema must not repeat full-table repair/backfill. Schema
   changes use versioned migrations and explicit upgrade tests.

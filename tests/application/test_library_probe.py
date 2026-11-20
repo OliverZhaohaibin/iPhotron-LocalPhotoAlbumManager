@@ -1079,6 +1079,18 @@ def test_controller_ignores_late_result_after_cancel(qapp, tmp_path: Path) -> No
     assert failures == []
 
 
+def test_controller_shutdown_kills_child_without_waiting_for_timer(qapp, tmp_path: Path) -> None:
+    controller = LibraryProbeController()
+    process = _FakeProcess(running=True)
+    controller._process = process  # type: ignore[assignment]
+    controller._request = LibraryProbeRequest.create(tmp_path)
+
+    controller.shutdown()
+
+    assert process.killed
+    assert controller._request is None
+
+
 @pytest.mark.parametrize("existing_work_dir", [None, ".iPhoto", ".iphoto"])
 def test_controller_real_helper_round_trip(
     qapp, tmp_path: Path, existing_work_dir: str | None
@@ -1119,6 +1131,46 @@ def test_controller_real_helper_round_trip(
         assert workspace_names == [expected_dir]
     finally:
         reset_global_repository()
+
+
+def test_controller_serializes_replacement_child_for_the_same_library(
+    qapp, tmp_path: Path, monkeypatch,
+) -> None:
+    real_command = _probe_process_command()
+    calls = []
+
+    def probe_command():
+        calls.append(True)
+        if len(calls) == 1:
+            return sys.executable, ["-c", "import time; time.sleep(10)"]
+        return real_command
+
+    monkeypatch.setattr(probe_module, "_probe_process_command", probe_command)
+    controller = LibraryProbeController()
+    superseded, ready, failures = [], [], []
+    controller.superseded.connect(superseded.append)
+    controller.ready.connect(ready.append)
+    controller.failed.connect(failures.append)
+    first = LibraryProbeRequest.create(tmp_path)
+    replacement = LibraryProbeRequest.create(tmp_path)
+    try:
+        controller.start(first)
+        child = controller._process
+        assert child.waitForStarted(1500)
+        controller.start(replacement)
+        assert superseded == [first.request_id]
+        assert calls == [True]
+
+        deadline = time.monotonic() + 5
+        while not ready and not failures and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+        assert failures == []
+        assert calls == [True, True]
+        assert [result.request_id for result in ready] == [replacement.request_id]
+    finally:
+        controller.cancel()
 
 
 @pytest.mark.parametrize(

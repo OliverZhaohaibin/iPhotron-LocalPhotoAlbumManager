@@ -779,9 +779,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     active_probe: dict[str, object] = {}
 
-    def _clear_active_probe(generation: int) -> None:
+    def _cancel_active_startup_probe(generation: int) -> None:
         if int(active_probe.get("generation", -1)) == generation:
             active_probe.clear()
+            probe_controller.cancel()
 
     def _register_attempt_resources(generation: int) -> None:
         startup.register_cleanup(
@@ -790,10 +791,9 @@ def main(argv: list[str] | None = None) -> int:
         startup.register_cleanup(
             lambda generation=generation: startup_imports.cancel_generation(generation)
         )
-        startup.register_cleanup(probe_controller.cancel)
         startup.register_cleanup(startup_input_guard.release)
         startup.register_cleanup(
-            lambda generation=generation: _clear_active_probe(generation)
+            lambda generation=generation: _cancel_active_startup_probe(generation)
         )
 
     _register_attempt_resources(startup.generation)
@@ -805,12 +805,6 @@ def main(argv: list[str] | None = None) -> int:
             StartupPhase.CANCELLED,
         }:
             startup_jobs.cancel_generation(snapshot.generation)
-        if snapshot.phase in {
-            StartupPhase.DEGRADED,
-            StartupPhase.FAILED,
-            StartupPhase.CANCELLED,
-        }:
-            probe_controller.cancel()
 
     startup.phaseChanged.connect(_handle_startup_phase_changed)
 
@@ -1138,8 +1132,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    def _probe_superseded(request_id: str) -> None:
+        generation = int(active_probe.get("generation", -1))
+        if startup.is_current(generation) and request_id == active_probe.get("request_id"):
+            active_probe.clear()
+            _finish_if_probe_superseded(generation, request_id)
+
     probe_controller.ready.connect(_probe_ready)
     probe_controller.failed.connect(_probe_failed)
+    superseded = getattr(probe_controller, "superseded", None)
+    if superseded is not None:
+        superseded.connect(_probe_superseded)
 
     def _start_library_probe(generation: int) -> None:
         if not startup.is_current(generation):
@@ -1156,6 +1159,8 @@ def main(argv: list[str] | None = None) -> int:
         if request is None or not callable(committer):
             active_probe.clear()
             already_bound = getattr(context, "library_session", None) is not None
+            pending_switch = getattr(coordinator_runtime, "has_pending_library_switch", None)
+            switching = callable(pending_switch) and pending_switch()
             context.resume_startup_tasks(defer_scan=True)
             mark(
                 "startup.probe.finished",
@@ -1163,7 +1168,7 @@ def main(argv: list[str] | None = None) -> int:
                 result="unbound",
                 storage_kind="unbound",
             )
-            _continue_after_library_ready(generation, select_initial=not already_bound)
+            _continue_after_library_ready(generation, select_initial=not (already_bound or switching))
             return
         active_probe.clear()
         active_probe.update(
@@ -1185,6 +1190,9 @@ def main(argv: list[str] | None = None) -> int:
             if not callable(coordinator_factory):
                 raise RuntimeError("desktop coordinator import returned no factory")
             coordinator_runtime = coordinator_factory(window, context)
+            set_library_probe_controller = getattr(coordinator_runtime, "set_library_probe_controller", None)
+            if callable(set_library_probe_controller):
+                set_library_probe_controller(probe_controller)
             window.bind_coordinators(
                 coordinator_runtime,
                 coordinator_runtime.gallery,
@@ -1331,6 +1339,9 @@ def main(argv: list[str] | None = None) -> int:
         # immediately).  Cancel the attempt so its watchdog and registered
         # resources cannot fire against an already torn-down window.
         startup.cancel()
+        shutdown_probe = getattr(probe_controller, "shutdown", None)
+        if callable(shutdown_probe):
+            shutdown_probe()
         startup_jobs.close()
         startup_imports.close()
 

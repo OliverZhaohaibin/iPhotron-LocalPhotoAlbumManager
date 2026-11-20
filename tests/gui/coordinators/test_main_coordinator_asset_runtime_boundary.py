@@ -127,7 +127,7 @@ def test_shutdown_is_idempotent_and_does_not_request_app_quit(monkeypatch) -> No
     assert qapp_instance_calls == []
 
 
-def test_open_album_from_path_creates_session_when_no_library_is_bound(
+def test_open_album_from_path_waits_for_library_switch_when_unbound(
     tmp_path: Path,
 ) -> None:
     coordinator = GalleryCoordinator.__new__(GalleryCoordinator)
@@ -137,13 +137,16 @@ def test_open_album_from_path_creates_session_when_no_library_is_bound(
     coordinator._context = MagicMock()
     coordinator._context.library_session = None
     coordinator._context.library.root.return_value = None
-    coordinator._facade = MagicMock()
     coordinator._navigation = MagicMock()
+    coordinator._request_library_switch = MagicMock()
     coordinator.rebind_library = MagicMock()
 
     GalleryCoordinator.open_album_from_path(coordinator, album_root)
 
-    coordinator._context.open_library.assert_called_once_with(album_root)
+    coordinator._navigation.open_album.assert_not_called()
+    target, on_opened = coordinator._request_library_switch.call_args.args
+    assert target == album_root
+    on_opened(album_root)
     coordinator.rebind_library.assert_called_once_with()
     coordinator._navigation.open_album.assert_called_once_with(album_root)
 
@@ -159,18 +162,18 @@ def test_open_album_from_path_reuses_session_for_album_inside_library(
     coordinator._context = MagicMock()
     coordinator._context.library_session = None
     coordinator._context.library.root.return_value = library_root
-    coordinator._facade = MagicMock()
     coordinator._navigation = MagicMock()
+    coordinator._request_library_switch = MagicMock()
     coordinator.rebind_library = MagicMock()
 
     GalleryCoordinator.open_album_from_path(coordinator, album_root)
 
-    coordinator._context.open_library.assert_not_called()
+    coordinator._request_library_switch.assert_not_called()
     coordinator.rebind_library.assert_not_called()
     coordinator._navigation.open_album.assert_called_once_with(album_root)
 
 
-def test_open_album_from_path_blocks_cross_library_switch_during_edit(
+def test_open_album_from_path_forwards_cross_library_switch_failure(
     tmp_path: Path,
 ) -> None:
     coordinator = GalleryCoordinator.__new__(GalleryCoordinator)
@@ -181,15 +184,14 @@ def test_open_album_from_path_blocks_cross_library_switch_during_edit(
     coordinator._context = MagicMock()
     coordinator._context.library_session = None
     coordinator._context.library.root.return_value = old_root
-    coordinator._facade = MagicMock()
     coordinator._navigation = MagicMock()
-    coordinator._library_rebind_preflight = lambda: False
+    failed = MagicMock()
+    coordinator._request_library_switch = lambda _path, _opened, *, on_failed: on_failed("unavailable")
 
-    GalleryCoordinator.open_album_from_path(coordinator, new_root)
+    GalleryCoordinator.open_album_from_path(coordinator, new_root, on_failed=failed)
 
-    coordinator._context.open_library.assert_not_called()
     coordinator._navigation.open_album.assert_not_called()
-    coordinator._facade.errorRaised.emit.assert_called_once()
+    failed.assert_called_once_with("unavailable")
 
 
 def test_on_library_tree_updated_rebinds_created_optional_domains() -> None:

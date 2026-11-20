@@ -591,6 +591,8 @@ class ContextMenuController(QObject):
         if manager is None or context.active_root is None:
             return None
         service = manager.pet_service
+        if service is None and manager.library_session is not None:
+            service = manager.library_session.pets
         if service is None:
             return None
         root = service.library_root()

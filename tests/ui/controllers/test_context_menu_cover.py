@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -152,7 +153,12 @@ def test_pet_gallery_menu_sets_cover_from_the_clicked_photo(mock_qmenu_cls, sect
     pet_service.library_root.return_value = Path("/library")
     pet_service.resolve_pet_cover_detection.return_value = "selected-crop"
     pet_service.set_pet_cover.return_value = True
-    deps["facade"].library_manager.pet_service = pet_service
+    manager = deps["facade"].library_manager
+    if section == "pinned_people_gallery":
+        manager.pet_service = None
+        manager.library_session = SimpleNamespace(library_root=Path("/library"), pets=pet_service)
+    else:
+        manager.pet_service = pet_service
     selection_model = controller._grid_view.selectionModel()
     selection_model.isSelected.return_value = False
     refresh = MagicMock()

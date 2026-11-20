@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from iPhoto.domain.models.query import AssetQuery
@@ -114,6 +115,28 @@ def test_open_pinned_missing_album_warns_and_prunes(tmp_path: Path, monkeypatch)
     assert warnings == [
         "Pinned album 'Trips' is no longer available and will be removed from the sidebar."
     ]
+
+
+def test_open_pinned_pet_uses_session_before_people_dashboard_loads(tmp_path: Path) -> None:
+    pins = MagicMock()
+    coord = _make_coordinator(pinned_items_service=pins)
+    coord._context.library.root.return_value = tmp_path
+    coord._context.library.people_service = None
+    coord._context.library.pet_service = None
+    query = AssetQuery(asset_ids=["pet-photo"])
+    pets = MagicMock()
+    pets.build_pet_query.return_value = query
+    pets.has_pet.return_value = True
+    coord._context.library_session = SimpleNamespace(library_root=tmp_path, pets=pets)
+
+    coord.open_pinned_item(PinnedSidebarItem(kind="pet", item_id="pet-a", label="Miso"))
+
+    pets.build_pet_query.assert_called_once_with("pet-a")
+    coord._gallery_vm.open_pinned_people_query.assert_called_once_with(
+        query, kind="pet", entity_id="pet-a"
+    )
+    pins.prune_missing_entity.assert_not_called()
+    coord._context.library.activate_recognition_scans.assert_not_called()
 
 
 def test_open_pinned_person_keeps_valid_empty_pin(tmp_path: Path, monkeypatch) -> None:

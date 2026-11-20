@@ -20,8 +20,10 @@ from iPhoto.gui.ui.delegates.album_sidebar_delegate import AlbumSidebarDelegate
 from iPhoto.gui.ui.menus.album_sidebar_menu import AlbumSidebarContextMenu
 from iPhoto.gui.ui.models.album_tree_model import NodeType
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
+from iPhoto.gui.ui.widgets.people_dashboard import PeopleDashboardWidget
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.library.runtime_controller import LibraryRuntimeController
+from iPhoto.pets.records import PetSummary
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -570,6 +572,52 @@ def test_album_rename_restores_the_current_builtin_section_after_user_navigation
     finally:
         if sidebar is not None:
             sidebar.close()
+        manager.shutdown()
+
+
+def test_pet_dashboard_menu_pins_a_selectable_sidebar_item(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    pins = PinnedItemsService(_settings(tmp_path))
+    dashboard = PeopleDashboardWidget()
+    dashboard.set_services(manager.people_service, manager.pet_service, pins, reload=False)
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pins)
+    summary = PetSummary("pet-a", "Miso", "det-a", 2, None, "2024-01-01T00:00:00Z")
+    selected_items = []
+    sidebar.pinnedItemSelected.connect(selected_items.append)
+
+    try:
+        menu = dashboard._build_pet_menu(summary)
+        action = next(action for action in menu.actions() if action.data() == "toggle_pet_pin")
+        assert action.text() == "Pin"
+        action.trigger()
+
+        (pinned_item,) = pins.items_for_library(root)
+        assert (pinned_item.kind, pinned_item.item_id, pinned_item.label) == ("pet", "pet-a", "Miso")
+        model = sidebar.tree_model()
+        index = model.index_for_pinned_item(pinned_item)
+        assert index.isValid()
+        assert model.item_from_index(index).node_type == NodeType.PINNED_PET
+        assert model.data(index) == "Miso"
+
+        sidebar._tree.setCurrentIndex(index)
+        qapp.processEvents()
+        assert selected_items == [pinned_item]
+
+        menu = dashboard._build_pet_menu(summary)
+        action = next(action for action in menu.actions() if action.data() == "toggle_pet_pin")
+        assert action.text() == "Unpin"
+        action.trigger()
+
+        assert not pins.items_for_library(root)
+        assert not model.index_for_pinned_item(pinned_item).isValid()
+    finally:
+        dashboard.shutdown()
+        dashboard.close()
+        sidebar.close()
         manager.shutdown()
 
 

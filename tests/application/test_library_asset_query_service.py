@@ -12,7 +12,8 @@ from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryServic
 from iPhoto.cache.index_store import IndexStore, get_global_repository
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
-from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.models.query import AssetQuery, ThumbnailReadyResult, ThumbnailState
+from iPhoto.infrastructure.services.thumbnail_artifact import thumbnail_revision
 
 
 class _Repository:
@@ -704,6 +705,74 @@ def test_legacy_thumbnail_backfill_does_not_overwrite_newer_row(
     assert row["thumb_cache_key"] == ("new-key" if late_error else None)
     assert row["thumbnail_state"] == ("ready" if late_error else "stale")
     service.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("legacy_revision", "replace_source"),
+    [(False, False), (True, False), (True, True)],
+    ids=["known-revision", "legacy-revision", "changed-source"],
+)
+def test_thumbnail_backfill_success_after_concurrent_failure(
+    tmp_path: Path,
+    legacy_revision: bool,
+    replace_source: bool,
+) -> None:
+    rel = "a.jpg"
+    asset_path = tmp_path / rel
+    asset_path.write_bytes(b"original media")
+    revision = thumbnail_revision(asset_path)
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([{
+        "rel": rel, "id": "a", "thumbnail_state": "stale",
+        "thumb_revision": None if legacy_revision else revision,
+    }])
+    successful = LibraryAssetQueryService(tmp_path)
+    failing = LibraryAssetQueryService(tmp_path)
+    success_executor, failure_executor = _DeferredExecutor(), _DeferredExecutor()
+    successful._thumbnail_backfill_executor = success_executor  # type: ignore[assignment]
+    failing._thumbnail_backfill_executor = failure_executor  # type: ignore[assignment]
+    batches = []
+    successful.thumbnail_backfill_completed.connect(batches.append)
+    query = AssetQuery()
+    render_target = "iPhoto.bootstrap.library_asset_query_service.ensure_scan_thumbnail"
+
+    def finish_after_failed_attempt(*_args, **_kwargs) -> ThumbnailReadyResult:
+        failed = ThumbnailReadyResult(
+            ThumbnailState.FAILED, thumb_error="temporary decode failure", thumb_revision=revision,
+        )
+        with patch(render_target, return_value=failed):
+            run, args = failure_executor.submitted[0]
+            run(*args)
+        assert repo.get_rows_by_rels([rel])[rel]["thumbnail_state"] == "failed"
+        if replace_source:
+            asset_path.write_bytes(b"replacement with different size")
+        return ThumbnailReadyResult(
+            ThumbnailState.READY, micro_thumbnail=b"micro", thumb_cache_key="ready-key",
+            thumb_revision=revision,
+        )
+
+    try:
+        assert successful.request_thumbnail_backfill(tmp_path, query, 0, 10) == 1
+        assert failing.request_thumbnail_backfill(tmp_path, query, 0, 10) == 1
+        with patch(render_target, side_effect=finish_after_failed_attempt):
+            run, args = success_executor.submitted[0]
+            run(*args)
+
+        [batch] = batches
+        row = repo.get_rows_by_rels([rel])[rel]
+        if replace_source:
+            assert batch.rows == []
+            assert row["thumbnail_state"] == "failed"
+            assert row["thumb_cache_key"] is None
+        else:
+            [published] = batch.rows
+            assert published["thumb_revision"] == row["thumb_revision"] == revision
+            assert row["thumb_error"] is None
+            assert row["thumb_cache_key"] == "ready-key"
+            assert successful.read_gallery_asset_window(tmp_path, query, 0, 10).total_count == 1
+    finally:
+        successful.shutdown()
+        failing.shutdown()
 
 
 def test_thumbnail_backfill_shutdown_suppresses_completion_event(tmp_path: Path) -> None:

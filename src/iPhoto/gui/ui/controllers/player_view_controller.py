@@ -458,6 +458,7 @@ class PlayerViewController(QObject):
         self._current_decode_level: int | str | None = None
         self._request_reason_by_generation: dict[int, str] = {}
         self._pending_zoom_factor = 1.0
+        self._deferred_lod_generation: int | None = None
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
         self._lod_timer.setInterval(80)
@@ -1121,6 +1122,8 @@ class PlayerViewController(QObject):
         transaction: DetailRenderTransaction | None = None,
     ) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
+        self._lod_timer.stop()
+        self._deferred_lod_generation = None
         identity = source_identity or AssetSourceIdentity.create(source)
         source = identity.path
         if transaction is not None:
@@ -1646,6 +1649,12 @@ class PlayerViewController(QObject):
         identity = self._active_source_identity
         if identity is None or self._loading_source is not None:
             return
+        # Keep the current still generation until its reveal, then retry the
+        # viewport demand that the single-shot timer could not service.
+        if self.is_showing_video() or self._pending_image_generation is not None:
+            self._deferred_lod_generation = self._request_generation
+            return
+        self._deferred_lod_generation = None
         self._request_generation += 1
         generation = self._request_generation
         self._loading_source = identity.path
@@ -1889,9 +1898,8 @@ class PlayerViewController(QObject):
                 self._finalize_image_surface_submission(source, submitted_generation)
                 return
 
-        # A newer LOD can be submitted while an older initial reveal still owns
-        # the Windows cover barrier.  Its presentation bookkeeping is current
-        # even though it must not release that older barrier.
+        # Resource invalidation can rearm an older cover while a newer LOD is
+        # already in flight. Accept its bookkeeping without releasing the cover.
         if submitted_generation != self._present_generation:
             return
         self._accept_still_frame_presented(source, submitted_generation)
@@ -1925,6 +1933,10 @@ class PlayerViewController(QObject):
         self._sync_detail_surface_cover()
         self._restore_transition_ui(generation)
         self._accept_still_frame_presented(source, generation)
+        if self._deferred_lod_generation == self._request_generation:
+            self._deferred_lod_generation = None
+            if not self._defer_lod_for_active_render_interaction():
+                self._lod_timer.start()
         emit_detail_event(
             "surface_revealed",
             generation=int(generation),
@@ -2524,6 +2536,7 @@ class PlayerViewController(QObject):
         self._residency_window_generation += 1
         self._preparation_prefetch_queue.clear()
         self._lod_timer.stop()
+        self._deferred_lod_generation = None
         self._cancel_stale_image_workers()
         self._loading_source = None
         self._loading_started_at = None
@@ -2563,9 +2576,32 @@ class PlayerViewController(QObject):
         self._pending_still = None
         if generation != self._request_generation:
             return False
+
+        lod_upgrade = self._request_reason_by_generation.get(generation) in {"zoom", "resize"}
+        if lod_upgrade:
+            transaction = self._active_transaction
+            key = surface.decode_key
+            if (
+                transaction is None
+                or transaction.media_kind != "live_motion"
+                or transaction.asset_id != key.asset_id
+                or transaction.source_identity.path != key.source
+                or transaction.source_identity.revision != key.source_revision
+                or transaction.source_identity.orientation != key.orientation
+            ):
+                return False
+
+            # A zoom decode can finish during replay. The restored still and
+            # its overlays belong to the original Live Photo transaction.
+            self._cancel_stale_image_workers()
+            if self._deferred_lod_generation == generation:
+                self._deferred_lod_generation = transaction.generation
+            generation = transaction.generation
+            self._request_generation = generation
+
         self._present_generation = generation
         self._begin_image_transition(generation)
-        self._apply_still_frame(surface, adjustments)
+        self._apply_still_frame(surface, adjustments, reset_view=not lod_upgrade)
         return True
 
     def clear_image(self) -> None:
@@ -2715,12 +2751,7 @@ class PlayerViewController(QObject):
         apply_started = time.perf_counter()
         source = surface.decode_key.source
         image = surface.image
-        reason = self._request_reason_by_generation.get(self._present_generation)
-        if reason not in {"zoom", "resize"}:
-            self._bind_image_transition_key(
-                self._present_generation,
-                surface.decode_key,
-            )
+        self._bind_image_transition_key(self._present_generation, surface.decode_key)
         self._current_full_image = QImage(image)
         session_key = self._render_session_key_for_surface(surface)
         session = self._render_sessions.get(session_key)

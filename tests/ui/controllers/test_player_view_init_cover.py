@@ -30,6 +30,7 @@ from iPhoto.gui.detail_pipeline import (
     DetailDecodeKey,
     DetailGeometryState,
     DetailRenderRequest,
+    DetailRenderTransaction,
 )
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
@@ -459,21 +460,128 @@ class TestInitCoverTracking:
         assert controller._player_stack.currentWidget() is controller._video_area
         assert controller._pending_video_generation == 2
 
-    def test_live_motion_keeps_its_inflight_still_until_restoration(self, controller, tmp_path):
+    def test_live_still_keeps_its_generation_until_revealed(
+        self, controller, qapp, tmp_path, mocker,
+    ):
         source = tmp_path / "live.jpg"
-        surface = _surface(source, QImage(64, 48, QImage.Format.Format_RGBA8888))
+        surface = _surface(source, QImage(1024, 768, QImage.Format.Format_RGBA8888))
+        controller._requires_post_submit_frame = False
         controller._request_generation = 2
+        controller._request_reason_by_generation[2] = "initial"
+        controller._active_asset_id = surface.decode_key.asset_id
+        controller._active_source_identity = AssetSourceIdentity.create(
+            source, width=4000, height=3000, source_mtime_ns=1,
+        )
         controller._loading_source = source
         controller._loading_started_at = time.perf_counter()
+        controller._image_viewer.resize(1600, 1200)
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
         controller.defer_still_updates(True)
         controller.begin_video_transition(2, interactive_when_ready=False)
         controller._on_scheduled_image_ready(2, surface)
 
+        controller._on_viewport_metrics_changed()
+        assert controller._lod_timer.isActive()
+        assert _spin_until(qapp, lambda: not controller._lod_timer.isActive())
+
         assert controller._player_stack.currentWidget() is controller._video_area
+        assert controller._request_generation == 2
+        schedule.assert_not_called()
+
+        controller.defer_live_badge_until_ready(2)
         controller.defer_still_updates(False)
         assert controller.apply_pending_still()
         assert controller._player_stack.currentWidget() is controller._image_viewer
         assert controller._pending_image_key == surface.decode_key
+
+        schedule.assert_not_called()
+        controller._image_viewer.stillFrameSubmitted.emit(surface.decode_key, 2)
+
+        assert controller._pending_image_generation is None
+        assert not controller._live_badge.isHidden()
+        presented.assert_called_once_with(source, 2)
+
+        assert _spin_until(qapp, lambda: schedule.called)
+        schedule.assert_called_once()
+        request = schedule.call_args.args[0]
+        assert request.generation == 3
+        assert request.decode_level > surface.decode_level
+
+    def test_live_replay_reveals_zoom_surface_under_original_transaction(
+        self, controller, qapp, tmp_path, mocker,
+    ):
+        source = tmp_path / "live.jpg"
+        initial = _surface(source, QImage(1024, 768, QImage.Format.Format_RGBA8888))
+        transaction = DetailRenderTransaction(
+            generation=2,
+            asset_id=initial.decode_key.asset_id,
+            media_kind="live_motion",
+            source_identity=AssetSourceIdentity.create(
+                source, width=4000, height=3000, source_mtime_ns=1,
+            ),
+        )
+        controller._requires_post_submit_frame = True
+        controller._player_stack.resize(800, 600)
+        controller._image_viewer.resize(800, 600)
+        mocker.patch.object(controller._image_viewer, "devicePixelRatioF", return_value=1.0)
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        mocker.patch.object(
+            controller, "_schedule_adjustment_preparation",
+            side_effect=lambda intent: controller._dispatch_prepared_intent(intent, {}),
+        )
+        assert controller.display_image(source, transaction=transaction)
+        controller._on_scheduled_image_ready(2, initial)
+        controller._image_viewer.stillFrameSubmitted.emit(initial.decode_key, 2)
+        qapp.processEvents()
+        controller._image_viewer.frameSubmitted.emit()
+        assert controller._pending_image_generation is None
+
+        controller._on_viewer_zoom_changed(2.0)
+        controller._lod_timer.stop()
+        controller._request_higher_lod()
+        zoom = schedule.call_args.args[0]
+        assert zoom.reason == "zoom"
+        assert zoom.generation == 3
+        assert zoom.decode_level == 2048
+        upgraded = _surface(
+            source, QImage(2048, 1536, QImage.Format.Format_RGBA8888), level=2048,
+        )
+
+        controller.defer_still_updates(True)
+        controller.begin_video_transition(2, interactive_when_ready=False)
+        controller._on_scheduled_image_ready(zoom.generation, upgraded)
+
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
+        install = mocker.patch.object(controller._image_viewer, "set_still_surface", create=True)
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller.defer_live_badge_until_ready(2)
+        controller.defer_still_updates(False)
+        assert controller.apply_pending_still()
+
+        assert controller._pending_image_key == upgraded.decode_key
+        assert controller._pending_image_generation == 2
+        install.assert_called_once_with(upgraded, {}, reset_view=False, generation=2)
+        controller._image_viewer.stillFrameSubmitted.emit(upgraded.decode_key, zoom.generation)
+        qapp.processEvents()
+        controller._image_viewer.frameSubmitted.emit()
+        assert controller._pending_image_generation == 2
+        presented.assert_not_called()
+        hide_cover.assert_not_called()
+
+        controller._image_viewer.stillFrameSubmitted.emit(upgraded.decode_key, 2)
+        qapp.processEvents()
+        assert controller._pending_image_generation == 2
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._pending_image_generation is None
+        assert controller._live_badge.isHidden() is False
+        assert controller._current_decode_level == upgraded.decode_level
+        presented.assert_called_once_with(source, 2)
+        hide_cover.assert_called_once()
+        assert schedule.call_count == 2
 
     def test_primed_image_decode_failure_returns_to_placeholder(
         self,
@@ -1644,6 +1752,44 @@ class TestInitCoverTracking:
 
         assert controller._pending_image_generation is None
         hide_cover.assert_called_once()
+
+    def test_windows_image_reveal_retries_deferred_lod(
+        self, controller, qapp, tmp_path, mocker,
+    ):
+        source = tmp_path / "resized-before-reveal.jpg"
+        surface = _surface(source, QImage(1024, 768, QImage.Format.Format_RGBA8888))
+        controller._requires_post_submit_frame = True
+        mocker.patch.object(controller, "_POST_SUBMIT_REVEAL_DEADLINE_MS", 10_000)
+        controller._request_generation = 40
+        controller._request_reason_by_generation[40] = "initial"
+        controller._active_asset_id = surface.decode_key.asset_id
+        controller._active_source_identity = AssetSourceIdentity.create(
+            source, width=4000, height=3000, source_mtime_ns=1,
+        )
+        controller._loading_source = source
+        controller._loading_started_at = time.perf_counter()
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        controller._begin_image_transition(40)
+        controller._on_scheduled_image_ready(40, surface)
+
+        controller._image_viewer.resize(1600, 1200)
+        controller._on_viewport_metrics_changed()
+        controller._image_viewer.stillFrameSubmitted.emit(surface.decode_key, 40)
+        assert controller._lod_timer.isActive()
+        assert _spin_until(qapp, lambda: not controller._lod_timer.isActive())
+
+        assert controller._pending_image_generation == 40
+        assert controller._request_generation == 40
+        schedule.assert_not_called()
+
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._pending_image_generation is None
+        assert _spin_until(qapp, lambda: schedule.called)
+        schedule.assert_called_once()
+        request = schedule.call_args.args[0]
+        assert request.generation == 41
+        assert request.decode_level > surface.decode_level
 
     def test_windows_image_reveal_deadline_is_bounded(
         self,

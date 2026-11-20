@@ -54,7 +54,82 @@ def _hold_scan_lease(root, pipe):
         pipe.close()
 
 
-@pytest.mark.parametrize("while_busy", ["release", "cancel", "finish-asset"])
+def _finish_face_scan_during_inference(root, pipe):
+    from iPhoto.bootstrap.library_people_service import create_people_service
+    from iPhoto.people.pipeline import DetectedAssetFaces
+
+    service = create_people_service(root)
+    try:
+        if pipe.poll(15):
+            pipe.recv()
+            event = service.coordinator.submit_detected_batch(
+                [DetectedAssetFaces("asset", "a.jpg", [])],
+                distance_threshold=0.6,
+                min_samples=2,
+            )
+            pipe.send(event is not None)
+    finally:
+        service.shutdown()
+        pipe.close()
+
+
+@pytest.mark.parametrize("stale_result", ["asset-error", "cancelled", "runtime-error", "batch-error"])
+def test_stale_face_worker_cannot_overwrite_another_process_commit(
+    tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch, stale_result: str,
+) -> None:
+    from iPhoto.bootstrap.library_people_service import create_people_service
+    from iPhoto.cache.index_store import get_global_repository
+    from iPhoto.library.workers.face_scan_worker import FaceScanWorker
+    from iPhoto.people.pipeline import DetectedAssetFaces
+
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "a.jpg", "id": "asset", "media_type": 0,
+         "face_status": "retry" if stale_result == "asset-error" else "pending"},
+    ])
+    service = create_people_service(tmp_path)
+    worker = FaceScanWorker(tmp_path, people_service=service)
+    worker.finish_input()
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    process = ctx.Process(target=_finish_face_scan_during_inference, args=(tmp_path, child))
+    process.start()
+    child.close()
+
+    def detect(_rows, **_kwargs):
+        # This commit must finish while inference is still in flight.
+        parent.send("finish")
+        if not parent.poll(10) or not parent.recv():
+            pytest.fail("Competing process could not commit during inference")
+        if stale_result == "cancelled":
+            worker.cancel()
+        elif stale_result == "runtime-error":
+            raise RuntimeError("batch could not initialize")
+        elif stale_result == "batch-error":
+            raise ValueError("batch could not run")
+        return [DetectedAssetFaces("asset", "a.jpg", [], error="decode failed")]
+
+    monkeypatch.setattr(
+        "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
+        lambda **_kwargs: SimpleNamespace(
+            detect_faces_for_rows=detect, distance_threshold=0.6, min_samples=2,
+        ),
+    )
+    try:
+        worker.run()
+        process.join(5)
+        assert process.exitcode == 0
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == "done"
+        assert service.coordinator._journal.unfinished() == ()
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+        service.shutdown()
+
+
+@pytest.mark.parametrize("while_busy", ["release", "cancel", "finish-asset", "fail-asset"])
 def test_face_worker_keeps_detected_batch_while_another_process_holds_lease(
     tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch, while_busy: str,
 ) -> None:
@@ -66,14 +141,16 @@ def test_face_worker_keeps_detected_batch_while_another_process_holds_lease(
     from iPhoto.people.pipeline import DetectedAssetFaces
 
     store = get_global_repository(tmp_path)
+    starting_status = "retry" if while_busy == "fail-asset" else "pending"
     store.write_rows([
         {"rel": "copy.jpg", "id": "asset", "media_type": 0, "face_status": "done"},
-        {"rel": "a.jpg", "id": "asset", "media_type": 0, "face_status": "pending"},
+        {"rel": "a.jpg", "id": "asset", "media_type": 0, "face_status": starting_status},
     ])
     service = create_people_service(tmp_path)
     coordinator = service.coordinator
     assert coordinator is not None
-    detect = Mock(return_value=[DetectedAssetFaces("asset", "a.jpg", [])])
+    error = "decode failed" if while_busy == "fail-asset" else None
+    detect = Mock(return_value=[DetectedAssetFaces("asset", "a.jpg", [], error)])
     monkeypatch.setattr(
         "iPhoto.library.workers.face_scan_worker.FaceClusterPipeline",
         lambda **_kwargs: SimpleNamespace(
@@ -108,6 +185,7 @@ def test_face_worker_keeps_detected_batch_while_another_process_holds_lease(
         worker.start()
         assert retried_lease.wait(5)
         detect.assert_called_once()
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == starting_status
         if while_busy == "cancel":
             worker.cancel()
             assert worker.wait(5000)
@@ -119,9 +197,10 @@ def test_face_worker_keeps_detected_batch_while_another_process_holds_lease(
 
         detect.assert_called_once()
         assert committed.count() == int(while_busy == "release")
-        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == (
-            "pending" if while_busy == "cancel" else "done"
-        )
+        expected_status = {"cancel": "pending", "fail-asset": "failed"}.get(while_busy, "done")
+        rows = store.get_rows_by_rels(["a.jpg", "copy.jpg"])
+        assert rows["a.jpg"]["face_status"] == expected_status
+        assert rows["copy.jpg"]["face_status"] == "done"
         assert coordinator._journal.unfinished() == ()
     finally:
         if process.is_alive():

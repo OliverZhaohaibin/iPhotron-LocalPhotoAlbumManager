@@ -673,19 +673,29 @@ class AssetRepository:
             (normalized, asset_id),
         )
 
-    def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
-        """Update the ``face_status`` for multiple assets."""
+    def update_face_statuses(
+        self,
+        asset_ids: Iterable[str],
+        status: str,
+        *,
+        expected_statuses: tuple[str | None, ...] | None = None,
+    ) -> None:
+        """Update face status for matching assets in the expected state."""
 
         normalized = normalize_face_status(status)
         ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
-        if normalized is None or not ids_list:
+        if normalized is None or not ids_list or expected_statuses == ():
             return
 
+        status_guard = ""
+        if expected_statuses is not None:
+            matches = " OR ".join("face_status IS ?" for _ in expected_statuses)
+            status_guard = f" AND ({matches})"
         for start in range(0, len(ids_list), 500):
             chunk = ids_list[start : start + 500]
             placeholders = ", ".join(["?"] * len(chunk))
-            query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
-            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
+            query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders}){status_guard}"
+            self._db_manager.execute_in_transaction(query, [normalized, *chunk, *(expected_statuses or ())])
 
     def reset_face_statuses_for_pipeline_upgrade(self) -> int:
         return self._reset_ai_statuses_for_pipeline_upgrade("face_status")

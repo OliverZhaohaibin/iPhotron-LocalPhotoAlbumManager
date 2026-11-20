@@ -359,6 +359,9 @@ Writers and recovery handlers acquire the same cross-process lease before
 inspecting unfinished work. A second process can retry after the owner exits
 or finishes the operation. Background People scans retain detected batches
 while waiting for the lease, and skip assets that another owner already finished.
+Asset-level failures use the same lease and journal. The asset index accepts a
+failure transition only from its expected pending or retry state. Cancelling
+or aborting the batch leaves individual assets eligible for a later scan.
 
 ### Large Library Query And Scan Contracts
 

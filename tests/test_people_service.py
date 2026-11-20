@@ -2392,7 +2392,7 @@ def test_face_scan_worker_skips_commit_when_cancelled_mid_batch(tmp_path: Path) 
 
     assert committed is False
     coordinator.submit_detected_batch.assert_not_called()
-    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
+    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "pending"
 
 
 @pytest.mark.parametrize("reason", ["runtime", "incomplete", "invalid_override"])
@@ -2434,12 +2434,14 @@ def test_face_scan_worker_marks_retry_error_failed_on_second_attempt(tmp_path: P
     global_repo.write_rows(
         [
             {"rel": "album/a.jpg", "id": "asset-a", "media_type": 0, "face_status": "retry"},
+            {"rel": "album/copy.jpg", "id": "asset-a", "media_type": 0, "face_status": "done"},
         ]
     )
     worker = FaceScanWorker(tmp_path)
     messages: list[str] = []
     worker.statusChanged.connect(messages.append)
-    coordinator = Mock(submit_detected_batch=Mock(return_value=None))
+    coordinator = worker._people_service.coordinator
+    assert coordinator is not None
     pipeline = SimpleNamespace(
         detect_faces_for_rows=Mock(
             return_value=[
@@ -2463,12 +2465,70 @@ def test_face_scan_worker_marks_retry_error_failed_on_second_attempt(tmp_path: P
     )
 
     assert committed is False
-    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "failed"
+    rows = global_repo.get_rows_by_rels(["album/a.jpg", "album/copy.jpg"])
+    assert rows["album/a.jpg"]["face_status"] == "failed"
+    assert rows["album/copy.jpg"]["face_status"] == "done"
     assert messages == [
         "Some assets could not be face scanned and will be retried after a rescan."
     ]
-    coordinator.submit_detected_batch.assert_called_once()
-    assert coordinator.submit_detected_batch.call_args.args[0] == []
+    assert coordinator._journal.unfinished() == ()
+
+
+def test_face_scan_failures_cannot_consume_retry_from_stale_attempt(tmp_path: Path) -> None:
+    store = get_global_repository(tmp_path)
+    store.write_rows([{"rel": "a.jpg", "id": "a", "media_type": 0, "face_status": "pending"}])
+    service = create_people_service(tmp_path)
+    try:
+        coordinator = service.coordinator
+        assert coordinator is not None
+        failure = DetectedAssetFaces("a", "a.jpg", [], error="decode failed")
+        for _ in range(2):
+            coordinator.submit_detected_batch(
+                [failure], distance_threshold=0.6, min_samples=2,
+                attempted_statuses={"a.jpg": "pending"},
+            )
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == "retry"
+
+        coordinator.submit_detected_batch(
+            [failure], distance_threshold=0.6, min_samples=2,
+            attempted_statuses={"a.jpg": "retry"},
+        )
+        assert store.get_rows_by_rels(["a.jpg"])["a.jpg"]["face_status"] == "failed"
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("commit_snapshot", [False, True])
+def test_people_scan_recovers_failed_status_bookkeeping(tmp_path: Path, commit_snapshot: bool) -> None:
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "broken.jpg", "id": "broken", "media_type": 0, "face_status": "retry"},
+        {"rel": "good.jpg", "id": "good", "media_type": 0, "face_status": "pending"},
+    ])
+    service = create_people_service(tmp_path)
+    try:
+        coordinator = service.coordinator
+        assert coordinator is not None
+        detected = [DetectedAssetFaces("broken", "broken.jpg", [], error="decode failed")]
+        if commit_snapshot:
+            detected.append(DetectedAssetFaces("good", "good.jpg", []))
+        error_type = PeopleSnapshotCommittedError if commit_snapshot else RuntimeError
+        with patch.object(store, "update_face_statuses", side_effect=RuntimeError("locked")):
+            with pytest.raises(error_type):
+                coordinator.submit_detected_batch(
+                    detected, distance_threshold=0.6, min_samples=2,
+                    attempted_statuses={"broken.jpg": "retry", "good.jpg": "pending"},
+                )
+        interrupted = coordinator._journal.unfinished_head()
+        assert interrupted is not None
+        assert interrupted.payload["failed_asset_ids"] == ["broken"]
+        assert coordinator._journal.recover_pending()
+        assert coordinator._journal.unfinished() == ()
+        rows = store.get_rows_by_rels(["broken.jpg", "good.jpg"])
+        assert rows["broken.jpg"]["face_status"] == "failed"
+        assert rows["good.jpg"]["face_status"] == ("done" if commit_snapshot else "pending")
+    finally:
+        service.shutdown()
 
 
 def test_face_pipeline_suppresses_missing_file_after_cancellation(
@@ -2906,7 +2966,7 @@ def test_face_scan_worker_reports_unexpected_batch_error_reason(
 
     worker.run()
 
-    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "retry"
+    assert global_repo.get_rows_by_ids(["asset-a"])["asset-a"]["face_status"] == "pending"
     assert messages == ["Face scanning paused: compiled dependency missing"]
 
 

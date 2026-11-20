@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 from dataclasses import asdict
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 
@@ -322,6 +323,7 @@ def prune_index_scope(
     preserve_modified_after_ms: int | None = None,
     current_scan_job_id: str | None = None,
     root_only: bool = False,
+    watched_albums: frozenset[Path] = frozenset(),
 ) -> int:
     """Delete rows under *root* that were not rediscovered by the completed scan.
 
@@ -361,6 +363,19 @@ def prune_index_scope(
         and any(RECENTLY_DELETED_DIR_NAME in pattern for pattern in (exclude_globs or ()))
     )
     trash_prefix = f"{RECENTLY_DELETED_DIR_NAME}/"
+
+    @cache
+    def awaiting_watcher(directory: Path) -> bool:
+        # A missing watched album can be a rename. Its watcher reconciliation
+        # must verify destinations before any recursive scan removes its rows.
+        for album in (directory, *directory.parents):
+            if album in watched_albums:
+                try:
+                    return not album.is_dir()
+                except OSError:
+                    return True
+        return False
+
     removable: List[str] = []
     for row in scoped_rows:
         rel_key = normalise_rel_key(row.get("rel"))
@@ -374,6 +389,8 @@ def prune_index_scope(
                 preserve_modified_after_ms=preserve_modified_after_ms,
                 current_scan_job_id=current_scan_job_id,
             ):
+                continue
+            if watched_albums and awaiting_watcher(((library_root or root) / rel_key).parent):
                 continue
             if root_only:
                 # Directory notifications can arrive while a source is unreadable.

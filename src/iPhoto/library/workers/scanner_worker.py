@@ -49,6 +49,7 @@ class ScannerWorker(QRunnable):
         finalize_scan: bool = False,
         reconcile_missing_scope: bool = False,
         relocation_roots: Iterable[Path] = (),
+        watched_albums: frozenset[Path] = frozenset(),
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -63,6 +64,7 @@ class ScannerWorker(QRunnable):
         self._finalize_scan = finalize_scan
         self._reconcile_missing_scope = reconcile_missing_scope
         self._relocation_roots = tuple(relocation_roots)
+        self._watched_albums = watched_albums
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
@@ -197,6 +199,7 @@ class ScannerWorker(QRunnable):
                         preserve_modified_after_ms=self._scan_started_at_ms,
                         current_scan_job_id=self._scan_job_id,
                         root_only=self.root_only,
+                        watched_albums=self._watched_albums,
                     )
                 except Exception as exc:
                     LOGGER.warning(

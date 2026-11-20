@@ -727,6 +727,7 @@ def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
         preserve_modified_after_ms=None,
         current_scan_job_id=None,
         root_only=False,
+        watched_albums=frozenset(),
     )
     start_ai.assert_not_called()
 

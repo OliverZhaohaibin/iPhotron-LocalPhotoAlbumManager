@@ -418,6 +418,7 @@ class LibraryScanService:
         preserve_modified_after_ms: int | None = None,
         current_scan_job_id: str | None = None,
         root_only: bool = False,
+        watched_albums: frozenset[Path] = frozenset(),
     ) -> list[dict[str, Any]]:
         """Persist scan completion side effects for one scope.
 
@@ -459,6 +460,7 @@ class LibraryScanService:
                 preserve_modified_after_ms=preserve_modified_after_ms,
                 current_scan_job_id=current_scan_job_id,
                 root_only=root_only,
+                watched_albums=watched_albums,
             )
             if pair_live:
                 if root_only:

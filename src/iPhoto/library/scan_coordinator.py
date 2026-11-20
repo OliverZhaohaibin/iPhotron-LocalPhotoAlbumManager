@@ -144,6 +144,16 @@ class ScanCoordinatorMixin:
 
         # Pass library root to scanner so all assets go to global database
         relocation_roots = getattr(self, "_watch_scan_relocation_roots", {}).pop(root, None)
+        watched_albums = frozenset()
+        if not root_only and getattr(self, "_background_watch_generation", 0):
+            # Include removed scopes whose queued reconciliation still owns the
+            # source rows. The tree snapshot can change before this worker runs.
+            if root in self._nodes:
+                children = self._children.get(root, ())
+                watched_albums = frozenset((root, *(node.path for node in children)))
+            else:
+                watched_albums = frozenset(self._nodes)
+            watched_albums = watched_albums.union(self._watch_scan_relocation_roots)
         worker = ScannerWorker(
             root,
             include,
@@ -155,6 +165,7 @@ class ScanCoordinatorMixin:
             finalize_scan=True,
             reconcile_missing_scope=relocation_roots is not None,
             relocation_roots=relocation_roots or (),
+            watched_albums=watched_albums,
         )
         self._current_scanner_worker = worker
         signals.progressUpdated.connect(self.scanProgress)

@@ -359,12 +359,12 @@ def scan_album(
                 try:
                     stat = p.stat()
                     # Validate cache
-                    cached_ts = cached.get("ts")
-                    current_ts = int(stat.st_mtime * 1_000_000)
-                    source_unchanged = (
-                        cached.get("bytes") == stat.st_size
-                        and abs((cached_ts or 0) - current_ts) <= 1_000_000
-                    )
+                    cached_mtime_ns = cached.get("source_mtime_ns")
+                    if cached_mtime_ns:
+                        mtime_matches = cached_mtime_ns == stat.st_mtime_ns
+                    else:
+                        mtime_matches = cached.get("ts") == int(stat.st_mtime * 1_000_000)
+                    source_unchanged = cached.get("bytes") == stat.st_size and mtime_matches
                     if source_unchanged:
                         cached = dict(cached)
                         cached["source_mtime_ns"] = int(stat.st_mtime_ns)

@@ -586,6 +586,48 @@ def test_finalize_scan_result_failure_keeps_scope_incomplete(
     assert service.is_scan_scope_complete(library_root) is False
 
 
+@pytest.mark.parametrize("finish_scan", [False, True], ids=["interrupted", "pairing-disabled"])
+def test_replaced_live_still_releases_motion_without_pairing(
+    tmp_path: Path, finish_scan: bool,
+) -> None:
+    still, motion = "photo.jpg", "photo.mov"
+    (tmp_path / still).write_bytes(b"original photo")
+    (tmp_path / motion).write_bytes(b"original video")
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([
+        {"rel": still, "id": compute_file_id(tmp_path / still), "mime": "image/jpeg",
+         "content_id": "paired", "is_favorite": 1},
+        {"rel": motion, "id": compute_file_id(tmp_path / motion), "mime": "video/quicktime",
+         "content_id": "paired"},
+        {"rel": "other.jpg", "id": "other-still", "content_id": "other-pair",
+         "mime": "image/jpeg"},
+        {"rel": "other.mov", "id": "other-motion", "content_id": "other-pair",
+         "mime": "video/quicktime"},
+    ])
+    for rel in ("other.jpg", "other.mov"):
+        (tmp_path / rel).touch()
+    (tmp_path / still).write_bytes(b"replacement photo")
+    replacement = {"rel": still, "id": compute_file_id(tmp_path / still), "mime": "image/jpeg"}
+    scan_rows = [replacement, *repo.get_rows_by_rels([motion, "other.jpg", "other.mov"]).values()]
+    service = LibraryScanService(tmp_path, scanner=_Scanner(scan_rows))
+    service.pair_album(tmp_path)
+    assert repo.find_live_partner("other-still")["rel"] == "other.mov"
+    assert repo.get_rows_by_rels([motion])[motion]["live_role"] == 1
+    with patch.object(service, "ensure_links_for_rows", wraps=service.ensure_links_for_rows) as pair:
+        result = service.scan_album(tmp_path, persist_chunks=True, chunk_size=1)
+        if finish_scan:
+            service.finalize_scan_result(tmp_path, result.rows, pair_live=False)
+        pair.assert_not_called()
+
+    assert repo.find_live_partner(replacement["id"]) is None
+    assert repo.find_live_partner("other-still")["rel"] == "other.mov"
+    rows = repo.get_rows_by_rels([still, motion])
+    assert rows[still]["is_favorite"] == 1
+    assert rows[motion]["live_role"] == 0
+    assert rows[motion]["live_partner_rel"] is None
+    assert (tmp_path / motion).read_bytes() == b"original video"
+
+
 def test_finalize_scan_result_preserves_move_written_rows_during_scan(
     tmp_path: Path,
 ) -> None:

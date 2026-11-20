@@ -557,36 +557,51 @@ class TestGlobalRepositorySingleton:
         row = repo.get_rows_by_ids(["asset-photo"])["asset-photo"]
         assert row["face_status"] == "pending"
 
-    def test_merge_scan_rows_preserves_live_role_and_partner_rel_for_changed_asset_id(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("include_partner", [False, True])
+    def test_merge_scan_rows_clears_both_live_roles_for_replaced_asset(
+        self, tmp_path: Path, include_partner: bool,
     ) -> None:
         repo = get_global_repository(tmp_path)
-        repo.write_rows(
-            [
-                {
-                    "rel": "album/photo.jpg",
-                    "id": "asset-old",
-                    "media_type": 0,
-                    "face_status": "skipped",
-                    "live_role": 1,
-                    "live_partner_rel": "album/photo.mov",
-                }
-            ]
-        )
+        still, motion = "photo.jpg", "album/photo.mov"
+        repo.write_rows([
+            {"rel": still, "id": "asset-old", "media_type": 0, "face_status": "done",
+             "pet_status": "done", "is_favorite": 1, "live_partner_rel": motion},
+            {"rel": motion, "id": "motion", "media_type": 1, "live_role": 1,
+             "live_partner_rel": still},
+        ])
+        before = repo.get_rows_by_rels([still, motion])
 
-        merged_rows = repo.merge_scan_rows(
-            [
-                {
-                    "rel": "album/photo.jpg",
-                    "id": "asset-new",
-                    "media_type": 0,
-                }
-            ]
-        )
+        scanned = [{**before[still], "id": "asset-new", "is_favorite": 0}]
+        if include_partner:
+            scanned.insert(0, before[motion])
+        merged = repo.merge_scan_rows(scanned)
+        indexed = repo.get_rows_by_rels([still, motion])
 
-        assert merged_rows[0]["live_role"] == 1
-        assert merged_rows[0]["live_partner_rel"] == "album/photo.mov"
-        assert merged_rows[0]["face_status"] == "pending"
+        for row in [*merged, *indexed.values()]:
+            assert row["live_role"] == 0
+            assert row["live_partner_rel"] is None
+        assert indexed[still]["face_status"] == "pending"
+        assert indexed[still]["pet_status"] == "pending"
+        assert indexed[still]["is_favorite"] == 1
+
+    def test_merge_scan_rows_preserves_trash_state_after_replacement(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
+        repo.write_rows([{
+            "rel": rel, "id": "old", "is_deleted": 1,
+            "original_rel_path": "Album/photo.jpg", "original_album_id": "album-id",
+        }])
+
+        repo.merge_scan_rows([{
+            "rel": rel, "id": "new", "is_deleted": 0,
+            "original_rel_path": None, "original_album_id": None,
+        }])
+
+        row = repo.get_rows_by_rels([rel])[rel]
+        assert row["id"] == "new"
+        assert row["is_deleted"] == 1
+        assert row["original_rel_path"] == "Album/photo.jpg"
+        assert row["original_album_id"] == "album-id"
 
     def test_merge_scan_rows_blocks_competing_writer_until_commit(self, tmp_path: Path) -> None:
         repo = get_global_repository(tmp_path)

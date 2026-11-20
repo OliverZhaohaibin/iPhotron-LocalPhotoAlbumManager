@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from io import BytesIO
 from pathlib import Path
 
@@ -15,6 +16,28 @@ from iPhoto.infrastructure.services.metadata_provider import ExifToolMetadataPro
 from iPhoto.io import scanner_adapter
 from iPhoto.io.sidecar import save_adjustments
 from iPhoto.utils.hashutils import compute_file_id
+
+
+def test_incremental_scan_rechecks_same_size_media_with_new_source_mtime(tmp_path, monkeypatch):
+    asset = tmp_path / "replacement.png"
+    Image.new("RGB", (4, 4), "red").save(asset, compress_level=0)
+    original = asset.stat()
+    expected_id = f"as_{compute_file_id(asset)}"
+    existing = {asset.name: {
+        "rel": asset.name, "id": expected_id, "bytes": original.st_size,
+        "ts": int(original.st_mtime * 1_000_000),
+        "source_mtime_ns": original.st_mtime_ns, "image_orientation": 1,
+    }}
+    Image.new("RGB", (4, 4), "blue").save(asset, compress_level=0)
+    os.utime(asset, ns=(original.st_atime_ns, original.st_mtime_ns + 100_000_000))
+    assert asset.stat().st_size == original.st_size
+    replacement_id = f"as_{compute_file_id(asset)}"
+    assert replacement_id != expected_id
+    monkeypatch.setattr(scanner_adapter._metadata_provider, "get_metadata_batch", lambda _paths: [])
+
+    [row] = scanner_adapter.scan_album(tmp_path, ["**/*.png"], [], existing)
+
+    assert row["id"] == replacement_id
 
 
 def test_process_media_paths_falls_back_to_minimal_row_when_metadata_fails(

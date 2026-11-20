@@ -24,8 +24,6 @@ _PRESERVED_SCAN_STATE_FIELDS = (
     "original_rel_path",
     "original_album_id",
     "original_album_subpath",
-    "live_role",
-    "live_partner_rel",
     "is_deleted",
 )
 _THUMBNAIL_STATE_FIELDS = (
@@ -65,6 +63,15 @@ def merge_scan_row(
     """Merge one scanned row with an existing persisted row."""
 
     merged = dict(scanned_row)
+    identity_unchanged = existing_row is not None and _asset_identity_unchanged(existing_row, merged)
+    # Pairing is computed from the indexed media. Cached scan rows can carry
+    # old links, and a replacement must be visible even if pairing is skipped.
+    if identity_unchanged and existing_row is not None:
+        merged["live_role"] = existing_row.get("live_role", 0)
+        merged["live_partner_rel"] = existing_row.get("live_partner_rel")
+    else:
+        merged["live_role"] = 0
+        merged["live_partner_rel"] = None
 
     if existing_row is not None:
         # Cached scan rows can contain state captured before a user edit.
@@ -76,9 +83,6 @@ def merge_scan_row(
             merged, existing_row, current_thumbnail_revision
         )
 
-    identity_unchanged = (
-        existing_row is not None and _asset_identity_unchanged(existing_row, merged)
-    )
     existing_face_status = None
     existing_pet_status = None
     if existing_row is not None:
@@ -92,12 +96,7 @@ def merge_scan_row(
     ):
         merged["face_status"] = existing_face_status
     else:
-        merged["face_status"] = initial_face_status(
-            _row_for_face_status(
-                merged,
-                preserve_live_state=identity_unchanged,
-            )
-        )
+        merged["face_status"] = initial_face_status(merged)
 
     if (
         existing_pet_status is not None
@@ -106,12 +105,7 @@ def merge_scan_row(
     ):
         merged["pet_status"] = existing_pet_status
     else:
-        merged["pet_status"] = initial_pet_status(
-            _row_for_face_status(
-                merged,
-                preserve_live_state=identity_unchanged,
-            )
-        )
+        merged["pet_status"] = initial_pet_status(merged)
 
     return merged
 
@@ -243,17 +237,3 @@ def _asset_identity_unchanged(
     if existing_id is None or scanned_id is None:
         return False
     return str(existing_id) == str(scanned_id)
-
-
-def _row_for_face_status(
-    merged_row: dict[str, Any],
-    *,
-    preserve_live_state: bool,
-) -> dict[str, Any]:
-    if preserve_live_state:
-        return merged_row
-
-    row = dict(merged_row)
-    row.pop("live_role", None)
-    row.pop("live_partner_rel", None)
-    return row

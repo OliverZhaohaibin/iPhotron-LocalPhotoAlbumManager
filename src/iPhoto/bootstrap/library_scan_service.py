@@ -166,7 +166,6 @@ class LibraryScanService:
                 rows = self.finalize_scan_result(
                     scan_root,
                     result.rows,
-                    pair_live=False,
                     preserve_modified_after_ms=result.scan_started_at_ms,
                     current_scan_job_id=result.scan_job_id,
                 )
@@ -391,7 +390,9 @@ class LibraryScanService:
             self.sync_manifest_favorites(Path(root))
         return rows
 
-    def finalize_scan(self, root: Path, rows: Iterable[dict[str, Any]]) -> None:
+    def finalize_scan(
+        self, root: Path, rows: Iterable[dict[str, Any]], *, pair_live: bool = True,
+    ) -> None:
         """Persist additive scan side effects after a successful scan."""
 
         with self._album_path_lock:
@@ -406,7 +407,8 @@ class LibraryScanService:
                 library_root=self.library_root,
                 repository=repository,
             )
-            self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
+            if pair_live:
+                self.ensure_links_for_rows(scan_root, materialized_rows, repository=repository)
 
     def finalize_scan_result(
         self,
@@ -452,7 +454,7 @@ class LibraryScanService:
                 # A partial snapshot cannot replace the library index or links.
                 self._repository().merge_scan_rows(materialized_rows)
             else:
-                self.finalize_scan(scan_root, materialized_rows)
+                self.finalize_scan(scan_root, materialized_rows, pair_live=False)
             lifecycle_service.reconcile_missing_scan_rows(
                 scan_root,
                 materialized_rows,

@@ -306,7 +306,18 @@ class AssetRepository:
                         existing_rows,
                         current_thumbnail_revisions=current_revisions,
                     )
+                    former_partners = self._clear_replaced_live_partners(merged_rows, existing_rows)
                     self._insert_rows(conn, merged_rows)
+                    if former_partners:
+                        conn.executemany(
+                            """
+                            UPDATE assets
+                            SET live_role = 0, live_partner_rel = NULL,
+                                index_revision = COALESCE(index_revision, 0) + 1
+                            WHERE rel = ? AND live_partner_rel = ?
+                            """,
+                            former_partners,
+                        )
                     break
             # Filesystem reads must release the SQLite write lock. Recheck the
             # observed thumbnail versions so an edit committed during I/O wins.
@@ -316,6 +327,27 @@ class AssetRepository:
 
         self._clear_collection_anchor_cache()
         return merged_rows
+
+    @staticmethod
+    def _clear_replaced_live_partners(
+        merged_rows: list[dict[str, Any]], existing_rows: dict[str, dict[str, Any]],
+    ) -> set[tuple[str, str]]:
+        """Clear reciprocal links in the batch and return the old links for SQL cleanup."""
+
+        former_partners: set[tuple[str, str]] = set()
+        for row in merged_rows:
+            rel = row.get("rel")
+            previous = existing_rows.get(rel)
+            if previous is not None:
+                partner = previous.get("live_partner_rel")
+                if partner and partner != row.get("live_partner_rel"):
+                    former_partners.add((partner, rel))
+        if former_partners:
+            # Some partners may already be in the batch that will be published.
+            for row in merged_rows:
+                if (row.get("rel"), row.get("live_partner_rel")) in former_partners:
+                    row.update(live_role=0, live_partner_rel=None)
+        return former_partners
 
     def _scan_merge_existing_rows(
         self, conn: sqlite3.Connection, rels: list[str]

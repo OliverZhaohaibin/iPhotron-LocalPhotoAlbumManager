@@ -18,6 +18,7 @@ from pathlib import Path
 from ...config import RECENTLY_DELETED_DIR_NAME
 from ...domain.models.core import normalise_content_id
 from ...utils.logging import get_logger
+from .queries import READY_THUMBNAIL_PREDICATE
 
 logger = get_logger()
 
@@ -948,10 +949,7 @@ class SchemaMigrator:
             visible_index_needs_refresh = (
                 index_name.startswith("idx_assets_visible_")
                 or index_name == "idx_assets_gps"
-            ) and (
-                "thumbnail_state IN ('ready', 'stale')" not in index_sql
-                or "TRIM(COALESCE(thumb_cache_key, '')) != ''" not in index_sql
-            )
+            ) and READY_THUMBNAIL_PREDICATE not in index_sql
             if columns and (
                 "rel" not in columns
                 or visible_index_needs_refresh
@@ -994,30 +992,6 @@ class SchemaMigrator:
             ("CREATE INDEX IF NOT EXISTS idx_parent_album_path "
              "ON assets (parent_album_path)"),
 
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_global "
-             "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_album "
-             "ON assets (parent_album_path, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_media "
-             "ON assets (media_type, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_favorite "
-             "ON assets (is_favorite, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
-            ("CREATE INDEX IF NOT EXISTS idx_assets_gps "
-             "ON assets (has_gps, live_role, is_deleted, "
-             "sort_ts DESC, id DESC, rel DESC) "
-             "WHERE thumbnail_state IN ('ready', 'stale') "
-             "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_collection_global "
              "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_collection_album "
@@ -1028,6 +1002,27 @@ class SchemaMigrator:
              "ON assets (is_favorite, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
             ("CREATE INDEX IF NOT EXISTS idx_assets_collection_gps "
              "ON assets (has_gps, live_role, is_deleted, sort_ts DESC, id DESC, rel DESC)"),
+            # SQLite can break equal-cost ties in reverse creation order before
+            # statistics are available. Prefer the smaller ready-only indexes.
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_global "
+             "ON assets (live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_album "
+             "ON assets (parent_album_path, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_media "
+             "ON assets (media_type, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_visible_favorite "
+             "ON assets (is_favorite, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
+            ("CREATE INDEX IF NOT EXISTS idx_assets_gps "
+             "ON assets (has_gps, live_role, is_deleted, "
+             "sort_ts DESC, id DESC, rel DESC) "
+             f"WHERE {READY_THUMBNAIL_PREDICATE}"),
             "CREATE INDEX IF NOT EXISTS idx_assets_rel_lookup ON assets (rel)",
             "CREATE INDEX IF NOT EXISTS idx_assets_id_lookup ON assets (id)",
             "CREATE INDEX IF NOT EXISTS idx_assets_live_content_id ON assets (content_id_key)",

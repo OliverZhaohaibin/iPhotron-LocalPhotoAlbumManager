@@ -13,6 +13,9 @@ from ...config import RECENTLY_DELETED_DIR_NAME
 from ...domain.models.query import CollectionQuery, CollectionType, PageCursor, SortDirection
 
 ESCAPE_CLAUSE = "ESCAPE '\\'"
+READY_THUMBNAIL_PREDICATE = (
+    "thumbnail_state = 'ready' AND TRIM(COALESCE(thumb_cache_key, '')) != ''"
+)
 
 
 def normalize_path(path_str: str) -> str:
@@ -345,10 +348,7 @@ class QueryBuilder:
 
         if collection_query.min_thumbnail_state:
             if collection_query.min_thumbnail_state == "ready":
-                where_clauses.append("thumbnail_state IN ('ready', 'stale')")
-                where_clauses.append(
-                    "TRIM(COALESCE(thumb_cache_key, '')) != ''"
-                )
+                where_clauses.append(READY_THUMBNAIL_PREDICATE)
             else:
                 where_clauses.append("thumbnail_state = ?")
                 params.append(collection_query.min_thumbnail_state)

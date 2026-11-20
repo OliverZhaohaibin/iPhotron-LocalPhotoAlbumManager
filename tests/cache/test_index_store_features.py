@@ -463,7 +463,7 @@ def test_pending_failed_stale_rows_are_hidden_from_gallery_collection(store: Ind
             "ts": int((base + timedelta(seconds=index)).timestamp() * 1_000_000),
             "media_type": 0,
             "thumbnail_state": state,
-            "thumb_cache_key": f"thumb-{state}" if state == "ready" else None,
+            "thumb_cache_key": f"thumb-{state}",
         }
         for index, state in enumerate(("ready", "pending", "failed", "stale"))
     )
@@ -471,6 +471,9 @@ def test_pending_failed_stale_rows_are_hidden_from_gallery_collection(store: Ind
     rows = store.read_collection_window(CollectionQuery(), 0, 10).rows
 
     assert [row["id"] for row in rows] == ["ready"]
+    assert [row["id"] for row in store.read_thumbnail_backfill_candidates(
+        CollectionQuery(), 0, 10
+    )] == ["stale"]
 
 
 def test_collection_query_excludes_recently_deleted_from_normal_views(store: IndexStore) -> None:

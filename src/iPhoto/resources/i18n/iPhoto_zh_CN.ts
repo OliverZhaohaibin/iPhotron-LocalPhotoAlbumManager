@@ -1084,6 +1084,14 @@
             <source>Some assets could not be pet scanned and were marked failed.</source>
             <translation>部分项目未能完成宠物扫描，已标记为失败。</translation>
         </message>
+        <message>
+            <source>A name is required before pinning this pet.</source>
+            <translation>固定此宠物前需要先填写名称。</translation>
+        </message>
+        <message>
+            <source>Could not save the pet's name. Please try again.</source>
+            <translation>无法保存宠物名称。请重试。</translation>
+        </message>
     </context>
     <context>
         <name>AlbumSidebar</name>

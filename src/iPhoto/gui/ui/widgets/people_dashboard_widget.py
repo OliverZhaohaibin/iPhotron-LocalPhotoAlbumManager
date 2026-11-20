@@ -1024,7 +1024,13 @@ class PeopleDashboardWidget(QWidget):
         label = str(summary.name or "").strip()
         renamed = False
         if not label:
-            label = self._prompt_required_person_name(summary)
+            label = self._prompt_required_pin_name(
+                title=tr("PeopleDashboard", "Name This Person"),
+                current_name=summary.name,
+                empty_name_message=tr(
+                    "PeopleDashboard", "A name is required before pinning this person."
+                ),
+            )
             if not label:
                 return
             self._service.rename_cluster(summary.person_id, label)
@@ -1061,11 +1067,37 @@ class PeopleDashboardWidget(QWidget):
                 library_root=library_root,
             )
             return
+
+        label = (summary.name or "").strip()
+        renamed = False
+        if not label:
+            name = self._prompt_required_pin_name(
+                title=tr("PeopleDashboard", "Name This Pet"),
+                current_name=summary.name,
+                empty_name_message=tr(
+                    "PeopleDashboard", "A name is required before pinning this pet."
+                ),
+            )
+            if not name:
+                return
+            if not self._pet_service.rename_pet(summary.pet_id, name):
+                dialogs.show_warning(
+                    self,
+                    tr("PeopleDashboard", "Could not save the pet's name. Please try again."),
+                )
+                return
+            label = name
+            renamed = True
+
         self._pinned_service.pin_pet(
             summary.pet_id,
-            self._pet_label(summary),
+            label,
             library_root=library_root,
         )
+        if renamed:
+            self._reload_after_mutation(
+                preserve_content=bool(self._summaries or self._pet_summaries)
+            )
 
     def _toggle_group_pin(self, summary: PeopleGroupSummary) -> None:
         if self._pinned_service is None:
@@ -1478,23 +1510,21 @@ class PeopleDashboardWidget(QWidget):
     def _pin_actions_available(self) -> bool:
         return self._pinned_service is not None and self._service.library_root() is not None
 
-    def _prompt_required_person_name(self, summary: PersonSummary) -> str | None:
-        title = tr("PeopleDashboard", "Name This Person")
+    def _prompt_required_pin_name(
+        self, *, title: str, current_name: str | None, empty_name_message: str
+    ) -> str | None:
         text, accepted = QInputDialog.getText(
             self,
             title,
             tr("PeopleDashboard", "Name:"),
-            text=summary.name or "",
+            text=current_name or "",
         )
         if not accepted:
             return None
         normalized = text.strip()
         if normalized:
             return normalized
-        dialogs.show_warning(
-            self,
-            tr("PeopleDashboard", "A name is required before pinning this person."),
-        )
+        dialogs.show_warning(self, empty_name_message)
         return None
 
     def _update_status_labels(self) -> None:

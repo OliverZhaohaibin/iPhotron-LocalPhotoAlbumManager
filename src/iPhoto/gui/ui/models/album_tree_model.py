@@ -108,6 +108,11 @@ class AlbumTreeModel(QAbstractItemModel):
         "location": "mappin.and.ellipse",
         "recently deleted": "trash",
     }
+    _PINNED_ICON_MAP: dict[NodeType, str] = {
+        NodeType.PINNED_PERSON: "person",
+        NodeType.PINNED_PET: "pawprint",
+        NodeType.PINNED_GROUP: "person.2",
+    }
 
     def __init__(self, library: LibraryRuntimeController, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -532,12 +537,9 @@ class AlbumTreeModel(QAbstractItemModel):
             return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.PINNED_ALBUM:
             return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
-        if item.node_type == NodeType.PINNED_PERSON:
-            return load_icon("person.svg", stroke_width=stroke_width, color=color)
-        if item.node_type == NodeType.PINNED_PET:
-            return load_icon("person.svg", stroke_width=stroke_width, color=color)
-        if item.node_type == NodeType.PINNED_GROUP:
-            return load_icon("person.2.svg", stroke_width=stroke_width, color=color)
+        pinned_icon = self._PINNED_ICON_MAP.get(item.node_type)
+        if pinned_icon is not None:
+            return load_icon(f"{pinned_icon}.svg", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.HEADER:
             if item.title == "Pinned":
                 return QIcon()

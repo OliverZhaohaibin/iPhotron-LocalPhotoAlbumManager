@@ -1375,19 +1375,85 @@ def test_pin_unnamed_person_prompts_for_name_and_persists_pin(
         widget._service, "rename_cluster", lambda person_id, name: renamed.append((person_id, name))
     )
     monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        PeopleDashboardWidget,
-        "_prompt_required_person_name",
-        lambda self, _summary: "Alice",
-    )
+    get_text = Mock(return_value=("  Alice  ", True))
+    monkeypatch.setattr(QInputDialog, "getText", get_text)
 
     widget._toggle_person_pin(summary)
 
+    get_text.assert_called_once_with(widget, "Name This Person", "Name:", text="")
     assert renamed == [("person-a", "Alice")]
     pinned = pinned_service.items_for_library(tmp_path)
     assert [(item.kind, item.item_id, item.label) for item in pinned] == [
         ("person", "person-a", "Alice")
     ]
+
+
+@pytest.mark.parametrize(
+    ("prompt_result", "rename_result", "warning"),
+    [
+        pytest.param(("  Miso  ", True), True, None, id="name-and-pin"),
+        pytest.param(("", False), None, None, id="cancel"),
+        pytest.param(
+            ("   ", True),
+            None,
+            "A name is required before pinning this pet.",
+            id="blank-name",
+        ),
+        pytest.param(
+            ("Miso", True),
+            False,
+            "Could not save the pet's name. Please try again.",
+            id="save-failed",
+        ),
+    ],
+)
+def test_pin_unnamed_pet_requires_a_saved_name(
+    monkeypatch,
+    tmp_path: Path,
+    qapp: QApplication,
+    prompt_result: tuple[str, bool],
+    rename_result: bool | None,
+    warning: str | None,
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pins = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pins)
+    summary = PetSummary("pet-a", None, "det-a", 2, None, "2024-01-01T00:00:00Z")
+    widget._pet_summaries = [summary]
+    get_text = Mock(return_value=prompt_result)
+    rename_pet = Mock(return_value=rename_result)
+    show_warning = Mock()
+    reload = Mock()
+    monkeypatch.setattr(QInputDialog, "getText", get_text)
+    monkeypatch.setattr(widget._pet_service, "rename_pet", rename_pet)
+    monkeypatch.setattr(people_dashboard_widget.dialogs, "show_warning", show_warning)
+    monkeypatch.setattr(widget, "reload", reload)
+
+    menu = widget._build_pet_menu(summary)
+    next(action for action in menu.actions() if action.data() == "toggle_pet_pin").trigger()
+
+    get_text.assert_called_once_with(widget, "Name This Pet", "Name:", text="")
+    if rename_result is None:
+        rename_pet.assert_not_called()
+    else:
+        rename_pet.assert_called_once_with("pet-a", "Miso")
+    if warning is None:
+        show_warning.assert_not_called()
+    else:
+        show_warning.assert_called_once_with(widget, warning)
+
+    pinned = pins.items_for_library(tmp_path)
+    if rename_result:
+        assert [(item.kind, item.item_id, item.label) for item in pinned] == [
+            ("pet", "pet-a", "Miso")
+        ]
+        reload.assert_called_once_with(preserve_content=True)
+    else:
+        assert not pinned
+        reload.assert_not_called()
 
 
 def test_hidden_person_pin_shows_warning_and_does_not_persist(

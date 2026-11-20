@@ -9,14 +9,19 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for sidebar tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 
 from iPhoto.gui.i18n import TranslationManager, font_policy
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinatorRuntime
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
-from iPhoto.gui.ui.delegates.album_sidebar_delegate import AlbumSidebarDelegate
+from iPhoto.gui.ui.delegates.album_sidebar_delegate import (
+    SIDEBAR_ICON_STROKE_WIDTH,
+    AlbumSidebarDelegate,
+)
+from iPhoto.gui.ui.icon import load_icon
 from iPhoto.gui.ui.menus.album_sidebar_menu import AlbumSidebarContextMenu
 from iPhoto.gui.ui.models.album_tree_model import NodeType
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
@@ -617,6 +622,43 @@ def test_pet_dashboard_menu_pins_a_selectable_sidebar_item(tmp_path: Path, qapp:
     finally:
         dashboard.shutdown()
         dashboard.close()
+        sidebar.close()
+        manager.shutdown()
+
+
+def test_pinned_pet_sidebar_uses_outline_and_filled_pawprint(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    pins = PinnedItemsService(_settings(tmp_path))
+    pins.pin_pet("pet-a", "Miso", library_root=root)
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pins)
+
+    try:
+        (item,) = pins.items_for_library(root)
+        index = sidebar.tree_model().index_for_pinned_item(item)
+        assert index.isValid()
+        tree = sidebar._tree
+        delegate = tree.itemDelegate()
+        assert isinstance(delegate, AlbumSidebarDelegate)
+        colour = tree.palette().color(QPalette.ColorRole.Text).name(QColor.NameFormat.HexArgb)
+        option = QStyleOptionViewItem()
+        option.state = QStyle.StateFlag.State_Enabled
+        for selected, asset in ((False, "pawprint.svg"), (True, "pawprint.fill.svg")):
+            if selected:
+                option.state |= QStyle.StateFlag.State_Selected
+            state = delegate._build_paint_state(option, index, option.rect, NodeType.PINNED_PET)
+            icon = delegate._get_icon_for_paint_state(index, state)
+            expected = load_icon(asset, color=colour, stroke_width=SIDEBAR_ICON_STROKE_WIDTH)
+            assert icon.cacheKey() == expected.cacheKey()
+            image = icon.pixmap(QSize(60, 60)).toImage()
+            assert image.pixelColor(30, 25).alpha() > 0
+            assert (image.pixelColor(30, 38).alpha() > 0) is selected
+    finally:
         sidebar.close()
         manager.shutdown()
 

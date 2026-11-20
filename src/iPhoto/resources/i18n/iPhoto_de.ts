@@ -1084,6 +1084,14 @@
             <source>Some assets could not be pet scanned and were marked failed.</source>
             <translation>Einige Elemente konnten nicht auf Haustiere gescannt werden und wurden als fehlgeschlagen markiert.</translation>
         </message>
+        <message>
+            <source>A name is required before pinning this pet.</source>
+            <translation>Vor dem Anheften dieses Haustiers ist ein Name erforderlich.</translation>
+        </message>
+        <message>
+            <source>Could not save the pet's name. Please try again.</source>
+            <translation>Der Name des Haustiers konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.</translation>
+        </message>
     </context>
     <context>
         <name>AlbumSidebar</name>

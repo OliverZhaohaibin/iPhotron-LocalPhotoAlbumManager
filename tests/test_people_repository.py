@@ -741,7 +741,7 @@ def test_merge_persons_rewrites_group_memberships_and_deduplicates_groups(tmp_pa
     ]
 
 
-def test_merge_persons_allows_mismatched_hidden_state(tmp_path: Path) -> None:
+def test_merge_persons_rejects_mismatched_hidden_state(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [
         _face_record(
@@ -766,11 +766,10 @@ def test_merge_persons_allows_mismatched_hidden_state(tmp_path: Path) -> None:
 
     merged, redirects = repository.merge_persons_with_redirects("person-a", "person-b")
 
-    assert merged is True
+    assert merged is False
     assert redirects == {}
     summaries = repository.get_person_summaries(include_hidden=True)
-    assert [summary.person_id for summary in summaries] == ["person-b"]
-    assert summaries[0].is_hidden is False
+    assert {s.person_id: s.is_hidden for s in summaries} == {"person-a": True, "person-b": False}
 
 
 def test_merge_persons_fills_blank_target_name_from_source(tmp_path: Path) -> None:

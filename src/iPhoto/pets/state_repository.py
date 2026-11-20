@@ -974,6 +974,7 @@ class PetStateRepository:
         self.initialize()
         timestamp = utc_now_iso()
         with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             source = conn.execute(
                 "SELECT pet_id, name FROM pet_profiles WHERE pet_id = ?",
                 (source_pet_id,),
@@ -983,6 +984,12 @@ class PetStateRepository:
                 (target_pet_id,),
             ).fetchone()
             if source is None or target is None:
+                return False
+            hidden_count = conn.execute(
+                "SELECT COUNT(*) FROM hidden_pets WHERE pet_id IN (?, ?)",
+                (source_pet_id, target_pet_id),
+            ).fetchone()[0]
+            if hidden_count == 1:
                 return False
             redirects = {
                 str(row["source_pet_id"]): str(row["target_pet_id"])

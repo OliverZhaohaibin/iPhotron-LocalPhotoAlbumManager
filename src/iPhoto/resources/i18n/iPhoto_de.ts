@@ -980,6 +980,14 @@
             <source>People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.</source>
             <translation>Ausgeblendete und sichtbare Personen können nicht zusammengeführt werden. Blenden Sie zuerst beide Personenkarten aus oder ein.</translation>
         </message>
+        <message>
+            <source>Make both cards visible or both hidden before merging them.</source>
+            <translation>Blenden Sie vor dem Zusammenführen entweder beide Karten ein oder beide aus.</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Cards</source>
+            <translation>Karten können nicht zusammengeführt werden</translation>
+        </message>
     </context>
     <context>
         <name>AlbumSidebar</name>

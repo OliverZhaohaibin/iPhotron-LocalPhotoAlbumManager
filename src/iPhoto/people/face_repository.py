@@ -1228,7 +1228,8 @@ class FaceRepository:
         if self._state_repo is not None:
             hidden_map = self._state_repo.get_person_hidden_map((source_person_id, target_person_id))
             target_hidden = bool(hidden_map.get(target_person_id, False))
-        merged_hidden = target_hidden
+            if bool(hidden_map.get(source_person_id, False)) != target_hidden:
+                return False, {}
 
         self.initialize()
         group_redirects: dict[str, str | None] = {}
@@ -1381,7 +1382,7 @@ class FaceRepository:
                         "target_created_at": target_created_at,
                         "sample_count": len(merged_faces),
                         "evidence_asset_count": evidence_asset_count,
-                        "hidden_state": merged_hidden,
+                        "hidden_state": target_hidden,
                         "changed_asset_ids": sorted(
                             {face.asset_id for face in merged_faces if face.asset_id}
                         ),
@@ -1408,7 +1409,7 @@ class FaceRepository:
                 target_created_at=target_created_at,
                 sample_count=len(merged_faces),
                 evidence_asset_count=evidence_asset_count,
-                hidden_state=merged_hidden,
+                hidden_state=target_hidden,
             )
             self._sync_person_cover_defaults()
             self.refresh_all_group_assets()

@@ -1137,7 +1137,7 @@ def test_pet_repository_persists_detection_and_profile_species(tmp_path: Path) -
     assert repository.state_repository.get_profiles()[0].species_label == "cat"
 
 
-def test_manual_pet_merge_allows_mismatched_hidden_state(tmp_path: Path) -> None:
+def test_manual_pet_merge_rejects_mismatched_hidden_state(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     first = _detection(detection_id="det-a", asset_id="asset-a", pet_id="pet-a")
     second = _detection(detection_id="det-b", asset_id="asset-b", pet_id="pet-b")
@@ -1168,10 +1168,12 @@ def test_manual_pet_merge_allows_mismatched_hidden_state(tmp_path: Path) -> None
     repository.replace_all([first, second], pets)
     assert repository.set_pet_hidden("pet-a", True) is True
 
-    assert repository.merge_pets("pet-a", "pet-b") is not None
+    assert repository.merge_pets("pet-a", "pet-b") is None
     summaries = repository.get_pet_summaries(include_hidden=True)
-    assert [summary.pet_id for summary in summaries] == ["pet-b"]
-    assert summaries[0].is_hidden is False
+    assert {s.pet_id: s.is_hidden for s in summaries} == {"pet-a": True, "pet-b": False}
+    assert repository.state_repository.get_merge_redirect_map() == {}
+    assert repository.set_pet_hidden("pet-b", True)
+    assert repository.merge_pets("pet-a", "pet-b") is not None
 
 
 def test_merge_pets_repairs_legacy_runtime_without_durable_profiles(tmp_path: Path) -> None:

@@ -733,7 +733,7 @@ def test_people_hidden_mutation_routes_through_index_coordinator(tmp_path: Path)
     coordinator.set_person_hidden.assert_called_once_with("person-a", True)
 
 
-def test_people_service_merge_allows_hidden_state_difference(tmp_path: Path) -> None:
+def test_people_service_merge_rejects_hidden_state_difference(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
 
@@ -760,10 +760,11 @@ def test_people_service_merge_allows_hidden_state_difference(tmp_path: Path) -> 
     )
     assert service.set_cluster_hidden("person-a", True) is True
 
-    assert service.merge_clusters("person-a", "person-b") is True
+    assert service.merge_clusters("person-a", "person-b") is False
     summaries = service.list_clusters(include_hidden=True, include_candidates=True)
-    assert [summary.person_id for summary in summaries] == ["person-b"]
-    assert summaries[0].is_hidden is False
+    assert {s.person_id: s.is_hidden for s in summaries} == {"person-a": True, "person-b": False}
+    assert service.set_cluster_hidden("person-b", True)
+    assert service.merge_clusters("person-a", "person-b")
 
 
 def test_pending_assignment_blocks_people_identity_mutations_then_merge_retargets(
@@ -1645,7 +1646,7 @@ def test_pet_merge_retargets_cross_merge_redirect_targets(tmp_path: Path) -> Non
     assert pet_service.build_pet_query("pet-a").asset_ids == []
 
 
-def test_manual_cross_merge_allows_hidden_state_mismatch(tmp_path: Path) -> None:
+def test_manual_cross_merge_rejects_hidden_state_mismatch(tmp_path: Path) -> None:
     library_root = tmp_path / "Library"
     library_root.mkdir()
     get_global_repository(library_root).write_rows(
@@ -1685,9 +1686,12 @@ def test_manual_cross_merge_allows_hidden_state_mismatch(tmp_path: Path) -> None
 
     result = people_service.merge_identities("person:person-a", "pet:pet-a")
 
-    assert result is not None and result.merged is True
-    assert people_service.has_cluster("person-a") is False
+    assert result is None
+    assert people_service.has_cluster("person-a") is True
     assert pet_service.has_pet("pet-a") is True
+    assert people_repository.state_repository.get_identity_redirects() == []
+    assert pet_service.set_pet_hidden("pet-a", True)
+    assert people_service.merge_identities("person:person-a", "pet:pet-a").merged
 
 
 def test_people_service_can_mark_retry_and_skipped(tmp_path: Path) -> None:

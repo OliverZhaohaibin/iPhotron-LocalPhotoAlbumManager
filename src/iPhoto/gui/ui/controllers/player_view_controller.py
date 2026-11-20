@@ -2576,9 +2576,32 @@ class PlayerViewController(QObject):
         self._pending_still = None
         if generation != self._request_generation:
             return False
+
+        lod_upgrade = self._request_reason_by_generation.get(generation) in {"zoom", "resize"}
+        if lod_upgrade:
+            transaction = self._active_transaction
+            key = surface.decode_key
+            if (
+                transaction is None
+                or transaction.media_kind != "live_motion"
+                or transaction.asset_id != key.asset_id
+                or transaction.source_identity.path != key.source
+                or transaction.source_identity.revision != key.source_revision
+                or transaction.source_identity.orientation != key.orientation
+            ):
+                return False
+
+            # A zoom decode can finish during replay. The restored still and
+            # its overlays belong to the original Live Photo transaction.
+            self._cancel_stale_image_workers()
+            if self._deferred_lod_generation == generation:
+                self._deferred_lod_generation = transaction.generation
+            generation = transaction.generation
+            self._request_generation = generation
+
         self._present_generation = generation
         self._begin_image_transition(generation)
-        self._apply_still_frame(surface, adjustments)
+        self._apply_still_frame(surface, adjustments, reset_view=not lod_upgrade)
         return True
 
     def clear_image(self) -> None:
@@ -2728,12 +2751,7 @@ class PlayerViewController(QObject):
         apply_started = time.perf_counter()
         source = surface.decode_key.source
         image = surface.image
-        reason = self._request_reason_by_generation.get(self._present_generation)
-        if reason not in {"zoom", "resize"}:
-            self._bind_image_transition_key(
-                self._present_generation,
-                surface.decode_key,
-            )
+        self._bind_image_transition_key(self._present_generation, surface.decode_key)
         self._current_full_image = QImage(image)
         session_key = self._render_session_key_for_surface(surface)
         session = self._render_sessions.get(session_key)

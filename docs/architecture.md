@@ -246,9 +246,11 @@ by generation before exposing its QRhi surface. Suppressed renders submit an
 opaque clear frame while preserving still residency; only installation of
 matching-generation content may resume media drawing. Media-specific overlays
 remain suppressed until that generation reaches its reveal terminal.
-Live Photo stills decoded while motion is active retain their request
-generation and re-enter the same image transition/reveal terminal when motion
-ends, so generation-bound overlays cannot remain deferred indefinitely.
+When Live Motion ends, the still re-enters the image reveal path with the
+owning Detail transaction's generation. A viewport LOD decoded during replay
+may supply that still once its asset and source identity match the transaction.
+The reveal waits for the matching frame submission and any platform barrier
+before releasing the cover and restoring the overlays for that generation.
 After `VideoArea.begin_load()` suppresses both video renderers, the active
 surface is explicitly updated under the Detail cover so its retained backing
 texture is replaced by the opaque clear frame before decode completes. Video

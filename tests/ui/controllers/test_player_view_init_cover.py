@@ -30,6 +30,7 @@ from iPhoto.gui.detail_pipeline import (
     DetailDecodeKey,
     DetailGeometryState,
     DetailRenderRequest,
+    DetailRenderTransaction,
 )
 from iPhoto.gui.ui.controllers.player_view_controller import (
     PlayerViewController,
@@ -507,6 +508,80 @@ class TestInitCoverTracking:
         request = schedule.call_args.args[0]
         assert request.generation == 3
         assert request.decode_level > surface.decode_level
+
+    def test_live_replay_reveals_zoom_surface_under_original_transaction(
+        self, controller, qapp, tmp_path, mocker,
+    ):
+        source = tmp_path / "live.jpg"
+        initial = _surface(source, QImage(1024, 768, QImage.Format.Format_RGBA8888))
+        transaction = DetailRenderTransaction(
+            generation=2,
+            asset_id=initial.decode_key.asset_id,
+            media_kind="live_motion",
+            source_identity=AssetSourceIdentity.create(
+                source, width=4000, height=3000, source_mtime_ns=1,
+            ),
+        )
+        controller._requires_post_submit_frame = True
+        controller._player_stack.resize(800, 600)
+        controller._image_viewer.resize(800, 600)
+        mocker.patch.object(controller._image_viewer, "devicePixelRatioF", return_value=1.0)
+        schedule = mocker.patch.object(controller._still_scheduler, "request", return_value=True)
+        mocker.patch.object(
+            controller, "_schedule_adjustment_preparation",
+            side_effect=lambda intent: controller._dispatch_prepared_intent(intent, {}),
+        )
+        assert controller.display_image(source, transaction=transaction)
+        controller._on_scheduled_image_ready(2, initial)
+        controller._image_viewer.stillFrameSubmitted.emit(initial.decode_key, 2)
+        qapp.processEvents()
+        controller._image_viewer.frameSubmitted.emit()
+        assert controller._pending_image_generation is None
+
+        controller._on_viewer_zoom_changed(2.0)
+        controller._lod_timer.stop()
+        controller._request_higher_lod()
+        zoom = schedule.call_args.args[0]
+        assert zoom.reason == "zoom"
+        assert zoom.generation == 3
+        assert zoom.decode_level == 2048
+        upgraded = _surface(
+            source, QImage(2048, 1536, QImage.Format.Format_RGBA8888), level=2048,
+        )
+
+        controller.defer_still_updates(True)
+        controller.begin_video_transition(2, interactive_when_ready=False)
+        controller._on_scheduled_image_ready(zoom.generation, upgraded)
+
+        presented = mocker.Mock()
+        controller.stillFramePresented.connect(presented)
+        install = mocker.patch.object(controller._image_viewer, "set_still_surface", create=True)
+        hide_cover = mocker.patch.object(controller, "_hide_detail_init_cover")
+        controller.defer_live_badge_until_ready(2)
+        controller.defer_still_updates(False)
+        assert controller.apply_pending_still()
+
+        assert controller._pending_image_key == upgraded.decode_key
+        assert controller._pending_image_generation == 2
+        install.assert_called_once_with(upgraded, {}, reset_view=False, generation=2)
+        controller._image_viewer.stillFrameSubmitted.emit(upgraded.decode_key, zoom.generation)
+        qapp.processEvents()
+        controller._image_viewer.frameSubmitted.emit()
+        assert controller._pending_image_generation == 2
+        presented.assert_not_called()
+        hide_cover.assert_not_called()
+
+        controller._image_viewer.stillFrameSubmitted.emit(upgraded.decode_key, 2)
+        qapp.processEvents()
+        assert controller._pending_image_generation == 2
+        controller._image_viewer.frameSubmitted.emit()
+
+        assert controller._pending_image_generation is None
+        assert controller._live_badge.isHidden() is False
+        assert controller._current_decode_level == upgraded.decode_level
+        presented.assert_called_once_with(source, 2)
+        hide_cover.assert_called_once()
+        assert schedule.call_count == 2
 
     def test_primed_image_decode_failure_returns_to_placeholder(
         self,

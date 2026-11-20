@@ -533,6 +533,7 @@ def test_raw_backend_prefers_adequate_embedded_preview(tmp_path: Path) -> None:
     raw = MagicMock()
     raw.__enter__.return_value = raw
     raw.__exit__.return_value = False
+    raw.sizes = SimpleNamespace(iwidth=4000, iheight=3000, flip=0)
     raw.extract_thumb.return_value = SimpleNamespace(
         format="jpeg",
         data=preview_path.read_bytes(),
@@ -559,6 +560,7 @@ def test_raw_embedded_jpeg_is_scaled_during_decode(tmp_path: Path) -> None:
     raw = MagicMock()
     raw.__enter__.return_value = raw
     raw.__exit__.return_value = False
+    raw.sizes = SimpleNamespace(iwidth=4000, iheight=3000, flip=0)
     raw.extract_thumb.return_value = SimpleNamespace(
         format="jpeg",
         data=b"embedded-jpeg",
@@ -751,12 +753,80 @@ def test_raw_backend_orients_embedded_preview_once(
     raw.postprocess.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("preview_format", "jpeg_orientation", "flip", "preview_size", "fallback"),
+    [
+        ("bitmap", None, 3, (64, 96), "half"),
+        ("jpeg", None, 3, (64, 96), "half"),
+        ("jpeg", 1, 3, (64, 96), None),
+        ("bitmap", None, 1, (64, 96), "half"),
+        ("bitmap", None, 6, (96, 96), "half"),
+    ],
+)
+def test_raw_backend_preserves_upright_embedded_preview(
+    tmp_path: Path,
+    preview_format: str,
+    jpeg_orientation: int | None,
+    flip: int,
+    preview_size: tuple[int, int],
+    fallback: str | None,
+) -> None:
+    def upright_image(size: tuple[int, int]) -> Image.Image:
+        width, height = size
+        image = Image.new("RGB", size, "red")
+        image.paste("blue", (width // 2, 0, width, height))
+        return image
+
+    preview = upright_image(preview_size)
+    if preview_format == "jpeg":
+        encoded = BytesIO()
+        exif = Image.Exif()
+        if jpeg_orientation is not None:
+            exif[274] = jpeg_orientation
+        preview.save(encoded, format="JPEG", exif=exif)
+        data = encoded.getvalue()
+    else:
+        data = np.asarray(preview)
+    raw = MagicMock()
+    raw.__enter__.return_value = raw
+    iwidth, iheight = (192, 128) if flip == 6 else (128, 192)
+    raw.sizes = SimpleNamespace(iwidth=iwidth, iheight=iheight, flip=flip)
+    raw.extract_thumb.return_value = SimpleNamespace(format=preview_format, data=data)
+    raw.postprocess.return_value = np.asarray(upright_image((64, 96)))
+    rawpy = SimpleNamespace(
+        ThumbFormat=SimpleNamespace(JPEG="jpeg", BITMAP="bitmap"),
+        imread=MagicMock(return_value=raw),
+    )
+    request = DetailRenderRequest(
+        generation=1,
+        asset_id="portrait",
+        source_identity=AssetSourceIdentity.create(tmp_path / "portrait.dng", width=128, height=192),
+        viewport_physical_size=(32, 48),
+        device_pixel_ratio=1,
+        geometry=DetailGeometryState(),
+        reason="initial",
+        decode_level=48,
+    )
+
+    with patch("iPhoto.gui.detail_decode_backend._import_rawpy", return_value=rawpy):
+        surface = RawStillDecodeBackend().decode(request, _Token())
+
+    assert surface.fallback == fallback
+    assert surface.decoded_size == (32, 48)
+    assert surface.image.pixelColor(8, 24).red() > 240
+    assert surface.image.pixelColor(24, 24).blue() > 240
+    assert [call.kwargs["half_size"] for call in raw.postprocess.call_args_list] == (
+        [True] if fallback == "half" else []
+    )
+
+
 def test_raw_backend_checks_cancellation_after_native_preview(tmp_path: Path) -> None:
     source = tmp_path / "cancelled.dng"
     source.write_bytes(b"raw")
     raw = MagicMock()
     raw.__enter__.return_value = raw
     raw.__exit__.return_value = False
+    raw.sizes = SimpleNamespace(iwidth=4000, iheight=3000, flip=0)
     raw.extract_thumb.return_value = SimpleNamespace(
         format="bitmap",
         data=np.zeros((1200, 1600, 3), dtype=np.uint8),

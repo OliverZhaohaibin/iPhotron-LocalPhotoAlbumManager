@@ -82,7 +82,7 @@ Phase 2 still 采样必须同时保留以下事件，并按 `asset_id + generati
   `raw_postprocess`、`raw_surface_convert` 和 `color_stats`。未知几何必须先由 `raw_probe` 修复后再产生
   `level_selected`；每个 cache miss 只能选择 embedded、half、full 之一，不得在同一请求中连续执行
   half 和 full。事件只记录阶段耗时、候选和尺寸，不记录媒体路径。
-- RAW 竖拍样本应覆盖内嵌 JPEG 有方向、无方向和内嵌位图。首次预览、放大后的全图以及重新打开的缓存图应保持同一方向。解码契约 4 会按需重建旧契约的磁盘表面。
+- RAW 样本应覆盖竖拍、180° 和镜像方向，以及带方向标签的内嵌 JPEG、无方向标签的 JPEG 和内嵌位图。方向有歧义时检查去马赛克候选。首次预览、放大后的全图和重开的缓存图应保持同一方向。解码契约 5 会按需重建旧契约的磁盘表面。
 
 开发机可用仓库 NEF 运行非门禁分段微基准；结果只用于定位 codec 阶段，不能替代 packaged SLO：
 

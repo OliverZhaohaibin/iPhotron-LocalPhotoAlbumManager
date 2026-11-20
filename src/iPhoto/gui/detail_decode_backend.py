@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -28,6 +29,7 @@ from iPhoto.utils.deps import load_pillow
 
 _MAX_DETAIL_SURFACE_BYTES = 192 * 1024 * 1024
 _WINDOWS_QT_PREFERRED_SUFFIXES = frozenset({".jpe", ".jpeg", ".jfif", ".jpg"})
+_RAW_FLIP_ORIENTATIONS = {1: 2, 2: 4, 3: 3, 4: 5, 5: 8, 6: 6, 7: 7}
 
 
 class DecodeCancelledError(RuntimeError):
@@ -530,7 +532,7 @@ def _raw_flip(raw: Any) -> int:
 
 
 def _raw_orientation(raw: Any, indexed_orientation: int) -> int:
-    return {3: 3, 5: 8, 6: 6}.get(_raw_flip(raw), indexed_orientation)
+    return _RAW_FLIP_ORIENTATIONS.get(_raw_flip(raw), indexed_orientation)
 
 
 def _raw_visible_size(raw: Any, identity: AssetSourceIdentity) -> QSize:
@@ -541,9 +543,8 @@ def _raw_visible_size(raw: Any, identity: AssetSourceIdentity) -> QSize:
         width = _positive_int(getattr(sizes, "width", 0))
         height = _positive_int(getattr(sizes, "height", 0))
     if width <= 0 or height <= 0:
-        width = max(0, int(identity.width))
-        height = max(0, int(identity.height))
-    if _raw_flip(raw) in (5, 6):
+        return QSize(max(0, int(identity.width)), max(0, int(identity.height)))
+    if _raw_orientation(raw, identity.orientation) in (5, 6, 7, 8):
         width, height = height, width
     return QSize(width, height)
 
@@ -598,7 +599,8 @@ def _qimage_from_raw_thumb(
         return QImage()
     display = display_size or target
     if thumb.format == rawpy.ThumbFormat.JPEG:
-        payload = QByteArray(bytes(thumb.data))
+        jpeg = bytes(thumb.data)
+        payload = QByteArray(jpeg)
         buffer = QBuffer(payload)
         if not buffer.open(QIODevice.OpenModeFlag.ReadOnly):
             return QImage()
@@ -610,6 +612,13 @@ def _qimage_from_raw_thumb(
             transform = QTransform()
             if embedded == QImageIOHandler.Transformation.TransformationNone:
                 transform = _raw_preview_transform(orientation, intrinsic, display)
+                if transform is None or not transform.isIdentity():
+                    # Qt reports TransformationNone for both missing EXIF and
+                    # an explicit orientation of 1 on a display-ready preview.
+                    if _jpeg_declares_upright(jpeg):
+                        transform = QTransform()
+                    elif transform is None:
+                        return QImage()
             if intrinsic.isValid() and not intrinsic.isEmpty():
                 reader_target = target
                 if (
@@ -627,29 +636,42 @@ def _qimage_from_raw_thumb(
         finally:
             buffer.close()
     if thumb.format == rawpy.ThumbFormat.BITMAP:
+        intrinsic = _raw_thumb_size(thumb, rawpy)
+        transform = _raw_preview_transform(orientation, intrinsic, display)
+        if transform is None:
+            return QImage()
         image = _qimage_from_array(thumb.data)
-        transform = _raw_preview_transform(orientation, image.size(), display)
         return image.transformed(transform)
     return QImage()
 
 
+def _jpeg_declares_upright(jpeg: bytes) -> bool:
+    pillow = load_pillow()
+    if pillow is None:
+        return False
+    try:
+        with pillow.Image.open(BytesIO(jpeg)) as image:
+            return image.getexif().get(274) == 1
+    except (OSError, SyntaxError, ValueError, pillow.Image.DecompressionBombError):
+        return False
+
+
 def _raw_preview_transform(
     orientation: int, intrinsic: QSize, display: QSize
-) -> QTransform:
-    """Orient sensor-order pixels when the preview has no independent transform."""
+) -> QTransform | None:
+    """Infer simple quarter turns from the axes of an untagged preview."""
 
-    transform = QTransform()
-    if orientation in (5, 6, 7, 8):
-        # Some cameras bake the quarter turn into the preview itself. Only
-        # non-square sizes distinguish the display axes from the sensor axes.
-        preview_axis = intrinsic.width() - intrinsic.height()
-        display_axis = display.width() - display.height()
-        if preview_axis * display_axis > 0:
-            return transform
-    if orientation in (2, 4, 5, 7):
-        transform.scale(-1, 1)
-    degrees = {3: 180, 4: 180, 5: 90, 6: 90, 7: -90, 8: -90}.get(orientation, 0)
-    return transform.rotate(degrees)
+    if orientation == 1:
+        return QTransform()
+    if orientation not in (6, 8) or intrinsic.isEmpty() or display.isEmpty():
+        return None
+    preview_axis = intrinsic.width() - intrinsic.height()
+    display_axis = display.width() - display.height()
+    if not preview_axis or not display_axis:
+        return None
+    if preview_axis * display_axis > 0:
+        return QTransform()
+    return QTransform().rotate(90 if orientation == 6 else -90)
 
 
 def _postprocess_raw(raw: Any, *, half_size: bool) -> Any:

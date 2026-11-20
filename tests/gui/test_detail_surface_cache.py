@@ -221,7 +221,7 @@ def test_disk_store_uses_v3_sqlite_index(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("filename", "backend", "previous_contract"),
-    [("alpha.png", "imageio", 2), ("portrait.dng", "rawpy", 3)],
+    [("alpha.png", "imageio", 2), ("portrait.dng", "rawpy", 3), ("portrait.dng", "rawpy", 4)],
 )
 def test_disk_store_misses_surfaces_from_old_decoder_contract(
     tmp_path: Path, filename: str, backend: str, previous_contract: int

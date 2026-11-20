@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -32,6 +34,8 @@ from ..infrastructure.services.thumbnail_artifact import thumbnail_artifact_lock
 from ..io.scanner_adapter import ensure_scan_thumbnail
 from ..path_normalizer import compute_album_path
 from ..utils.pathutils import ensure_work_dir
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class _CallbackSignal:
@@ -92,6 +96,7 @@ class LibraryAssetQueryService:
         self._thumbnail_backfill_lock = threading.Lock()
         self._thumbnail_backfill_pending: set[tuple[str, int, int, str]] = set()
         self._thumbnail_backfill_shutdown = False
+        self.thumbnail_ready_committed = _CallbackSignal()
         self.thumbnail_backfill_completed = _CallbackSignal()
         self.thumbnail_backfill_failed = _CallbackSignal()
         self.thumbnail_backfill_progress = _CallbackSignal()
@@ -657,17 +662,39 @@ class LibraryAssetQueryService:
         cache_key: str,
         micro_thumbnail: bytes,
     ) -> bool:
-        updater = getattr(self._repository(), "update_thumbnail_ready", None)
+        if self._thumbnail_backfill_shutdown:
+            return False
+        repository = self._repository()
+        updater = getattr(repository, "update_thumbnail_ready", None)
         if not callable(updater):
             return False
-        return bool(
-            updater(
-                self._library_relative_path(path),
-                micro_thumbnail=micro_thumbnail,
-                thumb_cache_key=cache_key,
-                expected_revision=revision,
-            )
+        rel = unicodedata.normalize("NFC", self._library_relative_path(path))
+        published = updater(
+            rel,
+            micro_thumbnail=micro_thumbnail,
+            thumb_cache_key=cache_key,
+            expected_revision=revision,
         )
+        if published and not self._thumbnail_backfill_shutdown:
+            try:
+                row = repository.get_rows_by_rels([rel]).get(rel)
+                if (
+                    row is not None
+                    and row.get("thumbnail_state") == ThumbnailState.READY.value
+                    and row.get("thumb_cache_key") == cache_key
+                    and row.get("thumb_revision") == revision
+                ):
+                    self.thumbnail_ready_committed.emit(ScanBatchCommitted(
+                        job_id="thumbnail-ready",
+                        root=self.library_root,
+                        collection_revision=0,
+                        ready_count=1,
+                        rows=[row],
+                        stage_elapsed_ms={},
+                    ))
+            except Exception:
+                _LOGGER.exception("Could not notify Gallery of committed thumbnail readiness")
+        return bool(published)
 
     def location_cache_writer(self, root: Path) -> _ScopedLocationCacheWriter:
         """Return an object compatible with legacy asset-entry location writes."""

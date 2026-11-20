@@ -68,6 +68,7 @@ class GalleryWindowRequest:
     purpose: Literal["viewport", "selection_anchor_retry"] = "viewport"
     selection_anchor_retry_attempt: int = 0
     surface_id: str = "gallery"
+    refresh_after_commit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +371,8 @@ class GalleryWindowLoader(QObject):
 
         signature = self._request_signature(request)
         if (
-            self._active_request is not None
+            not request.refresh_after_commit
+            and self._active_request is not None
             and self._request_signature(self._active_request) == signature
         ):
             self.requestsDropped.emit((request.generation,))

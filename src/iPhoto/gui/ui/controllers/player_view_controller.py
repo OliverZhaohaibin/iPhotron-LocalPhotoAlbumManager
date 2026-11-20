@@ -458,6 +458,7 @@ class PlayerViewController(QObject):
         self._current_decode_level: int | str | None = None
         self._request_reason_by_generation: dict[int, str] = {}
         self._pending_zoom_factor = 1.0
+        self._deferred_lod_generation: int | None = None
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
         self._lod_timer.setInterval(80)
@@ -1121,6 +1122,8 @@ class PlayerViewController(QObject):
         transaction: DetailRenderTransaction | None = None,
     ) -> bool:
         """Begin loading ``source`` asynchronously, returning scheduling success."""
+        self._lod_timer.stop()
+        self._deferred_lod_generation = None
         identity = source_identity or AssetSourceIdentity.create(source)
         source = identity.path
         if transaction is not None:
@@ -1644,15 +1647,14 @@ class PlayerViewController(QObject):
 
     def _request_higher_lod(self) -> None:
         identity = self._active_source_identity
-        # Viewport updates during Live Motion must keep the deferred still's
-        # generation intact until that still is submitted and revealed.
-        if (
-            identity is None
-            or self._loading_source is not None
-            or self.is_showing_video()
-            or self._pending_image_generation is not None
-        ):
+        if identity is None or self._loading_source is not None:
             return
+        # Keep the current still generation until its reveal, then retry the
+        # viewport demand that the single-shot timer could not service.
+        if self.is_showing_video() or self._pending_image_generation is not None:
+            self._deferred_lod_generation = self._request_generation
+            return
+        self._deferred_lod_generation = None
         self._request_generation += 1
         generation = self._request_generation
         self._loading_source = identity.path
@@ -1931,6 +1933,10 @@ class PlayerViewController(QObject):
         self._sync_detail_surface_cover()
         self._restore_transition_ui(generation)
         self._accept_still_frame_presented(source, generation)
+        if self._deferred_lod_generation == self._request_generation:
+            self._deferred_lod_generation = None
+            if not self._defer_lod_for_active_render_interaction():
+                self._lod_timer.start()
         emit_detail_event(
             "surface_revealed",
             generation=int(generation),
@@ -2530,6 +2536,7 @@ class PlayerViewController(QObject):
         self._residency_window_generation += 1
         self._preparation_prefetch_queue.clear()
         self._lod_timer.stop()
+        self._deferred_lod_generation = None
         self._cancel_stale_image_workers()
         self._loading_source = None
         self._loading_started_at = None

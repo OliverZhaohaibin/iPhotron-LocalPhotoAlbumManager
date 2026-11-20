@@ -334,6 +334,9 @@ python scripts/sync_macos_map_extension.py --sdk-root ../PySide6-OsmAnd-SDK
 bash scripts/build_nuitka_macos.sh
 ```
 
+The script stages Maps, signs `entrypoint.app`, and records its executable in
+`build-manifest.json` under the selected output directory.
+
 The macOS build defaults to `docs/picture/logo_new.ico` and passes it directly
 to `--macos-app-icon`. Nuitka converts it to ICNS using `imageio`; install
 `imageio` in the selected build interpreter when the preflight reports it

@@ -303,6 +303,36 @@ def _downgrade_to_v1_without_video_columns(database: Path) -> None:
         connection.execute("PRAGMA user_version = 1")
 
 
+def test_probe_upgrades_v5_visible_indexes_in_migration_phase(tmp_path: Path) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DROP INDEX idx_assets_visible_global")
+        connection.execute(
+            "CREATE INDEX idx_assets_visible_global ON assets "
+            "(live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
+            "WHERE thumbnail_state IN ('ready', 'stale') "
+            "AND TRIM(COALESCE(thumb_cache_key, '')) != ''"
+        )
+        connection.execute("PRAGMA user_version = 5")
+    request = LibraryProbeRequest.create(tmp_path)
+    migration_changes: list[bool] = []
+
+    prepared = probe_library(request, on_migration_changed=migration_changes.append)
+
+    assert migration_changes == [True, False]
+    assert prepared.schema_version == CURRENT_SCHEMA_VERSION > 5
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT is_favorite FROM assets").fetchone() == (1,)
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_assets_visible_global'"
+        ).fetchone()[0]
+        assert "thumbnail_state = 'ready'" in index_sql
+    migration_changes.clear()
+    probe_library(request, on_migration_changed=migration_changes.append)
+    assert migration_changes == []
+
+
 def test_prepare_database_adopts_complete_branch_base_schema_without_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

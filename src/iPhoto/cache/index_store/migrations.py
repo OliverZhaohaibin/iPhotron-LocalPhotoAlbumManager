@@ -26,7 +26,7 @@ logger = get_logger()
 # Version 2 adds cached video presentation metadata used by Gallery/Detail reads.
 # Opening an already migrated database must be O(1); in particular it must not
 # revisit every asset row on each desktop launch.
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
 
@@ -435,15 +435,24 @@ class SchemaMigrator:
                     "migration_recovery_failed",
                     f"No migration is available for schema version {next_version}",
                 )
-            conn.execute("BEGIN IMMEDIATE")
             try:
+                conn.execute("BEGIN IMMEDIATE")
                 migration(conn)
                 conn.execute(f"PRAGMA user_version = {next_version}")
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                # Direct repository opens must also distinguish a failed
+                # migration write from index corruption.
+                raise SchemaPreparationError(
+                    _classify_sqlite_operational_error(exc, fallback="migration_failed"),
+                    "Library index migration failed",
+                    operation="migration_write",
+                    native_code=_native_error_code(exc),
+                ) from exc
             except Exception:
                 conn.rollback()
                 raise
-            else:
-                conn.commit()
             current_version = next_version
 
     @staticmethod
@@ -606,6 +615,13 @@ class SchemaMigrator:
         SchemaMigrator._create_indexes(conn)
 
     @staticmethod
+    def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+        """Rebuild Gallery and GPS indexes for the ready-only predicate."""
+
+        # Partial legacy schemas can be missing columns needed by some indexes.
+        SchemaMigrator._create_indexes(conn, strict=_schema_matches_v1(conn))
+
+    @staticmethod
     def prepare_database(
         database_path: Path,
         *,
@@ -725,6 +741,7 @@ class SchemaMigrator:
                     else:
                         SchemaMigrator._migrate_columns(connection)
                         SchemaMigrator._migrate_to_v5(connection)
+                        SchemaMigrator._migrate_to_v6(connection)
                         connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             except sqlite3.OperationalError as exc:
                 code = _classify_sqlite_operational_error(
@@ -921,7 +938,7 @@ class SchemaMigrator:
         )
 
     @staticmethod
-    def _create_indexes(conn: sqlite3.Connection) -> None:
+    def _create_indexes(conn: sqlite3.Connection, *, strict: bool = False) -> None:
         """Create all required indexes for optimal query performance.
         
         Args:
@@ -1038,4 +1055,6 @@ class SchemaMigrator:
             try:
                 conn.execute(index_sql)
             except sqlite3.OperationalError as exc:
+                if strict:
+                    raise
                 logger.warning("Failed to create index: %s", exc)

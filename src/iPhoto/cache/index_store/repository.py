@@ -1418,7 +1418,7 @@ class AssetRepository:
             "live_partner_rel", "aspect_ratio", "media_type", "is_favorite", "is_deleted",
             "has_gps", "thumbnail_state", "location", "micro_thumbnail", "thumb_cache_key",
             "face_status", "video_rotation_cw", "video_linux_180_hint",
-            "source_mtime_ns", "image_orientation", "thumb_revision",
+            "source_mtime_ns", "image_orientation", "thumb_revision", "index_revision",
         )
         select_clause = f"SELECT {', '.join(columns)}"
         first = max(0, int(first))
@@ -1775,18 +1775,24 @@ class AssetRepository:
         thumb_cache_key: str | None = None,
         error: str | None = None,
         expected_revision: str | None = None,
+        expected_asset_id: str | None = None,
+        expected_index_revision: int | None = None,
     ) -> bool:
         """Publish readiness only for the currently desired render revision."""
 
         normalized_rel = unicodedata.normalize("NFC", str(rel))
-        revision_guard = (
-            " AND (thumb_revision = ? OR thumb_revision IS NULL)"
-            if expected_revision is not None
-            else ""
-        )
-        revision_params = (
-            [str(expected_revision)] if expected_revision is not None else []
-        )
+        guards: list[str] = []
+        guard_params: list[str | int] = []
+        if expected_revision is not None:
+            guards.append(" AND (thumb_revision = ? OR thumb_revision IS NULL)")
+            guard_params.append(expected_revision)
+        if expected_asset_id is not None:
+            guards.append(" AND COALESCE(id, '') = ?")
+            guard_params.append(expected_asset_id)
+        if expected_index_revision is not None:
+            guards.append(" AND COALESCE(index_revision, 0) = ?")
+            guard_params.append(expected_index_revision)
+        state_guard = "".join(guards)
         if error:
             error_text = str(error)
             changed = self._db_manager.execute_in_transaction(
@@ -1797,14 +1803,15 @@ class AssetRepository:
                     thumb_revision = COALESCE(?, thumb_revision),
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?{revision_guard}
+                WHERE rel = ?{state_guard}
+                    AND COALESCE(TRIM(thumb_cache_key), '') = ''
                     AND (
                         thumbnail_state != 'failed'
                         OR COALESCE(thumb_error, '') != ?
                     )
                 """,
                 [error_text, expected_revision, _utc_ms(), normalized_rel]
-                + revision_params
+                + guard_params
                 + [error_text],
             )
         else:
@@ -1831,7 +1838,7 @@ class AssetRepository:
                     thumb_error = NULL,
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?{revision_guard}
+                WHERE rel = ?{state_guard}
                     AND ({' OR '.join(change_guards)})
                 """,
                 [
@@ -1841,7 +1848,7 @@ class AssetRepository:
                     _utc_ms(),
                     normalized_rel,
                 ]
-                + revision_params
+                + guard_params
                 + change_params,
             )
         if changed:

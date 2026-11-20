@@ -623,6 +623,7 @@ class SchemaMigrator:
             )
         state_path = database_path.parent / MIGRATION_STATE_NAME
         state = _read_state(state_path)
+        recovering_migration = state is not None
         warnings: list[str] = []
 
         if state is not None:
@@ -630,6 +631,8 @@ class SchemaMigrator:
                 raise SchemaPreparationError(
                     "migration_recovery_failed", "Migration state targets another database"
                 )
+            if state.target_version > CURRENT_SCHEMA_VERSION:
+                raise SchemaPreparationError("future_schema", "Migration belongs to a newer application version")
             if on_migration_started is not None:
                 on_migration_started()
             backup_path = database_path.parent / state.backup_name
@@ -640,13 +643,22 @@ class SchemaMigrator:
                     current_version = int(
                         connection.execute("PRAGMA user_version").fetchone()[0]
                     )
+                if current_version > CURRENT_SCHEMA_VERSION:
+                    raise SchemaPreparationError("future_schema", "Library index uses a newer schema version")
             if current_ok and current_version == state.target_version:
                 if state.stage == "restored_migration_pending":
                     warnings.append("migration_restored")
                 if not _cleanup_migration(state_path, backup_path):
-                    warnings.append("migration_cleanup_pending")
-                return current_version, tuple(warnings)
-            if not current_ok:
+                    if current_version == CURRENT_SCHEMA_VERSION:
+                        return current_version, (*warnings, "migration_cleanup_pending")
+                    raise SchemaPreparationError(
+                        "migration_failed", "Could not clear the completed migration before upgrading",
+                        operation="migration_cleanup",
+                    )
+                # A newer release may still need to upgrade this database. Start
+                # its backup from the committed state, including subsequent edits.
+                state = None
+            elif not current_ok:
                 if not _integrity_ok(backup_path):
                     raise SchemaPreparationError(
                         "migration_recovery_failed",
@@ -665,6 +677,12 @@ class SchemaMigrator:
                 )
         else:
             backup_path = database_path.parent / "unused"
+
+        if state is not None and state.target_version < CURRENT_SCHEMA_VERSION:
+            # A restart between any two remaining version commits must still be
+            # recoverable using the original pre-migration backup.
+            state = replace(state, target_version=CURRENT_SCHEMA_VERSION)
+            _atomic_write_state(state_path, state)
 
         existed = database_path.is_file() and database_path.stat().st_size > 0
         try:
@@ -688,7 +706,7 @@ class SchemaMigrator:
             )
 
         if (
-            state is None
+            not recovering_migration
             and existed
             and source_version < CURRENT_SCHEMA_VERSION
             and on_migration_started is not None

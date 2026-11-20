@@ -1207,3 +1207,52 @@ def test_probe_process_command_uses_qt_application_path_when_packaged(
 
     assert program == packaged_executable
     assert arguments == ["--startup-library-probe", "--stdin"]
+
+
+@pytest.mark.parametrize("previous_committed", [False, True])
+def test_prepare_resumes_previous_release_migration_and_upgrades_to_current(
+    tmp_path: Path, previous_committed: bool
+) -> None:
+    database = tmp_path / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DROP INDEX idx_assets_live_content_id")
+        connection.execute("ALTER TABLE assets DROP COLUMN content_id_key")
+        connection.execute("UPDATE assets SET content_id = ' PAIR '")
+        connection.execute(f"PRAGMA user_version = {4 if previous_committed else 3}")
+
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION, migration_id="previous",
+        database_name=database.name, backup_name=f"{database.name}.migration-previous.bak",
+        source_version=3, target_version=4, stage="migration_pending", started_at_ms=1,
+    )
+    state_path = database.parent / MIGRATION_STATE_NAME
+    state_path.write_text(json.dumps(asdict(state)), encoding="utf-8")
+
+    assert SchemaMigrator.prepare_database(database) == (CURRENT_SCHEMA_VERSION, ())
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT content_id_key, is_favorite FROM assets").fetchone() == (
+            "pair", 1
+        )
+    assert not state_path.exists()
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_prepare_preserves_future_migration_marker(tmp_path: Path) -> None:
+    database = tmp_path / "global_index.db"
+    future = CURRENT_SCHEMA_VERSION + 1
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(f"PRAGMA user_version = {future}")
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION, migration_id="future",
+        database_name=database.name, backup_name=f"{database.name}.migration-future.bak",
+        source_version=CURRENT_SCHEMA_VERSION, target_version=future,
+        stage="migration_pending", started_at_ms=1,
+    )
+    state_path = tmp_path / MIGRATION_STATE_NAME
+    payload = json.dumps(asdict(state))
+    state_path.write_text(payload, encoding="utf-8")
+    with pytest.raises(SchemaPreparationError) as error:
+        SchemaMigrator.prepare_database(database)
+    assert error.value.code == "future_schema"
+    assert state_path.read_text(encoding="utf-8") == payload

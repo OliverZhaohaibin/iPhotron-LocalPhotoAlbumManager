@@ -44,7 +44,7 @@ from ...pets.status import normalize_pet_status
 from ...utils.logging import get_logger
 from ...utils.pathutils import LibraryAssetPathError, ensure_work_dir, resolve_library_asset_path
 from .engine import DatabaseManager
-from .migrations import SchemaMigrator
+from .migrations import MIGRATION_STATE_NAME, SchemaMigrator, SchemaPreparationError
 from .queries import QueryBuilder
 from .recovery import RecoveryService
 from .row_mapper import db_row_to_dict, insert_rows, row_to_db_params
@@ -207,12 +207,12 @@ class AssetRepository:
             self._init_db()
 
     def _init_db(self) -> None:
-        """Initialize the database schema."""
+        """Prepare direct opens with the same recovery rules as the startup probe."""
         try:
-            # Use a transient connection for initialization
-            with closing(sqlite3.connect(self.path, timeout=10.0)) as conn, conn:
-                SchemaMigrator.initialize_schema(conn)
-        except sqlite3.DatabaseError as exc:
+            _, warnings = SchemaMigrator.prepare_database(self.path)
+        except SchemaPreparationError as exc:
+            if exc.code != "db_corrupt" or (self.path.parent / MIGRATION_STATE_NAME).exists():
+                raise
             logger.warning("Detected index.db corruption at %s: %s", self.path, exc)
             recovery = RecoveryService(
                 self.path,
@@ -221,6 +221,9 @@ class AssetRepository:
                 self._insert_rows,
             )
             recovery.recover()
+        else:
+            for warning in warnings:
+                logger.warning("Library index preparation for %s reported %s", self.path, warning)
 
     def transaction(self, *, begin_mode: str | None = None):
         """Context manager for batching multiple operations.

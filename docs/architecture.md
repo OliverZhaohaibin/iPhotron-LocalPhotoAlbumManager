@@ -611,6 +611,9 @@ Desktop library preparation uses the killable helper in
 album discovery must not block the GUI thread. The controller has separate
 probe and migration timeouts and rejects cancelled or superseded results.
 Headless entry points may prepare synchronously outside the GUI.
+Direct repository opens share the helper's backup and recovery workflow.
+Schema preparation serializes upgrades and recovery through an operating-system
+lock on `.iPhoto/startup-migration.lock`.
 
 The helper selects the library's existing work directory, including the legacy
 `.iphoto` spelling, and checks the latest full-library scan for completion.

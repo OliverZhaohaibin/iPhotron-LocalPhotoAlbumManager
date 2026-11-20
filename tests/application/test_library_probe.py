@@ -29,6 +29,7 @@ from iPhoto.bootstrap.library_probe import (
     _probe_process_command,
     probe_library,
 )
+from iPhoto.bootstrap.library_session import create_headless_library_session
 from iPhoto.cache.index_store.migrations import (
     CURRENT_SCHEMA_VERSION,
     MIGRATION_PROTOCOL_VERSION,
@@ -1286,3 +1287,67 @@ def test_prepare_preserves_future_migration_marker(tmp_path: Path) -> None:
         SchemaMigrator.prepare_database(database)
     assert error.value.code == "future_schema"
     assert state_path.read_text(encoding="utf-8") == payload
+
+
+@pytest.mark.parametrize("database_version", [5, CURRENT_SCHEMA_VERSION], ids=["v5", "already-upgraded"])
+def test_headless_open_retires_older_marker_before_desktop_probe(
+    tmp_path: Path, database_version: int,
+) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(f"PRAGMA user_version = {database_version}")
+    state = MigrationState(
+        protocol_version=MIGRATION_PROTOCOL_VERSION,
+        migration_id="older-release",
+        database_name=database.name,
+        backup_name=f"{database.name}.migration-older-release.bak",
+        source_version=4,
+        target_version=5,
+        stage="migration_pending",
+        started_at_ms=1,
+    )
+    state_path = database.parent / MIGRATION_STATE_NAME
+    state_path.write_text(json.dumps(asdict(state)), encoding="utf-8")
+
+    session = create_headless_library_session(tmp_path)
+    try:
+        assert session.asset_queries.favorite_status_for_path(tmp_path / "album/photo.jpg") is True
+    finally:
+        session.shutdown()
+        reset_global_repository()
+
+    assert not state_path.exists()
+    assert probe_library(LibraryProbeRequest.create(tmp_path)).schema_version == CURRENT_SCHEMA_VERSION
+
+
+def test_direct_upgrade_backs_up_before_migrating_and_excludes_another_opener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    _create_branch_base_database(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("PRAGMA user_version = 5")
+
+    migrate = SchemaMigrator._migrate_to_v6
+    state_path = database.parent / MIGRATION_STATE_NAME
+    checked = False
+
+    def verify_backup_and_migrate(connection: sqlite3.Connection) -> None:
+        nonlocal checked
+        state = MigrationState.from_payload(json.loads(state_path.read_text(encoding="utf-8")))
+        with closing(sqlite3.connect(database.parent / state.backup_name)) as backup:
+            assert backup.execute("PRAGMA user_version").fetchone() == (5,)
+            assert backup.execute("SELECT is_favorite FROM assets WHERE rel = 'album/photo.jpg'").fetchone() == (1,)
+        with pytest.raises(SchemaPreparationError) as error:
+            probe_library(LibraryProbeRequest.create(tmp_path))
+        assert error.value.code == "migration_file_busy"
+        checked = True
+        migrate(connection)
+
+    monkeypatch.setattr(SchemaMigrator, "_migrate_to_v6", staticmethod(verify_backup_and_migrate))
+    repository = AssetRepository(tmp_path)
+    repository.close()
+
+    assert checked
+    assert not state_path.exists()

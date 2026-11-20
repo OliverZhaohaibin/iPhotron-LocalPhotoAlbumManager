@@ -5,6 +5,7 @@ It isolates all schema-related concerns from the main repository logic.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sqlite3
@@ -14,6 +15,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import NoReturn
 
 from ...config import RECENTLY_DELETED_DIR_NAME
 from ...domain.models.core import normalise_content_id
@@ -29,6 +31,7 @@ logger = get_logger()
 CURRENT_SCHEMA_VERSION = 6
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
+_MIGRATION_LOCK_NAME = "startup-migration.lock"
 
 _ASSET_COLUMN_MIGRATIONS = {
     "parent_album_path": "ALTER TABLE assets ADD COLUMN parent_album_path TEXT",
@@ -193,7 +196,7 @@ def _classify_filesystem_error(exc: OSError, *, operation: str) -> str:
     return "migration_recovery_failed"
 
 
-def _raise_filesystem_error(exc: OSError, message: str, *, operation: str) -> None:
+def _raise_filesystem_error(exc: OSError, message: str, *, operation: str) -> NoReturn:
     raise SchemaPreparationError(
         _classify_filesystem_error(exc, operation=operation),
         message,
@@ -246,6 +249,51 @@ def _managed_connection(
             connection.commit()
     finally:
         connection.close()
+
+
+@contextmanager
+def _migration_lock(path: Path) -> Iterator[None]:
+    """Serialize backup, migration and cleanup across library openers."""
+
+    try:
+        handle = path.open("a+b")
+    except OSError as exc:
+        _raise_filesystem_error(exc, "Could not open migration lock", operation="migration_lock")
+    with handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise SchemaPreparationError(
+                    "migration_file_busy", "Another opener is preparing the library index",
+                    operation="migration_lock", native_code=_native_error_code(exc),
+                ) from exc
+            _raise_filesystem_error(exc, "Could not lock the library index", operation="migration_lock")
+        yield
+
+
+def _inspect_schema(database_path: Path) -> tuple[int, bool]:
+    try:
+        with _managed_connection(database_path) as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            return version, version == 0 and _schema_matches_v1(connection)
+    except sqlite3.OperationalError as exc:
+        raise SchemaPreparationError(
+            _classify_sqlite_operational_error(exc, fallback="db_open_failed"),
+            "Library index could not be opened",
+            operation="database_open",
+            native_code=_native_error_code(exc),
+        ) from exc
+    except sqlite3.DatabaseError as exc:
+        raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
 
 
 def _table_info(connection: sqlite3.Connection, table: str) -> list[tuple]:
@@ -639,6 +687,24 @@ class SchemaMigrator:
                 operation="workdir_create",
             )
         state_path = database_path.parent / MIGRATION_STATE_NAME
+        if not state_path.exists() and database_path.is_file():
+            version, _ = _inspect_schema(database_path)
+            if version == CURRENT_SCHEMA_VERSION and not state_path.exists():
+                return SchemaMigrator._initialize_database(database_path), ()
+            if version > CURRENT_SCHEMA_VERSION:
+                raise SchemaPreparationError(
+                    "future_schema", "Library index uses a newer schema version"
+                )
+
+        with _migration_lock(database_path.parent / _MIGRATION_LOCK_NAME):
+            return SchemaMigrator._prepare_upgrade(database_path, state_path, on_migration_started)
+
+    @staticmethod
+    def _prepare_upgrade(
+        database_path: Path,
+        state_path: Path,
+        on_migration_started: Callable[[], None] | None,
+    ) -> tuple[int, tuple[str, ...]]:
         state = _read_state(state_path)
         recovering_migration = state is not None
         warnings: list[str] = []
@@ -654,15 +720,12 @@ class SchemaMigrator:
                 on_migration_started()
             backup_path = database_path.parent / state.backup_name
             current_ok = _integrity_ok(database_path)
-            current_version = -1
-            if current_ok:
-                with _managed_connection(database_path) as connection:
-                    current_version = int(
-                        connection.execute("PRAGMA user_version").fetchone()[0]
-                    )
-                if current_version > CURRENT_SCHEMA_VERSION:
-                    raise SchemaPreparationError("future_schema", "Library index uses a newer schema version")
-            if current_ok and current_version == state.target_version:
+            current_version = _inspect_schema(database_path)[0] if current_ok else -1
+            if current_version > CURRENT_SCHEMA_VERSION:
+                raise SchemaPreparationError("future_schema", "Library index uses a newer schema version")
+            # Older direct opens could commit further upgrades without closing
+            # the previous migration record. The verified database is authoritative.
+            if current_ok and current_version >= state.target_version:
                 if state.stage == "restored_migration_pending":
                     warnings.append("migration_restored")
                 if not _cleanup_migration(state_path, backup_path):
@@ -685,9 +748,7 @@ class SchemaMigrator:
                 warnings.append("migration_restored")
                 state = replace(state, stage="restored_migration_pending")
                 _atomic_write_state(state_path, state)
-            elif not (
-                state.source_version <= current_version < state.target_version
-            ):
+            elif current_version < state.source_version:
                 raise SchemaPreparationError(
                     "migration_recovery_failed",
                     "Interrupted migration state does not match the library index",
@@ -702,20 +763,7 @@ class SchemaMigrator:
             _atomic_write_state(state_path, state)
 
         existed = database_path.is_file() and database_path.stat().st_size > 0
-        try:
-            with _managed_connection(database_path) as connection:
-                source_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-                can_adopt_v1 = source_version == 0 and _schema_matches_v1(connection)
-        except sqlite3.OperationalError as exc:
-            code = _classify_sqlite_operational_error(exc, fallback="db_open_failed")
-            raise SchemaPreparationError(
-                code,
-                "Library index could not be opened",
-                operation="database_open",
-                native_code=_native_error_code(exc),
-            ) from exc
-        except sqlite3.DatabaseError as exc:
-            raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
+        source_version, can_adopt_v1 = _inspect_schema(database_path)
 
         if source_version > CURRENT_SCHEMA_VERSION:
             raise SchemaPreparationError(
@@ -796,25 +844,7 @@ class SchemaMigrator:
                 state = replace(state, stage="migration_pending")
             _atomic_write_state(state_path, state)
 
-        try:
-            with _managed_connection(database_path) as connection:
-                SchemaMigrator.initialize_schema(connection)
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        except SchemaPreparationError:
-            raise
-        except sqlite3.OperationalError as exc:
-            code = _classify_sqlite_operational_error(
-                exc, fallback="migration_failed"
-            )
-            raise SchemaPreparationError(
-                code,
-                "Library index migration failed",
-                operation="migration_write",
-                native_code=_native_error_code(exc),
-            ) from exc
-        except sqlite3.DatabaseError as exc:
-            raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
-
+        version = SchemaMigrator._initialize_database(database_path)
         if version != CURRENT_SCHEMA_VERSION or (
             requires_integrity_validation and not _integrity_ok(database_path)
         ):
@@ -827,6 +857,25 @@ class SchemaMigrator:
             if not _cleanup_migration(state_path, backup_path):
                 warnings.append("migration_cleanup_pending")
         return version, tuple(warnings)
+
+    @staticmethod
+    def _initialize_database(database_path: Path) -> int:
+        try:
+            with _managed_connection(database_path) as connection:
+                SchemaMigrator.initialize_schema(connection)
+                return int(connection.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.OperationalError as exc:
+            code = _classify_sqlite_operational_error(
+                exc, fallback="migration_failed"
+            )
+            raise SchemaPreparationError(
+                code,
+                "Library index migration failed",
+                operation="migration_write",
+                native_code=_native_error_code(exc),
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            raise SchemaPreparationError("db_corrupt", "Library index is corrupt") from exc
 
     @staticmethod
     def _migrate_columns(conn: sqlite3.Connection) -> None:

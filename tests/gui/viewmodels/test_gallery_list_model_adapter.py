@@ -587,34 +587,60 @@ def test_rebind_asset_query_service_moves_backfill_completion_signal(
 
     adapter.rebind_asset_query_service(new_service, Path("/library"))
 
-    assert (
-        adapter._handle_thumbnail_backfill_completed
-        not in old_service.thumbnail_backfill_completed.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_completed
-        in new_service.thumbnail_backfill_completed.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_progress
-        not in old_service.thumbnail_backfill_progress.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_progress
-        in new_service.thumbnail_backfill_progress.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_failed
-        not in old_service.thumbnail_backfill_failed.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_failed
-        in new_service.thumbnail_backfill_failed.handlers
-    )
+    for name in ("thumbnail_backfill_completed", "thumbnail_backfill_progress", "thumbnail_backfill_failed"):
+        assert not getattr(old_service, name).handlers
+        assert len(getattr(new_service, name).handlers) == 1
     mock_store.rebind_asset_query_service.assert_called_once_with(
         new_service,
         Path("/library"),
     )
+
+
+def test_library_rebind_discards_queued_backfill_events_for_same_path(
+    mock_store, mock_thumb_service, qapp,
+):
+    old_service = _BackfillService()
+    new_service = _BackfillService()
+    mock_store.asset_query_service = old_service
+    mock_store.record_scan_batch.return_value = True
+    adapter = GalleryListModelAdapter(mock_store, mock_thumb_service)
+    adapter._scan_batch_timer.setInterval(60_000)
+    root = Path("/library")
+    progress, completed, failures, resets = [], [], [], []
+    adapter.thumbnailBackfillProgress.connect(lambda *args: progress.append(args))
+    adapter.thumbnailBackfillCompleted.connect(completed.append)
+    adapter.thumbnailBackfillFailed.connect(lambda *args: failures.append(args))
+    adapter.thumbnailBackfillReset.connect(lambda: resets.append(True))
+    batch = SimpleNamespace(root=root, rows=[{"rel": "old.jpg"}])
+
+    # One completion has reached the model but is waiting for the refresh timer.
+    old_service.thumbnail_backfill_completed.emit(batch)
+    mock_store.record_scan_batch.assert_called_once_with(batch)
+    mock_store.record_scan_batch.reset_mock()
+
+    def emit_old_events():
+        old_service.thumbnail_backfill_progress.emit(root, 0, 1)
+        old_service.thumbnail_backfill_completed.emit(batch)
+        old_service.thumbnail_backfill_failed.emit(root, "old decode error")
+
+    worker = threading.Thread(target=emit_old_events)
+    worker.start()
+    worker.join()
+    adapter.rebind_asset_query_service(new_service, root)
+    qapp.processEvents()
+    adapter._flush_pending_scan_batches()
+
+    mock_store.record_scan_batch.assert_not_called()
+    mock_store.flush_pending_scan_refresh.assert_not_called()
+    mock_store.finish_thumbnail_backfill.assert_not_called()
+    assert (progress, completed, failures) == ([], [], [])
+    assert resets == [True]
+
+    new_service.thumbnail_backfill_progress.emit(root, 0, 1)
+    new_service.thumbnail_backfill_failed.emit(root, "current decode error")
+    assert progress == [(root, 0, 1)]
+    assert failures == [(root, "current decode error")]
+    mock_store.finish_thumbnail_backfill.assert_called_once_with(root)
 
 
 def test_backfill_progress_is_relayed_from_query_service(mock_thumb_service):

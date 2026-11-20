@@ -465,10 +465,20 @@ def test_thumbnail_backfill_completion_releases_requested_window(tmp_path: Path)
         rows=[],
     )
 
+    assert not store.finish_thumbnail_backfill(tmp_path / "old-album")
+    assert not store.record_scan_batch(SimpleNamespace(**{**vars(batch), "root": tmp_path / "old-album"}))
+    assert store._thumbnail_backfill_pending
+
     assert store.record_scan_batch(batch) is False
     assert store._thumbnail_backfill_windows == set()
     assert store._thumbnail_backfill_pending is False
     assert store._pending_scan_refresh is False
+
+    store._thumbnail_backfill_windows = {(0, store.MIN_WINDOW_SIZE)}
+    store._thumbnail_backfill_pending = True
+    assert store.finish_thumbnail_backfill(tmp_path)
+    assert not store._thumbnail_backfill_windows
+    assert not store._thumbnail_backfill_pending
 
 
 def test_prioritize_rows_replaces_old_window_with_new_window() -> None:

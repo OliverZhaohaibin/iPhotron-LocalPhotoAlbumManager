@@ -1463,20 +1463,27 @@ class GalleryCollectionStore:
         revision = getattr(batch, "collection_revision", None)
         if isinstance(revision, int):
             self._collection_revision = max(self._collection_revision, revision)
-        if is_thumbnail_backfill:
-            self._thumbnail_backfill_windows.clear()
-            self._thumbnail_backfill_pending = False
         if root is None:
             return False
+        finished_active_backfill = is_thumbnail_backfill and self.finish_thumbnail_backfill(Path(root))
         if not rows:
             if (
-                is_thumbnail_backfill
+                finished_active_backfill
                 and not self._pending_scan_rels
                 and not self._pending_scan_sort_keys
             ):
                 self._pending_scan_refresh = False
             return False
         return self._record_scan_rows(Path(root), list(rows))
+
+    def finish_thumbnail_backfill(self, root: Path) -> bool:
+        """Release the current selection's backfill requests after a terminal event."""
+
+        if not self._library_roots_match(root, self._active_root or self._library_root):
+            return False
+        self._thumbnail_backfill_windows.clear()
+        self._thumbnail_backfill_pending = False
+        return True
 
     def handle_scan_finished(self, root: Path, success: bool) -> None:
         if not success or self._current_query is None or self._active_root is None:
@@ -1887,6 +1894,7 @@ class GalleryCollectionStore:
                 self.thumbnail_backfill_scheduled.emit()
             return queued
         except Exception as exc:
+            self._thumbnail_backfill_windows.discard(request_key)
             emit_perf_event(
                 "gallery_thumbnail_backfill_failed",
                 first=window_first,

@@ -185,8 +185,7 @@ def test_scan_journal_recovers_after_asset_status_commit_failure(tmp_path: Path)
     store.fail_done = False
 
     recovered = PetIndexCoordinator(tmp_path, asset_repository=store)
-    with recovered._lock:
-        recovered._recover_operations_locked()
+    assert recovered._journal.recover_pending()
     assert store.status == "done"
     with sqlite3.connect(tmp_path / ".iPhoto" / "recognition" / "operations.db") as connection:
         assert (
@@ -249,8 +248,7 @@ def test_terminal_failed_status_is_journaled_and_recovered_without_retry_downgra
 
     store.fail_failed = False
     recovered = PetIndexCoordinator(tmp_path, asset_repository=store)
-    with recovered._lock:
-        recovered._recover_operations_locked()
+    assert recovered._journal.recover_pending()
 
     assert store.status == "failed"
     assert recovered._journal.unfinished() == ()
@@ -335,9 +333,10 @@ def test_pet_batch_cannot_mutate_before_global_journal_ownership(
     ]
 
 
-def test_pet_merge_reports_shutdown_as_temporary_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shutdown", ["begin_shutdown", "close"])
+def test_pet_merge_reports_shutdown_as_temporary_failure(tmp_path: Path, shutdown: str) -> None:
     coordinator = PetIndexCoordinator(tmp_path)
-    coordinator.begin_shutdown()
+    getattr(coordinator, shutdown)()
 
     outcome = coordinator.merge_pets("pet-a", "pet-b")
 
@@ -964,8 +963,7 @@ def test_contract_retirement_recovery_uses_full_assets_and_restores_pending_stat
 
     store.fail_done = False
     recovered = PetIndexCoordinator(tmp_path, asset_repository=store)  # type: ignore[arg-type]
-    with recovered._lock:
-        recovered._recover_operations_locked()
+    assert recovered._journal.recover_pending()
 
     assert store.statuses == {"asset-a": "done", "asset-b": "pending"}
     operation_db = tmp_path / ".iPhoto" / "recognition" / "operations.db"
@@ -1678,8 +1676,7 @@ def test_overlap_reconciliation_recovers_runtime_commit_state_sync(
     assert repository.get_detection("overlap") is None
 
     recovered = PetIndexCoordinator(tmp_path)
-    with recovered._lock:
-        recovered._recover_operations_locked()
+    assert recovered._journal.recover_pending()
     recovered_repository = recovered._repository()
     assert recovered_repository.get_runtime_commit(operation_id)["state_synced"] is True  # type: ignore[index]
     assert recovered._journal.unfinished() == ()
@@ -1766,8 +1763,7 @@ def test_delete_recovery_syncs_state_when_runtime_detection_is_already_missing(
     assert repository.get_runtime_commit(operation_id)["state_synced"] is False  # type: ignore[index]
 
     recovered = PetIndexCoordinator(tmp_path)
-    with recovered._lock:
-        recovered._recover_operations_locked()
+    assert recovered._journal.recover_pending()
     recovered_repository = recovered._repository()
     assert recovered_repository.get_runtime_commit(operation_id)["state_synced"] is True  # type: ignore[index]
     assert recovered._journal.unfinished() == ()
@@ -1817,8 +1813,7 @@ def test_move_and_merge_recover_after_runtime_commit(
     assert repository.get_runtime_commit(operation.operation_id)["state_synced"] is False  # type: ignore[index]
 
     recovered = PetIndexCoordinator(tmp_path)
-    with recovered._lock:
-        recovered._recover_operations_locked()
+    assert recovered._journal.recover_pending()
     recovered_repository = recovered._repository()
     assert recovered_repository.get_runtime_commit(operation.operation_id)["state_synced"] is True  # type: ignore[index]
     assert recovered._journal.unfinished() == ()
@@ -1868,8 +1863,7 @@ def test_local_consolidation_recovers_state_and_pipeline_metadata(
     assert repository.get_runtime_commit(operation.operation_id)["state_synced"] is False  # type: ignore[index]
 
     recovered = PetIndexCoordinator(tmp_path)
-    with recovered._lock:
-        recovered._recover_operations_locked()
+    assert recovered._journal.recover_pending()
     recovered_repository = recovered._repository()
     assert recovered_repository.get_runtime_commit(operation.operation_id)["state_synced"] is True  # type: ignore[index]
     assert recovered_repository.get_scan_metadata("clustering_pipeline_version") == (

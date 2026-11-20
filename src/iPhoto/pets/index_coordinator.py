@@ -99,7 +99,6 @@ class PetIndexCoordinator(QObject):
             self._library_root
         )
         self._owns_journal = mutation_coordinator is None
-        self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PET_JOURNAL_KINDS,
             self._recover_registered_pet_operation,
@@ -114,7 +113,9 @@ class PetIndexCoordinator(QObject):
         self._recovery_error: Exception | None = None
         self._last_mutation_failure: PetMutationFailure | None = None
         try:
-            with self._lock:
+            with self._journal.try_mutation_scope() as acquired:
+                if not acquired:
+                    return
                 if not self._journal.recover_pending():
                     raise self._journal.recovery_error or RuntimeError(
                         "Pets recognition recovery is incomplete."
@@ -144,7 +145,7 @@ class PetIndexCoordinator(QObject):
         self,
         asset_repository: PetAssetRepositoryPort | None,
     ) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._asset_repository = asset_repository
 
     def submit_detected_batch(
@@ -167,8 +168,8 @@ class PetIndexCoordinator(QObject):
         if not detected_batch:
             return None
 
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -399,8 +400,8 @@ class PetIndexCoordinator(QObject):
     def rename_pet(self, pet_id: str, name_or_none: str | None) -> PetSnapshotEvent | None:
         if not pet_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -427,8 +428,8 @@ class PetIndexCoordinator(QObject):
     def set_pet_hidden(self, pet_id: str, hidden: bool) -> bool:
         if not pet_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             if not self._ensure_recovered_locked():
                 return False
@@ -457,8 +458,8 @@ class PetIndexCoordinator(QObject):
     def set_pet_cover(self, pet_id: str, detection_id: str) -> bool:
         if not pet_id or not detection_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             if not self._ensure_recovered_locked():
                 return False
@@ -485,10 +486,10 @@ class PetIndexCoordinator(QObject):
             return changed
 
     def merge_pets(self, source_pet_id: str, target_pet_id: str) -> PetMergeOutcome:
-        with self._lock:
+        with self._journal.try_mutation_scope() as acquired:
             if self._shutdown_requested:
                 return PetMergeOutcome(False, PetMutationFailure.SHUTTING_DOWN)
-            if not self._ensure_recovered_locked():
+            if not acquired or not self._ensure_recovered_locked():
                 return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -532,8 +533,8 @@ class PetIndexCoordinator(QObject):
     def prepare_clustering_pipeline(self, *, clustering_pipeline_target: str) -> int:
         """Durably queue an upgrade without running clustering before scan drain."""
 
-        with self._lock:
-            if self._shutdown_requested or not self._ensure_recovered_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._ensure_recovered_locked():
                 return 0
             return self._repository().prepare_clustering_pipeline(
                 target_version=clustering_pipeline_target
@@ -544,8 +545,8 @@ class PetIndexCoordinator(QObject):
         *,
         clustering_pipeline_target: str,
     ) -> bool:
-        with self._lock:
-            if self._shutdown_requested or not self._ensure_recovered_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._ensure_recovered_locked():
                 return False
             return self._repository().has_pending_clustering_consolidation(
                 target_version=clustering_pipeline_target
@@ -560,8 +561,8 @@ class PetIndexCoordinator(QObject):
     ) -> PetClusteringConsolidationResult | None:
         """Consolidate only components reachable from durable pending seeds."""
 
-        with self._lock:
-            if self._shutdown_requested or not self._ensure_recovered_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
             if not repository.has_pending_clustering_consolidation(
@@ -639,8 +640,8 @@ class PetIndexCoordinator(QObject):
             return result
 
     def delete_detection(self, detection_id: str) -> PetSnapshotEvent | None:
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -678,8 +679,8 @@ class PetIndexCoordinator(QObject):
 
         if not people_boxes_by_asset_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -754,12 +755,12 @@ class PetIndexCoordinator(QObject):
         detection_id: str,
         target_pet_id: str,
     ) -> PetSnapshotEvent | None:
-        with self._lock:
+        with self._journal.try_mutation_scope() as acquired:
             self._last_mutation_failure = None
             if self._shutdown_requested:
                 self._last_mutation_failure = PetMutationFailure.SHUTTING_DOWN
                 return None
-            if not self._ensure_recovered_locked():
+            if not acquired or not self._ensure_recovered_locked():
                 self._last_mutation_failure = PetMutationFailure.RECOVERY_PENDING
                 return None
             repository = self._repository()
@@ -803,8 +804,8 @@ class PetIndexCoordinator(QObject):
         new_pet_id: str,
         new_name: str | None,
     ) -> PetSnapshotEvent | None:
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
@@ -839,11 +840,11 @@ class PetIndexCoordinator(QObject):
             )
 
     def begin_shutdown(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = True
 
     def resume(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = False
 
     def close(self) -> None:

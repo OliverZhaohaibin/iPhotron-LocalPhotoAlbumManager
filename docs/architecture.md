@@ -352,6 +352,9 @@ state guards and recovery handlers must not be bypassed. The coordinator owns
 Unfinished operations and pending event dispatch survive session restarts and
 snapshot rebuilds. Delivery is at-least-once, using stable event ids; recovery
 must retain this behavior rather than assuming a published event cannot replay.
+Writers and recovery handlers acquire the same cross-process lease before
+inspecting unfinished work. A second process can retry after the owner exits
+or finishes the operation.
 
 ### Large Library Query And Scan Contracts
 
@@ -503,6 +506,7 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/pets/pet_state.db` | Durable Pets profiles, names, covers, hidden flags, rejected keys, and merge redirects. |
 | `.iPhoto/pets/thumbnails/` | Cropped pet thumbnails; after a successful commit, prune only displaced candidates unreferenced by runtime detections or durable covers. Never sweep in-flight crops. |
 | `.iPhoto/recognition/operations.db` | Durable recognition mutation journal and event outbox; unfinished recovery and pending dispatch must survive restarts and runtime snapshot rebuilds. |
+| `.iPhoto/recognition/operations.lock` | Writers and recovery handlers hold an operating-system file lock for the duration of a recognition mutation. Process exit releases the lock. |
 | `.ipo` sidecars | Durable non-destructive edit instructions next to source media. |
 | `.iphoto.album.json` / `.iPhoto/manifest.json` | Folder-local album metadata formats. |
 | `.iphoto.album` | Legacy album marker compatibility file. |

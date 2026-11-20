@@ -79,7 +79,6 @@ class PeopleIndexCoordinator(QObject):
             self._library_root
         )
         self._owns_journal = mutation_coordinator is None
-        self._lock = self._journal.execution_lock
         self._journal.register_recovery_handler(
             _PEOPLE_JOURNAL_KINDS,
             self._recover_people_operation_locked,
@@ -89,8 +88,9 @@ class PeopleIndexCoordinator(QObject):
         # own thread regardless of which thread calls _emit_snapshot().
         self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
         try:
-            with self._lock:
-                self._recover_operations_locked()
+            with self._journal.try_mutation_scope() as acquired:
+                if acquired:
+                    self._recover_operations_locked()
         except Exception as exc:  # noqa: BLE001
             self._recovery_error = exc
             LOGGER.error(
@@ -117,7 +117,7 @@ class PeopleIndexCoordinator(QObject):
     ) -> None:
         """Bind the current library asset-index adapter."""
 
-        with self._lock:
+        with self._journal.execution_lock:
             self._asset_repository = asset_repository
 
     def submit_detected_batch(
@@ -131,8 +131,8 @@ class PeopleIndexCoordinator(QObject):
         if not detected_batch:
             return None
 
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             operation_id = self._try_prepare_operation_locked(
                 "people_scan_commit",
@@ -211,8 +211,8 @@ class PeopleIndexCoordinator(QObject):
     def rename_person(self, person_id: str, name_or_none: str | None) -> PeopleSnapshotEvent | None:
         if not person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -240,8 +240,8 @@ class PeopleIndexCoordinator(QObject):
     def set_person_cover(self, person_id: str, face_id: str) -> bool:
         if not person_id or not face_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             changed = repository.set_person_cover(person_id, face_id)
@@ -257,8 +257,8 @@ class PeopleIndexCoordinator(QObject):
 
         if not person_id:
             return False
-        with self._lock:
-            if self._shutdown_requested or not self._recover_operations_locked():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._recover_operations_locked():
                 return False
             repository = self._repository()
             changed = repository.set_person_hidden(person_id, hidden)
@@ -285,8 +285,8 @@ class PeopleIndexCoordinator(QObject):
 
         if not face.face_id or not face.asset_id or not face.person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -332,8 +332,8 @@ class PeopleIndexCoordinator(QObject):
     def delete_face(self, face_id: str) -> PeopleSnapshotEvent | None:
         if not face_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -365,8 +365,8 @@ class PeopleIndexCoordinator(QObject):
     ) -> PeopleSnapshotEvent | None:
         if not face_id or not target_person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -403,8 +403,8 @@ class PeopleIndexCoordinator(QObject):
     ) -> PeopleSnapshotEvent | None:
         if not face_id or not new_person_id:
             return None
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -440,8 +440,8 @@ class PeopleIndexCoordinator(QObject):
 
     def set_person_order(self, person_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(person_id) for person_id in person_ids if person_id)
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             repository.set_person_order(ordered_ids)
@@ -451,8 +451,8 @@ class PeopleIndexCoordinator(QObject):
 
     def set_group_order(self, group_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(group_id) for group_id in group_ids if group_id)
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             repository.set_group_order(ordered_ids)
@@ -467,8 +467,8 @@ class PeopleIndexCoordinator(QObject):
     ) -> bool:
         if not source_person_id or not target_person_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -509,8 +509,8 @@ class PeopleIndexCoordinator(QObject):
         self,
         member_person_ids: Iterable[str],
     ) -> PeopleGroupRecord | None:
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return None
             repository = self._repository()
             normalized_members = tuple(
@@ -546,8 +546,8 @@ class PeopleIndexCoordinator(QObject):
     def set_group_cover(self, group_id: str, asset_id: str) -> bool:
         if not group_id or not asset_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             changed = repository.set_group_cover_asset(group_id, asset_id)
@@ -561,8 +561,8 @@ class PeopleIndexCoordinator(QObject):
     def delete_group(self, group_id: str) -> bool:
         if not group_id:
             return False
-        with self._lock:
-            if self._shutdown_requested:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested:
                 return False
             repository = self._repository()
             operation_id = self._try_prepare_operation_locked(
@@ -597,11 +597,11 @@ class PeopleIndexCoordinator(QObject):
         )
 
     def begin_shutdown(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = True
 
     def resume(self) -> None:
-        with self._lock:
+        with self._journal.execution_lock:
             self._shutdown_requested = False
 
     def close(self) -> None:

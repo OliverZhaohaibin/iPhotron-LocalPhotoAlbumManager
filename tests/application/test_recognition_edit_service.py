@@ -57,7 +57,7 @@ def service_for(record):
     merges = Mock()
     merges.merge.return_value = SimpleNamespace(merged=True)
     mutations = Mock()
-    mutations.mutation_scope.side_effect = nullcontext
+    mutations.try_mutation_scope.side_effect = lambda: nullcontext(True)
     mutations.recover_pending.return_value = True
     service = RecognitionEditService(
         people_service=people,

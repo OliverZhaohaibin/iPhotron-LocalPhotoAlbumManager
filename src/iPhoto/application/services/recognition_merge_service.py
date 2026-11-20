@@ -114,7 +114,12 @@ class RecognitionMergeService:
     def merge(self, source: IdentityRef | str, target: IdentityRef | str) -> IdentityMergeOutcome:
         if self._journal is None:
             return self._merge_locked(source, target)
-        with self._journal.mutation_scope():
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired:
+                return IdentityMergeOutcome(
+                    False, IdentityRef.parse(source), IdentityRef.parse(target),
+                    IdentityMergeFailure.RECOVERY_PENDING,
+                )
             return self._merge_locked(source, target)
 
     def _merge_locked(

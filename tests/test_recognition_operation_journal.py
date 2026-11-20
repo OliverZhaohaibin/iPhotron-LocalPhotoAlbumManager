@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +12,114 @@ import pytest
 
 from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
 from iPhoto.recognition.operation_journal import RecognitionOperationJournal
+
+
+def _hold_unfinished_operation(root, pipe):
+    owner = RecognitionMutationCoordinator(root)
+    with owner.mutation_scope():
+        operation_id = owner.prepare("pet_rename", {"pet_id": "a", "name": "Miso"})
+        pipe.send(operation_id)
+        if pipe.poll(15):
+            pipe.recv()
+        os._exit(0)  # Exercise process death before the applying transition.
+
+
+def _check_forked_leases(owner, root, pipe):
+    new_owner = RecognitionMutationCoordinator(root)
+    for _ in range(2):
+        acquired = []
+        for coordinator in (owner, new_owner):
+            with coordinator.try_mutation_scope() as held:
+                acquired.append(held)
+        pipe.send(acquired)
+        if not pipe.poll(10):
+            return
+        pipe.recv()
+
+
+@pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(), reason="POSIX fork")
+def test_fork_child_can_only_acquire_after_parent_releases(tmp_path):
+    ctx = multiprocessing.get_context("fork")
+    parent, child = ctx.Pipe()
+    owner = RecognitionMutationCoordinator(tmp_path)
+    process = ctx.Process(target=_check_forked_leases, args=(owner, tmp_path, child))
+    try:
+        with owner.mutation_scope():
+            process.start()
+            child.close()
+            assert parent.poll(5)
+            assert parent.recv() == [False, False]
+        parent.send("retry")
+        assert parent.poll(5)
+        assert parent.recv() == [True, True]
+        parent.send("finish")
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+        owner.close()
+
+
+def test_competing_process_cannot_recover_live_owner_and_recovers_after_exit(tmp_path):
+    import numpy as np
+
+    from iPhoto.bootstrap.library_pet_service import create_pet_service
+    from iPhoto.people.index_coordinator import PeopleIndexCoordinator
+    from iPhoto.pets.records import PetMutationFailure, PetRecord
+    from iPhoto.pets.repository_utils import utc_now_iso
+
+    owner = RecognitionMutationCoordinator(tmp_path)
+    pets = create_pet_service(tmp_path, mutation_coordinator=owner)
+    now = utc_now_iso()
+    repo = pets.repository()
+    repo.initialize()
+    pet = PetRecord(
+        pet_id="a", name=None, key_detection_id="d", detection_count=1,
+        center_embedding=np.array([1.0], dtype=np.float32), embedding_dim=1,
+        created_at=now, updated_at=now,
+    )
+    repo.state_repository.ensure_runtime_candidates([pet], [])
+
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    process = ctx.Process(target=_hold_unfinished_operation, args=(tmp_path, child))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(10)
+        operation_id = parent.recv()
+        competing = RecognitionMutationCoordinator(tmp_path)
+        people = PeopleIndexCoordinator(tmp_path, mutation_coordinator=competing)
+        assert not competing.recover_pending()
+        assert competing.try_prepare("people_rename", {}) is None
+        assert pets.merge_pets("a", "b").failure is PetMutationFailure.RECOVERY_PENDING
+        assert not people.set_person_hidden("a", True)
+        assert competing.unfinished_head().operation_id == operation_id
+        assert competing.unfinished_head().state == "prepared"
+        people.close()
+        competing.close()
+        other = RecognitionMutationCoordinator(tmp_path / "other")
+        assert other.recover_pending()
+        other.close()
+        parent.send("exit")
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
+
+    assert owner.recover_pending()
+    assert owner.unfinished() == ()
+    assert owner.pending_events() == ()
+    assert repo.state_repository.get_profile("a").name == "Miso"
+    assert pets.set_pet_hidden("a", True)
+    pets.shutdown()
+    owner.close()
 
 
 def test_unfinished_operations_follow_insertion_sequence(tmp_path: Path) -> None:

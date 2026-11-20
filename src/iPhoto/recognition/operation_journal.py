@@ -300,6 +300,7 @@ class RecognitionOperationJournal:
     def _initialize(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operations'"
             ).fetchone()
@@ -311,7 +312,6 @@ class RecognitionOperationJournal:
                     for row in conn.execute("PRAGMA table_info(operations)").fetchall()
                 }
                 if "sequence" not in columns:
-                    conn.execute("BEGIN IMMEDIATE")
                     self._create_operations_table(conn, "operations_v2")
                     conn.execute(
                         """
@@ -328,6 +328,10 @@ class RecognitionOperationJournal:
                     conn.execute("DROP TABLE operations")
                     conn.execute("ALTER TABLE operations_v2 RENAME TO operations")
             self._initialize_outbox(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recognition_unfinished ON operations(sequence) "
+                "WHERE state != 'finalized'"
+            )
             conn.commit()
 
     @staticmethod

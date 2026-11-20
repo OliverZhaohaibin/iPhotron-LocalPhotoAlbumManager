@@ -17,8 +17,10 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.application.use_cases.scan_library import ScanLibraryResult
+from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.bootstrap.library_session import LibrarySession
 from iPhoto.cache.index_store import get_global_repository
+from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.facade import AppFacade
 from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.runtime_controller import LibraryRuntimeController
@@ -575,6 +577,57 @@ def test_scan_finished_reports_failure_when_finalization_fails(
     assert spy.at(0)[1] is False
 
 
+@pytest.mark.parametrize("pairing_fails", [False, True], ids=["paired", "pairing-failed"])
+def test_recursive_scan_finishes_after_live_photo_pairing(
+    tmp_path: Path,
+    qapp: QApplication,
+    pairing_fails: bool,
+) -> None:
+    root = tmp_path.resolve()
+    rows = [
+        {
+            "rel": "still.jpg", "id": "still", "mime": "image/jpeg", "media_type": 0,
+            "content_id": "live", "thumbnail_state": "ready", "thumb_cache_key": "still",
+        },
+        {
+            "rel": "motion.mov", "id": "motion", "mime": "video/quicktime", "media_type": 1,
+            "content_id": "live", "thumbnail_state": "ready", "thumb_cache_key": "motion",
+        },
+    ]
+    for row in rows:
+        (root / row["rel"]).touch()
+    scanner = Mock()
+    scanner.scan.return_value = iter(rows)
+    service = LibraryScanService(root, scanner=scanner)
+    if pairing_fails:
+        service.pair_album = Mock(side_effect=OSError("pairing failed"))
+
+    manager = LibraryRuntimeController()
+    try:
+        manager.bind_path(root)
+        manager.bind_scan_service(service)
+        query_service = manager.asset_query_service
+        assert query_service is not None
+        observations = []
+
+        def record_completion(_root: Path, success: bool) -> None:
+            window = query_service.read_gallery_asset_window(root, AssetQuery(), 0, 10)
+            complete = service.is_scan_scope_complete(root)
+            observations.append((success, complete, window.total_count))
+
+        manager.scanFinished.connect(record_completion)
+        with patch.object(
+            manager._scan_thread_pool, "start", side_effect=lambda task: task.run(),
+        ) as start:
+            manager.start_scanning(root, ["**/*.jpg", "**/*.mov"], [], startup=True)
+            qapp.processEvents()
+
+        assert observations == ([(False, False, 2)] if pairing_fails else [(True, True, 1)])
+        start.assert_called_once()
+    finally:
+        manager.shutdown()
+
+
 @pytest.mark.parametrize("retry_recognition", [False, True])
 def test_scan_request_is_queued_until_active_scan_finishes(
     tmp_path: Path,
@@ -723,7 +776,7 @@ def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
     scan_service.finalize_scan_result.assert_called_once_with(
         root,
         [],
-        pair_live=False,
+        pair_live=True,
         preserve_modified_after_ms=None,
         current_scan_job_id=None,
         root_only=False,

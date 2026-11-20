@@ -780,6 +780,8 @@ Replacing an asset invalidates both ends of its old Live Photo pair in the same
 transaction as the metadata merge. Favorites, trash state, and restore metadata
 remain durable. Scans that skip pairing keep unaffected pairs and leave the
 compatibility links snapshot to the next pairing pass.
+Desktop scan finalization commits Live Photo roles before recording completion
+and notifying Gallery of the finished scan.
 Metadata commits may create or update Face/Pet `pending`, `retry`, `done`, and
 `skipped` bookkeeping, but scanning does not itself activate model workers.
 Application startup, metadata-scan completion, persisted `pending`/`retry` rows,

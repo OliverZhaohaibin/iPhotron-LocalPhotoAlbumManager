@@ -70,7 +70,6 @@ class ScannerWorker(QRunnable):
         self._failed_count = 0
         self._scan_job_id: str | None = None
         self._scan_started_at_ms: int | None = None
-        self.reconciled_missing_scope = False
         self.reconciliation_deferred = False
 
     @property
@@ -155,7 +154,6 @@ class ScannerWorker(QRunnable):
                         self.reconciliation_deferred = True
                         return
                     if reconciled is True:
-                        self.reconciled_missing_scope = True
                         return
             # An older queued scan may run after a rename but before the
             # watcher reconciliation that carries its destination hints.
@@ -195,7 +193,7 @@ class ScannerWorker(QRunnable):
                     rows = self.scan_service.finalize_scan_result(
                         self._root,
                         rows,
-                        pair_live=self.root_only,
+                        pair_live=True,
                         preserve_modified_after_ms=self._scan_started_at_ms,
                         current_scan_job_id=self._scan_job_id,
                         root_only=self.root_only,

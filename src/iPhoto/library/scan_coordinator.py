@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
-from PySide6.QtCore import QMutexLocker, QRunnable, Qt, QThread
+from PySide6.QtCore import QMutexLocker, Qt, QThread
 
 from ..application.ports.recognition_extension import (
     ModelFailureReason,
@@ -16,43 +16,11 @@ from ..bootstrap.startup_profile import mark
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from ..bootstrap.library_scan_service import LibraryScanService
     from .workers.face_scan_worker import FaceScanWorker
     from .workers.pet_scan_worker import PetScanWorker
     from .workers.scanner_worker import ScannerWorker
 
 LOGGER = get_logger()
-
-
-class _PairingWorker(QRunnable):
-    """Run live-photo pairing off the main thread after a scan completes."""
-
-    def __init__(
-        self,
-        scan_root: Path,
-        scan_service: LibraryScanService | None = None,
-    ) -> None:
-        super().__init__()
-        self._scan_root = scan_root
-        self._scan_service = scan_service
-
-    def run(self) -> None:
-        try:
-            scan_service = self._scan_service
-            if scan_service is None:
-                LOGGER.warning(
-                    "Skipping live photo pairing for %s because no bound scan service is available",
-                    self._scan_root,
-                )
-                return
-            scan_service.pair_album(self._scan_root)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning(
-                "Failed to persist live photo pairings after scan of %s "
-                "(re-scanning the library will retry pairing): %s",
-                self._scan_root,
-                exc,
-            )
 
 
 class ScanCoordinatorMixin:
@@ -625,8 +593,7 @@ class ScanCoordinatorMixin:
         root: Path,
         _rows: List[dict],
     ) -> None:
-        # Clear worker reference before downstream listeners react so a completed
-        # scan does not still appear in-flight while final post-processing runs.
+        # Clear the worker reference before downstream listeners query scan state.
         locker = QMutexLocker(self._scan_buffer_lock)
         if self._current_scanner_worker is not worker:
             cancelled_workers = getattr(self, "_cancelled_scanner_workers", set())
@@ -670,14 +637,8 @@ class ScanCoordinatorMixin:
         # used to add model pressure immediately after startup completion and
         # made a quick window close race QThread destruction.
 
-        # Emit immediately so the UI (status bar, map refresh) can react without
-        # waiting for the potentially slow live-photo pairing step.
         self.scanFinished.emit(root, True)
         self._start_next_deferred_scan()
-
-        # Root media pairing completed in the scan worker with the scoped rows.
-        if not worker.root_only and not getattr(worker, "reconciled_missing_scope", False):
-            self._scan_thread_pool.start(_PairingWorker(root, worker.scan_service))
 
     def _on_scan_error(self, worker: ScannerWorker, root: Path, message: str) -> None:
         locker = QMutexLocker(self._scan_buffer_lock)

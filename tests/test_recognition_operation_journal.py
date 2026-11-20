@@ -38,13 +38,24 @@ def _check_forked_leases(owner, root, pipe):
 
 
 @pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(), reason="POSIX fork")
-def test_fork_child_can_only_acquire_after_parent_releases(tmp_path):
+@pytest.mark.parametrize("alias_name", ["Library", "library"], ids=["same-path", "case-alias"])
+def test_fork_child_can_only_acquire_after_parent_releases(tmp_path, alias_name):
+    root = tmp_path / "Library"
+    root.mkdir()
+    alias = tmp_path / alias_name
+    if not alias.is_dir():
+        pytest.skip("case-sensitive filesystem")
+
     ctx = multiprocessing.get_context("fork")
     parent, child = ctx.Pipe()
-    owner = RecognitionMutationCoordinator(tmp_path)
-    process = ctx.Process(target=_check_forked_leases, args=(owner, tmp_path, child))
+    owner = RecognitionMutationCoordinator(root)
+    alias_owner = RecognitionMutationCoordinator(alias)
+    process = ctx.Process(target=_check_forked_leases, args=(owner, root, child))
     try:
         with owner.mutation_scope():
+            with alias_owner.try_mutation_scope() as acquired:
+                assert acquired
+            alias_owner.close()
             process.start()
             child.close()
             assert parent.poll(5)
@@ -60,6 +71,7 @@ def test_fork_child_can_only_acquire_after_parent_releases(tmp_path):
             process.terminate()
             process.join(5)
         parent.close()
+        alias_owner.close()
         owner.close()
 
 

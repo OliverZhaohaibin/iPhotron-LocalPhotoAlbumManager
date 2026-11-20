@@ -39,20 +39,20 @@ class RecognitionMutationOutcome[T]:
 
 @dataclass(slots=True)
 class _ExecutionLease:
-    path: Path
+    identity: tuple[int, int] | Path
     references: int = 0
     lock: threading.RLock = field(default_factory=threading.RLock)
     handlers_lock: threading.RLock = field(default_factory=threading.RLock)
     _held: bool = False
 
     @contextmanager
-    def try_hold_locked(self) -> Iterator[bool]:
+    def try_hold_locked(self, path: Path) -> Iterator[bool]:
         if self._held:
             yield True
             return
         # A nonblocking OS lock spans commits to all recognition databases.
         # Closing the handle or exiting the process releases it.
-        with self.path.open("a+b") as handle:
+        with path.open("a+b") as handle:
             try:
                 if os.name == "nt":
                     import msvcrt
@@ -79,7 +79,7 @@ RecoveryHandler = Callable[[RecognitionOperation], bool]
 EventSubscriber = Callable[[RecognitionOutboxEvent], None]
 
 
-_EXECUTION_LOCKS: dict[Path, _ExecutionLease] = {}
+_EXECUTION_LOCKS: dict[tuple[int, int] | Path, _ExecutionLease] = {}
 _EXECUTION_LOCKS_GUARD = threading.Lock()
 
 
@@ -98,28 +98,26 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_execution_leases_after_fork)
 
 
-def _acquire_execution_lease(library_root: Path, lock_path: Path) -> _ExecutionLease:
+def _acquire_execution_lease(library_root: Path) -> _ExecutionLease:
     """Share thread reentrancy and an OS-backed lease for one library."""
 
-    resolved = Path(library_root).resolve()
+    # Case aliases must share one descriptor lifetime for POSIX record locks.
+    info = library_root.stat()
+    identity = (info.st_dev, info.st_ino) if info.st_ino else library_root
     with _EXECUTION_LOCKS_GUARD:
-        lease = _EXECUTION_LOCKS.get(resolved)
+        lease = _EXECUTION_LOCKS.get(identity)
         if lease is None:
-            lease = _ExecutionLease(lock_path)
-            _EXECUTION_LOCKS[resolved] = lease
+            lease = _ExecutionLease(identity)
+            _EXECUTION_LOCKS[identity] = lease
         lease.references += 1
         return lease
 
 
-def _release_execution_lease(library_root: Path) -> None:
-    resolved = Path(library_root).resolve()
+def _release_execution_lease(lease: _ExecutionLease) -> None:
     with _EXECUTION_LOCKS_GUARD:
-        lease = _EXECUTION_LOCKS.get(resolved)
-        if lease is None:
-            return
         lease.references -= 1
-        if lease.references <= 0:
-            _EXECUTION_LOCKS.pop(resolved, None)
+        if lease.references == 0:
+            _EXECUTION_LOCKS.pop(lease.identity)
 
 
 class RecognitionMutationCoordinator:
@@ -135,9 +133,8 @@ class RecognitionMutationCoordinator:
         directory = ensure_work_dir(self._library_root) / "recognition"
         directory.mkdir(exist_ok=True)
         self._journal = RecognitionOperationJournal(directory / "operations.db")
-        self._lease = _acquire_execution_lease(
-            self._library_root, directory / "operations.lock"
-        )
+        self._lock_path = directory / "operations.lock"
+        self._lease = _acquire_execution_lease(self._library_root)
         self._closed = False
         self._handlers: dict[str, list[RecoveryHandler]] = {}
         self._subscribers: list[EventSubscriber] = []
@@ -169,7 +166,7 @@ class RecognitionMutationCoordinator:
             if self._closed:
                 yield False
                 return
-            with self._lease.try_hold_locked() as acquired:
+            with self._lease.try_hold_locked(self._lock_path) as acquired:
                 if not acquired:
                     self._recovery_error = BlockingIOError("Another process is updating recognition.")
                 yield acquired
@@ -229,7 +226,7 @@ class RecognitionMutationCoordinator:
             self._handlers.clear()
             self._subscribers.clear()
             self._closed = True
-        _release_execution_lease(self._library_root)
+        _release_execution_lease(self._lease)
 
     def recover_pending(self) -> bool:
         with self.try_mutation_scope() as acquired, self._lease.handlers_lock:

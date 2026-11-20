@@ -781,7 +781,7 @@ def test_main_creates_required_features_in_platform_safe_order(
     assert "windows_detail.created" not in profile_marks
     assert "feature:preview" not in call_order
     assert "feature:people" not in call_order
-    # The shell becomes interactive immediately after the first-paint/watchdog
+    # The shell becomes interactive immediately after the first-paint
     # boundary; library probing and hidden feature creation must not retain the
     # global input filter.
     assert call_order.index("guard:release") < call_order.index("probe:startup-request")

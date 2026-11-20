@@ -105,14 +105,21 @@ def test_first_paint_and_watchdog_start_continuation_once(qapp) -> None:
     assert orchestrator.phase is StartupPhase.INTERACTIVE
 
 
-def test_watchdog_recovers_missing_first_paint(qapp) -> None:
+def test_watchdog_reports_delay_and_waits_for_first_paint(qapp, monkeypatch) -> None:
     calls: list[str] = []
+    events: list[str] = []
+    monkeypatch.setattr(orchestrator_module, "mark", lambda stage, **details: events.append(stage))
     orchestrator = StartupOrchestrator(watchdog_ms=10)
     orchestrator.begin()
     orchestrator.shell_shown(lambda: calls.append("continued"))
 
     orchestrator._on_watchdog()
 
+    assert calls == []
+    assert orchestrator.phase is StartupPhase.SHELL_SHOWN
+    assert "startup.first_paint_watchdog" in events
+    orchestrator.first_painted()
+    orchestrator.first_painted()
     assert calls == ["continued"]
     assert orchestrator.phase is StartupPhase.INTERACTIVE
 

@@ -136,7 +136,7 @@ class StartupOrchestrator(QObject):
         self._attempt.register_cleanup(callback)
 
     def shell_shown(self, continuation: Callable[[], None]) -> None:
-        """Arm the paint fast path and an independent liveness watchdog."""
+        """Wait for the first paint and report delays through the watchdog."""
 
         if self._cancelled:
             return
@@ -288,9 +288,10 @@ class StartupOrchestrator(QObject):
         )
 
     def _on_watchdog(self) -> None:
+        if self._phase is not StartupPhase.SHELL_SHOWN:
+            return
         _LOGGER.warning("First-paint startup watchdog fired after %dms", self._watchdog_ms)
         mark("startup.first_paint_watchdog", generation=self._generation)
-        self._run_continuation("watchdog")
 
     def _run_continuation(self, reason: str) -> None:
         if self._cancelled or self._continuation_started:

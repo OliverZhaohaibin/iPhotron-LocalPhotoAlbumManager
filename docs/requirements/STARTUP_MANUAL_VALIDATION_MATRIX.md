@@ -1,6 +1,6 @@
 # 启动链路人工实机验收包
 
-更新日期：2026-09-04
+更新日期：2026-11-19
 
 > 当前启动合同以 [`docs/architecture.md`](../architecture.md) 为准。Windows、
 > macOS、Linux 均必须在 top-level `show()` 前完成隐藏 Detail shell 和三个
@@ -33,6 +33,8 @@
 每个平台还需用隔离图库覆盖
 [图库准备与恢复契约](../architecture.md#library-preparation-and-schema-recovery)：
 
+- 延迟首次绘制超过 1.8 秒，确认日志记录 `startup.first_paint_watchdog`。恢复窗口绘制后，
+  `first_paint` 应先于 `interactive`、Detail 多媒体初始化和图库探测。
 - 当前 schema 重开不重复全表修复；旧 schema 的版本升级保留有效 SQLite
   在线备份及迁移状态，覆盖已提交 WAL 数据和升级中关窗后的恢复。
 - 兼容的完整无版本 schema 走事务内接纳路径；未知 schema 不得套用该快路径。

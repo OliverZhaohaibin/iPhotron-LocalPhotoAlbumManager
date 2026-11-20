@@ -137,6 +137,8 @@ For startup, the native hierarchy is prepared before `show()` and optional work
 follows `firstPainted`. The [runtime contract](architecture.md#runtime-contract)
 and [startup runbook](requirements/STARTUP_BENCHMARK_RUNBOOK.md) own lifecycle,
 import boundaries, profiler fields, and scheduling requirements.
+In a startup profile, `main_window.first_paint` should precede
+`desktop_coordinator_runtime.started` and `startup.probe.started`.
 Enable local checkpoint logging with:
 
 ```bash

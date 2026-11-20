@@ -167,16 +167,6 @@ class PeopleIndexCoordinator(QObject):
                 min_samples=min_samples,
                 existing_faces=previous_faces,
             )
-            done_id_set = set(done_ids)
-            changed_person_ids = tuple(
-                sorted(
-                    {
-                        str(face.person_id)
-                        for face in clustered_faces
-                        if face.person_id and face.asset_id in done_id_set
-                    }
-                )
-            )
             session.commit(
                 repository,
                 distance_threshold=distance_threshold,
@@ -190,6 +180,11 @@ class PeopleIndexCoordinator(QObject):
             try:
                 self._mark_retry_asset_ids(retry_ids)
                 self._mark_done_asset_ids(done_ids)
+                event = self._dispatch_runtime_commit_locked(
+                    operation_id,
+                    repository.get_runtime_commit(operation_id),
+                    retry_ids=retry_ids,
+                )
             except Exception as exc:
                 LOGGER.error(
                     "People snapshot committed for %s, but bookkeeping failed: %s",
@@ -200,13 +195,7 @@ class PeopleIndexCoordinator(QObject):
                 raise PeopleSnapshotCommittedError(
                     "Face scan committed, but updating scan bookkeeping failed."
                 ) from exc
-            event = self._emit_snapshot(
-                operation_id=operation_id,
-                changed_asset_ids=tuple(done_ids + retry_ids),
-                changed_person_ids=changed_person_ids,
-                dispatch=False,
-            )
-            self._finish_operation_locked(operation_id, event)
+            self._prune_runtime_commits_locked(repository)
             return event
 
     def rename_person(self, person_id: str, name_or_none: str | None) -> PeopleSnapshotEvent | None:
@@ -685,35 +674,48 @@ class PeopleIndexCoordinator(QObject):
             raise RuntimeError(
                 f"Missing People runtime commit during recovery: {operation.operation_id}"
             )
-        changed_asset_ids = tuple(runtime_commit.get("changed_asset_ids", ()))
+        retry_ids = []
         if operation.kind == "people_scan_commit":
             retry_ids = [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
             self._mark_retry_asset_ids(retry_ids)
             self._mark_done_asset_ids(
                 [str(value) for value in operation.payload.get("done_asset_ids", ()) if value]
             )
-            changed_asset_ids = (*changed_asset_ids, *retry_ids)
+            if not runtime_commit.get("scan_changes_complete"):
+                # Old scan markers recorded only the batch and cannot replay
+                # an exact delta. Refresh the current snapshot as well.
+                faces = repository.get_all_faces()
+                runtime_commit["changed_asset_ids"] = (
+                    *runtime_commit.get("changed_asset_ids", ()),
+                    *(face.asset_id for face in faces if face.asset_id),
+                )
+                runtime_commit["changed_person_ids"] = (
+                    *runtime_commit.get("changed_person_ids", ()),
+                    *(face.person_id for face in faces if face.person_id),
+                )
+        self._dispatch_runtime_commit_locked(operation.operation_id, runtime_commit, retry_ids=retry_ids)
+        return True
+
+    def _dispatch_runtime_commit_locked(
+        self,
+        operation_id: str,
+        runtime_commit: dict[str, object] | None,
+        *,
+        retry_ids: Iterable[str] = (),
+    ) -> PeopleSnapshotEvent:
+        if runtime_commit is None:
+            raise RuntimeError(f"Missing People runtime commit: {operation_id}")
         event = self._emit_snapshot(
-            operation_id=operation.operation_id,
-            changed_asset_ids=changed_asset_ids,
+            operation_id=operation_id,
+            changed_asset_ids=(*runtime_commit.get("changed_asset_ids", ()), *retry_ids),
             changed_person_ids=tuple(runtime_commit.get("changed_person_ids", ())),
             changed_group_ids=tuple(runtime_commit.get("changed_group_ids", ())),
             person_redirects=dict(runtime_commit.get("person_redirects", {})),
             group_redirects=dict(runtime_commit.get("group_redirects", {})),
             dispatch=False,
         )
-        self._journal.commit_and_dispatch(
-            operation.operation_id,
-            {
-                "changed_asset_ids": list(event.changed_asset_ids),
-                "changed_person_ids": list(event.changed_person_ids),
-                "changed_group_ids": list(event.changed_group_ids),
-                "person_redirects": event.person_redirects,
-                "group_redirects": event.group_redirects,
-            },
-            lambda: self._scheduleEmit.emit(event),
-        )
-        return True
+        self._dispatch_operation_locked(operation_id, event)
+        return event
 
     def _finish_operation_locked(
         self,
@@ -722,6 +724,10 @@ class PeopleIndexCoordinator(QObject):
     ) -> None:
         repository = self._repository()
         repository.complete_runtime_state_sync(operation_id)
+        self._dispatch_operation_locked(operation_id, event)
+        self._prune_runtime_commits_locked(repository)
+
+    def _dispatch_operation_locked(self, operation_id: str, event: PeopleSnapshotEvent) -> None:
         self._journal.commit_and_dispatch(
             operation_id,
             {
@@ -733,7 +739,6 @@ class PeopleIndexCoordinator(QObject):
             },
             lambda: self._scheduleEmit.emit(event),
         )
-        self._prune_runtime_commits_locked(repository)
 
     def _prune_runtime_commits_locked(self, repository: FaceRepository | None = None) -> None:
         """Trim finalized markers on a best-effort basis under the mutation lease."""

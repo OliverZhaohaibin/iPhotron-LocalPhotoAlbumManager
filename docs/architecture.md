@@ -352,6 +352,9 @@ state guards and recovery handlers must not be bypassed. The coordinator owns
 Unfinished operations and pending event dispatch survive session restarts and
 snapshot rebuilds. Delivery is at-least-once, using stable event ids; recovery
 must retain this behavior rather than assuming a published event cannot replay.
+People scan commits persist the affected asset and identity IDs with the
+runtime snapshot, including assignments changed outside the current batch.
+Live delivery and recovery replay use the same change set.
 Writers and recovery handlers acquire the same cross-process lease before
 inspecting unfinished work. A second process can retry after the owner exits
 or finishes the operation.

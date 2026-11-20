@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from .face_repository import FaceMutationResult
 from .pipeline import (
     DetectedAssetFaces,
     build_person_records_from_faces,
@@ -134,6 +135,45 @@ class FaceScanSession:
         )
         return clustered_auto_faces, persons
 
+    def _snapshot_changes(
+        self,
+        previous_faces: list[FaceRecord],
+        previous_persons: list[PersonRecord],
+        faces: list[FaceRecord],
+        persons: list[PersonRecord],
+    ) -> FaceMutationResult:
+        old_assignments = {(face.face_id, face.asset_id, face.person_id) for face in previous_faces}
+        new_assignments = {(face.face_id, face.asset_id, face.person_id) for face in faces}
+        changes = old_assignments ^ new_assignments
+        changed_assets = set(self._faces_by_asset_id)
+        changed_assets.update(asset_id for _, asset_id, _ in changes if asset_id)
+        changed_people = {person_id for _, _, person_id in changes if person_id}
+        changed_people.update(
+            face.person_id for face in faces
+            if face.person_id and face.asset_id in self._faces_by_asset_id
+        )
+
+        # A retained assignment can get a different label or promotion as the
+        # cluster changes. Compare display fields without comparing embeddings
+        # or the timestamps regenerated for all identities during a rebuild.
+        old_display = {
+            person.person_id: (person.name, person.profile_state)
+            for person in previous_persons
+        }
+        changed_display = {
+            person.person_id for person in persons
+            if person.person_id in old_display
+            and old_display[person.person_id] != (person.name, person.profile_state)
+        }
+        changed_people.update(changed_display)
+        changed_assets.update(
+            face.asset_id for face in faces if face.asset_id and face.person_id in changed_display
+        )
+        return FaceMutationResult(
+            changed_asset_ids=tuple(sorted(changed_assets)),
+            changed_person_ids=tuple(sorted(changed_people)),
+        )
+
     def commit(
         self,
         repository: FaceRepository,
@@ -172,7 +212,10 @@ class FaceScanSession:
             sync_runtime_state=False,
             operation_id=operation_id,
             operation_kind="people_scan_commit",
-            changed_asset_ids=self._faces_by_asset_id,
+            scan_changes=(
+                self._snapshot_changes(previous_faces, previous_persons, clustered_faces, persons)
+                if operation_id is not None else None
+            ),
         )
         state_repository = repository.state_repository
         try:

@@ -92,7 +92,7 @@ class FaceRepository:
         sync_runtime_state: bool = True,
         operation_id: str | None = None,
         operation_kind: str = "people_scan_commit",
-        changed_asset_ids: Iterable[str] | None = None,
+        scan_changes: FaceMutationResult | None = None,
     ) -> None:
         self.initialize()
         if self._state_repo is not None:
@@ -156,22 +156,18 @@ class FaceRepository:
                 person_rows,
             )
             if operation_id is not None:
-                if changed_asset_ids is None:
-                    asset_ids = sorted({face.asset_id for face in faces if face.asset_id})
-                    person_ids = {person.person_id for person in persons if person.person_id}
-                else:
-                    asset_ids = list(dict.fromkeys(changed_asset_ids))
-                    changed = set(asset_ids)
-                    person_ids = {
-                        face.person_id for face in faces if face.person_id and face.asset_id in changed
-                    }
+                changes = scan_changes or FaceMutationResult(
+                    changed_asset_ids=tuple(sorted({face.asset_id for face in faces if face.asset_id})),
+                    changed_person_ids=tuple(sorted({person.person_id for person in persons if person.person_id})),
+                )
                 self._write_runtime_commit(
                     conn,
                     operation_id,
                     {
                         "operation_kind": operation_kind,
-                        "changed_asset_ids": asset_ids,
-                        "changed_person_ids": sorted(person_ids),
+                        "changed_asset_ids": changes.changed_asset_ids,
+                        "changed_person_ids": changes.changed_person_ids,
+                        "scan_changes_complete": scan_changes is not None,
                     },
                 )
             conn.commit()
@@ -385,6 +381,12 @@ class FaceRepository:
                 "people_move_face_new",
             }:
                 self._state_repo.sync_scan_results(persons, faces)
+            if operation_kind == "people_scan_commit":
+                payload["changed_group_ids"] = self._group_ids_for_identity_refs(
+                    IdentityRef("person", str(person_id))
+                    for person_id in payload.get("changed_person_ids", ())
+                    if person_id
+                )
             if operation_kind == "people_delete_face":
                 face_key = str(payload.get("face_key") or "")
                 if face_key:

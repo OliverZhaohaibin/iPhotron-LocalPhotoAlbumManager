@@ -12,6 +12,7 @@ import pytest
 from PIL import Image
 
 from iPhoto.application.services.recognition_merge_service import RecognitionMergeService
+from iPhoto.application.services.recognition_query_service import RecognitionQueryService
 from iPhoto.bootstrap.library_people_service import (
     create_people_asset_repository,
     create_people_service,
@@ -2346,6 +2347,7 @@ def test_people_index_coordinator_commits_realtime_dashboard_snapshot(tmp_path: 
 
     assert event is not None
     assert event.changed_asset_ids == ("asset-new",)
+    assert event.changed_group_ids == (group.group_id,)
     assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "done"
 
     summaries, groups, pending = service.load_dashboard()
@@ -2675,8 +2677,8 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
     pending = coordinator._journal.unfinished_head()
     marker = repository.get_runtime_commit(pending.operation_id)
     assert marker["state_synced"]
-    assert marker["changed_asset_ids"] == ["asset-new"]
-    assert marker["changed_person_ids"] == [summaries[0].person_id]
+    assert marker["changed_asset_ids"] == ["asset-new", "asset-shared"]
+    assert set(marker["changed_person_ids"]) == {"person-a", summaries[0].person_id}
     repository.record_runtime_commit("newer", {"operation_kind": "people_scan_commit"}, state_synced=True)
     restarted = get_people_index_coordinator(
         library_root, asset_repository=create_people_asset_repository(library_root)
@@ -2692,6 +2694,78 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
     assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "done"
     assert repository.get_runtime_commit(pending.operation_id) is None
     assert repository.get_runtime_commit("newer") is not None
+
+
+@pytest.mark.parametrize("dispatch", ["live", "recovered", "legacy-recovered"])
+def test_people_scan_refreshes_annotations_for_faces_reclustered_outside_the_batch(
+    tmp_path: Path, qapp, dispatch: str,
+) -> None:
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "existing.jpg", "id": "existing", "media_type": 0, "face_status": "done"},
+        {"rel": "other.jpg", "id": "other", "media_type": 0, "face_status": "done"},
+        {"rel": "new.jpg", "id": "new", "media_type": 0, "face_status": "pending"},
+    ])
+    people = create_people_service(tmp_path)
+    pets = create_pet_service(tmp_path)
+    try:
+        repository = people.repository()
+        coordinator = people.coordinator
+        assert repository is not None and coordinator is not None
+
+        def unassigned_face(asset_id: str, embedding: list[float]) -> FaceRecord:
+            return _face_record_with_embedding(
+                face_id=asset_id,
+                face_key=f"key-{asset_id}",
+                asset_id=asset_id,
+                asset_rel=f"{asset_id}.jpg",
+                person_id=None,
+                embedding=np.asarray(embedding, dtype=np.float32),
+            )
+
+        repository.replace_all([
+            unassigned_face("existing", [1.0, 0.0]),
+            unassigned_face("other", [0.0, 1.0]),
+        ], [])
+        query = RecognitionQueryService(tmp_path, people_service=people, pet_service=pets)
+        assert query.load_asset_annotations("existing").faces[0].canonical_identity_id is None
+        unchanged = query.load_asset_annotations("other")
+        events = []
+        coordinator.snapshotCommitted.connect(events.append)
+        coordinator.snapshotCommitted.connect(lambda event: query.invalidate(event.changed_asset_ids))
+
+        detected = [DetectedAssetFaces("new", "new.jpg", [unassigned_face("new", [1.0, 0.0])])]
+        options = dict(distance_threshold=0.6, min_samples=2)
+        if dispatch == "live":
+            assert coordinator.submit_detected_batch(detected, **options) is not None
+        else:
+            with patch.object(store, "update_face_statuses", side_effect=RuntimeError("locked")):
+                with pytest.raises(PeopleSnapshotCommittedError):
+                    coordinator.submit_detected_batch(detected, **options)
+            pending = coordinator._journal.unfinished_head()
+            assert pending is not None
+            if dispatch == "legacy-recovered":
+                marker = repository.get_runtime_commit(pending.operation_id)
+                assert marker is not None
+                marker.pop("scan_changes_complete")
+                marker["changed_asset_ids"] = ["new"]
+                repository.record_runtime_commit(pending.operation_id, marker, state_synced=True)
+            assert coordinator._journal.recover_pending()
+
+        qapp.processEvents()
+        assert len(events) == 1
+        expected_assets = {"existing", "new"}
+        if dispatch == "legacy-recovered":
+            expected_assets.add("other")
+        else:
+            assert query.load_asset_annotations("other") is unchanged
+        assert set(events[0].changed_asset_ids) == expected_assets
+        assigned = query.load_asset_annotations("existing").faces[0].canonical_identity_id
+        assert assigned is not None
+        assert events[0].changed_person_ids == (assigned,)
+    finally:
+        pets.shutdown()
+        people.shutdown()
 
 
 def test_face_scan_worker_keeps_done_when_runtime_history_pruning_fails(

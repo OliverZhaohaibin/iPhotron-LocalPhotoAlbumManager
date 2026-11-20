@@ -322,14 +322,22 @@ def test_orientation_backfill_preserves_indexed_metadata_without_exiftool(
     repository.write_rows([{
         **metadata, "rel": asset.name, "id": f"as_{compute_file_id(asset)}",
         "ts": int(stat.st_mtime * 1_000_000), "bytes": stat.st_size,
-        "image_orientation": 0, "thumbnail_state": "stale",
+        "image_orientation": 0, "thumbnail_state": "stale", "is_favorite": False,
     }])
-    monkeypatch.setattr(scanner_adapter._metadata_provider, "get_metadata_batch", lambda _paths: [])
+
+    def extract_after_favorite_change(_paths):
+        repository.set_favorite_status(asset.name, True)
+        return []
+
+    monkeypatch.setattr(
+        scanner_adapter._metadata_provider, "get_metadata_batch", extract_after_favorite_change,
+    )
 
     LibraryScanService(tmp_path).rescan_album(tmp_path)
 
     row = repository.get_rows_by_rels([asset.name])[asset.name]
     assert {key: row[key] for key in metadata} == metadata
+    assert row["is_favorite"]
     assert (row["w"], row["h"], row["image_orientation"], row["aspect_ratio"]) == (20, 40, 6, .5)
     assert row["thumbnail_state"] == "ready" and row["thumb_cache_key"]
 

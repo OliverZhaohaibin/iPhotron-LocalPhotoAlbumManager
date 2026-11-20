@@ -67,8 +67,9 @@ def merge_scan_row(
     merged = dict(scanned_row)
 
     if existing_row is not None:
+        # Cached scan rows can contain state captured before a user edit.
         for field in _PRESERVED_SCAN_STATE_FIELDS:
-            if field in existing_row and (field not in merged or merged.get(field) in (None, "")):
+            if field in existing_row:
                 merged[field] = existing_row.get(field)
         _preserve_location_state(merged, existing_row)
         _preserve_current_thumbnail_revision(

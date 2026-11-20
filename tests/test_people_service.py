@@ -2666,6 +2666,32 @@ def test_people_index_coordinator_preserves_committed_snapshot_when_done_status_
     assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "pending"
     assert call_count["value"] == 3
 
+    # This runtime marker is synced, but the journal still owes bookkeeping and
+    # event delivery. Age it beyond the history limit while recovery is blocked.
+    from iPhoto.people import face_repository
+
+    monkeypatch.setattr(face_repository, "_RUNTIME_COMMIT_HISTORY_LIMIT", 1)
+    pending = coordinator._journal.unfinished_head()
+    marker = repository.get_runtime_commit(pending.operation_id)
+    assert marker["state_synced"]
+    assert marker["changed_asset_ids"] == ["asset-new"]
+    assert marker["changed_person_ids"] == [summaries[0].person_id]
+    repository.record_runtime_commit("newer", {"operation_kind": "people_scan_commit"}, state_synced=True)
+    restarted = get_people_index_coordinator(
+        library_root, asset_repository=create_people_asset_repository(library_root)
+    )
+    assert restarted._journal.recovery_pending
+    assert repository.get_runtime_commit(pending.operation_id) == marker
+
+    monkeypatch.setattr(global_repo, "update_face_statuses", original_update_face_statuses)
+    recovered = get_people_index_coordinator(
+        library_root, asset_repository=create_people_asset_repository(library_root)
+    )
+    assert recovered._journal.unfinished() == ()
+    assert global_repo.get_rows_by_ids(["asset-new"])["asset-new"]["face_status"] == "done"
+    assert repository.get_runtime_commit(pending.operation_id) is None
+    assert repository.get_runtime_commit("newer") is not None
+
 
 def test_face_scan_worker_does_not_mark_retry_after_committed_snapshot_error(
     tmp_path: Path,

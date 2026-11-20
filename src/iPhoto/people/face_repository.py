@@ -44,6 +44,8 @@ from .repository_utils import (
 )
 from .state_repository import FaceStateRepository
 
+_RUNTIME_COMMIT_HISTORY_LIMIT = 1000
+
 
 @dataclass(frozen=True)
 class FaceMutationResult:
@@ -90,6 +92,7 @@ class FaceRepository:
         sync_runtime_state: bool = True,
         operation_id: str | None = None,
         operation_kind: str = "people_scan_commit",
+        changed_asset_ids: Iterable[str] | None = None,
     ) -> None:
         self.initialize()
         if self._state_repo is not None:
@@ -153,17 +156,22 @@ class FaceRepository:
                 person_rows,
             )
             if operation_id is not None:
+                if changed_asset_ids is None:
+                    asset_ids = sorted({face.asset_id for face in faces if face.asset_id})
+                    person_ids = {person.person_id for person in persons if person.person_id}
+                else:
+                    asset_ids = list(dict.fromkeys(changed_asset_ids))
+                    changed = set(asset_ids)
+                    person_ids = {
+                        face.person_id for face in faces if face.person_id and face.asset_id in changed
+                    }
                 self._write_runtime_commit(
                     conn,
                     operation_id,
                     {
                         "operation_kind": operation_kind,
-                        "changed_asset_ids": sorted(
-                            {face.asset_id for face in faces if face.asset_id}
-                        ),
-                        "changed_person_ids": sorted(
-                            {person.person_id for person in persons if person.person_id}
-                        ),
+                        "changed_asset_ids": asset_ids,
+                        "changed_person_ids": sorted(person_ids),
                     },
                 )
             conn.commit()
@@ -278,6 +286,25 @@ class FaceRepository:
         payload = json.loads(str(row["payload_json"] or "{}"))
         payload["state_synced"] = bool(row["state_synced"])
         return payload
+
+    def prune_synced_runtime_commits(self) -> None:
+        """Trim old markers once the owning journal has finalized its operations."""
+
+        if not self._db_path.is_file():
+            return
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                DELETE FROM people_runtime_commits
+                WHERE state_synced = 1 AND rowid < (
+                    SELECT rowid FROM people_runtime_commits
+                    ORDER BY rowid DESC LIMIT 1 OFFSET ?
+                )
+                """,
+                (_RUNTIME_COMMIT_HISTORY_LIMIT - 1,),
+            )
+            conn.commit()
 
     def complete_runtime_state_sync(self, operation_id: str) -> dict[str, object] | None:
         payload = self.get_runtime_commit(operation_id)

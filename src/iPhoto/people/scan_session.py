@@ -172,6 +172,7 @@ class FaceScanSession:
             sync_runtime_state=False,
             operation_id=operation_id,
             operation_kind="people_scan_commit",
+            changed_asset_ids=self._faces_by_asset_id,
         )
         state_repository = repository.state_repository
         try:

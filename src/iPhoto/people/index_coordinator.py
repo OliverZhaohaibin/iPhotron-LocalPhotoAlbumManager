@@ -89,8 +89,8 @@ class PeopleIndexCoordinator(QObject):
         self._scheduleEmit.connect(self._fire_snapshot, Qt.ConnectionType.QueuedConnection)
         try:
             with self._journal.try_mutation_scope() as acquired:
-                if acquired:
-                    self._recover_operations_locked()
+                if acquired and self._recover_operations_locked():
+                    self._repository().prune_synced_runtime_commits()
         except Exception as exc:  # noqa: BLE001
             self._recovery_error = exc
             LOGGER.error(
@@ -684,16 +684,17 @@ class PeopleIndexCoordinator(QObject):
             raise RuntimeError(
                 f"Missing People runtime commit during recovery: {operation.operation_id}"
             )
+        changed_asset_ids = tuple(runtime_commit.get("changed_asset_ids", ()))
         if operation.kind == "people_scan_commit":
-            self._mark_retry_asset_ids(
-                [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
-            )
+            retry_ids = [str(value) for value in operation.payload.get("retry_asset_ids", ()) if value]
+            self._mark_retry_asset_ids(retry_ids)
             self._mark_done_asset_ids(
                 [str(value) for value in operation.payload.get("done_asset_ids", ()) if value]
             )
+            changed_asset_ids = (*changed_asset_ids, *retry_ids)
         event = self._emit_snapshot(
             operation_id=operation.operation_id,
-            changed_asset_ids=tuple(runtime_commit.get("changed_asset_ids", ())),
+            changed_asset_ids=changed_asset_ids,
             changed_person_ids=tuple(runtime_commit.get("changed_person_ids", ())),
             changed_group_ids=tuple(runtime_commit.get("changed_group_ids", ())),
             person_redirects=dict(runtime_commit.get("person_redirects", {})),
@@ -718,7 +719,8 @@ class PeopleIndexCoordinator(QObject):
         operation_id: str,
         event: PeopleSnapshotEvent,
     ) -> None:
-        self._repository().complete_runtime_state_sync(operation_id)
+        repository = self._repository()
+        repository.complete_runtime_state_sync(operation_id)
         self._journal.commit_and_dispatch(
             operation_id,
             {
@@ -730,6 +732,8 @@ class PeopleIndexCoordinator(QObject):
             },
             lambda: self._scheduleEmit.emit(event),
         )
+        if self._journal.unfinished_head() is None:
+            repository.prune_synced_runtime_commits()
 
     def _reject_operation_locked(self, operation_id: str, error: str) -> None:
         self._journal.transition(operation_id, "finalized", error=error)

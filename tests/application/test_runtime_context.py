@@ -216,6 +216,30 @@ def test_library_epoch_advances_for_open_and_close(tmp_path: Path) -> None:
     assert context.library_epoch == 2
 
 
+def test_explicit_bind_supersedes_saved_library_probe(tmp_path: Path) -> None:
+    from iPhoto.bootstrap.library_probe import ValidatedPreparedLibrary, probe_library
+
+    saved = tmp_path / "saved"
+    chosen = tmp_path / "chosen"
+    saved.mkdir()
+    chosen.mkdir()
+    context, library, _runtime = _runtime_context(saved)
+    request = context.request_startup_library_probe()
+    validated = ValidatedPreparedLibrary.create(probe_library(request))
+    assert context.is_current_startup_probe(request.request_id)
+
+    chosen_session = context.open_library(chosen)
+    try:
+        assert context.request_startup_library_probe() is None
+        assert not context.is_current_startup_probe(request.request_id)
+        with pytest.raises(RuntimeError, match="superseded"):
+            context.commit_validated_library(validated)
+        assert context.library_session is chosen_session
+        assert library.root() == chosen
+    finally:
+        context.close_library()
+
+
 def test_new_epoch_is_visible_before_session_bind_callback(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     library_root.mkdir()

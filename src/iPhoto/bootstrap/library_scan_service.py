@@ -41,8 +41,7 @@ from ..index_sync_service import (
     update_index_snapshot,
 )
 from ..infrastructure.services.filesystem_media_scanner import FilesystemMediaScanner
-from ..domain.models.scan import ScanStage
-from ..domain.models.scan import ScanBatchCommitted
+from ..domain.models.scan import ScanBatchCommitted, ScanStage, scan_job_completed
 from ..io.scanner_adapter import process_media_paths
 from ..media_classifier import ALL_IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ..path_normalizer import compute_album_path
@@ -670,7 +669,7 @@ class LibraryScanService:
             )
 
         latest = self._newer_scan_job(exact, covering)
-        return self._scan_job_completed(latest)
+        return scan_job_completed(latest)
 
     def scan_specific_files(
         self,
@@ -1002,12 +1001,6 @@ class LibraryScanService:
         if self._album_path(scan_root):
             return self.library_root / rel
         return scan_root / rel
-
-    @staticmethod
-    def _scan_job_completed(job: dict[str, Any] | None) -> bool:
-        if not job:
-            return False
-        return str(job.get("status") or "") == "completed" and job.get("finished_at") is not None
 
     @staticmethod
     def _newer_scan_job(

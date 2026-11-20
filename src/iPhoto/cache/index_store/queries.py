@@ -51,6 +51,19 @@ class QueryBuilder:
     _COLLECTION_SORT_COLUMNS = frozenset({"sort_ts", "ts", "dt", "id", "rel", "bytes"})
 
     @staticmethod
+    def build_latest_scan_job(root: str, scope: str | None) -> tuple[str, list[str]]:
+        where = "root = ?"
+        params = [root]
+        if scope is not None:
+            where += " AND scope = ?"
+            params.append(scope)
+        return (
+            f"SELECT * FROM scan_jobs WHERE {where} "
+            "ORDER BY COALESCE(updated_at, started_at, 0) DESC, started_at DESC, rowid DESC LIMIT 1",
+            params,
+        )
+
+    @staticmethod
     def build_filter_clauses(
         filter_params: Optional[Dict[str, Any]]
     ) -> Tuple[List[str], List[Any]]:

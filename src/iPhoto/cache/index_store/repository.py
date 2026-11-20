@@ -26,7 +26,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from ...config import WORK_DIR_NAME
+from ...config import GLOBAL_INDEX_DB_NAME
 from ...domain.models.core import normalise_content_id
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...infrastructure.services.performance_events import (
@@ -52,9 +52,6 @@ from .scan_merge import conflicting_thumbnail_revisions
 from .scan_merge import merge_scan_rows as merge_scan_rows_payload
 
 logger = get_logger()
-
-# Database filename for the global index
-GLOBAL_INDEX_DB_NAME = "global_index.db"
 
 # SQLite supports at most SQLITE_MAX_VARIABLE_NUMBER bound parameters per query
 # (compile-time default 999, raised to 32766 in SQLite ≥3.32).  Use a
@@ -129,34 +126,27 @@ def get_global_repository(library_root: Path) -> "AssetRepository":
     with _global_lock:
         resolved_root = library_root.resolve()
         
+        credential = _prepared_roots.pop(resolved_root, None)
+        if (
+            credential is None
+            and _global_instance is not None
+            and _global_instance.library_root == resolved_root
+        ):
+            return _global_instance
+        if credential is not None:
+            matches_current = getattr(credential, "matches_current", None)
+            if not callable(matches_current) or not matches_current():
+                raise RuntimeError("prepared repository credential is stale")
+
+        repository = AssetRepository(resolved_root, initialize=credential is None)
+        if credential is not None and repository.path != getattr(credential, "database_path", None):
+            raise RuntimeError("prepared repository credential is stale")
         if _global_instance is not None:
-            # Verify the instance matches the requested root
-            if _global_instance.library_root.resolve() == resolved_root:
-                return _global_instance
-            # Different root requested - close old instance and create new one
             logger.info(
-                "Switching global database from %s to %s",
-                _global_instance.library_root,
-                resolved_root,
+                "Rebinding global database from %s to %s", _global_instance.path, repository.path
             )
             _global_instance.close()
-        
-        credential = _prepared_roots.pop(resolved_root, None)
-        skip_initialization = False
-        if credential is not None:
-            expected_database = resolved_root / WORK_DIR_NAME / GLOBAL_INDEX_DB_NAME
-            matches_current = getattr(credential, "matches_current", None)
-            skip_initialization = (
-                getattr(credential, "database_path", None) == expected_database
-                and callable(matches_current)
-                and bool(matches_current())
-            )
-            if not skip_initialization:
-                raise RuntimeError("prepared repository credential is stale")
-        _global_instance = AssetRepository(
-            resolved_root,
-            initialize=not skip_initialization,
-        )
+        _global_instance = repository
         return _global_instance
 
 
@@ -1261,17 +1251,7 @@ class AssetRepository:
     ) -> Dict[str, Any] | None:
         """Return the newest scan job matching *root* and optional *scope*."""
 
-        where = ["root = ?"]
-        params: list[Any] = [root]
-        if scope is not None:
-            where.append("scope = ?")
-            params.append(scope)
-        sql = (
-            "SELECT * FROM scan_jobs WHERE "
-            + " AND ".join(where)
-            + " ORDER BY COALESCE(updated_at, started_at, 0) DESC, "
-            "COALESCE(finished_at, 0) DESC LIMIT 1"
-        )
+        sql, params = QueryBuilder.build_latest_scan_job(root, scope)
         conn = self._db_manager.get_connection()
         should_close = conn != self._db_manager._conn
         try:

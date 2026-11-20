@@ -38,9 +38,11 @@ from ..config import (
     ALBUM_MANIFEST_NAMES,
     ALL_WORK_DIR_NAMES,
     EXPORT_DIR_NAME,
+    GLOBAL_INDEX_DB_NAME,
     RECENTLY_DELETED_DIR_NAME,
     WORK_DIR_NAME,
 )
+from ..utils.pathutils import resolve_work_dir
 
 _RESERVED_NAMES = frozenset(
     name.casefold()
@@ -480,11 +482,14 @@ def _snapshot_albums(root: Path) -> tuple[tuple[PreparedAlbum, ...], tuple[str, 
 def _database_snapshot(
     root: Path, on_migration_changed: Callable[[bool], None] | None
 ) -> tuple[Path, int, bool, tuple[str, ...]]:
-    database_path = root / WORK_DIR_NAME / "global_index.db"
+    work_dir = resolve_work_dir(root) or root / WORK_DIR_NAME
+    database_path = work_dir / GLOBAL_INDEX_DB_NAME
     # Schema creation/migration is intentionally performed in this killable
     # helper, never on the GUI thread.  Versioned migrations make the common
     # already-current path a constant-time PRAGMA check.
     from ..cache.index_store.migrations import SchemaMigrator
+    from ..cache.index_store.queries import QueryBuilder
+    from ..domain.models.scan import scan_job_completed
 
     migration_started = False
 
@@ -500,15 +505,13 @@ def _database_snapshot(
     if migration_started and on_migration_changed is not None:
         on_migration_changed(False)
     with closing(sqlite3.connect(database_path, timeout=0.5)) as connection:
+        connection.row_factory = sqlite3.Row
         try:
-            row = connection.execute(
-                "SELECT 1 FROM scan_jobs WHERE status = 'completed' "
-                "AND scope = 'library' AND root = ? LIMIT 1",
-                (root.as_posix(),),
-            ).fetchone()
+            sql, params = QueryBuilder.build_latest_scan_job(root.as_posix(), "library")
+            row = connection.execute(sql, params).fetchone()
         except sqlite3.OperationalError:
             row = None
-    return database_path, schema_version, row is not None, warnings
+    return database_path, schema_version, scan_job_completed(dict(row) if row else None), warnings
 
 
 def _unix_mount_profile(path: Path) -> StorageProfile | None:
@@ -838,7 +841,11 @@ class LibraryProbeController(QObject):
             if prepared.request_id != request.request_id:
                 raise ValueError("request id mismatch")
             root = prepared.root
-            expected_database = root / WORK_DIR_NAME / "global_index.db"
+            # The helper selected the on-disk spelling. Keep GUI validation
+            # lexical here; the repository checks its selected path on bind.
+            allowed_databases = {
+                root / name / GLOBAL_INDEX_DB_NAME for name in ALL_WORK_DIR_NAMES
+            }
             requested_root = Path(request.path).expanduser().absolute()
             root_matches = os.path.normcase(os.fspath(requested_root)) == os.path.normcase(
                 os.fspath(root)
@@ -858,7 +865,7 @@ class LibraryProbeController(QObject):
                 not root.is_absolute()
                 or Path(os.path.normpath(root)) != root
                 or not root_matches
-                or prepared.database_path != expected_database
+                or prepared.database_path not in allowed_databases
                 or not album_paths_valid
             ):
                 self.failed.emit(_failure(request.request_id, "root_mismatch"))

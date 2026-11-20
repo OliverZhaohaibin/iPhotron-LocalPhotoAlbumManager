@@ -500,16 +500,17 @@ def test_settings_initialization_failure_emits_one_failed_terminal(
     assert terminals == ["startup.failed"]
 
 
-@pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
-@pytest.mark.parametrize("emit_startup_ready", (True, False))
-def test_main_creates_required_features_in_platform_safe_order(
+def _run_saved_library_startup(
     monkeypatch,
     platform: str,
     emit_startup_ready: bool,
-) -> None:
+    *,
+    supersede_at: str | None = None,
+):
     call_order: list[str] = []
     profile_marks: list[str] = []
     delayed_callbacks = []
+    probe_is_current = True
     fake_color_role = type(
         "ColorRole",
         (),
@@ -633,6 +634,7 @@ def test_main_creates_required_features_in_platform_safe_order(
                     "request_startup_library_probe": (
                         lambda self: SimpleNamespace(request_id="startup-request")
                     ),
+                    "is_current_startup_probe": lambda self, _request_id: probe_is_current,
                     "commit_prepared_library": (
                         lambda self, prepared, *, defer_scan=False: call_order.append(
                             f"commit:{prepared.request_id}:{defer_scan}"
@@ -655,13 +657,21 @@ def test_main_creates_required_features_in_platform_safe_order(
             self.failed = _FakeSignal()
 
         def start(self, request) -> None:
+            nonlocal probe_is_current
             call_order.append(f"probe:{request.request_id}")
+            if supersede_at == "failure":
+                probe_is_current = False
+                self.failed.emit(SimpleNamespace(request_id=request.request_id))
+                return
             self.ready.emit(
                 SimpleNamespace(
                     request_id=request.request_id,
                     warnings=(),
                 )
             )
+            if supersede_at == "commit":
+                # The result was accepted and its commit is queued for the next GUI turn.
+                probe_is_current = False
 
         def cancel(self) -> None:
             call_order.append("probe:cancel")
@@ -767,6 +777,17 @@ def test_main_creates_required_features_in_platform_safe_order(
     from iPhoto.gui.main import main
 
     assert main([]) == 0
+    return call_order, profile_marks, delayed_callbacks
+
+
+@pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
+@pytest.mark.parametrize("emit_startup_ready", (True, False))
+def test_main_creates_required_features_in_platform_safe_order(
+    monkeypatch, platform: str, emit_startup_ready: bool
+) -> None:
+    call_order, profile_marks, delayed_callbacks = _run_saved_library_startup(
+        monkeypatch, platform, emit_startup_ready
+    )
 
     detail_index = call_order.index("feature:detail")
     prepare_index = call_order.index("prepare:detail")
@@ -796,6 +817,17 @@ def test_main_creates_required_features_in_platform_safe_order(
         callback()
     assert call_order.index("select") < call_order.index("scan")
     assert call_order.count("scan") == 1
+
+
+@pytest.mark.parametrize("supersede_at", ["failure", "commit"])
+def test_superseded_startup_probe_preserves_interactive_selection(monkeypatch, supersede_at):
+    calls, _marks, _callbacks = _run_saved_library_startup(
+        monkeypatch, "linux", False, supersede_at=supersede_at
+    )
+    assert "commit:startup-request:True" not in calls
+    assert "select" not in calls
+    assert calls.count("warmup") == 1
+    assert calls.count("scan") == 1
 
 
 def test_main_defers_pending_map_extension_until_map_feature(monkeypatch) -> None:

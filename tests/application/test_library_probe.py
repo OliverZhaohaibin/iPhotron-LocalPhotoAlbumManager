@@ -37,7 +37,12 @@ from iPhoto.cache.index_store.migrations import (
     SchemaMigrator,
     SchemaPreparationError,
 )
-from iPhoto.cache.index_store.repository import AssetRepository
+from iPhoto.cache.index_store.repository import (
+    AssetRepository,
+    get_global_repository,
+    mark_repository_prepared,
+    reset_global_repository,
+)
 from iPhoto.domain.models.query import CollectionQuery
 
 
@@ -89,26 +94,39 @@ def test_probe_returns_two_level_album_snapshot_without_creating_work_dir(
     assert prepared.storage_kind == "local"
 
 
-def test_probe_reads_schema_and_completed_scan_without_writing(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("status", "finished_at", "expected"),
+    [
+        ("completed", 2, True),
+        ("completed", None, False),
+        ("running", None, False),
+        ("failed", 2, False),
+    ],
+)
+def test_probe_reads_latest_library_scan(
+    tmp_path: Path, status: str, finished_at: int | None, expected: bool
+) -> None:
     library = tmp_path / "library"
     work_dir = library / ".iPhoto"
     work_dir.mkdir(parents=True)
     database = work_dir / "global_index.db"
+    SchemaMigrator.prepare_database(database)
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
-        connection.execute(
-            "CREATE TABLE scan_jobs (status TEXT NOT NULL, scope TEXT NOT NULL, root TEXT)"
-        )
-        connection.execute(
-            "INSERT INTO scan_jobs(status, scope, root) VALUES ('completed', 'library', ?)",
-            (library.as_posix(),),
+        connection.executemany(
+            "INSERT INTO scan_jobs(job_id, root, scope, status, started_at, updated_at, finished_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("old", library.as_posix(), "library", "completed", 1, 2, 2),
+                ("latest", library.as_posix(), "library", status, 2, 2, finished_at),
+                ("root-only", library.as_posix(), "root_media", "completed", 3, 3, 3),
+            ],
         )
 
     prepared = probe_library(LibraryProbeRequest.create(library))
     round_trip = PreparedLibrary.from_payload(prepared.to_payload())
 
     assert round_trip.schema_version == CURRENT_SCHEMA_VERSION
-    assert round_trip.scan_complete is True
+    assert round_trip.scan_complete is expected
     assert round_trip.database_path == database
 
 
@@ -1030,12 +1048,14 @@ def test_controller_ignores_late_result_after_cancel(qapp, tmp_path: Path) -> No
     assert failures == []
 
 
-@pytest.mark.parametrize("legacy_schema", [False, True])
-def test_controller_real_helper_round_trip(qapp, tmp_path: Path, legacy_schema: bool) -> None:
+@pytest.mark.parametrize("existing_work_dir", [None, ".iPhoto", ".iphoto"])
+def test_controller_real_helper_round_trip(
+    qapp, tmp_path: Path, existing_work_dir: str | None
+) -> None:
     library = tmp_path / "library"
     library.mkdir()
-    if legacy_schema:
-        _create_legacy_database(library / ".iPhoto" / "global_index.db")
+    if existing_work_dir:
+        _create_legacy_database(library / existing_work_dir / "global_index.db")
     request = LibraryProbeRequest.create(library)
     controller = LibraryProbeController()
     ready = []
@@ -1053,6 +1073,21 @@ def test_controller_real_helper_round_trip(qapp, tmp_path: Path, legacy_schema: 
     assert ready[0].request_id == request.request_id
     assert ready[0].schema_version == CURRENT_SCHEMA_VERSION
     assert controller._process is None
+    prepared = ready[0].consume()
+    expected_dir = existing_work_dir or ".iPhoto"
+    assert prepared.database_path == library.resolve() / expected_dir / "global_index.db"
+    try:
+        mark_repository_prepared(prepared.root, prepared.credential)
+        repository = get_global_repository(prepared.root)
+        assert repository.path == prepared.database_path
+        if existing_work_dir:
+            with closing(sqlite3.connect(repository.path)) as connection:
+                rows = connection.execute("SELECT rel FROM assets").fetchall()
+                assert rows == [("album/photo.jpg",)]
+        workspace_names = [p.name for p in library.iterdir() if p.name.casefold() == ".iphoto"]
+        assert workspace_names == [expected_dir]
+    finally:
+        reset_global_repository()
 
 
 @pytest.mark.parametrize(

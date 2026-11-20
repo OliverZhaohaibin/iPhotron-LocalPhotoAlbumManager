@@ -608,6 +608,11 @@ album discovery must not block the GUI thread. The controller has separate
 probe and migration timeouts and rejects cancelled or superseded results.
 Headless entry points may prepare synchronously outside the GUI.
 
+The helper selects the library's existing work directory, including the legacy
+`.iphoto` spelling, and checks the latest full-library scan for completion.
+Selecting a library while the helper runs supersedes its request. The queued
+commit verifies the request's library epoch before changing the active session.
+
 - Opening a current schema must not repeat full-table repair/backfill. Schema
   changes use versioned migrations and explicit upgrade tests.
 - Versioned upgrades of an existing older index create an online SQLite backup

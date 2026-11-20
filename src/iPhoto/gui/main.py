@@ -964,10 +964,11 @@ def main(argv: list[str] | None = None) -> int:
             prerequisite=prerequisite,
         )
 
-    def _continue_after_library_ready(generation: int) -> None:
+    def _continue_after_library_ready(generation: int, *, select_initial: bool = True) -> None:
         if not startup.is_current(generation):
             return
         startup.transition(StartupPhase.LIBRARY_READY)
+        library_epoch = getattr(context, "library_epoch", None)
         startup_scan_enqueued = False
 
         def _run_idle_startup_jobs() -> None:
@@ -1034,11 +1035,12 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         def _select_initial_collection() -> None:
-            mark("startup_gallery.selection_requested")
-            if len(arguments) > 1:
-                coordinator_runtime.gallery.open_album_from_path(Path(arguments[1]))
-            else:
-                window.ui.sidebar.select_all_photos(emit_signal=True)
+            if select_initial and getattr(context, "library_epoch", None) == library_epoch:
+                mark("startup_gallery.selection_requested")
+                if len(arguments) > 1:
+                    coordinator_runtime.gallery.open_album_from_path(Path(arguments[1]))
+                else:
+                    window.ui.sidebar.select_all_photos(emit_signal=True)
             if not warmup_armed:
                 _enqueue_idle_startup_jobs()
 
@@ -1047,6 +1049,14 @@ def main(argv: list[str] | None = None) -> int:
             generation,
             _select_initial_collection,
         )
+
+    def _finish_if_probe_superseded(generation: int, request_id: str) -> bool:
+        check = getattr(context, "is_current_startup_probe", None)
+        if not callable(check) or check(request_id):
+            return False
+        mark("startup.probe.finished", generation=generation, result="superseded")
+        _continue_after_library_ready(generation, select_initial=False)
+        return True
 
     def _probe_ready(validated) -> None:
         generation = int(active_probe.get("generation", -1))
@@ -1059,15 +1069,17 @@ def main(argv: list[str] | None = None) -> int:
         ):
             return
         active_probe.clear()
-        mark(
-            "startup.probe.finished",
-            generation=generation,
-            result="success",
-            storage_kind=getattr(validated, "storage_kind", "unknown"),
-            warnings=validated.warnings,
-        )
 
         def _commit_validated_library() -> None:
+            if _finish_if_probe_superseded(generation, validated.request_id):
+                return
+            mark(
+                "startup.probe.finished",
+                generation=generation,
+                result="success",
+                storage_kind=getattr(validated, "storage_kind", "unknown"),
+                warnings=validated.warnings,
+            )
             committer(validated, defer_scan=True)
             restored = "migration_restored" in validated.warnings
             cleanup_pending = "migration_cleanup_pending" in validated.warnings
@@ -1105,6 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
         ):
             return
         active_probe.clear()
+        if _finish_if_probe_superseded(generation, failure.request_id):
+            return
         mark(
             "startup.probe.finished",
             generation=generation,
@@ -1141,6 +1155,7 @@ def main(argv: list[str] | None = None) -> int:
         mark("startup.probe.started", generation=generation)
         if request is None or not callable(committer):
             active_probe.clear()
+            already_bound = getattr(context, "library_session", None) is not None
             context.resume_startup_tasks(defer_scan=True)
             mark(
                 "startup.probe.finished",
@@ -1148,7 +1163,7 @@ def main(argv: list[str] | None = None) -> int:
                 result="unbound",
                 storage_kind="unbound",
             )
-            _continue_after_library_ready(generation)
+            _continue_after_library_ready(generation, select_initial=not already_bound)
             return
         active_probe.clear()
         active_probe.update(

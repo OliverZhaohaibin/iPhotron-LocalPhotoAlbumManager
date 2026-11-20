@@ -90,6 +90,7 @@ class RuntimeContext:
         repr=False,
     )
     _pending_basic_library_path: Path | None = field(init=False, default=None, repr=False)
+    _startup_probe: tuple[str, int] | None = field(init=False, default=None, repr=False)
     _deferred_startup_scan_root: Path | None = field(init=False, default=None, repr=False)
 
     @property
@@ -260,7 +261,12 @@ class RuntimeContext:
         candidate = self._pending_basic_library_path
         if candidate is None:
             return None
-        return LibraryProbeRequest.create(candidate, timeout_ms=timeout_ms)
+        request = LibraryProbeRequest.create(candidate, timeout_ms=timeout_ms)
+        self._startup_probe = (request.request_id, self.library_epoch)
+        return request
+
+    def is_current_startup_probe(self, request_id: str) -> bool:
+        return self._startup_probe == (request_id, self.library_epoch)
 
     def commit_prepared_library(
         self,
@@ -344,6 +350,12 @@ class RuntimeContext:
         from .library_session import LibrarySession
         from ..errors import LibraryUnavailableError
 
+        if (
+            validated is not None
+            and self._startup_probe is not None
+            and not self.is_current_startup_probe(validated.request_id)
+        ):
+            raise RuntimeError("Startup library request was superseded")
         normalized = (
             Path(prepared.root)
             if prepared is not None
@@ -432,6 +444,11 @@ class RuntimeContext:
             )
             if callable(bind_asset_operation_service):
                 bind_asset_operation_service(self.library_session.asset_operations)
+        # An explicit bind owns selection and scanning from now on, including
+        # when it happens before the saved-library helper has been launched.
+        if prepared is None:
+            self._pending_basic_library_path = None
+            self._deferred_startup_scan_root = None
         return self.library_session
 
     def close_library(self) -> None:

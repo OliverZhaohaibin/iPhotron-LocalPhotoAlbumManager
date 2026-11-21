@@ -14,8 +14,8 @@ pytest.importorskip(
 )
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QLocale, QObject, QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtCore import QEvent, QLocale, QObject, QPoint, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLabel, QMenu, QPushButton, QWidget
 
 from iPhoto.application.services.recognition_merge_service import (
@@ -70,16 +70,19 @@ def dashboard_translations(monkeypatch, tmp_path: Path, qapp: QApplication):
         translations.set_language("system")
 
 
-def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -> None:
+def test_cancelled_drag_merge_shows_single_confirmation_and_keeps_preview_order(
+    monkeypatch, qapp: QApplication
+) -> None:
     widget = PeopleDashboardWidget()
+    board = widget._board
+    board.resize(800, 500)
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
         PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
     ]
     widget._populate_cards()
 
-    cards = widget._board.visible_cards()
-    assert len(cards) == 2
+    source, target = board.visible_cards()
 
     confirm_calls: list[int] = []
 
@@ -88,13 +91,19 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
         return False
 
     monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(_confirm))
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
-    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+    order_changed = Mock()
+    board.orderChanged.connect(order_changed)
 
-    widget._board.proximity_pair = (cards[0], cards[1])
-    widget._board.finish_drag(cards[0])
+    source.begin_drag()
+    source.move(source.pos() + QPoint(100, 0))
+    board.update_drag(source)
+    assert board.visible_cards() == [target, source]
+    board.finish_drag(source)
+    source.end_drag()
 
     assert len(confirm_calls) == 1
+    assert board.visible_cards() == [target, source]
+    order_changed.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -106,7 +115,7 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
         ("pet", "person"),
     ],
 )
-def test_real_card_positions_merge_once_in_all_directions(
+def test_drag_preview_and_merge_use_a_120_pixel_radius_for_all_identity_kinds(
     source_kind: str,
     target_kind: str,
     monkeypatch,
@@ -153,12 +162,19 @@ def test_real_card_positions_merge_once_in_all_directions(
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     source.begin_drag()
-    start = source.pos()
-    distance = target.x() - source.x()
-    for step in range(1, 21):
-        source.move(start + QPoint(round(distance * step / 20), 0))
-        widget._board.update_drag(source)
+    inside = target.pos() + QPoint(-100, 60)
+    source.move(inside)
+    widget._board.update_drag(source)
+    assert widget._board.proximity_pair == (source, target)
 
+    # A diagonal offset of (96, 72) lands exactly on the merge boundary.
+    source.move(target.pos() + QPoint(-96, 72))
+    widget._board.update_drag(source)
+    assert widget._board.proximity_pair is None
+    assert widget._board.merge_frame.isHidden()
+
+    source.move(inside)
+    widget._board.update_drag(source)
     assert widget._board.top_cards == [source, target]
     assert widget._board.proximity_pair == (source, target)
 
@@ -191,7 +207,7 @@ def test_person_and_pet_with_same_raw_id_remain_distinct(
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     pet.begin_drag()
-    pet.move(person.pos())
+    pet.move(person.pos() + QPoint(100, 60))
     widget._board.update_drag(pet)
     widget._board.finish_drag(pet)
     pet.end_drag()
@@ -358,21 +374,36 @@ def test_drag_reorder_persists_mixed_order_through_reload(
         assert loaded_order(widget) == ("person:shared", "pet:shared", "person:bob")
         board = widget._board
         board.resize(800, 500)
-        first, second, _ = board.visible_cards()
+        first, second, third = board.visible_cards()
         dragged, target = (first, second) if first.identity_key == dragged_key else (second, first)
-        start = dragged.pos()
+        grab_point = dragged.mapToGlobal(dragged.rect().center())
         distance = target.x() - dragged.x()
         merged = Mock()
         board.mergeRequested.connect(merged)
 
-        dragged.begin_drag()
-        for step in range(1, 21):
-            dragged.move(start + QPoint(round(distance * step / 20), 48))
-            board.update_drag(dragged)
-        dragged.move(start + QPoint(distance, 0))
-        board.update_drag(dragged)
-        board.finish_drag(dragged)
-        dragged.end_drag()
+        def send_mouse(event_type, offset, button, buttons):
+            point = grab_point + QPoint(offset, 0)
+            event = QMouseEvent(
+                event_type,
+                dragged.mapFromGlobal(point),
+                point,
+                button,
+                buttons,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            qapp.sendEvent(dragged, event)
+
+        left, no_button = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+        send_mouse(QEvent.Type.MouseButtonPress, 0, left, left)
+        send_mouse(QEvent.Type.MouseMove, round(distance * 0.4), no_button, left)
+        assert board.proximity_pair == (dragged, target)
+        assert board.visible_cards() == [first, second, third]
+
+        send_mouse(QEvent.Type.MouseMove, distance, no_button, left)
+        assert board.visible_cards() == [second, first, third]
+        # The preview was set before the target card moved into its new slot.
+        assert board.proximity_pair == (dragged, target)
+        send_mouse(QEvent.Type.MouseButtonRelease, distance, left, no_button)
 
         expected = ("pet:shared", "person:shared", "person:bob")
         merged.assert_not_called()

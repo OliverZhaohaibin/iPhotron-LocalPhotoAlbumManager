@@ -19,8 +19,6 @@ from .people_dashboard_shared import (
     _create_pos_anim,
 )
 
-_PROXIMITY_HYSTERESIS = 18
-
 
 class IdentityBoard(QWidget):
     mergeRequested = Signal(str, str)
@@ -118,8 +116,6 @@ class IdentityBoard(QWidget):
     def begin_drag(self, card: IdentityCard) -> None:
         del card
         self._drag_start_order = tuple(item.identity_key for item in self.visible_cards())
-        self.hide_merge_frame()
-        self.proximity_pair = None
         if (
             self._active_anim is not None
             and self._active_anim.state() == QAbstractAnimation.State.Running
@@ -127,15 +123,12 @@ class IdentityBoard(QWidget):
             self._active_anim.stop()
 
     def finish_drag(self, card: IdentityCard) -> None:
-        if self.proximity_pair is None:
-            self.check_card_proximity(card)
+        # The last reorder can move the card that was shown in the merge preview.
+        self.check_card_proximity(card)
         should_persist_order = self.proximity_pair is None
         if self.proximity_pair is not None:
             source, target = self.proximity_pair
             self.mergeRequested.emit(source.identity_key, target.identity_key)
-            if self._drag_start_order is not None:
-                positions = {key: index for index, key in enumerate(self._drag_start_order)}
-                self.top_cards.sort(key=lambda item: positions[item.identity_key])
 
         self.hide_merge_frame()
         self.proximity_pair = None
@@ -173,11 +166,8 @@ class IdentityBoard(QWidget):
         group.start()
 
     def update_drag(self, dragged: IdentityCard) -> None:
-        """Update one drag frame without letting reorder move a merge target."""
-
         self.check_card_proximity(dragged)
-        if self.proximity_pair is None:
-            self.update_card_order(dragged)
+        self.update_card_order(dragged)
 
     def update_card_order(self, dragged: IdentityCard) -> None:
         visible = self.visible_cards()
@@ -209,18 +199,6 @@ class IdentityBoard(QWidget):
             self.hide_merge_frame()
             self.proximity_pair = None
             return
-
-        locked_target = None
-        if self.proximity_pair is not None and self.proximity_pair[0] is dragged:
-            candidate = self.proximity_pair[1]
-            if candidate in candidates:
-                locked_target = candidate
-        if locked_target is not None:
-            locked_distance = _button_distance(dragged, locked_target)
-            if locked_distance < PROXIMITY_THRESHOLD + _PROXIMITY_HYSTERESIS:
-                self.show_merge_frame(dragged, locked_target)
-                self.proximity_pair = (dragged, locked_target)
-                return
 
         closest = min(candidates, key=lambda candidate: _button_distance(dragged, candidate))
         distance = _button_distance(dragged, closest)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -182,9 +183,10 @@ def _resolve_dashboard_dark_mode(parent: QWidget | None) -> bool:
     return False
 
 
-def _button_distance(first: QWidget, second: QWidget) -> int:
-    # Leave a diagonal path for reordering around the merge area.
-    return (first.pos() - second.pos()).manhattanLength()
+def _button_distance(first: QWidget, second: QWidget) -> float:
+    c1 = first.pos() + QPoint(CARD_WIDTH // 2, CARD_HEIGHT // 2)
+    c2 = second.pos() + QPoint(CARD_WIDTH // 2, CARD_HEIGHT // 2)
+    return math.hypot(c1.x() - c2.x(), c1.y() - c2.y())
 
 
 class HintFrame(QFrame):

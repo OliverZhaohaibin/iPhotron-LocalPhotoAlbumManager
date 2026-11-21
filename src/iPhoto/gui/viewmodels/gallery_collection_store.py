@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import os
 import time
+from bisect import bisect_left
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Protocol
@@ -36,11 +37,13 @@ from iPhoto.gui.viewmodels.asset_paging import (
     should_validate_paths as _should_validate_paths_fn,
 )
 from iPhoto.gui.viewmodels.gallery_window_loader import (
+    AssetIdentity,
     GallerySelectionAnchor,
     GallerySelectionAnchorResult,
     GallerySelectionAnchorRetryTicket,
     GalleryWindowRequest,
     GalleryWindowResult,
+    raw_offset_for_view_offset,
 )
 from iPhoto.gui.viewmodels.path_cache import PathExistsCache
 from iPhoto.gui.viewmodels.pending_move_buffer import (
@@ -97,7 +100,7 @@ class GalleryAssetQuerySurface(Protocol):
 
 
 WindowPublisher = Callable[
-    [int, dict[int, AssetDTO], Callable[[int], None], Callable[[], None]], None
+    [int, dict[AssetIdentity, int], Callable[[int], None], Callable[[], None]], None
 ]
 
 
@@ -158,6 +161,8 @@ class GalleryCollectionStore:
         self._selection_library_root: Optional[Path] = library_root
         self._total_count = 0
         self._row_cache: OrderedDict[int, AssetDTO] = OrderedDict()
+        self._retained_identities: dict[int, AssetIdentity] = {}
+        self._persistent_rows: Callable[[], set[int]] = set
         self._window_range: Optional[tuple[int, int]] = None
         self._visible_range: Optional[tuple[int, int]] = None
         self._warm_range: Optional[tuple[int, int]] = None
@@ -247,10 +252,13 @@ class GalleryCollectionStore:
     def set_active_root(self, root: Optional[Path]) -> None:
         self._active_root = root
 
-    def set_window_publisher(self, publisher: WindowPublisher) -> None:
+    def set_window_publisher(
+        self, publisher: WindowPublisher, persistent_rows: Callable[[], set[int]],
+    ) -> None:
         """Let the model bracket mutations to its rows and count with Qt signals."""
 
         self._window_publisher = publisher
+        self._persistent_rows = persistent_rows
 
     def active_root(self) -> Optional[Path]:
         return self._active_root
@@ -377,6 +385,18 @@ class GalleryCollectionStore:
         if index < 0 or index >= self._total_count:
             return None
         return None
+
+    def identity_at(self, row: int) -> AssetIdentity | None:
+        dto = self._row_cache.get(row)
+        return (dto.abs_path, dto.id) if dto is not None else self._retained_identities.get(row)
+
+    def _tracked_rows(self) -> set[int]:
+        return self._persistent_rows().union(first for first, _ in self._visible_ranges_for_count(None))
+
+    def _tracked_assets(self) -> frozenset[AssetIdentity]:
+        return frozenset(
+            identity for row in self._tracked_rows() if (identity := self.identity_at(row)) is not None
+        )
 
     def ensure_row_loaded(self, row: int, *, emit_signals: bool = True) -> bool:
         """Load the bounded gallery window containing *row* if needed."""
@@ -563,6 +583,11 @@ class GalleryCollectionStore:
             new_cache[row - removed_before] = self._row_cache[row]
 
         self._row_cache = OrderedDict(sorted(new_cache.items()))
+        self._retained_identities = {
+            row - bisect_left(removed, row): identity
+            for row, identity in self._retained_identities.items()
+            if row not in removed_set
+        }
         self._total_count = max(0, old_total - len(removed))
         self._window_range = None
         self._visible_range = None if self._total_count == 0 else self._visible_range
@@ -899,6 +924,19 @@ class GalleryCollectionStore:
             # order before its visible rows are available at the same revision.
             self._request_commit_refresh(total_count=new_total)
             return False
+        if (
+            order_changed and old_total > 0 and new_total > 0
+            and callable(getattr(self._asset_query_service, "find_gallery_asset_positions", None))
+        ):
+            known_assets = set(result.tracked_rows)
+            known_assets.update((dto.abs_path, dto.id) for dto in relevant_rows.values())
+            if anchor_is_current and anchor_result is not None and anchor_result.dto is not None:
+                known_assets.add((anchor_result.dto.abs_path, anchor_result.dto.id))
+            if not self._tracked_assets().issubset(known_assets):
+                # A scroll, selection, or SQLite write can race with a queued
+                # refresh. Keep the old rows until their identities are resolved.
+                self._request_commit_refresh(total_count=new_total)
+                return False
         retry_inflight_before_revision = self._selection_anchor_retry_inflight
         if revision_advanced:
             self._cancel_selection_anchor_retry()
@@ -982,6 +1020,13 @@ class GalleryCollectionStore:
             )
         old_rows = self._row_cache
         changed_rows = {row for row, dto in relevant_rows.items() if old_rows.get(row) != dto}
+        destinations: dict[AssetIdentity, int] = {}
+        if order_changed:
+            destinations.update(
+                (identity, row) for identity, row in result.tracked_rows.items()
+                if row is not None and 0 <= row < new_total
+            )
+            destinations.update(((dto.abs_path, dto.id), row) for row, dto in relevant_rows.items())
 
         def set_count(count: int) -> None:
             self._total_count = count
@@ -989,6 +1034,9 @@ class GalleryCollectionStore:
         def publish_rows() -> None:
             if order_changed or (not versioned and old_revision > 0 and revision_advanced):
                 self._row_cache = OrderedDict()
+                self._retained_identities = {
+                    row: identity for identity, row in destinations.items() if row not in relevant_rows
+                }
             for row, dto in relevant_rows.items():
                 self._row_cache[row] = old_rows.get(row, dto) if row not in changed_rows else dto
                 self._row_cache.move_to_end(row)
@@ -1000,7 +1048,7 @@ class GalleryCollectionStore:
                 self._collection_revision = max(self._collection_revision, result.collection_revision)
 
         if order_changed and self._window_publisher is not None:
-            self._window_publisher(new_total, relevant_rows, set_count, publish_rows)
+            self._window_publisher(new_total, destinations, set_count, publish_rows)
         else:
             set_count(new_total)
             publish_rows()
@@ -1238,6 +1286,9 @@ class GalleryCollectionStore:
         for row, dto in self._row_cache.items():
             if self._normalize_abs_key(dto.abs_path) == target:
                 return row
+        for row, (asset_path, _asset_id) in self._retained_identities.items():
+            if self._normalize_abs_key(asset_path) == target:
+                return row
         return None
 
     def selection_anchor_status(self, path: Path) -> str | None:
@@ -1373,17 +1424,6 @@ class GalleryCollectionStore:
         self._pending_window_generations.add(generation)
         if refresh_after_commit:
             self._latest_commit_refresh = generation, ((view_first, limit), *extra_ranges)
-        pending_source_rows = tuple(
-            self._pending_source_rows_for_query(self._current_query)
-            if self._pending_moves
-            else ()
-        )
-        raw_first = view_first
-        for source_row in pending_source_rows:
-            if source_row <= raw_first:
-                raw_first += 1
-                continue
-            break
         pending_sources = tuple(
             pending
             for pending in self._pending_moves
@@ -1399,7 +1439,7 @@ class GalleryCollectionStore:
                 query=self._clone_query(self._current_query),
                 query_service=self._asset_query_service,
                 view_first=view_first,
-                raw_first=raw_first,
+                raw_first=view_first,
                 limit=limit,
                 pending_source_ids=frozenset(
                     str(pending.source_id)
@@ -1407,7 +1447,11 @@ class GalleryCollectionStore:
                     if pending.source_id is not None
                 ),
                 pending_source_count=len(pending_sources),
-                pending_source_rows=pending_source_rows,
+                pending_source_assets=tuple(
+                    (pending.source_abs, pending.source_id)
+                    for pending in pending_sources
+                    if pending.source_id is not None
+                ),
                 pending_insertions=pending_insertions,
                 selection_anchor=self._selection_anchor,
                 request_backfill=bool(request_backfill),
@@ -1426,6 +1470,8 @@ class GalleryCollectionStore:
                 refresh_after_commit=refresh_after_commit,
                 selection_generation=self._window_selection_generation,
                 extra_ranges=extra_ranges,
+                previous_order_revision=self._order_revision,
+                tracked_assets=self._tracked_assets() if refresh_after_commit else frozenset(),
             )
         )
         if self._selection_anchor is not None:
@@ -1475,6 +1521,11 @@ class GalleryCollectionStore:
         evicted = 0
         item_budget = max(1, int(max_items))
         cache_limit = MICRO_WARM_LIMIT + (1 if self._pinned_row is not None else 0)
+        tracked = self._tracked_rows() if len(self._row_cache) > cache_limit else set()
+        if len(self._row_cache) > cache_limit and self._retained_identities:
+            self._retained_identities = {
+                row: identity for row, identity in self._retained_identities.items() if row in tracked
+            }
         while len(self._row_cache) > cache_limit:
             evict = next(
                 (
@@ -1496,7 +1547,9 @@ class GalleryCollectionStore:
                 )
             if evict is None:
                 break
-            self._row_cache.pop(evict, None)
+            dto = self._row_cache.pop(evict)
+            if evict in tracked:
+                self._retained_identities[evict] = (dto.abs_path, dto.id)
             evicted += 1
             if evicted >= item_budget:
                 break
@@ -2166,13 +2219,9 @@ class GalleryCollectionStore:
         query: AssetQuery,
         view_offset: int,
     ) -> int:
-        raw_offset = max(0, int(view_offset))
-        for source_row in self._pending_source_rows_for_query(query):
-            if source_row <= raw_offset:
-                raw_offset += 1
-                continue
-            break
-        return raw_offset
+        return raw_offset_for_view_offset(
+            max(0, int(view_offset)), tuple(self._pending_source_rows_for_query(query)),
+        )
 
     def _pending_adjusted_view_row_for_raw_row(
         self,
@@ -2345,6 +2394,7 @@ class GalleryCollectionStore:
         self._selection_version += 1
         self._selection_anchor_latest_result_generation = 0
         self._row_cache.clear()
+        self._retained_identities.clear()
         self._total_count = 0
         self._window_range = None
         self._visible_range = None

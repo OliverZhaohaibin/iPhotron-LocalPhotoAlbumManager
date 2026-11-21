@@ -162,6 +162,11 @@ class AssetRepositoryPort(Protocol):
     ) -> tuple[WindowResult, ...]:
         """Read lightweight windows from one snapshot."""
 
+    def find_collection_positions(
+        self, query: CollectionQuery, paths: tuple[Path, ...], order_revision: int,
+    ) -> dict[Path, tuple[str, int]] | None:
+        """Resolve asset identities and positions at the requested order revision."""
+
     def read_thumbnail_hint_window(
         self,
         query: CollectionQuery,

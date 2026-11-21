@@ -5,7 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QCoreApplication, Signal
+from PySide6.QtCore import (
+    QCoreApplication,
+    QItemSelection,
+    QItemSelectionModel,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    Signal,
+)
 from PySide6.QtWidgets import QPushButton
 
 from ..models.roles import Roles
@@ -42,6 +50,7 @@ class SelectionController(QObject):
         self._playback = playback
         self._active = False
         self._selection_paths: list[Path] = []
+        self._selection_indexes: list[QPersistentModelIndex] = []
         self._bound_model = None
         self._bound_selection_model = None
         self._restoring_selection = False
@@ -84,6 +93,7 @@ class SelectionController(QObject):
         if self._grid_delegate is not None:
             self._grid_delegate.set_selection_mode_active(desired_state)
         self._selection_paths = []
+        self._selection_indexes.clear()
         self._grid_view.clearSelection()
         if not desired_state:
             self._preview_controller.close_preview(False)
@@ -136,6 +146,7 @@ class SelectionController(QObject):
             return
         window_signals = (
             ("windowUpdateStarted", self._begin_window_update),
+            ("layoutChanged", self._restore_window_selection),
             ("windowUpdateFinished", self._finish_window_update),
         )
         if self._bound_model is not None:
@@ -208,9 +219,30 @@ class SelectionController(QObject):
         self._capture_selection_before_reset()
         self._window_update_active = True
 
+    def _restore_window_selection(self, *_args) -> None:
+        if not (self._window_update_active and self._active and self._selection_indexes):
+            return
+        selection_model = self._grid_view.selectionModel()
+        if selection_model is None:
+            return
+
+        indexes = [QModelIndex(index) for index in self._selection_indexes if index.isValid()]
+        selected = selection_model.selectedIndexes()
+        # Qt can keep the whole row range, including uncached replacement rows.
+        if len(selected) == len(indexes) and set(selected) == set(indexes):
+            return
+        selection = QItemSelection()
+        for index in indexes:
+            selection.select(index, index)
+        selection_model.select(
+            selection,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows,
+        )
+
     def _finish_window_update(self) -> None:
         self._window_update_active = False
-        self._restore_selection_after_model_change()
+        self._selection_tracking_suspended = False
+        self._remember_current_selection()
 
     def _remember_current_selection(self, *_args) -> None:
         if (
@@ -219,26 +251,24 @@ class SelectionController(QObject):
             or self._selection_tracking_suspended
         ):
             return
-        self._selection_paths = self._current_selection_paths()
-
-    def _current_selection_paths(self) -> list[Path]:
         selection_model = self._grid_view.selectionModel()
-        if selection_model is None:
-            return []
-        seen: set[Path] = set()
-        paths: list[Path] = []
-        for index in selection_model.selectedIndexes():
+        indexes = selection_model.selectedIndexes() if selection_model is not None else []
+        by_path = self._selected_indexes_by_path(indexes)
+        self._selection_paths = list(by_path)
+        # Qt selections may store a range using only its endpoints. Preserve
+        # the identities inside that range across a sparse layout change.
+        self._selection_indexes = [QPersistentModelIndex(index) for index in by_path.values()]
+
+    @staticmethod
+    def _selected_indexes_by_path(indexes: list[QModelIndex]) -> dict[Path, QModelIndex]:
+        by_path = {}
+        for index in indexes:
             if not index.isValid():
                 continue
             raw_path = index.data(Roles.ABS)
-            if not raw_path:
-                continue
-            path = Path(str(raw_path))
-            if path in seen:
-                continue
-            seen.add(path)
-            paths.append(path)
-        return paths
+            if raw_path:
+                by_path.setdefault(Path(str(raw_path)), index)
+        return by_path
 
     def _restore_selection_after_model_change(self, *_args) -> None:
         if self._window_update_active:
@@ -249,12 +279,12 @@ class SelectionController(QObject):
         if not self._selection_paths:
             self._selection_tracking_suspended = False
             return
-        if self._current_selection_paths() == self._selection_paths:
-            self._selection_tracking_suspended = False
-            return
         model = self._grid_view.model()
         selection_model = self._grid_view.selectionModel()
         if model is None or selection_model is None:
+            self._selection_tracking_suspended = False
+            return
+        if self._selected_indexes_by_path(selection_model.selectedIndexes()).keys() == set(self._selection_paths):
             self._selection_tracking_suspended = False
             return
         row_for_path = getattr(model, "row_for_path", None)
@@ -263,6 +293,7 @@ class SelectionController(QObject):
             return
 
         restored_paths: list[Path] = []
+        restored_indexes: list[QPersistentModelIndex] = []
         self._restoring_selection = True
         try:
             selection_model.clearSelection()
@@ -279,7 +310,9 @@ class SelectionController(QObject):
                     | QItemSelectionModel.SelectionFlag.Rows,
                 )
                 restored_paths.append(path)
+                restored_indexes.append(QPersistentModelIndex(index))
         finally:
             self._restoring_selection = False
             self._selection_tracking_suspended = False
         self._selection_paths = restored_paths
+        self._selection_indexes = restored_indexes

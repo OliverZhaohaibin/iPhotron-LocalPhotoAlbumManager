@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional, Type
 
-from PySide6.QtCore import QModelIndex, QPoint, QTimer, Qt, Signal
+from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QPoint, QTimer, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QListView
 
@@ -44,7 +44,7 @@ class AssetGrid(QListView):
         self._press_timer = QTimer(self)
         self._press_timer.setSingleShot(True)
         self._press_timer.timeout.connect(self._on_long_press_timeout)
-        self._pressed_index: Optional[QModelIndex] = None
+        self._pressed_index: Optional[QPersistentModelIndex] = None
         self._press_pos: Optional[QPoint] = None
         self._long_press_active = False
         self._suppress_next_preview_leave = False
@@ -71,7 +71,7 @@ class AssetGrid(QListView):
             viewport_pos = self._viewport_pos(event)
             index = self.indexAt(viewport_pos)
             if index.isValid():
-                self._pressed_index = index
+                self._pressed_index = QPersistentModelIndex(index)
                 self._press_pos = QPoint(viewport_pos)
                 self._long_press_active = False
                 self._press_timer.stop()
@@ -100,7 +100,7 @@ class AssetGrid(QListView):
             if was_long_press:
                 self.previewReleased.emit()
             elif index.isValid():
-                self.itemClicked.emit(index)
+                self.itemClicked.emit(QModelIndex(index))
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
@@ -234,6 +234,8 @@ class AssetGrid(QListView):
 
     def setModel(self, model) -> None:  # type: ignore[override]
         previous_model = self._model
+        if model is not previous_model:
+            self._cancel_pending_long_press()
         self.modelAboutToChange.emit(previous_model)
         if self._model is not None:
             try:
@@ -277,7 +279,7 @@ class AssetGrid(QListView):
         if self._pressed_index is not None and self._pressed_index.isValid():
             self._long_press_active = True
             self._suppress_next_preview_leave = _IS_DARWIN
-            self.requestPreview.emit(self._pressed_index)
+            self.requestPreview.emit(QModelIndex(self._pressed_index))
 
     def _should_suppress_preview_leave(self) -> bool:
         if not _IS_DARWIN or not self._suppress_next_preview_leave:

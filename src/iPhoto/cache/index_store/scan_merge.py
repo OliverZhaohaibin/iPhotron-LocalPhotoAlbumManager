@@ -153,8 +153,12 @@ def _preserve_current_thumbnail_revision(
     existing_revision = _thumbnail_revision(existing_row)
     incoming_revision = _thumbnail_revision(merged)
     if existing_revision == incoming_revision:
+        late_failure = (
+            merged.get("thumbnail_state") != "ready"
+            and int(merged.get("index_revision") or 0) < int(existing_row.get("index_revision") or 0)
+        )
         if (
-            merged.get("thumb_refresh_pending")
+            (merged.get("thumb_refresh_pending") or late_failure)
             and not existing_row.get("thumb_refresh_pending")
             and existing_row.get("thumbnail_state") == "ready"
             and existing_revision

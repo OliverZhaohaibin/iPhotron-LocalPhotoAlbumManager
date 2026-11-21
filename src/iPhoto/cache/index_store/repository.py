@@ -22,14 +22,14 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Mapping
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ...config import GLOBAL_INDEX_DB_NAME
 from ...domain.models.core import normalise_content_id
-from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
+from ...domain.models.query import CollectionQuery, PageCursor, PageResult, SortDirection, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
     emit_perf_event,
@@ -59,6 +59,7 @@ logger = get_logger()
 # conservative chunk size so large scans never hit the limit regardless of
 # the SQLite version in use.
 _SQLITE_PARAM_CHUNK_SIZE = 900
+_COLLECTION_POSITION_POINT_LIMIT = 32
 _DEEP_OFFSET_LIMIT = 5_000
 _DEEP_SEEK_CHUNK_SIZE = 1_024
 _MAX_COLLECTION_ANCHORS_PER_QUERY = 64
@@ -1442,6 +1443,114 @@ class AssetRepository:
                 collection_revision=revision,
                 order_revision=cache.order_revision,
             )
+
+    def find_collection_positions(
+        self, query: CollectionQuery, paths: tuple[Path, ...], order_revision: int,
+    ) -> dict[Path, tuple[str, int]] | None:
+        """Return only the requested identities and their ranks at a known order."""
+
+        by_rel = {
+            path.relative_to(self.library_root).as_posix()
+            if path.is_relative_to(self.library_root) else self._library_relative_path(path): path
+            for path in paths
+        }
+        with self._collection_snapshot() as (conn, _revision, cache):
+            if cache.order_revision != order_revision:
+                return None
+            if not by_rel:
+                return {}
+            if len(by_rel) <= _COLLECTION_POSITION_POINT_LIMIT:
+                rows = self._count_collection_positions(conn, query, tuple(by_rel))
+            else:
+                rows = self._rank_collection_positions(conn, query, by_rel)
+            return {
+                by_rel[rel]: (str(asset_id or by_rel[rel]), rank)
+                for rel, asset_id, rank in rows
+            }
+
+    @staticmethod
+    def _count_collection_positions(
+        conn: sqlite3.Connection, query: CollectionQuery, rels: tuple[str, ...],
+    ) -> list[tuple[str, str | None, int]]:
+        sort_column = QueryBuilder._collection_sort_column(query)
+        sort_columns = tuple(dict.fromkeys((sort_column, "id", "rel")))
+        where, params = QueryBuilder.build_collection_where(query)
+        where_sql = " AND ".join(where)
+        columns = ", ".join(sort_columns)
+        values = ", ".join("(?)" for _ in rels)
+        order = QueryBuilder.build_collection_order(query)
+        # Drive the join from the requested paths, so SQLite sorts only the
+        # matching targets and looks up each asset by its primary key.
+        targets = conn.execute(
+            f"WITH requested(rel) AS (VALUES {values}) "
+            f"SELECT {columns} FROM requested CROSS JOIN assets USING (rel) WHERE {where_sql} {order}",
+            (*rels, *params),
+        ).fetchall()
+        ascending = query.sort_direction == SortDirection.ASC
+        inclusive_bound = ">=" if ascending else "<="
+        count_sql = f"SELECT COUNT(*) FROM assets WHERE {where_sql}"
+        positions = []
+        preceding_groups = 0
+        previous = None
+        for target in targets:
+            value = target[sort_column]
+            if previous is None or value != previous[sort_column]:
+                range_sql, range_params = count_sql, params
+                if previous is not None and (bound := previous[sort_column]) is not None:
+                    range_sql += f" AND {sort_column} {inclusive_bound} ?"
+                    range_params = [*params, bound]
+                # Each primary sort range is counted once, even for paths
+                # scattered across distant windows of the same collection.
+                preceding_groups += AssetRepository._count_preceding_values(
+                    conn, range_sql, range_params, sort_column, value, ascending=ascending,
+                )
+            rank = preceding_groups
+            tie_sql, tie_params = count_sql, list(params)
+            for earlier, column in zip(sort_columns, sort_columns[1:]):
+                tie_sql += f" AND {earlier} IS ?"
+                tie_params.append(target[earlier])
+                rank += AssetRepository._count_preceding_values(
+                    conn, tie_sql, tie_params, column, target[column], ascending=ascending,
+                )
+            positions.append((target["rel"], target["id"], rank))
+            previous = target
+        return positions
+
+    @staticmethod
+    def _count_preceding_values(
+        conn: sqlite3.Connection, sql: str, params: list[Any], column: str, value: Any, *, ascending: bool,
+    ) -> int:
+        # SQLite places NULL first in ascending order and last in descending order.
+        if value is None:
+            if ascending:
+                return 0
+            return conn.execute(f"{sql} AND {column} IS NOT NULL", params).fetchone()[0]
+        operator = "<" if ascending else ">"
+        count = conn.execute(f"{sql} AND {column} {operator} ?", (*params, value)).fetchone()[0]
+        if ascending:
+            count += conn.execute(f"{sql} AND {column} IS NULL", params).fetchone()[0]
+        return count
+
+    @staticmethod
+    def _rank_collection_positions(
+        conn: sqlite3.Connection, query: CollectionQuery, rels: Iterable[str],
+    ) -> list[tuple[str, str | None, int]]:
+        order = QueryBuilder.build_collection_order(query)
+        ranked_sql, params = QueryBuilder.build_collection_query(
+            query, select_clause=f"SELECT rel, id, ROW_NUMBER() OVER ({order}) - 1", include_order=False,
+        )
+        # The connection-local paths keep bindings bounded while the collection
+        # is ranked once, even when a selection exceeds SQLite's parameter limit.
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS gallery_position_paths (rel TEXT PRIMARY KEY) WITHOUT ROWID")
+        try:
+            conn.executemany("INSERT INTO temp.gallery_position_paths VALUES (?)", ((rel,) for rel in rels))
+            rows = conn.execute(
+                f"SELECT * FROM ({ranked_sql}) WHERE rel IN (SELECT rel FROM temp.gallery_position_paths)",
+                params,
+            )
+            return [(rel, asset_id, rank) for rel, asset_id, rank in rows]
+        finally:
+            conn.execute("DELETE FROM temp.gallery_position_paths")
 
     def _read_collection_window_rows(
         self,

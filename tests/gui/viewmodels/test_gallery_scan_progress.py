@@ -1,23 +1,31 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
-from threading import Event
+from threading import Event, current_thread, main_thread
 from time import monotonic, sleep
 from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPersistentModelIndex
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, QPersistentModelIndex, Qt
+from PySide6.QtTest import QAbstractItemModelTester, QTest
+from PySide6.QtWidgets import QPushButton
 
 from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store.repository import AssetRepository
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.domain.models.scan import ScanBatchCommitted
 from iPhoto.gui.gallery_demand import build_viewport_demand
+from iPhoto.gui.ui.controllers.selection_controller import SelectionController
 from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.ui.models.spacer_proxy_model import SpacerProxyModel
+from iPhoto.gui.ui.models.thumbnail_surface_proxy_model import ThumbnailSurfaceProxyModel
 from iPhoto.gui.ui.widgets.asset_delegate import AssetGridDelegate
 from iPhoto.gui.ui.widgets.gallery_grid_view import GalleryGridView
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
@@ -47,6 +55,7 @@ def gallery(tmp_path: Path, qapp, monkeypatch):
     service = LibraryAssetQueryService(root, repository_factory=lambda _root: repository)
     monkeypatch.setattr(service, "request_thumbnail_backfill", lambda *_args: 0)
     thumbnails = MagicMock(spec=ThumbnailCacheService)
+    thumbnails.peek_full_thumbnail.return_value = None
     adapter = GalleryListModelAdapter.create(
         asset_query_service=service, thumbnail_service=thumbnails, library_root=root,
     )
@@ -228,6 +237,202 @@ def test_ready_and_backfill_bursts_leave_one_followup(gallery, make_rows, qapp, 
         release.set()
 
 
+@pytest.mark.parametrize(
+    ("notify_before_old_result", "cancel"),
+    [(False, False), (True, False), (True, True)],
+    ids=["result-first", "notification-first", "cancel-after-commit"],
+)
+def test_real_jpeg_scan_draws_committed_batches_before_scan_finishes(
+    gallery, qapp, monkeypatch, notify_before_old_result: bool, cancel: bool,
+) -> None:
+    root, repository, service, model = gallery
+    store, loader = model.store, model._window_loader
+    for i in range(205):
+        path = root / f"photo-{i:03}.jpg"
+        Image.new("RGB", (48, 32), (i, 30, 60)).save(path)
+        os.utime(path, ns=(0, 1_700_000_000_000_000_000 + i * 1_000_000_000))
+
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: loader._active_request is None)
+    assert model.rowCount() == 0
+    real_read = service.read_gallery_asset_window
+    read_old_window, deliver_old_window = Event(), Event()
+    permit_second, permit_final = Event(), Event()
+    cancelled = Event()
+    batches, resets = [], []
+    model.modelReset.connect(lambda: resets.append(True))
+    model._scan_batch_timer.setInterval(60_000)
+
+    def pause_first_snapshot(*args):
+        window = real_read(*args)
+        if not read_old_window.is_set():
+            assert window.total_count == 100
+            read_old_window.set()
+            assert deliver_old_window.wait(5)
+        return window
+
+    def on_commit(batch):
+        batches.append(batch)
+        if len(batches) == 1:
+            model.handle_scan_batch(batch)
+            assert permit_second.wait(5)
+        elif len(batches) == 2:
+            if notify_before_old_result:
+                model.handle_scan_batch(batch)
+            assert permit_final.wait(5)
+        else:
+            model.handle_scan_batch(batch)
+
+    monkeypatch.setattr(service, "read_gallery_asset_window", pause_first_snapshot)
+    scan = LibraryScanService(root, repository_factory=lambda _root: repository)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(
+            scan.scan_album, root, include=["*.jpg"], persist_chunks=True,
+            chunk_size=100, scan_batch_callback=on_commit, is_cancelled=cancelled.is_set,
+        )
+        try:
+            _wait_for(qapp, lambda: model._pending_scan_batch_count == 1)
+            model._flush_pending_scan_batches()
+            assert read_old_window.wait(5)
+            expected_first = root / real_read(root, AssetQuery(), 0, 1).rows[0]["rel"]
+            permit_second.set()
+            _wait_for(qapp, lambda: len(batches) == 2)
+            assert service.count_query_assets(AssetQuery()) == 200
+            if notify_before_old_result:
+                _wait_for(qapp, lambda: model._pending_scan_batch_count == 1)
+                model._flush_pending_scan_batches()
+
+            first_rows = []
+            model.rowsInserted.connect(lambda *_args: first_rows.append((
+                model.rowCount(), model.index(0, 0).data(Roles.ABS),
+                model.index(0, 0).data(Roles.MICRO_THUMBNAIL),
+            )))
+            deliver_old_window.set()
+            _wait_for(qapp, lambda: bool(first_rows))
+            assert first_rows[0][0] == 100
+            assert first_rows[0][1] == str(expected_first)
+            assert not first_rows[0][2].isNull()
+            if not notify_before_old_result:
+                assert model.rowCount() == 100
+                model.handle_scan_batch(batches[1])
+                model._flush_pending_scan_batches()
+            _wait_for(qapp, lambda: model.rowCount() == 200)
+            assert not result.done()
+            assert model.index(0, 0).data(Roles.ABS) == str(
+                root / real_read(root, AssetQuery(), 0, 1).rows[0]["rel"]
+            )
+
+            if cancel:
+                cancelled.set()
+            permit_final.set()
+            expected_total = 200 if cancel else 205
+            assert len(result.result(timeout=5).rows) == expected_total
+            store.handle_scan_finished(root, not cancel)
+            _wait_for(qapp, lambda: model.rowCount() == expected_total and loader._active_request is None)
+            fresh = real_read(root, AssetQuery(), 0, 50)
+            assert fresh.total_count == expected_total
+            assert [store.asset_at(i).id for i in range(50)] == [row["id"] for row in fresh.rows]
+            assert not resets
+        finally:
+            permit_second.set()
+            permit_final.set()
+            deliver_old_window.set()
+
+
+@pytest.mark.parametrize("switch_to", ["album", "favorites", "library"])
+def test_scan_refresh_cannot_publish_into_superseding_selection(
+    gallery, make_rows, qapp, monkeypatch, switch_to: str,
+) -> None:
+    root, repository, service, model = gallery
+    loader, store = model._window_loader, model.store
+    rows = make_rows(0, 5)
+    rows[0].update(rel="Trip/favorite.jpg", is_favorite=1)
+    repository.write_rows(rows[:4])
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == 4 and loader._active_request is None)
+    read, deliver = Event(), Event()
+    real_read = service.read_gallery_asset_window
+
+    def pause_old_snapshot(*args):
+        window = real_read(*args)
+        if not read.is_set():
+            read.set()
+            assert deliver.wait(5)
+        return window
+
+    monkeypatch.setattr(service, "read_gallery_asset_window", pause_old_snapshot)
+    observed = []
+    model.rowsInserted.connect(lambda *_args: observed.append(model.index(0, 0).data(Roles.ABS)))
+    replacement_repository = replacement_service = None
+    try:
+        repository.merge_scan_rows([rows[4]])
+        store.handle_scan_finished(root, True)
+        assert read.wait(5)
+        expected = root / rows[0]["rel"]
+        if switch_to == "album":
+            store.load_selection(root / "Trip", query=AssetQuery(album_path="Trip"))
+        elif switch_to == "favorites":
+            store.load_selection(root, query=AssetQuery(is_favorite=True))
+        else:
+            other = root / "other-library"
+            other.mkdir()
+            replacement_repository = AssetRepository(other)
+            replacement_repository.write_rows([rows[1]])
+            replacement_service = LibraryAssetQueryService(
+                other, repository_factory=lambda _root: replacement_repository,
+            )
+            model.rebind_asset_query_service(replacement_service, other)
+            store.load_selection(other, query=AssetQuery())
+            expected = other / rows[1]["rel"]
+        deliver.set()
+        _wait_for(qapp, lambda: model.rowCount() == 1 and loader._active_request is None)
+        assert observed == [str(expected)]
+    finally:
+        deliver.set()
+        if replacement_service is not None:
+            replacement_service.shutdown()
+            replacement_repository.close()
+
+
+def test_offscreen_anchor_does_not_report_missing_against_an_older_window(
+    gallery, make_rows, qapp, monkeypatch,
+) -> None:
+    root, repository, service, model = gallery
+    loader, store = model._window_loader, model.store
+    rows = make_rows(0, 300)
+    repository.write_rows(rows)
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == 300 and loader._active_request is None)
+    current = root / rows[0]["rel"]
+    store.pin_path(current, asset_id=rows[0]["id"], previous_row=299)
+    read, deliver = Event(), Event()
+    real_read = service.read_gallery_asset_window
+
+    def pause_old_snapshot(*args):
+        window = real_read(*args)
+        if not read.is_set():
+            read.set()
+            assert deliver.wait(5)
+        return window
+
+    monkeypatch.setattr(service, "read_gallery_asset_window", pause_old_snapshot)
+    results = []
+    loader.resultReady.connect(results.append)
+    try:
+        store._request_async_chunk(0, 5, demand_generation=0, priority=0, request_backfill=False)
+        assert read.wait(5)
+        repository.remove_rows([rows[0]["rel"]])
+        deliver.set()
+        _wait_for(qapp, lambda: bool(results))
+        assert results[0].selection_anchor_result.status == "retry"
+        assert model.rowCount() == 300
+        store.handle_scan_finished(root, True)
+        _wait_for(qapp, lambda: model.rowCount() == 299)
+        assert store.selection_anchor_status(current) == "missing"
+    finally:
+        deliver.set()
+
+
 def test_thumbnail_only_window_keeps_other_visible_rows(gallery, make_rows, qapp) -> None:
     root, repository, _service, model = gallery
     loader, store = model._window_loader, model.store
@@ -252,7 +457,7 @@ def test_thumbnail_only_window_keeps_other_visible_rows(gallery, make_rows, qapp
     assert not resets
 
 
-def test_order_change_stages_both_visible_surfaces(gallery, make_rows, qapp) -> None:
+def test_order_change_stages_both_visible_surfaces(gallery, make_rows, qapp, capfd) -> None:
     root, repository, _service, model = gallery
     loader, store = model._window_loader, model.store
     rows = make_rows(0, 300)
@@ -266,18 +471,226 @@ def test_order_change_stages_both_visible_surfaces(gallery, make_rows, qapp) -> 
             screens_per_second=0, actively_scrolling=False,
         ))
     _wait_for(qapp, lambda: store.asset_at(290) is not None and loader._active_request is None)
-    published = []
-    model.rowsInserted.connect(lambda *_args: published.append((store.asset_at(0), store.asset_at(290))))
-    repository.merge_scan_rows(make_rows(300, 1))
+    surface = ThumbnailSurfaceProxyModel("filmstrip", model)
+    surface.setSourceModel(model)
+    filmstrip = SpacerProxyModel(model)
+    filmstrip.setSourceModel(surface)
+    for tested in (model, surface, filmstrip):
+        QAbstractItemModelTester(tested, QAbstractItemModelTester.FailureReportingMode.Warning, tested)
+    current_path = store.asset_at(290).abs_path
+    model.set_current_asset(290, current_path)
+    persistent = QPersistentModelIndex(filmstrip.index(291, 0))
+    published, layouts, resets = [], [], []
+    filmstrip.modelReset.connect(lambda: resets.append(True))
+
+    def on_insert(_parent, first, last):
+        published.append((
+            first, last, model.rowCount(), model.index(0, 0).data(Roles.ASSET_ID),
+            persistent.data(Roles.ASSET_ID), model.index(last, 0).data(Roles.ASSET_ID),
+            model.flags(model.index(last, 0)) & Qt.ItemFlag.ItemIsSelectable,
+        ))
+
+    model.rowsInserted.connect(on_insert)
+    filmstrip.layoutChanged.connect(lambda: layouts.append((
+        persistent.row(), persistent.data(Roles.ASSET_ID), persistent.data(Roles.IS_CURRENT),
+        filmstrip.index(291, 0).data(Roles.IS_CURRENT),
+    )))
+    repository.merge_scan_rows([
+        *make_rows(300, 1), {**rows[4], "sort_ts": 299},
+    ])
     store._request_async_chunk(290, 293, demand_generation=0, priority=0, surface_id="filmstrip")
     _wait_for(qapp, lambda: model.rowCount() == 301 and loader._active_request is None)
     assert store.asset_at(0).id == "asset-300"
-    assert store.asset_at(290).id == "asset-10"
-    assert len(published) == 1
-    assert all(asset is not None for asset in published[0])
+    assert store.asset_at(290).id == "asset-11"
+    assert published == [(300, 300, 301, "asset-299", "asset-9", None, Qt.ItemFlag.NoItemFlags)]
+    assert layouts == [(293, "asset-9", True, False)]
+    assert not resets
+    assert "qt.modeltest: FAIL" not in capfd.readouterr().err
 
 
-def test_scrolled_grid_keeps_anchor_offset_when_a_batch_sorts_ahead(gallery, make_rows, qapp) -> None:
+def test_filmstrip_structural_signals_include_spacers_at_empty_boundary(gallery, make_rows, qapp, capfd) -> None:
+    root, repository, _service, model = gallery
+    store, loader = model.store, model._window_loader
+    surface = ThumbnailSurfaceProxyModel("filmstrip", model)
+    surface.setSourceModel(model)
+    filmstrip = SpacerProxyModel(model)
+    filmstrip.setSourceModel(surface)
+    QAbstractItemModelTester(filmstrip, QAbstractItemModelTester.FailureReportingMode.Warning, filmstrip)
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: loader._active_request is None)
+    inserted, removed, resets = [], [], []
+    filmstrip.rowsInserted.connect(lambda _parent, first, last: inserted.append((first, last, filmstrip.rowCount())))
+    filmstrip.rowsRemoved.connect(lambda _parent, first, last: removed.append((first, last, filmstrip.rowCount())))
+    filmstrip.modelReset.connect(lambda: resets.append(True))
+
+    rows = make_rows(0, 2)
+    repository.append_rows(rows)
+    store.handle_scan_finished(root, True)
+    _wait_for(qapp, lambda: filmstrip.rowCount() == 4 and loader._active_request is None)
+    assert inserted == [(0, 3, 4)]
+    assert [filmstrip.index(row, 0).data(Roles.IS_SPACER) for row in range(4)] == [True, False, False, True]
+    last_asset = QPersistentModelIndex(filmstrip.index(2, 0))
+    repository.remove_rows([row["rel"] for row in rows])
+    store.handle_scan_finished(root, True)
+    _wait_for(qapp, lambda: filmstrip.rowCount() == 0 and loader._active_request is None)
+    assert removed == [(0, 3, 0)]
+    assert not last_asset.isValid()
+    assert not resets
+    assert "qt.modeltest: FAIL" not in capfd.readouterr().err
+
+
+def test_offscreen_indexes_and_selection_survive_delete_and_reorder(
+    gallery, make_rows, qapp, monkeypatch, capfd,
+) -> None:
+    root, repository, _service, model = gallery
+    loader, store = model._window_loader, model.store
+    rows = make_rows(0, 750)
+    repository.write_rows(rows)
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == 750)
+    for selected_row in (389, 390, 391):
+        store.ensure_row_loaded(selected_row)
+    _wait_for(qapp, lambda: store.asset_at(389) is not None and loader._active_request is None)
+    grid = GalleryGridView()
+    grid.setModel(model)
+    controller = SelectionController(QPushButton(grid), grid, None, MagicMock(), parent=grid)
+    controller.set_selection_mode(True)
+    selection = grid.selectionModel()
+    indexes = [QPersistentModelIndex(model.index(row, 0)) for row in (389, 390, 391)]
+    selection.select(
+        QItemSelection(model.index(389, 0), model.index(391, 0)),
+        QItemSelectionModel.SelectionFlag.Select,
+    )
+    thumbnail_surface = ThumbnailSurfaceProxyModel("filmstrip", model)
+    thumbnail_surface.setSourceModel(model)
+    filmstrip = SpacerProxyModel(model)
+    filmstrip.setSourceModel(thumbnail_surface)
+    filmstrip_index = QPersistentModelIndex(filmstrip.index(391, 0))
+    assert [index.data(Roles.ASSET_ID) for index in indexes] == ["asset-360", "asset-359", "asset-358"]
+    with monkeypatch.context() as trim:
+        trim.setattr("iPhoto.gui.viewmodels.gallery_collection_store.MICRO_WARM_LIMIT", 10)
+        for row, _ in store.cached_rows(0, 749):
+            if row not in (389, 390, 391):
+                store.asset_at(row)
+        store._trim_row_cache()
+    assert all(store.asset_at(row) is None for row in (389, 390, 391))
+
+    QAbstractItemModelTester(model, QAbstractItemModelTester.FailureReportingMode.Warning, model)
+    repository.remove_rows([rows[360]["rel"], rows[746]["rel"]])
+    repository.merge_scan_rows([{**rows[358], "sort_ts": 1000}])
+    store.handle_scan_finished(root, True)
+    _wait_for(qapp, lambda: model.rowCount() == 748 and loader._active_request is None)
+    assert not indexes[0].isValid()
+    assert (indexes[1].row(), indexes[1].data(Roles.ASSET_ID)) == (389, "asset-359")
+    assert (indexes[2].row(), indexes[2].data(Roles.ASSET_ID)) == (0, "asset-358")
+    assert (filmstrip_index.row(), filmstrip_index.data(Roles.ASSET_ID)) == (390, "asset-359")
+    assert {index.data(Roles.ASSET_ID) for index in selection.selectedIndexes()} == {"asset-359", "asset-358"}
+    assert "qt.modeltest: FAIL" not in capfd.readouterr().err
+    grid.setModel(None)
+    grid.deleteLater()
+
+
+@pytest.mark.parametrize("replacement_visible", [True, False])
+def test_scan_does_not_extend_a_large_select_all_to_replacement_assets(
+    gallery, make_rows, qapp, replacement_visible: bool,
+) -> None:
+    root, repository, _service, model = gallery
+    loader, store = model._window_loader, model.store
+    rows = make_rows(0, 1001)
+    repository.write_rows(rows)
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == len(rows) and loader._active_request is None)
+    store._request_async_chunk(0, len(rows) - 1, demand_generation=0, priority=0)
+    _wait_for(qapp, lambda: loader._active_request is None)
+
+    grid = GalleryGridView()
+    grid.setModel(model)
+    controller = SelectionController(QPushButton(grid), grid, None, MagicMock(), parent=grid)
+    controller.set_selection_mode(True)
+    try:
+        grid.selectAll()
+        selection = grid.selectionModel()
+        assert {index.data(Roles.ASSET_ID) for index in selection.selectedIndexes()} == {
+            row["id"] for row in rows
+        }
+
+        repository.remove_rows([rows[0]["rel"]])
+        replacement = make_rows(len(rows), 1)[0]
+        if not replacement_visible:
+            replacement["sort_ts"] = -1
+        repository.merge_scan_rows([replacement])
+        store.handle_scan_finished(root, True)
+        _wait_for(qapp, lambda: loader._active_request is None)
+
+        assert model.rowCount() == len(rows)
+        assert {index.data(Roles.ASSET_ID) for index in selection.selectedIndexes()} == {
+            row["id"] for row in rows[1:]
+        }
+        replacement_row = 0 if replacement_visible else len(rows) - 1
+        store.ensure_row_loaded(replacement_row)
+        _wait_for(qapp, lambda: loader._active_request is None)
+        replacement_index = model.index(replacement_row, 0)
+        assert replacement_index.data(Roles.ASSET_ID) == replacement["id"]
+        assert not selection.isSelected(replacement_index)
+    finally:
+        grid.setModel(None)
+        grid.deleteLater()
+
+
+@pytest.mark.parametrize("deep_viewport", [False, True])
+def test_pending_move_offsets_follow_the_window_order(gallery, make_rows, qapp, monkeypatch, deep_viewport) -> None:
+    root, repository, service, model = gallery
+    store, loader = model.store, model._window_loader
+    rows = make_rows(0, 900)
+    repository.write_rows(rows)
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == 900 and loader._active_request is None)
+    store._request_async_chunk(480, 680, demand_generation=0, priority=0)
+    _wait_for(qapp, lambda: loader._active_request is None)
+
+    pending_source = rows[399]
+    target_id = rows[249]["id"]
+    tracked = QPersistentModelIndex(model.index(650, 0))
+    assert tracked.data(Roles.ASSET_ID) == target_id
+    assert model.optimistic_move_paths(
+        [root / pending_source["rel"]], root / RECENTLY_DELETED_DIR_NAME, is_delete=True,
+    )
+    assert tracked.row() == 649
+    if deep_viewport:
+        store.prioritize_rows(640, 660)
+        _wait_for(qapp, lambda: loader._active_request is None)
+
+    read_started, release = Event(), Event()
+    read_window = service.read_gallery_asset_window
+    find_row_by_path = service.find_row_by_path
+
+    def read_after_source_moves(*args):
+        read_started.set()
+        assert release.wait(5)
+        return read_window(*args)
+
+    def find_row_off_gui_thread(*args):
+        assert current_thread() is not main_thread()
+        return find_row_by_path(*args)
+
+    monkeypatch.setattr(service, "read_gallery_asset_window", read_after_source_moves)
+    monkeypatch.setattr(service, "find_row_by_path", find_row_off_gui_thread)
+    store.handle_scan_finished(root, True)
+    try:
+        assert read_started.wait(5)
+        repository.merge_scan_rows([{**pending_source, "sort_ts": -1}])
+    finally:
+        release.set()
+    _wait_for(qapp, lambda: loader._active_request is None)
+
+    store.ensure_row_loaded(649)
+    _wait_for(qapp, lambda: loader._active_request is None)
+    assert store.asset_at(649).id == target_id
+    assert (tracked.row(), tracked.data(Roles.ASSET_ID)) == (649, target_id)
+
+
+@pytest.mark.parametrize("inserted", [20, 450])
+def test_scrolled_grid_keeps_anchor_offset_when_a_batch_sorts_ahead(gallery, make_rows, qapp, inserted) -> None:
     root, repository, _service, model = gallery
     loader, store = model._window_loader, model.store
     repository.write_rows(make_rows(0, 300))
@@ -298,12 +711,41 @@ def test_scrolled_grid_keeps_anchor_offset_when_a_batch_sorts_ahead(gallery, mak
         before = grid.visualRect(top).top()
         anchor_path = Path(top.data(Roles.ABS))
 
-        repository.merge_scan_rows(make_rows(300, 20))
+        repository.merge_scan_rows(make_rows(300, inserted))
         store.handle_scan_finished(root, True)
-        _wait_for(qapp, lambda: model.rowCount() == 320 and not grid._scroll_restore_timer.isActive())
+        _wait_for(qapp, lambda: model.rowCount() == 300 + inserted and not grid._scroll_restore_timer.isActive())
         restored = model.index(store.cached_row_for_path(anchor_path), 0)
         assert grid.visualRect(restored).top() == before
         assert grid.currentIndex().data(Roles.ABS) == selected_path
+    finally:
+        grid.hide()
+        grid.setModel(None)
+        grid.deleteLater()
+
+
+def test_gallery_click_keeps_pressed_asset_when_a_scan_changes_its_row(gallery, make_rows, qapp) -> None:
+    root, repository, _service, model = gallery
+    store = model.store
+    repository.write_rows(make_rows(0, 4))
+    grid = GalleryGridView()
+    grid.resize(800, 450)
+    grid.setModel(model)
+    grid.setItemDelegate(AssetGridDelegate(grid, filmstrip_mode=False))
+    grid.set_preview_enabled(False)
+    grid.show()
+    try:
+        store.load_selection(root, query=AssetQuery())
+        _wait_for(qapp, lambda: model.rowCount() == 4 and grid._visible_range is not None)
+        clicked = []
+        grid.itemClicked.connect(lambda index: clicked.append(index.data(Roles.ASSET_ID)))
+        start = grid.visualRect(model.index(0, 0)).center()
+        QTest.mousePress(grid.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        repository.merge_scan_rows(make_rows(4, 1))
+        store.handle_scan_finished(root, True)
+        _wait_for(qapp, lambda: model.rowCount() == 5)
+        assert model.index(0, 0).data(Roles.ASSET_ID) == "asset-4"
+        QTest.mouseRelease(grid.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        assert clicked == ["asset-3"]
     finally:
         grid.hide()
         grid.setModel(None)

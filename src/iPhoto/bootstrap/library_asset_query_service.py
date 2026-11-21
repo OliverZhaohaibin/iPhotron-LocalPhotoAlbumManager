@@ -7,7 +7,7 @@ import logging
 import threading
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from itertools import islice
@@ -353,6 +353,15 @@ class LibraryAssetQueryService:
         window = reader(self._collection_query_for_asset_query(query), first, limit)
         return replace(window, rows=list(self._scoped_rows(window.rows, album_path)))
 
+    def find_gallery_asset_positions(
+        self, query: AssetQuery, paths: tuple[Path, ...], order_revision: int,
+    ) -> dict[Path, tuple[str, int]] | None:
+        """Resolve offscreen index positions without changing the Gallery order snapshot."""
+
+        return self._repository().find_collection_positions(
+            self._collection_query_for_asset_query(query), paths, order_revision,
+        )
+
     def count_collection(self, query: CollectionQuery) -> int:
         """Return the number of assets matching a SQL-first collection query."""
 
@@ -442,7 +451,7 @@ class LibraryAssetQueryService:
                 return 0
             self._thumbnail_backfill_pending.add(request_key)
             try:
-                self._thumbnail_backfill_executor.submit(
+                future = self._thumbnail_backfill_executor.submit(
                     self._discover_and_run_thumbnail_backfill,
                     request_key,
                     root,
@@ -454,6 +463,13 @@ class LibraryAssetQueryService:
             except Exception:
                 self._thumbnail_backfill_pending.discard(request_key)
                 raise
+        # A cancelled future never enters the worker's terminal path. Register
+        # outside the lock because a completed future invokes callbacks inline.
+        def release_cancelled(completed: Future[None]) -> None:
+            if completed.cancelled():
+                self._finish_thumbnail_backfill_request(request_key)
+
+        future.add_done_callback(release_cancelled)
         return 1
 
     def thumbnail_backfill_pending(self) -> bool:
@@ -685,7 +701,12 @@ class LibraryAssetQueryService:
                 ):
                     continue
                 request_key = (self.library_root.as_posix(), 0, 1, f"{rel}:{desired_revision}")
-                self._queue_thumbnail_backfill(request_key, self.library_root, None, asset_rel=rel)
+                try:
+                    self._queue_thumbnail_backfill(request_key, self.library_root, None, asset_rel=rel)
+                except RuntimeError:
+                    _LOGGER.warning("Could not queue thumbnail refresh for %s", path, exc_info=True)
+                # The return value describes the drawable preview. A scan or
+                # visible-window backfill can recover the durable pending row.
                 return True
             else:
                 return False

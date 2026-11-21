@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QMouseEvent, QPalette
 from PySide6.QtWidgets import QAbstractItemView, QLabel, QListView
 
@@ -72,20 +70,20 @@ class GalleryGridView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
         self._update_empty_state()
-        self._detail_prefetch_index = QModelIndex()
+        self._detail_prefetch_index = QPersistentModelIndex()
         self._detail_prefetch_timer = QTimer(self)
         self._detail_prefetch_timer.setSingleShot(True)
         self._detail_prefetch_timer.setInterval(150)
         self._detail_prefetch_timer.timeout.connect(self._emit_detail_prefetch)
         self.entered.connect(self._schedule_detail_prefetch)
-        self._scroll_anchor: tuple[int, Path | None, int] | None = None
+        self._scroll_anchor: tuple[int, QPersistentModelIndex, int] | None = None
         self._scroll_restore_timer = QTimer(self)
         self._scroll_restore_timer.setSingleShot(True)
         self._scroll_restore_timer.timeout.connect(self._restore_window_scroll)
 
     def _schedule_detail_prefetch(self, index: QModelIndex) -> None:
         self._detail_prefetch_timer.stop()
-        self._detail_prefetch_index = QModelIndex(index)
+        self._detail_prefetch_index = QPersistentModelIndex(index)
         if index.isValid() and not self._selection_mode_enabled:
             self._detail_prefetch_timer.start()
 
@@ -100,7 +98,7 @@ class GalleryGridView(AssetGrid):
 
     def _cancel_detail_prefetch(self, *_args: object) -> None:
         self._detail_prefetch_timer.stop()
-        self._detail_prefetch_index = QModelIndex()
+        self._detail_prefetch_index = QPersistentModelIndex()
 
     def leaveEvent(self, event: QEvent) -> None:  # type: ignore[override]
         self._cancel_detail_prefetch()
@@ -257,14 +255,13 @@ class GalleryGridView(AssetGrid):
         value = self.verticalScrollBar().value()
         if not self.isVisible() or self._scroll_anchor is not None:
             return
-        self._scroll_anchor = (value, None, 0)
+        self._scroll_anchor = (value, QPersistentModelIndex(), 0)
         if value <= 0 or self._visible_range is None:
             return
         index = self.model().index(self._visible_range[0], 0)
         rect = self.visualRect(index)
-        path = index.data(Roles.ABS)
-        if path and rect.intersects(self.viewport().rect()):
-            self._scroll_anchor = (value, Path(path), rect.top())
+        if index.data(Roles.ABS) and rect.intersects(self.viewport().rect()):
+            self._scroll_anchor = (value, QPersistentModelIndex(index), rect.top())
 
     def _schedule_window_scroll_restore(self) -> None:
         if self._scroll_anchor is not None:
@@ -274,16 +271,12 @@ class GalleryGridView(AssetGrid):
         anchor, self._scroll_anchor = self._scroll_anchor, None
         if anchor is None or not self.isVisible():
             return
-        value, path, offset = anchor
-        model = self.model()
-        lookup = getattr(model, "cached_row_for_path", None)
+        value, index, offset = anchor
         scrollbar = self.verticalScrollBar()
-        if path is not None and callable(lookup):
-            row = lookup(path)
-            if row is not None:
-                rect = self.visualRect(model.index(row, 0))
-                if rect.isValid():
-                    value = scrollbar.value() + rect.top() - offset
+        if index.isValid():
+            rect = self.visualRect(QModelIndex(index))
+            if rect.isValid():
+                value = scrollbar.value() + rect.top() - offset
         scrollbar.setValue(value)
 
     def _update_empty_state(self) -> None:

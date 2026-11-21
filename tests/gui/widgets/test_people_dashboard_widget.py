@@ -37,6 +37,7 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
     MergeConfirmDialog,
     PeopleDashboardWidget,
 )
+from iPhoto.gui.ui.widgets.people_dashboard_board import IdentityBoard
 from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
 from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
@@ -104,6 +105,33 @@ def test_cancelled_drag_merge_shows_single_confirmation_and_keeps_preview_order(
     assert len(confirm_calls) == 1
     assert board.visible_cards() == [target, source]
     order_changed.assert_not_called()
+
+
+def test_drag_merge_uses_the_highlighted_target_after_reordering(qapp: QApplication) -> None:
+    board = IdentityBoard()
+    board.resize(800, 500)
+    cards = [
+        people_dashboard_cards.PeopleCard(
+            board=board,
+            summary=PersonSummary(key, key, f"face-{key}", 1, None, "2024-01-01"),
+            seed_index=index,
+        )
+        for index, key in enumerate(("a", "b", "c", "d"))
+    ]
+    board.set_cards(cards)
+    source, _, initial_target, target = cards
+    merged = Mock()
+    board.mergeRequested.connect(merged)
+
+    source.begin_drag()
+    source.move(initial_target.pos() + QPoint(60, 0))
+    board.update_drag(source)
+    assert board.proximity_pair == (source, target)
+    assert not board.merge_frame.isHidden()
+    board.finish_drag(source)
+    source.end_drag()
+
+    merged.assert_called_once_with(source.identity_key, target.identity_key)
 
 
 @pytest.mark.parametrize(
@@ -333,7 +361,6 @@ def test_drag_merge_removes_source_card_immediately(monkeypatch, qapp: QApplicat
         ),
     )
     monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     widget._board.proximity_pair = (cards[0], cards[1])
@@ -401,8 +428,8 @@ def test_drag_reorder_persists_mixed_order_through_reload(
 
         send_mouse(QEvent.Type.MouseMove, distance, no_button, left)
         assert board.visible_cards() == [second, first, third]
-        # The preview was set before the target card moved into its new slot.
-        assert board.proximity_pair == (dragged, target)
+        assert board.proximity_pair is None
+        assert board.merge_frame.isHidden()
         send_mouse(QEvent.Type.MouseButtonRelease, distance, left, no_button)
 
         expected = ("pet:shared", "person:shared", "person:bob")
@@ -437,7 +464,6 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(
 
     persist = Mock()
     monkeypatch.setattr(widget._service, "set_identity_card_order", persist)
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     cards = widget._board.visible_cards()

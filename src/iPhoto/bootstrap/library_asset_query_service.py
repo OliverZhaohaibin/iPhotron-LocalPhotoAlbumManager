@@ -32,7 +32,7 @@ from ..domain.models.query import (
 )
 from ..domain.models.scan import ScanBatchCommitted
 from ..infrastructure.services.thumbnail_artifact import thumbnail_artifact_lock, thumbnail_revision
-from ..io.scanner_adapter import ensure_scan_thumbnail
+from ..io.scanner_adapter import ensure_scan_thumbnail, has_usable_published_thumbnail
 from ..path_normalizer import compute_album_path
 from ..utils.pathutils import ensure_work_dir
 
@@ -396,9 +396,7 @@ class LibraryAssetQueryService:
         collection_query = self._collection_query_for_asset_query(query)
         candidates = list(read_candidates(collection_query, first, limit))
 
-        # Ready rows from older libraries may have a valid 512 cache but no
-        # micro layer. Include them so ensure_scan_thumbnail() can derive the
-        # micro image from L2 without decoding the source media again.
+        # Keep replacement work and legacy micro gaps bounded to the window.
         read_gallery_window = getattr(self._repository(), "read_gallery_collection_window", None)
         if callable(read_gallery_window):
             ready_window = read_gallery_window(collection_query, first, limit)
@@ -406,7 +404,7 @@ class LibraryAssetQueryService:
             candidates.extend(
                 row
                 for row in ready_window.rows
-                if row.get("micro_thumbnail") is None
+                if (row.get("thumb_refresh_pending") or row.get("micro_thumbnail") is None)
                 and str(row.get("rel")) not in seen
             )
 
@@ -429,6 +427,16 @@ class LibraryAssetQueryService:
             return 0
 
         request_key = (root.as_posix(), max(0, int(first)), max(0, int(limit)), repr(query))
+        return self._queue_thumbnail_backfill(request_key, Path(root), copy.deepcopy(query))
+
+    def _queue_thumbnail_backfill(
+        self,
+        request_key: tuple[str, int, int, str],
+        root: Path,
+        query: AssetQuery | None,
+        *,
+        asset_rel: str | None = None,
+    ) -> int:
         with self._thumbnail_backfill_lock:
             if self._thumbnail_backfill_shutdown or request_key in self._thumbnail_backfill_pending:
                 return 0
@@ -437,10 +445,11 @@ class LibraryAssetQueryService:
                 self._thumbnail_backfill_executor.submit(
                     self._discover_and_run_thumbnail_backfill,
                     request_key,
-                    Path(root),
-                    copy.deepcopy(query),
+                    root,
+                    query,
                     request_key[1],
                     request_key[2],
+                    asset_rel,
                 )
             except Exception:
                 self._thumbnail_backfill_pending.discard(request_key)
@@ -486,7 +495,7 @@ class LibraryAssetQueryService:
                 asset_id or library_rel,
                 thumbnail_cache_dir=self._thumbnail_cache_dir(),
                 prefer_cached_micro=True,
-                refresh_cache=row.get("thumbnail_state") == "stale",
+                refresh_cache=row.get("thumbnail_state") == "stale" or bool(row.get("thumb_refresh_pending")),
                 expected_revision=row_revision,
             )
             if self._thumbnail_backfill_shutdown:
@@ -520,6 +529,7 @@ class LibraryAssetQueryService:
                         "micro_thumbnail": thumbnail.micro_thumbnail,
                         "thumb_cache_key": thumbnail.thumb_cache_key,
                         "thumb_revision": rendered_revision,
+                        "thumb_refresh_pending": False,
                         "thumb_error": None,
                     })
             self.thumbnail_backfill_progress.emit(root, index, total)
@@ -569,9 +579,10 @@ class LibraryAssetQueryService:
         self,
         request_key: tuple[str, int, int, str],
         root: Path,
-        query: AssetQuery,
+        query: AssetQuery | None,
         first: int,
         limit: int,
+        asset_rel: str | None = None,
     ) -> None:
         """Discover and process old-library micro gaps away from the Gallery loader."""
 
@@ -579,7 +590,12 @@ class LibraryAssetQueryService:
             return
         started = False
         try:
-            candidates = self.read_thumbnail_backfill_candidates(root, query, first, limit)
+            if asset_rel is not None:
+                row = self._repository().get_rows_by_rels([asset_rel]).get(asset_rel)
+                candidates = [row] if row is not None and row.get("thumb_refresh_pending") else []
+            else:
+                assert query is not None
+                candidates = self.read_thumbnail_backfill_candidates(root, query, first, limit)
             if self._thumbnail_backfill_shutdown:
                 return
             started = True
@@ -595,7 +611,7 @@ class LibraryAssetQueryService:
             self.thumbnail_backfill_completed.emit(ScanBatchCommitted(
                 job_id=f"thumbnail-backfill:{request_key[0]}:{first}:{limit}",
                 root=root,
-                collection_revision=0,
+                collection_revision=self._thumbnail_collection_revision() if ready_rows else 0,
                 ready_count=len(ready_rows),
                 rows=ready_rows,
                 stage_elapsed_ms={},
@@ -649,15 +665,38 @@ class LibraryAssetQueryService:
         return bool(row.get("is_favorite"))
 
     def mark_thumbnail_stale(self, path: Path, desired_revision: str) -> bool:
-        marker = getattr(self._repository(), "mark_thumbnail_stale", None)
-        if not callable(marker):
-            return False
-        return bool(
-            marker(
-                self._library_relative_path(path),
-                desired_revision=desired_revision,
-            )
-        )
+        """Record desired inputs and return whether the previous thumbnail stays drawable."""
+
+        repository = self._repository()
+        rel = unicodedata.normalize("NFC", self._library_relative_path(path))
+        retain = getattr(repository, "mark_thumbnail_refresh_pending", None)
+        if callable(retain):
+            for _attempt in range(2):
+                row = repository.get_rows_by_rels([rel]).get(rel)
+                if row is None or not has_usable_published_thumbnail(path, row, self._thumbnail_cache_dir()):
+                    break
+                if row.get("thumb_revision") == desired_revision:
+                    if not row.get("thumb_refresh_pending"):
+                        return True
+                elif not retain(
+                    rel, desired_revision=desired_revision,
+                    cache_key=row["thumb_cache_key"], expected_asset_id=str(row["id"]),
+                    expected_index_revision=int(row.get("index_revision") or 0),
+                ):
+                    continue
+                request_key = (self.library_root.as_posix(), 0, 1, f"{rel}:{desired_revision}")
+                self._queue_thumbnail_backfill(request_key, self.library_root, None, asset_rel=rel)
+                return True
+            else:
+                return False
+        marker = getattr(repository, "mark_thumbnail_stale", None)
+        if callable(marker):
+            marker(rel, desired_revision=desired_revision)
+        return False
+
+    def _thumbnail_collection_revision(self) -> int:
+        reader = getattr(self._repository(), "collection_revision", None)
+        return reader() if callable(reader) else 0
 
     def publish_thumbnail_ready(
         self,
@@ -692,7 +731,7 @@ class LibraryAssetQueryService:
                     self.thumbnail_ready_committed.emit(ScanBatchCommitted(
                         job_id="thumbnail-ready",
                         root=self.library_root,
-                        collection_revision=0,
+                        collection_revision=self._thumbnail_collection_revision(),
                         ready_count=1,
                         rows=[row],
                         stage_elapsed_ms={},

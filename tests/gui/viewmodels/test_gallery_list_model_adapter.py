@@ -1844,6 +1844,22 @@ def test_revisioned_invalidation_queues_stale_target_and_hides_local_micro(
     assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is None
 
 
+def test_retained_edit_keeps_last_drawable_preview(adapter, mock_store, mock_thumb_service):
+    path = Path("/photos/edited.jpg")
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=path, micro_thumbnail=micro, thumbnail_state="ready",
+    )
+
+    adapter.invalidate_thumbnail(str(path), desired_revision="revision-2", retained_thumbnail=True)
+
+    mock_thumb_service.invalidate.assert_not_called()
+    mock_thumb_service.get_thumbnail.assert_not_called()
+    assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is micro
+
+
 def test_size_role_returns_trimmed_duration_for_video(adapter, mock_store):
     mock_store.count.return_value = 1
     mock_store.asset_at.return_value = _make_dto(

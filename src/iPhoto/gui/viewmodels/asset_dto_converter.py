@@ -227,7 +227,7 @@ def to_dto(asset: Asset, library_root: Optional[Path]) -> AssetDTO:
         thumbnail_state=str(metadata.get("thumbnail_state") or "ready"),
         thumb_revision=(
             metadata.get("thumb_revision")
-            if isinstance(metadata.get("thumb_revision"), str)
+            if isinstance(metadata.get("thumb_revision"), str) and not metadata.get("thumb_refresh_pending")
             else None
         ),
     )
@@ -368,7 +368,7 @@ def scan_row_to_dto(
         thumbnail_state=str(row.get("thumbnail_state") or "ready"),
         thumb_revision=(
             row.get("thumb_revision")
-            if isinstance(row.get("thumb_revision"), str)
+            if isinstance(row.get("thumb_revision"), str) and not row.get("thumb_refresh_pending")
             else None
         ),
     )

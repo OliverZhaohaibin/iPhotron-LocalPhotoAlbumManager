@@ -114,6 +114,7 @@ class EditCommitResult:
     """Durable sidecar commit and the thumbnail revision it selects."""
 
     thumbnail_revision: str
+    retained_thumbnail: bool = False
 
 
 class EditServicePort(Protocol):

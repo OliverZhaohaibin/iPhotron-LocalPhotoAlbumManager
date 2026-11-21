@@ -651,6 +651,7 @@ class EditCoordinator(QObject):
                 self._asset_vm.invalidate_thumbnail(
                     str(source),
                     desired_revision=commit_result.thumbnail_revision,
+                    retained_thumbnail=getattr(commit_result, "retained_thumbnail", False) is True,
                 )
             finally:
                 if navigation:

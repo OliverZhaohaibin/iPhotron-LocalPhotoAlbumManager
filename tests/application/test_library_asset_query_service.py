@@ -7,13 +7,84 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from PIL import Image
 
 from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
+from iPhoto.bootstrap.library_session import create_headless_library_session
 from iPhoto.cache.index_store import IndexStore, get_global_repository
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.core import MediaType
 from iPhoto.domain.models.query import AssetQuery, ThumbnailReadyResult, ThumbnailState
 from iPhoto.infrastructure.services.thumbnail_artifact import thumbnail_revision
+from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_file_for_key
+
+
+@pytest.mark.parametrize("repair_with_scan", [True, False])
+def test_edit_keeps_published_thumbnail_drawable_through_failed_replacement(
+    tmp_path: Path, monkeypatch, repair_with_scan: bool,
+) -> None:
+    root = tmp_path.resolve()
+    for name, color in (("edited.jpg", "navy"), ("other.jpg", "green"), ("third.jpg", "red")):
+        Image.new("RGB", (70, 60), color).save(root / name)
+    path = root / "edited.jpg"
+    session = create_headless_library_session(root)
+    repository = get_global_repository(root)
+    service = session.asset_queries
+    query = AssetQuery()
+    try:
+        session.scans.scan_album(root, include=["*.jpg"], persist_chunks=True)
+        before = service.read_gallery_asset_window(root, query, 0, 8)
+        original = repository.get_rows_by_rels([path.name])[path.name]
+        key = original["thumb_cache_key"]
+        artifact = thumbnail_cache_file_for_key(repository.path.parent / "cache" / "thumbs", key)
+        old_artifact = artifact.read_bytes()
+        queued = []
+        monkeypatch.setattr(service, "_queue_thumbnail_backfill", lambda *args, **kw: queued.append(kw) or 1)
+
+        edit = session.edit.write_adjustments(path, {"Light_Master": 0.9})
+        assert edit.retained_thumbnail
+        assert queued == [{"asset_rel": path.name}]
+        marked = repository.get_rows_by_rels([path.name])[path.name]
+        assert marked["thumb_refresh_pending"]
+        assert marked["thumbnail_state"] == "ready"
+        assert marked["micro_thumbnail"] == original["micro_thumbnail"]
+        assert marked["thumb_revision"] == edit.thumbnail_revision
+        assert marked["index_revision"] > original["index_revision"]
+        assert not service.publish_thumbnail_ready(
+            path, revision=original["thumb_revision"], cache_key=key,
+            micro_thumbnail=original["micro_thumbnail"],
+        )
+        assert not repository.update_thumbnail_ready(path.name, thumb_cache_key=key, micro_thumbnail=b"unguarded")
+
+        with monkeypatch.context() as failure:
+            failure.setattr("iPhoto.io.scanner_adapter.ensure_scan_thumbnail", lambda *args, **kw: ThumbnailReadyResult(
+                state=ThumbnailState.FAILED, thumb_error="temporary failure", thumb_revision=kw["expected_revision"],
+            ))
+            session.scans.scan_album(root, include=["*.jpg"], persist_chunks=True)
+        failed = repository.get_rows_by_rels([path.name])[path.name]
+        assert failed["thumb_refresh_pending"]
+        assert failed["thumbnail_state"] == "ready"
+        assert artifact.read_bytes() == old_artifact
+        during = service.read_gallery_asset_window(root, query, 0, 8)
+        assert before.total_count == during.total_count == 3
+        assert before.order_revision == during.order_revision
+
+        if repair_with_scan:
+            session.scans.scan_album(root, include=["*.jpg"], persist_chunks=True)
+        else:
+            candidates = service.read_thumbnail_backfill_candidates(root, query, 0, 8)
+            assert [row["rel"] for row in candidates] == [path.name]
+            assert len(service._run_thumbnail_backfill(root, None, candidates)) == 1
+        # A late cached scan row cannot restore the pending flag or old preview.
+        repository.merge_scan_rows([failed])
+        repaired = repository.get_rows_by_rels([path.name])[path.name]
+        assert repaired["thumbnail_state"] == "ready"
+        assert not repaired["thumb_refresh_pending"]
+        assert repaired["thumb_revision"] == edit.thumbnail_revision
+        assert repaired["micro_thumbnail"] != original["micro_thumbnail"]
+        assert service.read_gallery_asset_window(root, query, 0, 8).order_revision == before.order_revision
+    finally:
+        session.shutdown()
 
 
 class _Repository:

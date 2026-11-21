@@ -59,19 +59,20 @@ class LibraryEditService(EditServicePort):
         adjustments: dict[str, Any],
     ) -> EditCommitResult:
         normalized = self._normalize_path(path)
+        retained_thumbnail = False
         with thumbnail_artifact_lock(normalized):
             self._sidecar_repository.write_adjustments(normalized, adjustments)
             revision = thumbnail_revision(normalized)
             marker = getattr(self._thumbnail_state_service, "mark_thumbnail_stale", None)
             if callable(marker):
                 try:
-                    marker(normalized, revision)
+                    retained_thumbnail = marker(normalized, revision) is True
                 except Exception:
                     _LOGGER.exception(
                         "Failed to mark thumbnail revision stale for %s",
                         normalized,
                     )
-        return EditCommitResult(thumbnail_revision=revision)
+        return EditCommitResult(thumbnail_revision=revision, retained_thumbnail=retained_thumbnail)
 
     def default_adjustments(self) -> dict[str, Any]:
         return default_adjustment_values()

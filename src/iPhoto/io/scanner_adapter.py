@@ -384,8 +384,9 @@ def scan_album(
                         ).strip()
                         revision = thumbnail_revision(p)
                         cached["thumb_revision"] = revision
-                        if indexed_revision != revision and (
-                            indexed_revision or p.with_suffix(".ipo").is_file()
+                        if cached.get("thumb_refresh_pending") or (
+                            indexed_revision != revision
+                            and (indexed_revision or p.with_suffix(".ipo").is_file())
                         ):
                             yield _refresh_cached_thumbnail(
                                 p,
@@ -491,6 +492,33 @@ def _cached_thumbnail_ready(
     return _cache_file_is_ready(thumbnail_cache_file(thumbnail_cache_dir, path))
 
 
+def has_usable_published_thumbnail(
+    path: Path, row: Dict[str, Any], thumbnail_cache_dir: Path,
+) -> bool:
+    """Check that the indexed, previously published artifact still belongs to the source."""
+
+    if row.get("thumbnail_state") != ThumbnailState.READY.value or not row.get("id"):
+        return False
+    key = row.get("thumb_cache_key")
+    if not isinstance(key, str):
+        return False
+    canonical_key = thumbnail_cache_key(path, DEFAULT_THUMBNAIL_SIZE)
+    base, separator, namespace = key.partition("-")
+    if base != canonical_key or (separator and (
+        len(namespace) != 32 or any(char not in "0123456789abcdef" for char in namespace)
+    )):
+        return False
+    if not _cache_file_is_ready(thumbnail_cache_file_for_key(thumbnail_cache_dir, key)):
+        return False
+    try:
+        source = path.stat()
+        if row.get("source_mtime_ns"):
+            return row["source_mtime_ns"] == source.st_mtime_ns and row.get("bytes") == source.st_size
+        return row["id"] == f"as_{compute_file_id(path)}"
+    except OSError:
+        return False
+
+
 def _refresh_cached_thumbnail(
     path: Path,
     cached: Dict[str, Any],
@@ -508,6 +536,7 @@ def _refresh_cached_thumbnail(
         expected_revision=expected_revision,
     )
     row["thumbnail_state"] = thumbnail.state.value
+    row["thumb_refresh_pending"] = False
     row.pop("thumb_error", None)
     if thumbnail.micro_thumbnail is not None:
         row["micro_thumbnail"] = thumbnail.micro_thumbnail
@@ -518,7 +547,10 @@ def _refresh_cached_thumbnail(
         row["thumb_revision"] = thumbnail.thumb_revision
     if thumbnail.thumb_error:
         row["thumb_error"] = thumbnail.thumb_error
-        if str(cached.get("thumb_cache_key") or "").strip():
+        if has_usable_published_thumbnail(path, cached, thumbnail_cache_dir):
+            row["thumbnail_state"] = ThumbnailState.READY.value
+            row["thumb_refresh_pending"] = True
+        elif str(cached.get("thumb_cache_key") or "").strip():
             row["thumbnail_state"] = ThumbnailState.STALE.value
             row["micro_thumbnail"] = None
         else:
@@ -583,6 +615,7 @@ def _refresh_cached_metadata_rows(
         if (
             source_replaced
             or inputs_changed
+            or refreshed.get("thumb_refresh_pending")
             or not _cached_thumbnail_ready(path, refreshed, thumbnail_cache_dir)
         ):
             refreshed = _refresh_cached_thumbnail(

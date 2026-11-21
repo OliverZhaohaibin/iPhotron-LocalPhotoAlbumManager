@@ -751,18 +751,16 @@ class GalleryListModelAdapter(QAbstractListModel):
         path_str: str,
         *,
         desired_revision: str | None = None,
+        retained_thumbnail: bool = False,
     ) -> None:
         path = Path(path_str)
-        if desired_revision:
-            self._locally_stale_thumbnail_paths.add(path)
-            self._published_thumbnail_paths.pop(path, None)
-        sizes = {size.width(): size for size in self._surface_sizes.values()}
-        for size in sizes.values():
-            self._thumbnails.invalidate(
-                path,
-                size=size,
-                desired_revision=desired_revision,
-            )
+        if not retained_thumbnail:
+            if desired_revision:
+                self._locally_stale_thumbnail_paths.add(path)
+                self._published_thumbnail_paths.pop(path, None)
+            sizes = {size.width(): size for size in self._surface_sizes.values()}
+            for size in sizes.values():
+                self._thumbnails.invalidate(path, size=size, desired_revision=desired_revision)
         self._duration_cache.pop(path, None)
         row = self._store.row_for_path(path)
         if row is None:
@@ -770,7 +768,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         # Decoration lookups are intentionally memory-only, so invalidation
         # alone would leave the filmstrip showing its micro thumbnail until a
         # later viewport-demand refresh.  Queue the edited asset immediately.
-        if desired_revision:
+        if retained_thumbnail:
+            self._locally_stale_thumbnail_paths.discard(path)
+        elif desired_revision:
             self._thumbnails.get_thumbnail(
                 path,
                 self._thumb_size,
@@ -784,7 +784,8 @@ class GalleryListModelAdapter(QAbstractListModel):
                 self._thumb_size,
                 priority="high",
             )
-        self._reconcile_full_thumbnail_demand()
+        if not retained_thumbnail:
+            self._reconcile_full_thumbnail_demand()
         idx = self.index(row, 0)
         if idx.isValid():
             self.dataChanged.emit(

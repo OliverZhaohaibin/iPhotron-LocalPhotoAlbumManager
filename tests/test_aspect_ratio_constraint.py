@@ -338,12 +338,12 @@ class TestAspectOrientationToggle:
         self.emitted: list[float] = []
         self.widget.ratioSelected.connect(lambda r: self.emitted.append(r))
 
-    def _select_preset(self, label: str) -> None:
-        for btn in self.widget._button_group.buttons():
-            if btn.text() == label:
-                btn.setChecked(True)
+    def _select_preset(self, source_text: str) -> None:
+        for preset, button in self.widget._ratio_buttons:
+            if preset == source_text:
+                button.setChecked(True)
                 return
-        raise ValueError(f"Preset '{label}' not found")
+        raise ValueError(f"Preset '{source_text}' not found")
 
     def test_orientation_hidden_for_freeform(self):
         assert self.widget._orientation_widget.isHidden()

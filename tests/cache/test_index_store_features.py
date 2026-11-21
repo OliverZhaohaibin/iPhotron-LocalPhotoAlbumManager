@@ -1165,6 +1165,26 @@ def test_late_scan_keeps_ready_thumbnail_for_committed_edit(store: IndexStore) -
     assert merged["micro_thumbnail"] == b"edited"
 
 
+def test_late_failed_scan_cannot_replace_success_for_same_revision(store: IndexStore) -> None:
+    store.append_rows([{
+        "rel": "photo.jpg", "id": "photo", "ts": 1, "thumbnail_state": "stale",
+        "thumb_revision": "edit-revision",
+    }])
+    scanned = store.get_rows_by_rels(["photo.jpg"])["photo.jpg"]
+    scanned.update(thumbnail_state="failed", thumb_error="temporarily unreadable")
+    assert store.update_thumbnail_ready(
+        "photo.jpg", expected_revision="edit-revision", thumb_cache_key="valid-key",
+        micro_thumbnail=b"edited",
+    )
+
+    store.merge_scan_rows([scanned])
+
+    row = store.get_rows_by_rels(["photo.jpg"])["photo.jpg"]
+    assert row["thumbnail_state"] == "ready"
+    assert row["micro_thumbnail"] == b"edited"
+    assert row["thumb_error"] is None
+
+
 def test_scan_accepts_replaced_source_while_edit_thumbnail_is_stale(store: IndexStore) -> None:
     source = store.library_root / "photo.jpg"
     source.write_bytes(b"source")

@@ -6,11 +6,12 @@ import hashlib
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 from PIL import Image as PILImage
 from PySide6.QtCore import QSize, Qt
@@ -98,6 +99,7 @@ def render_thumbnail_image(
     *,
     edit_service: EditServicePort | None = None,
     generator: PillowThumbnailGenerator | None = None,
+    raw_adjustments: Mapping[str, Any] | None = None,
 ) -> QImage | None:
     """Render one square thumbnail with persisted sidecar adjustments applied."""
 
@@ -122,18 +124,20 @@ def render_thumbnail_image(
     if image is None or image.isNull():
         return None
 
-    if edit_service is not None and edit_service.sidecar_exists(source):
-        stats = compute_color_statistics(image)
-        state = edit_service.describe_adjustments(source, color_stats=stats)
-        adjustments = state.resolved_adjustments
-    else:
-        raw_adjustments = sidecar.load_adjustments(source)
-        stats = compute_color_statistics(image) if raw_adjustments else None
-        adjustments = sidecar.resolve_render_adjustments(raw_adjustments, color_stats=stats)
+    if raw_adjustments is None:
+        raw_adjustments = _read_thumbnail_adjustments(source, edit_service)
+    stats = compute_color_statistics(image) if raw_adjustments else None
+    adjustments = sidecar.resolve_render_adjustments(raw_adjustments, color_stats=stats)
     if adjustments:
         image = apply_geometry_and_crop(image, adjustments) or image
         image = apply_adjustments(image, adjustments, color_stats=stats)
     return _composite_square(image, size)
+
+
+def _read_thumbnail_adjustments(path: Path, edit_service: EditServicePort | None) -> dict[str, Any]:
+    if edit_service is not None and edit_service.sidecar_exists(path):
+        return edit_service.read_adjustments(path)
+    return sidecar.load_adjustments(path)
 
 
 def encode_micro_thumbnail(image: QImage) -> bytes | None:
@@ -157,14 +161,16 @@ def publish_thumbnail_artifact(
     """Render and atomically replace the stable cache file iff inputs stay current."""
 
     source = Path(path)
-    if thumbnail_revision(source) != expected_revision:
-        return None
+    with thumbnail_artifact_lock(source):
+        if thumbnail_revision(source) != expected_revision:
+            return None
+        raw_adjustments = _read_thumbnail_adjustments(source, edit_service)
     target_size = QSize(int(size[0]), int(size[1]))
     image = render_thumbnail_image(
         source,
         target_size,
-        edit_service=edit_service,
         generator=generator,
+        raw_adjustments=raw_adjustments,
     )
     if image is None or image.isNull():
         return None

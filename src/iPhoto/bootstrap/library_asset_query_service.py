@@ -8,6 +8,7 @@ import threading
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
@@ -277,12 +278,7 @@ class LibraryAssetQueryService:
                     read_query.offset,
                     read_query.limit or 0,
                 )
-                return WindowResult(
-                    first=window.first,
-                    rows=list(self._scoped_rows(window.rows, album_path)),
-                    total_count=window.total_count,
-                    collection_revision=window.collection_revision,
-                )
+                return replace(window, rows=list(self._scoped_rows(window.rows, album_path)))
 
         rows = list(self.read_query_asset_rows(root, read_query))
         return WindowResult(
@@ -317,13 +313,27 @@ class LibraryAssetQueryService:
                     read_query.offset,
                     read_query.limit or 0,
                 )
-                return WindowResult(
-                    first=window.first,
-                    rows=list(self._scoped_rows(window.rows, album_path)),
-                    total_count=window.total_count,
-                    collection_revision=window.collection_revision,
-                )
+                return replace(window, rows=list(self._scoped_rows(window.rows, album_path)))
         return self.read_query_asset_window(root, read_query, first, limit)
+
+    def read_gallery_asset_windows(
+        self,
+        root: Path,
+        query: AssetQuery,
+        ranges: tuple[tuple[int, int], ...],
+    ) -> tuple[WindowResult, ...]:
+        """Read disjoint Gallery view ranges at a common collection revision."""
+
+        if self._can_use_collection_api(query):
+            reader = getattr(self._repository(), "read_gallery_collection_windows", None)
+            if callable(reader):
+                album_path = self.album_path_for(root)
+                windows = reader(self._collection_query_for_asset_query(query), ranges)
+                return tuple(
+                    replace(window, rows=list(self._scoped_rows(window.rows, album_path)))
+                    for window in windows
+                )
+        return tuple(self.read_gallery_asset_window(root, query, first, limit) for first, limit in ranges)
 
     def read_thumbnail_hint_window(
         self,
@@ -341,12 +351,7 @@ class LibraryAssetQueryService:
             return WindowResult(first=first, rows=[], total_count=-1, collection_revision=0)
         album_path = self.album_path_for(root)
         window = reader(self._collection_query_for_asset_query(query), first, limit)
-        return WindowResult(
-            first=window.first,
-            rows=list(self._scoped_rows(window.rows, album_path)),
-            total_count=-1,
-            collection_revision=window.collection_revision,
-        )
+        return replace(window, rows=list(self._scoped_rows(window.rows, album_path)))
 
     def count_collection(self, query: CollectionQuery) -> int:
         """Return the number of assets matching a SQL-first collection query."""

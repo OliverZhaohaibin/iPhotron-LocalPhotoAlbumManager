@@ -28,7 +28,7 @@ logger = get_logger()
 # Version 2 adds cached video presentation metadata used by Gallery/Detail reads.
 # Opening an already migrated database must be O(1); in particular it must not
 # revisit every asset row on each desktop launch.
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 MIGRATION_PROTOCOL_VERSION = 1
 MIGRATION_STATE_NAME = "startup-migration.json"
 _MIGRATION_LOCK_NAME = "startup-migration.lock"
@@ -670,6 +670,58 @@ class SchemaMigrator:
         SchemaMigrator._create_indexes(conn, strict=_schema_matches_v1(conn))
 
     @staticmethod
+    def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+        """Version collection snapshots and track refreshes of usable thumbnails."""
+
+        if "thumb_refresh_pending" not in {row[1] for row in _table_info(conn, "assets")}:
+            conn.execute("ALTER TABLE assets ADD COLUMN thumb_refresh_pending INTEGER NOT NULL DEFAULT 0")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS collection_versions (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                revision INTEGER NOT NULL,
+                order_revision INTEGER NOT NULL
+            )
+        """)
+        conn.execute("INSERT OR IGNORE INTO collection_versions VALUES (1, 1, 1)")
+
+        # Match the fields used by QueryBuilder for collection filters and sort.
+        # BEFORE INSERT can still compare the previous row on INSERT OR REPLACE.
+        order_columns = (
+            "rel", "id", "sort_ts", "ts", "dt", "bytes", "parent_album_path", "live_role",
+            "is_deleted", "is_favorite", "media_type", "has_gps", "thumbnail_state",
+        )
+
+        def same_order(previous: str) -> str:
+            fields = [f"{previous}.{column} IS NEW.{column}" for column in order_columns]
+            fields.append(
+                f"(TRIM(COALESCE({previous}.thumb_cache_key, '')) != '') "
+                "IS (TRIM(COALESCE(NEW.thumb_cache_key, '')) != '')"
+            )
+            return " AND ".join(fields)
+
+        conn.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS assets_collection_insert BEFORE INSERT ON assets BEGIN
+                UPDATE collection_versions SET revision = revision + 1,
+                    order_revision = order_revision + NOT EXISTS (
+                        SELECT 1 FROM assets AS previous
+                        WHERE previous.rel = NEW.rel AND {same_order('previous')}
+                    );
+            END
+        """)
+        conn.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS assets_collection_update AFTER UPDATE ON assets BEGIN
+                UPDATE collection_versions SET revision = revision + 1,
+                    order_revision = order_revision + NOT ({same_order('OLD')});
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS assets_collection_delete AFTER DELETE ON assets BEGIN
+                UPDATE collection_versions SET revision = revision + 1,
+                    order_revision = order_revision + 1;
+            END
+        """)
+
+    @staticmethod
     def prepare_database(
         database_path: Path,
         *,
@@ -790,6 +842,7 @@ class SchemaMigrator:
                         SchemaMigrator._migrate_columns(connection)
                         SchemaMigrator._migrate_to_v5(connection)
                         SchemaMigrator._migrate_to_v6(connection)
+                        SchemaMigrator._migrate_to_v7(connection)
                         connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             except sqlite3.OperationalError as exc:
                 code = _classify_sqlite_operational_error(

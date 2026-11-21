@@ -27,6 +27,7 @@ def insert_rows(
             row,
             include_metadata="metadata" in columns,
             include_content_id_key="content_id_key" in columns,
+            include_refresh_pending="thumb_refresh_pending" in columns,
         )
         data_list.append(data)
 
@@ -62,6 +63,8 @@ def _asset_insert_columns(conn: sqlite3.Connection) -> list[str]:
         columns.append("metadata")
     if "content_id_key" in table_columns:
         columns.append("content_id_key")
+    if "thumb_refresh_pending" in table_columns:
+        columns.append("thumb_refresh_pending")
     return columns
 
 
@@ -70,6 +73,7 @@ def row_to_db_params(
     *,
     include_metadata: bool = False,
     include_content_id_key: bool = False,
+    include_refresh_pending: bool = False,
 ) -> list[Any]:
     """Map a dictionary row to a list of values for the DB."""
     gps_val = row.get("gps")
@@ -159,6 +163,8 @@ def row_to_db_params(
         params.append(_metadata_to_json(row.get("metadata")))
     if include_content_id_key:
         params.append(normalise_content_id(row.get("content_id")))
+    if include_refresh_pending:
+        params.append(int(thumbnail_state == "ready" and bool(row.get("thumb_refresh_pending"))))
     return params
 
 

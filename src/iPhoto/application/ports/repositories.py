@@ -128,6 +128,9 @@ class AssetRepositoryPort(Protocol):
     def count_collection(self, query: CollectionQuery) -> int:
         """Return the number of rows matching a collection query."""
 
+    def collection_revision(self) -> int:
+        """Return the committed asset snapshot revision."""
+
     def read_collection_page(
         self,
         query: CollectionQuery,
@@ -151,6 +154,13 @@ class AssetRepositoryPort(Protocol):
         limit: int,
     ) -> WindowResult:
         """Return a lightweight collection window for Gallery rendering."""
+
+    def read_gallery_collection_windows(
+        self,
+        query: CollectionQuery,
+        ranges: tuple[tuple[int, int], ...],
+    ) -> tuple[WindowResult, ...]:
+        """Read lightweight windows from one snapshot."""
 
     def read_thumbnail_hint_window(
         self,
@@ -183,6 +193,17 @@ class AssetRepositoryPort(Protocol):
 
     def mark_thumbnail_stale(self, rel: str, *, desired_revision: str) -> bool:
         """Select a desired thumbnail revision and suppress the old micro layer."""
+
+    def mark_thumbnail_refresh_pending(
+        self,
+        rel: str,
+        *,
+        desired_revision: str,
+        cache_key: str,
+        expected_asset_id: str,
+        expected_index_revision: int,
+    ) -> bool:
+        """Queue replacement inputs for an asset with a verified drawable artifact."""
 
     def create_scan_job(
         self,

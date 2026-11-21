@@ -399,6 +399,9 @@ future side design. The active query path is SQL-first and windowed:
   `read_gallery_asset_window()`; direct row lookup uses `find_row_by_path()`
   rather than scanning the model. Loaded chunks are merged into a bounded
   sparse cache, and stale generation/revision results are discarded.
+- SQL windows read rows, count, and revisions from one snapshot. The collection
+  revision orders asynchronous results. The order revision versions counts,
+  cursors, and numeric row positions so thumbnail-only updates can keep them.
 - Gallery SQL has two narrow projections in addition to the general collection
   window: `read_gallery_collection_window()` returns tile-rendering fields, and
   `read_thumbnail_hint_window()` returns only paths and existing full-thumbnail

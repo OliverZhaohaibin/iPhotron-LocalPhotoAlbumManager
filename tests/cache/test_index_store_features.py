@@ -837,7 +837,7 @@ def test_sync_favorites_mixed_unicode_forms(store: IndexStore) -> None:
     assert data["regular.jpg"] == 0
 
 
-def test_collection_window_reuses_count_revision_cache_until_invalidation(store: IndexStore) -> None:
+def test_collection_window_reuses_count_until_order_changes(store: IndexStore) -> None:
     store.write_rows(
         [
                 {
@@ -851,19 +851,66 @@ def test_collection_window_reuses_count_revision_cache_until_invalidation(store:
         )
     query = CollectionQuery()
 
-    first = store.read_collection_window(query, 0, 10)
-    second = store.read_collection_window(query, 0, 10)
+    with patch.object(store, "count_collection", wraps=store.count_collection) as count:
+        first = store.read_collection_window(query, 0, 10)
+        store.update_thumbnail_ready(
+            "ready.jpg", micro_thumbnail=b"new-thumb", thumb_cache_key="thumb-ready",
+        )
+        second = store.read_collection_window(query, 0, 10)
+        assert first.total_count == second.total_count == 1
+        assert first.order_revision == second.order_revision
+        assert first.collection_revision < second.collection_revision
+        assert second.rows[0]["micro_thumbnail"] == b"new-thumb"
+        count.assert_called_once_with(query)
 
-    assert first.total_count == second.total_count == 1
-    assert store._collection_meta_cache
+        store.remove_rows(["ready.jpg"])
+        empty = store.read_collection_window(query, 0, 10)
+        assert empty.total_count == 0
+        assert empty.order_revision > second.order_revision
+        assert empty.collection_revision > second.collection_revision
+        assert count.call_count == 2
 
-    store.update_thumbnail_ready(
-        "ready.jpg",
-        micro_thumbnail=b"new-thumb",
-        thumb_cache_key="thumb-ready",
-    )
 
-    assert store._collection_meta_cache == {}
+def test_old_window_cannot_republish_a_count_after_another_writer_commits(store: IndexStore) -> None:
+    query = CollectionQuery()
+
+    def ready_row(number: int) -> dict:
+        return {
+            "rel": f"{number:03}.jpg", "id": str(number), "sort_ts": number,
+            "thumbnail_state": "ready", "thumb_cache_key": f"key-{number}",
+        }
+
+    store.merge_scan_rows([ready_row(0)])
+    separate_writer = IndexStore(store.library_root)
+    count_read = Event()
+    finish_read = Event()
+    count_collection = store.count_collection
+
+    def pause_first_count(query: CollectionQuery) -> int:
+        count = count_collection(query)
+        if not count_read.is_set():
+            count_read.set()
+            assert finish_read.wait(5)
+        return count
+
+    with ThreadPoolExecutor(max_workers=1) as workers, patch.object(
+        store, "count_collection", side_effect=pause_first_count,
+    ):
+        old_window = workers.submit(store.read_gallery_collection_window, query, 0, 301)
+        try:
+            assert count_read.wait(5)
+            for start in (1, 101, 201):
+                separate_writer.merge_scan_rows(ready_row(i) for i in range(start, start + 100))
+            current = store.read_gallery_collection_window(query, 0, 301)
+            assert current.total_count == len(current.rows) == 301
+        finally:
+            finish_read.set()
+        old = old_window.result(timeout=5)
+        assert old.total_count == len(old.rows) == 1
+        assert old.collection_revision < current.collection_revision
+        newest = store.read_gallery_collection_window(query, 0, 301)
+        assert newest == current
+        assert [row["rel"] for row in newest.rows] == [f"{i:03}.jpg" for i in reversed(range(301))]
 
 
 def test_gallery_collection_window_uses_light_projection_with_micro(store: IndexStore) -> None:
@@ -910,7 +957,7 @@ def test_thumbnail_hint_window_omits_micro_and_does_not_count(store: IndexStore)
 
     with patch.object(
         store,
-        "_collection_count_and_revision",
+        "count_collection",
         side_effect=AssertionError("hint reads must not count"),
     ):
         window = store.read_thumbnail_hint_window(CollectionQuery(), 0, 10)

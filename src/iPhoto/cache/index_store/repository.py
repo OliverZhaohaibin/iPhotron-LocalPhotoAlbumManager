@@ -22,7 +22,8 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Mapping
-from contextlib import closing
+from contextlib import closing, contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -62,6 +63,20 @@ _DEEP_OFFSET_LIMIT = 5_000
 _DEEP_SEEK_CHUNK_SIZE = 1_024
 _MAX_COLLECTION_ANCHORS_PER_QUERY = 64
 _OMIT_METADATA_VALUE = object()
+_GALLERY_COLUMNS = (
+    "rel, id, parent_album_path, dt, ts, sort_ts, bytes, mime, w, h, gps, content_id, "
+    "still_image_time, dur, live_role, live_partner_rel, aspect_ratio, media_type, "
+    "is_favorite, is_deleted, has_gps, thumbnail_state, location, micro_thumbnail, "
+    "thumb_cache_key, face_status, video_rotation_cw, video_linux_180_hint, "
+    "source_mtime_ns, image_orientation, thumb_revision, thumb_refresh_pending, index_revision"
+)
+
+
+@dataclass
+class _CollectionCache:
+    order_revision: int
+    counts: dict[CollectionQuery, int] = field(default_factory=dict)
+    anchors: dict[CollectionQuery, dict[int, PageCursor | None]] = field(default_factory=dict)
 
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
@@ -198,11 +213,8 @@ class AssetRepository:
         
         self._db_manager = DatabaseManager(self.path)
         self._conn: Optional[sqlite3.Connection] = None
-        self._collection_anchor_cache: dict[
-            CollectionQuery,
-            dict[int, PageCursor | None],
-        ] = {}
-        self._collection_meta_cache: dict[CollectionQuery, tuple[int, int]] = {}
+        self._collection_cache = _CollectionCache(0)
+        self._collection_cache_lock = threading.Lock()
         if initialize:
             self._init_db()
 
@@ -257,14 +269,12 @@ class AssetRepository:
         with self.transaction() as conn:
             conn.execute("DELETE FROM assets")
             self._insert_rows(conn, stamped_rows)
-        self._clear_collection_anchor_cache()
 
     def append_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Merge *rows* into the index, replacing duplicates by ``rel`` key."""
         stamped_rows = self._stamp_rows(rows)
         with self.transaction() as conn:
             self._insert_rows(conn, stamped_rows)
-        self._clear_collection_anchor_cache()
 
     def merge_scan_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Merge scanned rows while preserving persisted library-managed state.
@@ -325,7 +335,6 @@ class AssetRepository:
                 current_revisions[rel] = self._current_thumbnail_revision(rel)
                 validated_versions[rel] = version
 
-        self._clear_collection_anchor_cache()
         return merged_rows
 
     @staticmethod
@@ -385,7 +394,6 @@ class AssetRepository:
         row_data["index_updated_at_ms"] = _utc_ms()
         with self.transaction() as conn:
             self._insert_rows(conn, [row_data])
-        self._clear_collection_anchor_cache()
 
     def _stamp_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         now = _utc_ms()
@@ -420,7 +428,6 @@ class AssetRepository:
                         [*chunk, *chunk],
                     )
                 conn.execute(f"DELETE FROM assets WHERE rel IN ({placeholders})", chunk)
-        self._clear_collection_anchor_cache()
 
     def relocate_rows(
         self,
@@ -463,6 +470,7 @@ class AssetRepository:
                     "UPDATE assets SET rel = ?, parent_album_path = ?, "
                     "thumbnail_state = 'stale', micro_thumbnail = NULL, "
                     "thumb_cache_key = NULL, thumb_revision = NULL, "
+                    "thumb_refresh_pending = 0, "
                     "face_status = NULL, pet_status = NULL, "
                     "index_revision = COALESCE(index_revision, 0) + 1, "
                     "index_updated_at_ms = ? WHERE rel = ?",
@@ -483,7 +491,6 @@ class AssetRepository:
                         "index_updated_at_ms = ? WHERE rel = ? AND live_partner_rel = ?",
                         (destinations[source], now, destinations.get(partner, partner), source),
                     )
-        self._clear_collection_anchor_cache()
 
     def remap_album_paths(self, old_root: Path, new_root: Path) -> None:
         """Retarget a known rename while keeping ready thumbnails and user state."""
@@ -568,7 +575,6 @@ class AssetRepository:
                 pass  # Disposable cache misses are repaired by thumbnail workers.
             except OSError as exc:
                 logger.warning("Failed to retarget renamed thumbnail %s: %s", old_key, exc)
-        self._clear_collection_anchor_cache()
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:
         """Return a mapping of ``rel`` → row dict for the given *rels*.
@@ -1028,6 +1034,7 @@ class AssetRepository:
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
             "face_status", "thumbnail_state", "thumb_cache_key", "thumb_revision",
+            "thumb_refresh_pending",
             "index_revision", "micro_thumbnail", "source_mtime_ns", "image_orientation"
         ]
 
@@ -1322,17 +1329,14 @@ class AssetRepository:
             limit=limit,
         )
         started = monotonic_ms()
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
-        try:
-            conn.row_factory = sqlite3.Row
+        with self._collection_snapshot() as (conn, revision, cache):
             rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
             next_cursor = self._page_cursor_from_row(query, rows[-1]) if rows else None
             result = PageResult(
                 rows=rows,
                 next_cursor=next_cursor,
-                total_count=self.count_collection(query),
-                collection_revision=self._collection_revision(conn, query),
+                total_count=self._snapshot_count(query, cache),
+                collection_revision=revision,
             )
             emit_perf_event(
                 "collection_page_query",
@@ -1344,9 +1348,6 @@ class AssetRepository:
                 query_plan=self._explain_query_plan(conn, sql, params),
             )
             return result
-        finally:
-            if should_close:
-                conn.close()
 
     def read_collection_window(
         self,
@@ -1360,30 +1361,14 @@ class AssetRepository:
         limit = max(0, int(limit))
 
         started = monotonic_ms()
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
-        try:
-            conn.row_factory = sqlite3.Row
-            if first > _DEEP_OFFSET_LIMIT:
-                sql, params = self._build_deep_collection_window_query(conn, query, first, limit)
-                if sql is None:
-                    rows: list[dict[str, Any]] = []
-                else:
-                    rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
-            else:
-                sql, params = QueryBuilder.build_collection_query(
-                    query,
-                    limit=limit,
-                    offset=first,
-                )
-                rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
-            self._remember_collection_window(query, first, rows)
-            total_count, collection_revision = self._collection_count_and_revision(conn, query)
+        with self._collection_snapshot() as (conn, revision, cache):
+            rows, sql, params = self._read_collection_window_rows(conn, cache, query, first, limit)
             result = WindowResult(
                 first=first,
                 rows=rows,
-                total_count=total_count,
-                collection_revision=collection_revision,
+                total_count=self._snapshot_count(query, cache),
+                collection_revision=revision,
+                order_revision=cache.order_revision,
             )
             emit_perf_event(
                 "collection_window_reload",
@@ -1400,9 +1385,6 @@ class AssetRepository:
                 ),
             )
             return result
-        finally:
-            if should_close:
-                conn.close()
 
     def read_gallery_collection_window(
         self,
@@ -1412,50 +1394,27 @@ class AssetRepository:
     ) -> WindowResult:
         """Return a Gallery-only window without wide metadata columns."""
 
-        columns = (
-            "rel", "id", "parent_album_path", "dt", "ts", "sort_ts", "bytes", "mime",
-            "w", "h", "gps", "content_id", "still_image_time", "dur", "live_role",
-            "live_partner_rel", "aspect_ratio", "media_type", "is_favorite", "is_deleted",
-            "has_gps", "thumbnail_state", "location", "micro_thumbnail", "thumb_cache_key",
-            "face_status", "video_rotation_cw", "video_linux_180_hint",
-            "source_mtime_ns", "image_orientation", "thumb_revision", "index_revision",
-        )
-        select_clause = f"SELECT {', '.join(columns)}"
-        first = max(0, int(first))
-        limit = max(0, int(limit))
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
-        try:
-            conn.row_factory = sqlite3.Row
-            if first > _DEEP_OFFSET_LIMIT:
-                sql, params = self._build_deep_collection_window_query(
-                    conn,
-                    query,
-                    first,
-                    limit,
-                    select_clause=select_clause,
+        return self.read_gallery_collection_windows(query, ((first, limit),))[0]
+
+    def read_gallery_collection_windows(
+        self,
+        query: CollectionQuery,
+        ranges: tuple[tuple[int, int], ...],
+    ) -> tuple[WindowResult, ...]:
+        """Read disjoint visible ranges from one SQLite snapshot."""
+
+        with self._collection_snapshot() as (conn, revision, cache):
+            count = self._snapshot_count(query, cache)
+            select_clause = f"SELECT {_GALLERY_COLUMNS}"
+            windows = []
+            for first, limit in ranges:
+                first = max(0, int(first))
+                limit = max(0, int(limit))
+                rows, _, _ = self._read_collection_window_rows(
+                    conn, cache, query, first, limit, select_clause=select_clause,
                 )
-                rows = [] if sql is None else [
-                    self._db_row_to_dict(row) for row in conn.execute(sql, params)
-                ]
-            else:
-                sql, params = QueryBuilder.build_collection_query(
-                    query,
-                    select_clause=select_clause,
-                    limit=limit,
-                    offset=first,
-                )
-                rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
-            total_count, collection_revision = self._collection_count_and_revision(conn, query)
-            return WindowResult(
-                first=first,
-                rows=rows,
-                total_count=total_count,
-                collection_revision=collection_revision,
-            )
-        finally:
-            if should_close:
-                conn.close()
+                windows.append(WindowResult(first, rows, count, revision, cache.order_revision))
+            return tuple(windows)
 
     def read_thumbnail_hint_window(
         self,
@@ -1467,66 +1426,54 @@ class AssetRepository:
 
         first = max(0, int(first))
         limit = max(0, int(limit))
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
-        try:
-            conn.row_factory = sqlite3.Row
-            select_clause = "SELECT rel, thumb_cache_key, thumbnail_state, thumb_revision"
-            if first > _DEEP_OFFSET_LIMIT:
-                sql, params = self._build_deep_collection_window_query(
-                    conn,
-                    query,
-                    first,
-                    limit,
-                    select_clause=select_clause,
-                )
-                rows = [] if sql is None else [
-                    self._db_row_to_dict(row) for row in conn.execute(sql, params)
-                ]
-            else:
-                sql, params = QueryBuilder.build_collection_query(
-                    query,
-                    select_clause=select_clause,
-                    limit=limit,
-                    offset=first,
-                )
-                rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+        with self._collection_snapshot() as (conn, revision, cache):
+            select_clause = (
+                "SELECT rel, thumb_cache_key, thumbnail_state, "
+                "CASE WHEN NOT thumb_refresh_pending THEN thumb_revision END AS thumb_revision"
+            )
+            rows, _, _ = self._read_collection_window_rows(
+                conn, cache, query, first, limit, select_clause=select_clause,
+                remember=False,
+            )
             return WindowResult(
                 first=first,
                 rows=rows,
                 total_count=-1,
-                collection_revision=0,
+                collection_revision=revision,
+                order_revision=cache.order_revision,
             )
-        finally:
-            if should_close:
-                conn.close()
 
-    def _build_deep_collection_window_query(
+    def _read_collection_window_rows(
         self,
         conn: sqlite3.Connection,
+        cache: _CollectionCache,
         query: CollectionQuery,
         first: int,
         limit: int,
         *,
         select_clause: str = "SELECT *",
-    ) -> tuple[str | None, list[Any]]:
-        if first <= 0:
-            return QueryBuilder.build_collection_query(
-                query,
-                select_clause=select_clause,
-                limit=limit,
-            )
-
-        cursor = self._cursor_for_collection_offset(conn, query, first)
-        if cursor is None and first > 0:
-            return None, []
-
-        return QueryBuilder.build_collection_query(
+        remember: bool = True,
+    ) -> tuple[list[dict[str, Any]], str | None, list[Any]]:
+        cursor = None
+        offset = first
+        if first > _DEEP_OFFSET_LIMIT:
+            cursor = self._cursor_for_collection_offset(conn, cache, query, first)
+            if cursor is None:
+                return [], None, []
+            offset = 0
+        sql, params = QueryBuilder.build_collection_query(
             query,
             select_clause=select_clause,
             cursor=cursor,
             limit=limit,
+            offset=offset,
         )
+        rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
+        if remember and rows:
+            anchor = self._page_cursor_from_row(query, rows[-1])
+            if anchor is not None:
+                self._remember_collection_anchor(cache, query, first + len(rows), anchor)
+        return rows, sql, params
 
     def read_thumbnail_backfill_candidates(
         self,
@@ -1542,15 +1489,9 @@ class AssetRepository:
             return []
 
         stale_query = self._collection_query_with_thumbnail_state(query, "stale")
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
-        try:
-            conn.row_factory = sqlite3.Row
-            window_rows, _window_sql, _window_params = self._collection_window_rows_for_backfill(
-                conn,
-                query,
-                first,
-                limit,
+        with self._collection_snapshot() as (conn, _revision, cache):
+            window_rows, _, _ = self._read_collection_window_rows(
+                conn, cache, query, first, limit,
             )
             if not window_rows:
                 sql, params = QueryBuilder.build_collection_query(
@@ -1588,9 +1529,6 @@ class AssetRepository:
                     )
                 )
             return candidates
-        finally:
-            if should_close:
-                conn.close()
 
     @staticmethod
     def _collection_window_reaches_end(
@@ -1643,31 +1581,6 @@ class AssetRepository:
             for row in rows
             if str(row.get("rel")) not in exclude_rels
         ][:limit]
-
-    def _collection_window_rows_for_backfill(
-        self,
-        conn: sqlite3.Connection,
-        query: CollectionQuery,
-        first: int,
-        limit: int,
-    ) -> tuple[list[dict[str, Any]], str | None, list[Any]]:
-        if first > _DEEP_OFFSET_LIMIT:
-            sql, params = self._build_deep_collection_window_query(
-                conn,
-                query,
-                first,
-                limit,
-            )
-            if sql is None:
-                return [], None, []
-        else:
-            sql, params = QueryBuilder.build_collection_query(
-                query,
-                limit=limit,
-                offset=first,
-            )
-        rows = [self._db_row_to_dict(row) for row in conn.execute(sql, params)]
-        return rows, sql, params
 
     def _build_stale_window_query(
         self,
@@ -1786,6 +1699,8 @@ class AssetRepository:
         if expected_revision is not None:
             guards.append(" AND (thumb_revision = ? OR thumb_revision IS NULL)")
             guard_params.append(expected_revision)
+        else:
+            guards.append(" AND thumb_refresh_pending = 0")
         if expected_asset_id is not None:
             guards.append(" AND COALESCE(id, '') = ?")
             guard_params.append(expected_asset_id)
@@ -1817,7 +1732,9 @@ class AssetRepository:
         else:
             if not str(thumb_cache_key or "").strip():
                 raise ValueError("ready thumbnails require thumb_cache_key")
-            change_guards = ["thumbnail_state != 'ready'", "thumb_error IS NOT NULL"]
+            change_guards = [
+                "thumbnail_state != 'ready'", "thumb_error IS NOT NULL", "thumb_refresh_pending = 1",
+            ]
             change_params: list[Any] = []
             if micro_thumbnail is not None:
                 change_guards.append("micro_thumbnail IS NOT ?")
@@ -1832,6 +1749,7 @@ class AssetRepository:
                 f"""
                 UPDATE assets
                 SET thumbnail_state = 'ready',
+                    thumb_refresh_pending = 0,
                     micro_thumbnail = COALESCE(?, micro_thumbnail),
                     thumb_cache_key = COALESCE(?, thumb_cache_key),
                     thumb_revision = COALESCE(?, thumb_revision),
@@ -1851,8 +1769,6 @@ class AssetRepository:
                 + guard_params
                 + change_params,
             )
-        if changed:
-            self._clear_collection_anchor_cache()
         return bool(changed)
 
     def mark_thumbnail_stale(self, rel: str, *, desired_revision: str) -> bool:
@@ -1866,6 +1782,7 @@ class AssetRepository:
             """
             UPDATE assets
             SET thumbnail_state = 'stale',
+                thumb_refresh_pending = 0,
                 micro_thumbnail = NULL,
                 thumb_revision = ?,
                 thumb_error = NULL,
@@ -1879,13 +1796,34 @@ class AssetRepository:
             """,
             [revision, _utc_ms(), normalized_rel, revision],
         )
-        if changed:
-            self._clear_collection_anchor_cache()
         return bool(changed)
+
+    def mark_thumbnail_refresh_pending(
+        self,
+        rel: str,
+        *,
+        desired_revision: str,
+        cache_key: str,
+        expected_asset_id: str,
+        expected_index_revision: int,
+    ) -> bool:
+        """Select replacement inputs while keeping the verified artifact drawable."""
+
+        return bool(self._db_manager.execute_in_transaction(
+            """
+            UPDATE assets
+            SET thumb_refresh_pending = 1, thumb_revision = ?, thumb_error = NULL,
+                index_revision = COALESCE(index_revision, 0) + 1
+            WHERE rel = ? AND id = ? AND COALESCE(index_revision, 0) = ?
+                AND thumbnail_state = 'ready' AND thumb_cache_key = ?
+            """,
+            (desired_revision, rel, expected_asset_id, expected_index_revision, cache_key),
+        ))
 
     def _cursor_for_collection_offset(
         self,
         conn: sqlite3.Connection,
+        cache: _CollectionCache,
         query: CollectionQuery,
         offset: int,
     ) -> PageCursor | None:
@@ -1894,9 +1832,10 @@ class AssetRepository:
         if offset <= 0:
             return None
 
-        anchors = self._collection_anchor_cache.setdefault(query, {0: None})
-        anchor_index = max(index for index in anchors if index <= offset)
-        cursor = anchors[anchor_index]
+        with self._collection_cache_lock:
+            anchors = cache.anchors.get(query, {0: None})
+            anchor_index = max(index for index in anchors if index <= offset)
+            cursor = anchors[anchor_index]
 
         while anchor_index < offset:
             step = min(_DEEP_SEEK_CHUNK_SIZE, offset - anchor_index)
@@ -1911,8 +1850,8 @@ class AssetRepository:
 
             anchor_index += len(rows)
             cursor = self._page_cursor_from_row(query, dict(rows[-1]))
-            anchors[anchor_index] = cursor
-            self._prune_collection_anchor_cache(query)
+            if cursor is not None:
+                self._remember_collection_anchor(cache, query, anchor_index, cursor)
 
             if len(rows) < step:
                 return None
@@ -2019,7 +1958,6 @@ class AssetRepository:
             "UPDATE assets SET is_favorite = ? WHERE rel = ?",
             (val, rel),
         )
-        self._clear_collection_anchor_cache()
 
     def sync_favorites(self, featured_rels: Iterable[str]) -> None:
         """Synchronise the DB 'is_favorite' column with the provided list."""
@@ -2067,7 +2005,6 @@ class AssetRepository:
                     "UPDATE assets SET is_favorite = 1 WHERE rel = ?",
                     [(r,) for r in to_add_original],
                 )
-        self._clear_collection_anchor_cache()
 
     def update_location(self, rel: str, location: str) -> None:
         """Update the location string for a single asset."""
@@ -2140,7 +2077,6 @@ class AssetRepository:
                 f"UPDATE assets SET {', '.join(update_parts)} WHERE rel = ?",
                 params,
             )
-        self._clear_collection_anchor_cache()
 
     def apply_live_role_updates(
         self,
@@ -2155,7 +2091,6 @@ class AssetRepository:
             self._db_manager.execute_in_transaction(
                 "UPDATE assets SET live_role = 0, live_partner_rel = NULL"
             )
-            self._clear_collection_anchor_cache()
             return
 
         with self.transaction() as conn:
@@ -2163,7 +2098,6 @@ class AssetRepository:
             query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
-        self._clear_collection_anchor_cache()
 
     def apply_live_role_updates_for_prefix(
         self,
@@ -2182,7 +2116,6 @@ class AssetRepository:
             query = "UPDATE assets SET live_role = ?, live_partner_rel = ? WHERE rel = ?"
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
-        self._clear_collection_anchor_cache()
 
     def update_live_roles(self, updates: Iterable[tuple[str, int, str | None]]) -> None:
         """Update specific pairs and clear affected former partners."""
@@ -2191,7 +2124,7 @@ class AssetRepository:
         if not params:
             return
         with self.transaction() as conn:
-            cursor = conn.executemany(
+            conn.executemany(
                 """
                 UPDATE assets
                 SET live_role = ?, live_partner_rel = ?,
@@ -2200,8 +2133,6 @@ class AssetRepository:
                 """,
                 params,
             )
-        if cursor.rowcount:
-            self._clear_collection_anchor_cache()
 
     def list_albums(self) -> List[str]:
         """Return a list of distinct album paths in the index."""
@@ -2241,31 +2172,44 @@ class AssetRepository:
             include_subalbums=include_subalbums,
         )
 
-    def _collection_revision(
-        self,
-        conn: sqlite3.Connection,
-        query: CollectionQuery,
-    ) -> int:
-        sql, params = QueryBuilder.build_collection_query(
-            query,
-            select_clause="SELECT COALESCE(MAX(index_revision), 0)",
-            include_order=False,
-        )
-        row = conn.execute(sql, params).fetchone()
-        return int(row[0] if row else 0)
+    def collection_revision(self) -> int:
+        """Return the current committed collection revision for notifications."""
 
-    def _collection_count_and_revision(
-        self,
-        conn: sqlite3.Connection,
-        query: CollectionQuery,
-    ) -> tuple[int, int]:
-        cached = self._collection_meta_cache.get(query)
-        if cached is not None:
-            return cached
-        count = self.count_collection(query)
-        revision = self._collection_revision(conn, query)
-        self._collection_meta_cache[query] = (count, revision)
-        return count, revision
+        conn = self._db_manager.get_connection()
+        try:
+            return int(conn.execute("SELECT revision FROM collection_versions").fetchone()[0])
+        finally:
+            if conn != self._db_manager._conn:
+                conn.close()
+
+    @contextmanager
+    def _collection_snapshot(self) -> Iterator[tuple[sqlite3.Connection, int, _CollectionCache]]:
+        # A caller's write transaction can roll back and reuse a version. Its
+        # counts and cursors must stay private to this read.
+        shared = self._db_manager._conn is None
+        with self.transaction(begin_mode="DEFERRED") as conn:
+            conn.row_factory = sqlite3.Row
+            revision, order_revision = conn.execute(
+                "SELECT revision, order_revision FROM collection_versions"
+            ).fetchone()
+            with self._collection_cache_lock:
+                current = self._collection_cache
+                if shared and order_revision >= current.order_revision:
+                    if order_revision > current.order_revision:
+                        self._collection_cache = _CollectionCache(order_revision)
+                    cache = self._collection_cache
+                else:
+                    cache = _CollectionCache(order_revision)
+            yield conn, revision, cache
+
+    def _snapshot_count(self, query: CollectionQuery, cache: _CollectionCache) -> int:
+        with self._collection_cache_lock:
+            count = cache.counts.get(query)
+        if count is None:
+            count = self.count_collection(query)
+            with self._collection_cache_lock:
+                cache.counts[query] = count
+        return count
 
     def _explain_query_plan(
         self,
@@ -2281,35 +2225,19 @@ class AssetRepository:
             return f"explain_failed:{exc}"
         return " | ".join(" ".join(str(part) for part in row) for row in rows)
 
-    def _remember_collection_window(
+    def _remember_collection_anchor(
         self,
+        cache: _CollectionCache,
         query: CollectionQuery,
-        first: int,
-        rows: list[dict[str, Any]],
+        index: int,
+        cursor: PageCursor,
     ) -> None:
-        if not rows:
-            return
-        anchors = self._collection_anchor_cache.setdefault(query, {0: None})
-        if first <= 0:
-            anchors[0] = None
-        cursor = self._page_cursor_from_row(query, rows[-1])
-        if cursor is not None:
-            anchors[max(0, first) + len(rows)] = cursor
-            self._prune_collection_anchor_cache(query)
-
-    def _prune_collection_anchor_cache(self, query: CollectionQuery) -> None:
-        anchors = self._collection_anchor_cache.get(query)
-        if not anchors or len(anchors) <= _MAX_COLLECTION_ANCHORS_PER_QUERY:
-            return
-        overflow = len(anchors) - _MAX_COLLECTION_ANCHORS_PER_QUERY
-        largest = max(anchors)
-        candidates = [index for index in sorted(anchors) if index not in {0, largest}]
-        for index in candidates[:overflow]:
-            anchors.pop(index, None)
-
-    def _clear_collection_anchor_cache(self) -> None:
-        self._collection_anchor_cache.clear()
-        self._collection_meta_cache.clear()
+        with self._collection_cache_lock:
+            anchors = cache.anchors.setdefault(query, {0: None})
+            anchors[index] = cursor
+            if len(anchors) > _MAX_COLLECTION_ANCHORS_PER_QUERY:
+                oldest = min(index for index in anchors if index > 0)
+                del anchors[oldest]
 
     @staticmethod
     def _page_cursor_from_row(

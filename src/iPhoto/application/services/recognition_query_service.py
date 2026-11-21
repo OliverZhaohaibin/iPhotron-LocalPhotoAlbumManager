@@ -30,6 +30,7 @@ class RecognitionDashboardSnapshot:
     pets: tuple[PetSummary, ...]
     pending_people: int
     pending_pets: int
+    identity_order: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +237,7 @@ class RecognitionQueryService:
             pets=tuple(pets),
             pending_people=int(pending_people),
             pending_pets=int(pending_pets),
+            identity_order=self._people_service.get_identity_card_order(),
         )
         return snapshot, self._candidates(people, pets)
 

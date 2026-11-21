@@ -116,7 +116,7 @@ iphoto-gui /photos/LondonTrip
 - 🎥 完整的**实况照片**配对和播放支持。
 - 🗺 可选地图视图，可视化所有照片和视频的 GPS 元数据；缺少 maps extension 时会优雅降级。
 - 👥 可选的 People 人脸扫描，支持 face cluster、人物命名、封面、隐藏人物与多人 group。
-- 🐾 可选的 Pets 扫描，支持猫狗检测、宠物个体 cluster、命名、封面、隐藏、置顶与 People & Pets group。
+- 🐾 可选的 Pets 扫描，支持猫狗检测、宠物个体 cluster、命名、封面、隐藏、侧栏固定与 People & Pets group。
 ![Main interface](../picture/mainview.png)
 ![Preview interface](../picture/preview.png)
 ---
@@ -178,20 +178,22 @@ Nuitka 打包、runtime 同步与安装器说明请参阅
 `所有照片`、`视频`、`实况照片`、`收藏`和`最近删除`。
 
 ### 👥🐾 People、Pets、Face Cluster 与 Group
-可选的 People 管线会检测照片中的人脸，生成 face cluster，并在 People 页面以人物卡片展示。
+可选的 People 管线会检测照片中的人脸，生成 face cluster，并在「人物与宠物」页面以人物卡片展示。
 您可以为人物命名、合并重复 cluster、隐藏或重新显示隐藏人物，并让选定封面在重新扫描后继续保留。
 
 独立的 Pets 管线使用 YOLOX 检测猫狗、使用 DINOv2 生成 embedding，并在同一页面展示宠物个体卡片。
-宠物可以命名、合并、隐藏、置顶、设置封面并打开对应图库。人物与宠物可以加入同一个 identity group。
+宠物可以命名、合并、隐藏和固定。通过宠物卡片或侧边栏固定项打开宠物图库后，右键点击有匹配检测的照片，
+即可选择「设为封面」。
 明显的人脸冲突通常会抑制重复的 pet 检测，避免生成重复卡片、宠物图库结果、详情标注或 overlay；
 但运行时会保留包含较小人脸的明显更大的宠物身体检测框，避免把被人抱着的真实宠物误删。该规则只
 比较检测框，People 与 Pets 的模型、记录、索引和持久状态仍保持独立。
 
-将多个人物组成 group 后，可以查看这些人物共同出现的照片。Group 卡片支持设置封面、拖拽排序，
-未置顶的 group 可以解散。人脸扫描依赖可选的 `ai-demo` 依赖；即使不安装 AI 运行时，
-核心照片管理功能仍可使用。People 状态通过 library session 边界持久化，人物命名、封面、
-隐藏状态、group 和手动人脸标注都会在重新扫描后保留。宠物扫描依赖可选的 `pets-ai`；缺少依赖或模型时，
-候选资源会保持 pending，且不会阻塞应用的其他功能。
+拖动人物和宠物卡片可以调整它们在面板中的顺序。从卡片右键菜单选择「新建分组」，即可查看所选人物与宠物
+共同出现的照片。分组卡片支持自定义封面和拖拽排序，也可以解散未固定的分组。
+
+人脸扫描使用可选的 `ai-demo` 依赖。即使不安装 AI 运行时，核心照片管理功能仍可使用。People 状态通过
+library session 边界持久化，人物命名、封面、隐藏状态、分组和手动人脸标注都会在重新扫描后保留。
+宠物扫描使用可选的 `pets-ai`。缺少依赖或模型时，候选资源会保持 pending，应用的其他功能仍可使用。
 ![People and groups interface](<../picture/People & Group.png>)
 
 ### ⚡ 大型图库 Gallery

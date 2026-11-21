@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from PySide6.QtCore import QModelIndex, QPoint
@@ -130,6 +131,95 @@ def test_group_cluster_gallery_menu_shows_set_as_cover(mock_qmenu_cls) -> None:
     mock_qmenu_cls.return_value.addAction.return_value.setData.assert_any_call(
         "set_as_cover"
     )
+
+
+@patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
+@pytest.mark.parametrize("section", ["people_cluster_gallery", "pinned_people_gallery"])
+def test_pet_gallery_menu_sets_cover_from_the_clicked_photo(mock_qmenu_cls, section: str) -> None:
+    asset = _make_asset("selected-photo", "album/b.jpg")
+    controller, deps = _make_controller(
+        context=MenuContext(
+            surface="gallery",
+            selection_kind="empty",
+            gallery_section=section,
+            entity_kind="pet",
+            entity_id="pet-a",
+            active_root=Path("/library"),
+            is_cluster_gallery=True,
+        ),
+        selected_assets=[asset],
+    )
+    pet_service = MagicMock()
+    pet_service.library_root.return_value = Path("/library")
+    pet_service.resolve_pet_cover_detection.return_value = "selected-crop"
+    pet_service.set_pet_cover.return_value = True
+    manager = deps["facade"].library_manager
+    if section == "pinned_people_gallery":
+        manager.pet_service = None
+        manager.library_session = SimpleNamespace(library_root=Path("/library"), pets=pet_service)
+    else:
+        manager.pet_service = pet_service
+    selection_model = controller._grid_view.selectionModel()
+    selection_model.isSelected.return_value = False
+    refresh = MagicMock()
+    controller.petCoverUpdated.connect(refresh)
+
+    controller._handle_context_menu(QPoint(10, 10))
+
+    selection_model.setCurrentIndex.assert_called_once()
+    action = mock_qmenu_cls.return_value.addAction.return_value
+    cover_index = action.setData.call_args_list.index(call("set_as_cover"))
+    action.triggered.connect.call_args_list[cover_index].args[0]()
+
+    assert pet_service.resolve_pet_cover_detection.call_args_list == [
+        call("pet-a", "selected-photo"),
+        call("pet-a", "selected-photo"),
+    ]
+    pet_service.set_pet_cover.assert_called_once_with("pet-a", "selected-crop")
+    deps["facade"].set_cover.assert_not_called()
+    refresh.assert_called_once_with()
+    deps["toast"].show_toast.assert_called_once_with("Cover Updated")
+
+
+@patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")
+@pytest.mark.parametrize(
+    ("asset_count", "service_root", "detection_id"),
+    [
+        (0, Path("/library"), "detection"),
+        (2, Path("/library"), "detection"),
+        (1, Path("/other-library"), "detection"),
+        (1, Path("/library"), None),
+    ],
+    ids=["empty-selection", "multi-selection", "other-library", "no-matching-detection"],
+)
+def test_pet_gallery_cover_requires_one_eligible_photo(
+    mock_qmenu_cls, asset_count: int, service_root: Path, detection_id: str | None
+) -> None:
+    controller, deps = _make_controller(
+        context=MenuContext(
+            surface="gallery",
+            selection_kind="empty",
+            gallery_section="people_cluster_gallery",
+            entity_kind="pet",
+            entity_id="pet-a",
+            active_root=Path("/library"),
+            is_cluster_gallery=True,
+        ),
+        selected_assets=[
+            _make_asset(f"asset-{index}", f"album/{index}.jpg") for index in range(asset_count)
+        ],
+    )
+    pet_service = MagicMock()
+    pet_service.library_root.return_value = service_root
+    pet_service.resolve_pet_cover_detection.return_value = detection_id
+    deps["facade"].library_manager.pet_service = pet_service
+
+    controller._handle_context_menu(QPoint(10, 10))
+
+    action = mock_qmenu_cls.return_value.addAction.return_value
+    assert call("set_as_cover") not in action.setData.call_args_list
+    if asset_count != 1 or service_root != Path("/library"):
+        pet_service.resolve_pet_cover_detection.assert_not_called()
 
 
 @patch("iPhoto.gui.ui.controllers.context_menu_controller.QMenu")

@@ -19,8 +19,6 @@ from .people_dashboard_shared import (
     _create_pos_anim,
 )
 
-_PROXIMITY_HYSTERESIS = 18
-
 
 class IdentityBoard(QWidget):
     mergeRequested = Signal(str, str)
@@ -58,6 +56,8 @@ class IdentityBoard(QWidget):
         if not cards:
             return
         self.top_cards.extend(cards)
+        if self._drag_start_order is not None:
+            self._drag_start_order += tuple(card.identity_key for card in cards)
         for card in cards:
             card.setParent(self)
             card.show()
@@ -73,12 +73,17 @@ class IdentityBoard(QWidget):
             card.hide()
             card.deleteLater()
         self.top_cards = []
+        self._drag_start_order = None
         self.merge_frame.hide()
         self.proximity_pair = None
         self.setMinimumHeight(260)
 
     def visible_cards(self) -> list[IdentityCard]:
         return list(self.top_cards)
+
+    @property
+    def is_dragging(self) -> bool:
+        return self._drag_start_order is not None
 
     def calculate_positions(self, cards: list[IdentityCard] | None = None) -> list[QPoint]:
         visible = list(cards) if cards is not None else self.visible_cards()
@@ -98,8 +103,11 @@ class IdentityBoard(QWidget):
 
     def update_positions(self) -> None:
         positions = self.calculate_positions()
+        dragged = None
         for card, position in zip(self.visible_cards(), positions):
-            if not card.is_dragging:
+            if card.is_dragging:
+                dragged = card
+            else:
                 card.move(position)
             card.show()
 
@@ -107,12 +115,12 @@ class IdentityBoard(QWidget):
         if positions:
             max_bottom = max(point.y() for point in positions) + CARD_HEIGHT + CANVAS_MARGIN
         self.setMinimumHeight(max_bottom)
+        if dragged is not None and self.is_dragging:
+            self.check_card_proximity(dragged)
 
     def begin_drag(self, card: IdentityCard) -> None:
         del card
         self._drag_start_order = tuple(item.identity_key for item in self.visible_cards())
-        self.hide_merge_frame()
-        self.proximity_pair = None
         if (
             self._active_anim is not None
             and self._active_anim.state() == QAbstractAnimation.State.Running
@@ -120,21 +128,20 @@ class IdentityBoard(QWidget):
             self._active_anim.stop()
 
     def finish_drag(self, card: IdentityCard) -> None:
-        if self.proximity_pair is None:
-            self.check_card_proximity(card)
-        should_persist_order = self.proximity_pair is None
-        if self.proximity_pair is not None:
-            source, target = self.proximity_pair
-            self.mergeRequested.emit(source.identity_key, target.identity_key)
+        target = None
+        if self.proximity_pair is not None and self.proximity_pair[0] is card:
+            target = self.proximity_pair[1]
+            self.mergeRequested.emit(card.identity_key, target.identity_key)
 
         self.hide_merge_frame()
         self.proximity_pair = None
-        self.animate_to_layout()
-        if should_persist_order:
-            current_order = tuple(item.identity_key for item in self.visible_cards())
-            if current_order != (self._drag_start_order or current_order):
-                self.orderChanged.emit(list(current_order))
+        start_order = self._drag_start_order
         self._drag_start_order = None
+        self.animate_to_layout()
+        if target is None:
+            current_order = tuple(item.identity_key for item in self.visible_cards())
+            if start_order is not None and current_order != start_order:
+                self.orderChanged.emit(list(current_order))
 
     def animate_to_layout(self) -> None:
         if (
@@ -162,11 +169,8 @@ class IdentityBoard(QWidget):
         group.start()
 
     def update_drag(self, dragged: IdentityCard) -> None:
-        """Update one drag frame without letting reorder move a merge target."""
-
+        self.update_card_order(dragged)
         self.check_card_proximity(dragged)
-        if self.proximity_pair is None:
-            self.update_card_order(dragged)
 
     def update_card_order(self, dragged: IdentityCard) -> None:
         visible = self.visible_cards()
@@ -198,18 +202,6 @@ class IdentityBoard(QWidget):
             self.hide_merge_frame()
             self.proximity_pair = None
             return
-
-        locked_target = None
-        if self.proximity_pair is not None and self.proximity_pair[0] is dragged:
-            candidate = self.proximity_pair[1]
-            if candidate in candidates:
-                locked_target = candidate
-        if locked_target is not None:
-            locked_distance = _button_distance(dragged, locked_target)
-            if locked_distance < PROXIMITY_THRESHOLD + _PROXIMITY_HYSTERESIS:
-                self.show_merge_frame(dragged, locked_target)
-                self.proximity_pair = (dragged, locked_target)
-                return
 
         closest = min(candidates, key=lambda candidate: _button_distance(dragged, candidate))
         distance = _button_distance(dragged, closest)

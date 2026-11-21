@@ -350,6 +350,22 @@ coordination state in the People state repository, not shared detection tables.
 People, Pets, and cross-kind merge/redirect services must reject identities
 whose hidden states differ, even when a caller bypasses the UI guard.
 
+The dashboard stores one shared card order in `face_state.db` in
+`identity_card_orders`, keyed by identity kind and ID. The default layout
+interleaves cards by photo count while preserving the relative People order from
+existing libraries. The first shared save incorporates ranks from
+`person_card_orders` for people outside the current view, including hidden people.
+Reads of a partially saved shared order recover omitted People ranks from the
+same legacy table. A reorder updates the visible order atomically and retains
+slots already saved for identities outside the view. An identity merge keeps the
+target's saved slot or transfers the source's slot when the target has no saved
+position.
+
+Pinned People and Pets galleries resolve membership through the active library.
+A durable pet identity remains a valid pin target during a runtime snapshot
+rebuild. Zero matches are shown as an empty selection. The open gallery refreshes
+on relevant recognition snapshots even if the dashboard has yet to open.
+
 Recognition writes use the session's shared `recognition_mutations` coordinator.
 Its library-wide mutation lease covers admission through apply/finalize; existing
 state guards and recovery handlers must not be bypassed. The coordinator owns
@@ -512,7 +528,7 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iPhoto/cache/thumbs/` | Rebuildable thumbnail cache. |
 | `.iPhoto/cache/detail-surfaces/v3/` | SQLite-indexed, rebuildable neutral RGBA8/sRGB Detail surfaces keyed by source identity, decoder contract, orientation, and LOD; trusted hits validate indexed header/stat metadata without scanning the full payload, and sidecar revision is excluded. |
 | `.iPhoto/faces/face_index.db` | Rebuildable People runtime snapshot. |
-| `.iPhoto/faces/face_state.db` | Durable People user state: names, covers, hidden flags, order, groups, pinned state, group covers/caches, manual faces, and cross-kind identity coordination. Group cache tables include custom cover choices. |
+| `.iPhoto/faces/face_state.db` | Durable People names, covers, hidden flags, manual faces, groups and their order, and group asset caches with custom covers. Also stores shared identity card order and cross-kind identity coordination. |
 | `.iPhoto/faces/thumbnails/` | Cropped face thumbnails; preserve durable cover and manual-face references when rebuilding or cleaning up. |
 | `.iPhoto/pets/pet_index.db` | Rebuildable Pets detections and clustered pet records. |
 | `.iPhoto/pets/pet_state.db` | Durable Pets profiles, names, covers, hidden flags, rejected keys, and merge redirects. |
@@ -524,6 +540,10 @@ Each library root owns a `.iPhoto/` workspace.
 | `.iphoto.album` | Legacy album marker compatibility file. |
 | `.iPhoto/manifest.bak/` | Manifest/links backup area. |
 | `.iPhoto/locks/` | File-level locks for JSON sidecars. |
+
+Sidebar pins for albums, people, pets, and groups live in `settings.json` under
+`pinned_items_by_library`, keyed by resolved library root. Sidebar aliases are
+stored with the pin.
 
 Scan facts and some user state share the same SQLite file, but repository APIs
 and merge behavior must maintain the logical boundary: scans may rebuild facts

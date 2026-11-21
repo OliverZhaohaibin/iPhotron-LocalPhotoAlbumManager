@@ -258,17 +258,11 @@ class AlbumSidebarDelegate(QStyledItemDelegate):
                         color=colour_name,
                         stroke_width=SIDEBAR_ICON_STROKE_WIDTH,
                     )
-            if state.node_type in {NodeType.PINNED_PERSON, NodeType.PINNED_PET, NodeType.PINNED_GROUP}:
-                palette = self._palette_for_state(state)
-                icon_color = palette.color(QPalette.ColorRole.Text)
-                colour_name = icon_color.name(QColor.NameFormat.HexArgb)
-                if state.node_type in {NodeType.PINNED_PERSON, NodeType.PINNED_PET}:
-                    icon_name = "person.fill.svg" if state.is_selected else "person.svg"
-                else:
-                    icon_name = "person.2.fill.svg" if state.is_selected else "person.2.svg"
+            pinned_icon = model._PINNED_ICON_MAP.get(state.node_type)
+            if pinned_icon and state.is_selected:
                 return load_icon(
-                    icon_name,
-                    color=colour_name,
+                    f"{pinned_icon}.fill.svg",
+                    color=text_color.name(QColor.NameFormat.HexArgb),
                     stroke_width=SIDEBAR_ICON_STROKE_WIDTH,
                 )
 

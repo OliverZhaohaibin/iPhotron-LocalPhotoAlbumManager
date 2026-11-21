@@ -9,19 +9,26 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for sidebar tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 
 from iPhoto.gui.i18n import TranslationManager, font_policy
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinatorRuntime
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
-from iPhoto.gui.ui.delegates.album_sidebar_delegate import AlbumSidebarDelegate
+from iPhoto.gui.ui.delegates.album_sidebar_delegate import (
+    SIDEBAR_ICON_STROKE_WIDTH,
+    AlbumSidebarDelegate,
+)
+from iPhoto.gui.ui.icon import load_icon
 from iPhoto.gui.ui.menus.album_sidebar_menu import AlbumSidebarContextMenu
 from iPhoto.gui.ui.models.album_tree_model import NodeType
 from iPhoto.gui.ui.widgets.album_sidebar import AlbumSidebar
+from iPhoto.gui.ui.widgets.people_dashboard import PeopleDashboardWidget
 from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
 from iPhoto.library.runtime_controller import LibraryRuntimeController
+from iPhoto.pets.records import PetSummary
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -96,12 +103,16 @@ def test_sidebar_retranslate_updates_title_and_menu_labels(
     qapp.processEvents()
 
     translations = TranslationManager(_settings(tmp_path))
-    translations.apply_language("zh-CN")
     sidebar = AlbumSidebar(manager)
+    sidebar.select_static_node("People")
+    assert sidebar._tree.currentIndex().data() == "People&pets"
+
+    translations.apply_language("zh-CN")
     qapp.processEvents()
     sidebar.retranslate_ui()
 
     assert sidebar._title.text() == "基础图库"
+    assert sidebar._tree.currentIndex().data() == "人物与宠物"
 
     album_index = sidebar.tree_model().index_for_path(album_dir)
     item = sidebar.tree_model().item_from_index(album_index)
@@ -570,6 +581,89 @@ def test_album_rename_restores_the_current_builtin_section_after_user_navigation
     finally:
         if sidebar is not None:
             sidebar.close()
+        manager.shutdown()
+
+
+def test_pet_dashboard_menu_pins_a_selectable_sidebar_item(tmp_path: Path, qapp: QApplication) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    pins = PinnedItemsService(_settings(tmp_path))
+    dashboard = PeopleDashboardWidget()
+    dashboard.set_services(manager.people_service, manager.pet_service, pins, reload=False)
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pins)
+    summary = PetSummary("pet-a", "Miso", "det-a", 2, None, "2024-01-01T00:00:00Z")
+    selected_items = []
+    sidebar.pinnedItemSelected.connect(selected_items.append)
+
+    try:
+        menu = dashboard._build_pet_menu(summary)
+        action = next(action for action in menu.actions() if action.data() == "toggle_pet_pin")
+        assert action.text() == "Pin"
+        action.trigger()
+
+        (pinned_item,) = pins.items_for_library(root)
+        assert (pinned_item.kind, pinned_item.item_id, pinned_item.label) == ("pet", "pet-a", "Miso")
+        model = sidebar.tree_model()
+        index = model.index_for_pinned_item(pinned_item)
+        assert index.isValid()
+        assert model.item_from_index(index).node_type == NodeType.PINNED_PET
+        assert model.data(index) == "Miso"
+
+        sidebar._tree.setCurrentIndex(index)
+        qapp.processEvents()
+        assert selected_items == [pinned_item]
+
+        menu = dashboard._build_pet_menu(summary)
+        action = next(action for action in menu.actions() if action.data() == "toggle_pet_pin")
+        assert action.text() == "Unpin"
+        action.trigger()
+
+        assert not pins.items_for_library(root)
+        assert not model.index_for_pinned_item(pinned_item).isValid()
+    finally:
+        dashboard.shutdown()
+        dashboard.close()
+        sidebar.close()
+        manager.shutdown()
+
+
+def test_pinned_pet_sidebar_uses_outline_and_filled_pawprint(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    pins = PinnedItemsService(_settings(tmp_path))
+    pins.pin_pet("pet-a", "Miso", library_root=root)
+    sidebar = AlbumSidebar(manager)
+    sidebar.set_pinned_service(pins)
+
+    try:
+        (item,) = pins.items_for_library(root)
+        index = sidebar.tree_model().index_for_pinned_item(item)
+        assert index.isValid()
+        tree = sidebar._tree
+        delegate = tree.itemDelegate()
+        assert isinstance(delegate, AlbumSidebarDelegate)
+        colour = tree.palette().color(QPalette.ColorRole.Text).name(QColor.NameFormat.HexArgb)
+        option = QStyleOptionViewItem()
+        option.state = QStyle.StateFlag.State_Enabled
+        for selected, asset in ((False, "pawprint.svg"), (True, "pawprint.fill.svg")):
+            if selected:
+                option.state |= QStyle.StateFlag.State_Selected
+            state = delegate._build_paint_state(option, index, option.rect, NodeType.PINNED_PET)
+            icon = delegate._get_icon_for_paint_state(index, state)
+            expected = load_icon(asset, color=colour, stroke_width=SIDEBAR_ICON_STROKE_WIDTH)
+            assert icon.cacheKey() == expected.cacheKey()
+            image = icon.pixmap(QSize(60, 60)).toImage()
+            assert image.pixelColor(30, 25).alpha() > 0
+            assert (image.pixelColor(30, 38).alpha() > 0) is selected
+    finally:
+        sidebar.close()
         manager.shutdown()
 
 

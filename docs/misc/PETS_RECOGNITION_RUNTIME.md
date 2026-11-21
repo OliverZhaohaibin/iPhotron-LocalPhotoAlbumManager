@@ -183,6 +183,10 @@ Missing dependencies and models pause recognition while preserving pending
 rows. Recovery prompts and successful-install resumption follow the
 [shared lifecycle contract](../architecture.md#recognition-extension-installation).
 
+Standard Pet scan notices carry a status code and optional technical detail.
+The dashboard translates the notice when it is shown and refreshes it on a
+language switch. Technical details retain their original text.
+
 ## Persistence And Mutation Safety
 
 ```text
@@ -224,12 +228,28 @@ them through the shared recognition annotation/overlay transport. A pet
 annotation remains a `PetDetectionRecord`/`AssetPetAnnotation`; it must not be
 coerced into a face or person record.
 
+### Pet covers and pins
+
+- Choose `Set as Cover` on a single photo in a pet gallery opened from its card
+  or sidebar pin. The action requires a matching pet detection with a crop.
+  The cover is durable and can still display while its detection is unavailable.
+- The pet card's `Delete Detection` action applies to the detection behind the
+  displayed cover. It is enabled when that detection is available and still
+  belongs to the pet. The mutation checks ownership again after confirmation.
+- `Pin` in a pet card's menu saves a sidebar entry for the current library.
+  Give an unnamed pet a name before pinning. A durable pet profile keeps the
+  pin valid while the runtime snapshot is empty. Its gallery shows zero photos
+  until matching detections return. See the
+  [persistence model](../architecture.md#persistence-model) for pin storage.
+
 ## Focused Verification
 
 ```bash
 .venv/bin/python -m pytest -q tests/test_pet_service.py
 .venv/bin/python -m pytest -q tests/test_people_service.py tests/test_people_repository.py
 .venv/bin/python -m pytest -q tests/gui/widgets/test_people_dashboard_widget.py
+.venv/bin/python -m pytest -q tests/test_navigation_coordinator_cluster_gallery.py \
+  tests/test_album_sidebar.py tests/ui/controllers/test_context_menu_cover.py
 .venv/bin/python -m pytest -q tests/gui/coordinators/test_playback_coordinator.py
 .venv/bin/python -m pytest -q tests/ui/widgets/test_face_name_overlay.py
 ```

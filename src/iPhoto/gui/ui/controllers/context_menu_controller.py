@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QUrl,
+    Signal,
 )
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu
@@ -35,12 +36,16 @@ from .selection_controller import SelectionController
 from .status_bar_controller import StatusBarController
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from iPhoto.pets.service import PetService
+
     from ...coordinators.navigation_coordinator import NavigationCoordinator
     from ...viewmodels.gallery_viewmodel import GalleryViewModel
 
 
 class ContextMenuController(QObject):
     """Manage the asset grid context menu and related clipboard interactions."""
+
+    petCoverUpdated = Signal()
 
     def __init__(
         self,
@@ -507,6 +512,12 @@ class ContextMenuController(QObject):
                 )
                 is not None
             )
+        if context.entity_kind == "pet" and context.entity_id:
+            service = self._pet_service_for_context(context)
+            return (
+                service is not None
+                and service.resolve_pet_cover_detection(context.entity_id, asset.id) is not None
+            )
         if context.entity_kind == "group" and context.entity_id:
             service = self._people_service_for_context(context)
             return bool(
@@ -521,7 +532,7 @@ class ContextMenuController(QObject):
 
     def _set_as_cover(self, context: MenuContext) -> None:
         asset = context.selected_asset
-        if asset is None:
+        if asset is None or context.is_recently_deleted:
             return
 
         success = False
@@ -532,6 +543,13 @@ class ContextMenuController(QObject):
             if service is not None:
                 face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
                 success = bool(face_id) and service.set_cluster_cover(context.entity_id, face_id)
+        elif context.entity_kind == "pet" and context.entity_id:
+            service = self._pet_service_for_context(context)
+            if service is not None:
+                detection_id = service.resolve_pet_cover_detection(context.entity_id, asset.id)
+                success = bool(detection_id) and service.set_pet_cover(
+                    context.entity_id, detection_id
+                )
         elif context.entity_kind == "group" and context.entity_id:
             service = self._people_service_for_context(context)
             if service is not None:
@@ -542,6 +560,8 @@ class ContextMenuController(QObject):
                 )
 
         if success:
+            if context.entity_kind == "pet":
+                self.petCoverUpdated.emit()
             self._toast.show_toast(tr("GalleryContextMenu", "Cover Updated"))
             return
         self._status_bar.show_message(
@@ -565,6 +585,23 @@ class ContextMenuController(QObject):
             self._facade.library_manager,
             library_root=context.active_root,
         )
+
+    def _pet_service_for_context(self, context: MenuContext) -> PetService | None:
+        manager = self._facade.library_manager
+        if manager is None or context.active_root is None:
+            return None
+        service = manager.pet_service
+        if service is None and manager.library_session is not None:
+            service = manager.library_session.pets
+        if service is None:
+            return None
+        root = service.library_root()
+        if (
+            not isinstance(root, Path)
+            or normalise_for_compare(root) != normalise_for_compare(context.active_root)
+        ):
+            return None
+        return service
 
     def _remove_selection_rows(self, selected_indexes: list) -> None:
         if not selected_indexes:

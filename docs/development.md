@@ -77,6 +77,7 @@ The completed vNext migration is [historical material](finished/refactor/vnext-2
 | Move/delete/restore planning and UI | [Move/restore](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md), [trash state](misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |
 | People models, scanning, and stable state | [People runtime](misc/PEOPLE_RECOGNITION_RUNTIME.md) |
 | Pets models, clustering, and stable state | [Pets runtime](misc/PETS_RECOGNITION_RUNTIME.md) |
+| People & Pets dashboard gestures | [Dashboard drag and reorder](misc/PROJECT_POPUP_GUARDRAILS.md#dashboard-drag-and-reorder) |
 | Maps SDK build, sync, and source diagnostics | [Maps development](misc/MAP_EXTENSION_DEVELOPMENT.md) |
 | Map installation and recovery | [Map installation](misc/MAP_EXTENSION_INSTALLATION.md) |
 | Windows graphics support and D3D11 experiment | [Windows QRhi matrix](misc/WINDOWS_D3D11_QRHI_STATUS.md) |

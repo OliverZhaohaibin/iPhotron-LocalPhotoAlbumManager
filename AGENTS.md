@@ -19,7 +19,7 @@ remain binding when referenced here.
   ExifTool. Failures produce warnings without rolling back local state.
 - **Durable user choices.** Rescans and rebuilds must preserve favorites,
   hidden/trash state, pinned items, album order, manual metadata, People/Pets
-  names, covers, and hidden flags, People order, groups and group order, group
+  names, covers, hidden flags, shared card order, groups and group order, group
   covers and caches, manual faces, rejected pet detections, and identity redirects.
 - **Cross-platform desktop.** macOS, Windows, and Linux remain supported.
   Platform rendering, maps, external tools, and AI runtime choices belong
@@ -64,8 +64,9 @@ bounded contexts -> application ports / domain values
 
 ## 3. Files, State, And Recovery
 
-Library state lives under `<LibraryRoot>/.iPhoto/`. The complete layout is in
-the [persistence model](docs/architecture.md#persistence-model).
+Library-owned state lives under `<LibraryRoot>/.iPhoto/`. Sidebar pins live in
+app settings keyed by library root. The complete layout is in the
+[persistence model](docs/architecture.md#persistence-model).
 
 | State | Required treatment |
 | --- | --- |
@@ -167,6 +168,11 @@ the [persistence model](docs/architecture.md#persistence-model).
   `dialogs.show_warning()` and the shared themed popup family. Preserve active
   app-theme inheritance and positioning relative to the top-level window;
   People/Pets confirmations use the existing shared dialogs.
+- Preserve the People & Pets dashboard's interaction feel. Change drag
+  thresholds, merge proximity, reorder hit testing, card geometry, or snap
+  animation parameters only when the requested behavior or a confirmed
+  interaction bug requires it. Follow the
+  [dashboard drag contract](docs/misc/PROJECT_POPUP_GUARDRAILS.md#dashboard-drag-and-reorder).
 - Extension archive/network/filesystem operations belong in infrastructure
   installers behind application services; Qt workers transport progress and
   typed results. Preserve archive verification, locking, user-writable managed
@@ -190,6 +196,7 @@ matrices remain owned by these documents.
 | Startup phases, native surfaces, or shutdown | [Startup benchmark](docs/requirements/STARTUP_BENCHMARK_RUNBOOK.md) and [manual validation matrix](docs/requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md) |
 | Detail/Edit, decoders, source caches, residency, or viewer behavior | [Rendering contract](docs/architecture.md#gallery-to-detailedit-rendering), [Detail tests](docs/architecture.md#detail-rendering-decoders-caches-and-edit), and [Detail benchmark](docs/requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md) |
 | People/Pets identities, recognition mutations, or crop cleanup | [Recognition coordination](docs/architecture.md#recognition-coordination), [Pets runtime](docs/misc/PETS_RECOGNITION_RUNTIME.md), and [dashboard/popup contracts](docs/misc/PROJECT_POPUP_GUARDRAILS.md) |
+| People & Pets dashboard drag gestures | [Dashboard drag contract](docs/misc/PROJECT_POPUP_GUARDRAILS.md#dashboard-drag-and-reorder) |
 | GUI text, menus, themes, or dialogs | [i18n guardrails](docs/misc/I18N_UI_TEXT_GUARDRAILS.md) and [popup guardrails](docs/misc/PROJECT_POPUP_GUARDRAILS.md) |
 | Maps runtime or extension installation | [Map installation](docs/misc/MAP_EXTENSION_INSTALLATION.md) and [packaged validation](docs/requirements/MAP_EXTENSION_INSTALL_VALIDATION.md) |
 | People/Pets model installation or shared installer code | [Pets runtime](docs/misc/PETS_RECOGNITION_RUNTIME.md) and [recognition packaged validation](docs/requirements/PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md); shared installer changes also require Map regressions |

@@ -130,10 +130,11 @@ deadlocking People scanning until the user deletes the database manually.
 Keep the People runtime snapshot and user decisions separate:
 
 - `.iPhoto/faces/face_index.db` is the rebuildable runtime snapshot containing
-  detected/manual faces and clustered person records.
-- `.iPhoto/faces/face_state.db` stores human decisions: names, canonical
-  identities, selected covers, hidden flags, person order, groups, group order,
-  pinned state, group covers, and group asset caches.
+  detected faces and clustered person records.
+- `.iPhoto/faces/face_state.db` stores names, canonical identities, selected
+  covers, hidden flags, manual faces, the shared People & Pets card order,
+  groups, group order, group covers, and group asset caches. See the
+  [persistence model](../architecture.md#persistence-model) for sidebar pin storage.
 - A scan commit may recluster all faces and rewrite the runtime snapshot, but it
   must preserve the stable state and repair it through repository/coordinator
   APIs instead of dropping it.

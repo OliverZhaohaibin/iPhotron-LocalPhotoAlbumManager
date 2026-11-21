@@ -16,6 +16,7 @@ from iPhoto.settings.manager import SettingsManager
 
 if TYPE_CHECKING:  # pragma: no cover
     from iPhoto.people.service import PeopleService
+    from iPhoto.pets.service import PetService
 
 
 class _SettingsPinnedStateRepository:
@@ -52,6 +53,8 @@ class PinnedItemsService(QObject):
         settings: SettingsManager,
         people_service_getter: Callable[[Path | None], PeopleService | None] | None = None,
         parent: QObject | None = None,
+        *,
+        pet_service_getter: Callable[[Path | None], PetService | None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._settings = settings
@@ -59,6 +62,7 @@ class PinnedItemsService(QObject):
         self._state = PinnedSidebarStateService(
             _SettingsPinnedStateRepository(settings),
             people_resolver_getter=self._people_service_for_library,
+            pet_resolver_getter=pet_service_getter,
         )
 
     def items_for_library(self, library_root: Path | None) -> list[PinnedSidebarItem]:

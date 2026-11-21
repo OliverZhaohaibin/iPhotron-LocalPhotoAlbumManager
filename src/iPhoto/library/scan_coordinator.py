@@ -16,6 +16,7 @@ from ..bootstrap.startup_profile import mark
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from ..pets.status import PetScanMessage
     from .workers.face_scan_worker import FaceScanWorker
     from .workers.pet_scan_worker import PetScanWorker
     from .workers.scanner_worker import ScannerWorker
@@ -731,7 +732,7 @@ class ScanCoordinatorMixin:
             self._resume_recognition_model_workers()
             self._start_next_deferred_scan()
 
-    def _on_pet_scan_status_changed(self, message: str) -> None:
+    def _on_pet_scan_status_changed(self, message: PetScanMessage) -> None:
         self._pet_scan_status_message = message or None
         self.petScanStatusChanged.emit(message)
 
@@ -747,14 +748,14 @@ class ScanCoordinatorMixin:
         self,
         worker: QThread,
         kind: str,
-        message: str,
+        message: PetScanMessage,
     ) -> None:
         if int(getattr(worker, "_recognition_generation_token", -1)) != int(
             getattr(self, "_recognition_generation", 0)
         ):
             return
         if kind == "face":
-            self._on_face_scan_status_changed(message)
+            self._on_face_scan_status_changed(str(message))
         else:
             self._on_pet_scan_status_changed(message)
 

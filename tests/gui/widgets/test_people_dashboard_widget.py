@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -13,9 +14,9 @@ pytest.importorskip(
 )
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QEvent, QLocale, QObject, QPoint, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPixmap
+from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QLabel, QMenu, QPushButton, QWidget
 
 from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeFailure,
@@ -23,6 +24,8 @@ from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeRefreshPolicy,
     IdentityRef,
 )
+from iPhoto.application.services.recognition_query_service import RecognitionQueryService
+from iPhoto.gui.i18n import TranslationManager
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets import (
     people_dashboard_cards,
@@ -34,11 +37,15 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
     MergeConfirmDialog,
     PeopleDashboardWidget,
 )
+from iPhoto.gui.ui.widgets.people_dashboard_board import IdentityBoard
 from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
+from iPhoto.library.runtime_controller import LibraryRuntimeController
+from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.people.service import PeopleService
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.service import PetService
+from iPhoto.pets.status import PetScanStatus, PetScanStatusCode
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -51,16 +58,32 @@ def qapp() -> QApplication:
     yield app
 
 
-def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -> None:
+@pytest.fixture()
+def dashboard_translations(monkeypatch, tmp_path: Path, qapp: QApplication):
+    monkeypatch.setattr(QLocale, "system", staticmethod(lambda: QLocale("en_US")))
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    translations = TranslationManager(settings)
+    translations.set_language("system")
+    try:
+        yield translations
+    finally:
+        translations.set_language("system")
+
+
+def test_cancelled_drag_merge_shows_single_confirmation_and_keeps_preview_order(
+    monkeypatch, qapp: QApplication
+) -> None:
     widget = PeopleDashboardWidget()
+    board = widget._board
+    board.resize(800, 500)
     widget._summaries = [
         PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
         PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
     ]
     widget._populate_cards()
 
-    cards = widget._board.visible_cards()
-    assert len(cards) == 2
+    source, target = board.visible_cards()
 
     confirm_calls: list[int] = []
 
@@ -69,13 +92,46 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
         return False
 
     monkeypatch.setattr(MergeConfirmDialog, "confirm", staticmethod(_confirm))
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
-    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+    order_changed = Mock()
+    board.orderChanged.connect(order_changed)
 
-    widget._board.proximity_pair = (cards[0], cards[1])
-    widget._board.finish_drag(cards[0])
+    source.begin_drag()
+    source.move(source.pos() + QPoint(100, 0))
+    board.update_drag(source)
+    assert board.visible_cards() == [target, source]
+    board.finish_drag(source)
+    source.end_drag()
 
     assert len(confirm_calls) == 1
+    assert board.visible_cards() == [target, source]
+    order_changed.assert_not_called()
+
+
+def test_drag_merge_uses_the_highlighted_target_after_reordering(qapp: QApplication) -> None:
+    board = IdentityBoard()
+    board.resize(800, 500)
+    cards = [
+        people_dashboard_cards.PeopleCard(
+            board=board,
+            summary=PersonSummary(key, key, f"face-{key}", 1, None, "2024-01-01"),
+            seed_index=index,
+        )
+        for index, key in enumerate(("a", "b", "c", "d"))
+    ]
+    board.set_cards(cards)
+    source, _, initial_target, target = cards
+    merged = Mock()
+    board.mergeRequested.connect(merged)
+
+    source.begin_drag()
+    source.move(initial_target.pos() + QPoint(60, 0))
+    board.update_drag(source)
+    assert board.proximity_pair == (source, target)
+    assert not board.merge_frame.isHidden()
+    board.finish_drag(source)
+    source.end_drag()
+
+    merged.assert_called_once_with(source.identity_key, target.identity_key)
 
 
 @pytest.mark.parametrize(
@@ -87,7 +143,7 @@ def test_drag_merge_shows_single_confirmation(monkeypatch, qapp: QApplication) -
         ("pet", "person"),
     ],
 )
-def test_real_card_positions_merge_once_in_all_directions(
+def test_drag_preview_and_merge_use_a_120_pixel_radius_for_all_identity_kinds(
     source_kind: str,
     target_kind: str,
     monkeypatch,
@@ -134,9 +190,19 @@ def test_real_card_positions_merge_once_in_all_directions(
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     source.begin_drag()
-    source.move(target.pos())
+    inside = target.pos() + QPoint(-100, 60)
+    source.move(inside)
     widget._board.update_drag(source)
+    assert widget._board.proximity_pair == (source, target)
 
+    # A diagonal offset of (96, 72) lands exactly on the merge boundary.
+    source.move(target.pos() + QPoint(-96, 72))
+    widget._board.update_drag(source)
+    assert widget._board.proximity_pair is None
+    assert widget._board.merge_frame.isHidden()
+
+    source.move(inside)
+    widget._board.update_drag(source)
     assert widget._board.top_cards == [source, target]
     assert widget._board.proximity_pair == (source, target)
 
@@ -169,7 +235,7 @@ def test_person_and_pet_with_same_raw_id_remain_distinct(
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     pet.begin_drag()
-    pet.move(person.pos())
+    pet.move(person.pos() + QPoint(100, 60))
     widget._board.update_drag(pet)
     widget._board.finish_drag(pet)
     pet.end_drag()
@@ -201,7 +267,7 @@ def test_set_services_binds_people_and_pets_with_one_reload(
     assert reloads == [False]
 
 
-def test_snapshot_advances_dashboard_index_version(
+def test_warm_snapshot_applies_card_order_and_advances_index_version(
     qapp: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -214,17 +280,19 @@ def test_snapshot_advances_dashboard_index_version(
 
     applied = widget.apply_snapshot(
         library_root=tmp_path,
-        summaries=[],
+        summaries=[PersonSummary("alice", "Alice", "face-a", 1, None, "2024-01-01")],
         groups=[],
-        pet_summaries=[],
+        pet_summaries=[PetSummary("miso", "Miso", "det-a", 1, None, "2024-01-02")],
         pending=0,
         pet_pending=0,
         index_version=4,
+        identity_order=("pet:miso", "person:alice"),
     )
 
     assert applied is True
     assert widget._index_version == 4
     assert widget._loaded_index_version == 4
+    assert [card.identity_key for card in widget._board.visible_cards()] == ["pet:miso", "person:alice"]
 
 
 def test_incremental_population_commits_first_viewport_before_remaining_cards(
@@ -293,7 +361,6 @@ def test_drag_merge_removes_source_card_immediately(monkeypatch, qapp: QApplicat
         ),
     )
     monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     widget._board.proximity_pair = (cards[0], cards[1])
@@ -302,27 +369,87 @@ def test_drag_merge_removes_source_card_immediately(monkeypatch, qapp: QApplicat
     assert [card.person_id for card in widget._board.visible_cards()] == ["person-b"]
 
 
-def test_drag_reorder_persists_cluster_order(monkeypatch, qapp: QApplication) -> None:
-    widget = PeopleDashboardWidget()
-    widget._summaries = [
-        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
-        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+@pytest.mark.parametrize("dragged_key", ["pet:shared", "person:shared"])
+def test_drag_reorder_persists_mixed_order_through_reload(
+    dragged_key: str, monkeypatch, qapp: QApplication, tmp_path: Path
+) -> None:
+    people = [
+        PersonSummary("shared", "Alice", "face-a", 1, None, "2024-01-01", asset_count=1),
+        PersonSummary("bob", "Bob", "face-b", 3, None, "2024-01-02", asset_count=3),
     ]
-    widget._populate_cards()
+    pets = [
+        PetSummary("shared", "Miso", "det-a", 2, None, "2024-01-03", asset_count=2),
+    ]
 
-    persisted: list[list[str]] = []
-    monkeypatch.setattr(
-        widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids))
-    )
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
-    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+    def bind(widget: PeopleDashboardWidget) -> PeopleService:
+        people_service = PeopleService(tmp_path)
+        pet_service = PetService(tmp_path)
+        monkeypatch.setattr(people_service, "load_dashboard", lambda **_kwargs: (people, [], 0))
+        monkeypatch.setattr(pet_service, "load_dashboard", lambda **_kwargs: (pets, 0))
+        query = RecognitionQueryService(tmp_path, people_service=people_service, pet_service=pet_service)
+        widget.set_services(people_service, pet_service, query_service=query)
+        return people_service
 
-    cards = widget._board.visible_cards()
-    widget._board.top_cards = [cards[1], cards[0]]
-    widget._board._drag_start_order = ("person:person-a", "person:person-b")
-    widget._board.finish_drag(cards[1])
+    def loaded_order(widget: PeopleDashboardWidget) -> tuple[str, ...]:
+        assert widget._load_pool.waitForDone(3000)
+        qapp.processEvents()
+        return tuple(card.identity_key for card in widget._board.visible_cards())
 
-    assert persisted == [["person-b", "person-a"]]
+    widget = PeopleDashboardWidget()
+    service = bind(widget)
+    try:
+        assert loaded_order(widget) == ("person:shared", "pet:shared", "person:bob")
+        board = widget._board
+        board.resize(800, 500)
+        first, second, third = board.visible_cards()
+        dragged, target = (first, second) if first.identity_key == dragged_key else (second, first)
+        grab_point = dragged.mapToGlobal(dragged.rect().center())
+        distance = target.x() - dragged.x()
+        merged = Mock()
+        board.mergeRequested.connect(merged)
+
+        def send_mouse(event_type, offset, button, buttons):
+            point = grab_point + QPoint(offset, 0)
+            event = QMouseEvent(
+                event_type,
+                dragged.mapFromGlobal(point),
+                point,
+                button,
+                buttons,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            qapp.sendEvent(dragged, event)
+
+        left, no_button = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+        send_mouse(QEvent.Type.MouseButtonPress, 0, left, left)
+        send_mouse(QEvent.Type.MouseMove, round(distance * 0.4), no_button, left)
+        assert board.proximity_pair == (dragged, target)
+        assert board.visible_cards() == [first, second, third]
+
+        send_mouse(QEvent.Type.MouseMove, distance, no_button, left)
+        assert board.visible_cards() == [second, first, third]
+        assert board.proximity_pair is None
+        assert board.merge_frame.isHidden()
+        send_mouse(QEvent.Type.MouseButtonRelease, distance, left, no_button)
+
+        expected = ("pet:shared", "person:shared", "person:bob")
+        merged.assert_not_called()
+        assert service.get_identity_card_order() == expected
+        widget.reload(preserve_content=True)
+        assert loaded_order(widget) == expected
+    finally:
+        widget.shutdown()
+        widget.close()
+        service.shutdown()
+
+    reopened = PeopleDashboardWidget()
+    service = bind(reopened)
+    try:
+        assert loaded_order(reopened) == expected
+    finally:
+        reopened.shutdown()
+        reopened.close()
+        service.shutdown()
 
 
 def test_drag_reorder_skips_persist_when_order_is_unchanged(
@@ -335,18 +462,15 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(
     ]
     widget._populate_cards()
 
-    persisted: list[list[str]] = []
-    monkeypatch.setattr(
-        widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids))
-    )
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
+    persist = Mock()
+    monkeypatch.setattr(widget._service, "set_identity_card_order", persist)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     cards = widget._board.visible_cards()
     widget._board._drag_start_order = ("person:person-a", "person:person-b")
     widget._board.finish_drag(cards[0])
 
-    assert persisted == []
+    persist.assert_not_called()
 
 
 def test_drag_reorder_persists_group_order(monkeypatch, qapp: QApplication) -> None:
@@ -416,6 +540,237 @@ def test_people_card_menu_shows_unhide_for_hidden_person(qapp: QApplication) -> 
     menu = widget._build_card_menu(summary)
 
     assert "Unhide" in [action.text() for action in menu.actions()]
+
+
+def test_pet_card_menu_keeps_management_actions_and_style(
+    monkeypatch, tmp_path: Path, qapp: QApplication
+) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PetSummary("pet-a", "Miso", "det-a", 2, None, "2024-01-01T00:00:00Z")
+    widget._pet_summaries = [
+        summary,
+        replace(summary, pet_id="pet-b", name="Nori", key_detection_id="det-b"),
+    ]
+    widget._service.set_library_root(tmp_path)
+    pinned_service = Mock(spec=PinnedItemsService)
+    pinned_service.is_pinned.return_value = False
+    widget.set_pinned_service(pinned_service)
+    menu_style = "QMenu { background-color: #f5f6fa; }"
+    widget.menu_stylesheet = lambda: menu_style
+    monkeypatch.setattr(widget, "reload", Mock())
+    rename = Mock()
+    set_hidden = Mock(return_value=True)
+    create_group = Mock()
+    confirm_hide = Mock(return_value=True)
+    monkeypatch.setattr(widget._pet_service, "rename_pet", rename)
+    monkeypatch.setattr(widget._pet_service, "set_pet_hidden", set_hidden)
+    monkeypatch.setattr(widget._service, "create_group", create_group)
+    monkeypatch.setattr(widget, "_confirm_hide_pet", confirm_hide)
+    monkeypatch.setattr(QInputDialog, "getText", Mock(return_value=("Miso II", True)))
+
+    def select_group_members(dialog: GroupPeopleDialog) -> QDialog.DialogCode:
+        assert dialog.selected_person_ids() == ["pet:pet-a"]
+        dialog._handle_tile_clicked(1, False)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(GroupPeopleDialog, "exec", select_group_members)
+
+    menu = widget._build_pet_menu(summary)
+    assert menu.styleSheet() == menu_style
+    assert menu.windowFlags() & Qt.WindowType.FramelessWindowHint
+    assert [
+        None if action.isSeparator() else (action.data(), action.text())
+        for action in menu.actions()
+    ] == [
+        ("rename_pet", "Rename"),
+        ("new_group", "New Group"),
+        ("toggle_pet_hidden", "Hide"),
+        ("toggle_pet_pin", "Pin"),
+        None,
+        ("merge_pet", "Merge Into..."),
+        None,
+        ("delete_pet_detection", "Delete Detection"),
+    ]
+    actions = {action.data(): action for action in menu.actions() if not action.isSeparator()}
+    assert all(action.isEnabled() for action in actions.values())
+    actions["rename_pet"].trigger()
+    actions["new_group"].trigger()
+    actions["toggle_pet_hidden"].trigger()
+    actions["toggle_pet_pin"].trigger()
+
+    rename.assert_called_once_with("pet-a", "Miso II")
+    create_group.assert_called_once_with(["pet:pet-a", "pet:pet-b"])
+    confirm_hide.assert_called_once_with(summary)
+    pinned_service.pin_pet.assert_called_once_with("pet-a", "Miso", library_root=tmp_path)
+
+    pinned_service.is_pinned.return_value = True
+    hidden = replace(summary, is_hidden=True, key_detection_id="")
+    widget._pet_summaries[0] = hidden
+    hidden_menu = widget._build_pet_menu(hidden)
+    hidden_actions = {
+        action.data(): action for action in hidden_menu.actions() if not action.isSeparator()
+    }
+    assert hidden_actions["toggle_pet_hidden"].text() == "Unhide"
+    assert hidden_actions["toggle_pet_pin"].text() == "Unpin"
+    assert not hidden_actions["merge_pet"].isEnabled()
+    assert not hidden_actions["delete_pet_detection"].isEnabled()
+    hidden_actions["toggle_pet_hidden"].trigger()
+    hidden_actions["toggle_pet_pin"].trigger()
+    assert [call.args for call in set_hidden.call_args_list] == [("pet-a", True), ("pet-a", False)]
+    assert confirm_hide.call_count == 1
+    pinned_service.unpin.assert_called_once_with(kind="pet", item_id="pet-a", library_root=tmp_path)
+
+
+@pytest.mark.parametrize("confirmed", [False, True], ids=["cancel", "confirm"])
+def test_pet_card_delete_targets_only_the_confirmed_key_detection(
+    monkeypatch, qapp: QApplication, confirmed: bool
+) -> None:
+    widget = PeopleDashboardWidget()
+    summary = PetSummary("pet-a", "Miso", "det-a", 3, None, "2024-01-01T00:00:00Z")
+    widget._pet_summaries = [summary]
+    delete = Mock(return_value=True)
+    reload = Mock()
+    confirm = Mock(return_value=confirmed)
+    monkeypatch.setattr(widget._pet_service, "delete_detection", delete)
+    monkeypatch.setattr(widget, "reload", reload)
+    monkeypatch.setattr(MergeConfirmDialog, "confirm_action", confirm)
+
+    menu = widget._build_pet_menu(summary)
+    next(action for action in menu.actions() if action.data() == "delete_pet_detection").trigger()
+
+    confirm.assert_called_once()
+    assert confirm.call_args.kwargs["item_count"] == 1
+    if confirmed:
+        delete.assert_called_once_with("det-a", expected_pet_id="pet-a")
+        reload.assert_called_once_with(preserve_content=True)
+    else:
+        delete.assert_not_called()
+        reload.assert_not_called()
+
+
+def test_reopening_pet_card_menu_uses_the_current_compiled_translation(
+    monkeypatch, qapp: QApplication, dashboard_translations: TranslationManager
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._pet_summaries = [
+        PetSummary("pet-a", None, "det-a", 1, None, "2024-01-01T00:00:00Z"),
+    ]
+    opened_menus: list[QMenu] = []
+
+    class CapturingMenu(QMenu):
+        def exec(self, _pos: QPoint) -> None:
+            opened_menus.append(self)
+
+    monkeypatch.setattr(people_dashboard_widget, "QMenu", CapturingMenu)
+
+    for language, name_text, delete_text in (
+        ("system", "Name This Pet", "Delete Detection"),
+        ("zh-CN", "命名此宠物", "删除检测结果"),
+        ("de", "Dieses Haustier benennen", "Erkennung löschen"),
+        ("system", "Name This Pet", "Delete Detection"),
+    ):
+        dashboard_translations.set_language(language)
+        qapp.processEvents()
+        widget._show_card_menu("pet:pet-a", QPoint())
+        actions = {action.data(): action.text() for action in opened_menus[-1].actions()}
+        assert actions["rename_pet"] == name_text
+        assert actions["delete_pet_detection"] == delete_text
+    assert len(opened_menus) == 4
+
+
+@pytest.mark.parametrize(
+    ("language", "name_title", "rename_title", "merge_title", "delete_dialog", "hide_dialog"),
+    [
+        (
+            "zh-CN",
+            "命名此宠物",
+            "重命名宠物",
+            "合并宠物",
+            (
+                "删除此检测结果？",
+                "删除此宠物检测结果后，今后重新扫描时将隐藏对应的裁剪图像。",
+                "删除检测结果",
+                "取消",
+            ),
+            (
+                "隐藏此宠物？",
+                "隐藏 Miso & Nori 后，它将从“人物与宠物”视图中消失，直到你选择“显示隐藏人物”或取消隐藏。",
+                "隐藏宠物",
+                "取消",
+            ),
+        ),
+        (
+            "de",
+            "Dieses Haustier benennen",
+            "Haustier umbenennen",
+            "Haustier zusammenführen",
+            (
+                "Diese Erkennung löschen?",
+                "Wenn Sie diese Haustiererkennung löschen, wird der zugehörige Bildausschnitt "
+                "auch bei künftigen Scans ausgeblendet.",
+                "Erkennung löschen",
+                "Abbrechen",
+            ),
+            (
+                "Dieses Haustier ausblenden?",
+                "Wenn Sie Miso & Nori ausblenden, verschwindet das Haustier aus der Ansicht "
+                "„Personen & Haustiere“, bis Sie „Ausgeblendete Personen anzeigen“ wählen "
+                "oder das Haustier wieder einblenden.",
+                "Haustier ausblenden",
+                "Abbrechen",
+            ),
+        ),
+    ],
+    ids=["zh-CN", "de"],
+)
+def test_pet_card_dialogs_use_compiled_translations(
+    monkeypatch,
+    dashboard_translations: TranslationManager,
+    language: str,
+    name_title: str,
+    rename_title: str,
+    merge_title: str,
+    delete_dialog: tuple[str, ...],
+    hide_dialog: tuple[str, ...],
+) -> None:
+    dashboard_translations.set_language(language)
+    widget = PeopleDashboardWidget()
+    summary = PetSummary("pet-a", "Miso & Nori", "det-a", 1, None, "2024-01-01T00:00:00Z")
+    unnamed = replace(summary, pet_id="pet-b", name=None, key_detection_id="det-b")
+    widget._pet_summaries = [summary, unnamed]
+
+    get_name = Mock(return_value=("", False))
+    monkeypatch.setattr(QInputDialog, "getText", get_name)
+    merge_titles: list[str] = []
+    confirmations: list[tuple[str, ...]] = []
+
+    def capture_picker(dialog: GroupPeopleDialog) -> QDialog.DialogCode:
+        merge_titles.append(dialog.windowTitle())
+        return QDialog.DialogCode.Rejected
+
+    def capture_confirmation(dialog: MergeConfirmDialog) -> QDialog.DialogCode:
+        labels = [label.text() for label in dialog.findChildren(QLabel)]
+        buttons = [button.text() for button in dialog.findChildren(QPushButton)]
+        confirmations.append((*labels, *buttons))
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(GroupPeopleDialog, "exec", capture_picker)
+    monkeypatch.setattr(MergeConfirmDialog, "exec", capture_confirmation)
+
+    menu = widget._build_pet_menu(summary)
+    actions = {action.data(): action for action in menu.actions()}
+    actions["rename_pet"].trigger()
+    assert get_name.call_args.args[1] == rename_title
+    assert get_name.call_args.kwargs["text"] == "Miso & Nori"
+    unnamed_menu = widget._build_pet_menu(unnamed)
+    next(action for action in unnamed_menu.actions() if action.data() == "rename_pet").trigger()
+    assert get_name.call_args.args[1] == name_title
+
+    actions["merge_pet"].trigger()
+    actions["delete_pet_detection"].trigger()
+    actions["toggle_pet_hidden"].trigger()
+    assert merge_titles == [merge_title]
+    assert confirmations == [delete_dialog, hide_dialog]
 
 
 def test_people_card_requests_thumbnail_artwork_immediately(
@@ -542,9 +897,11 @@ def test_people_and_pet_card_badges_use_asset_count(qapp: QApplication) -> None:
 
     widget._populate_cards()
 
-    people_card, pet_card = widget._board.visible_cards()
-    assert people_card._badge_count() == 2
-    assert pet_card._badge_count() == 3
+    cards = widget._board.visible_cards()
+    assert {card.identity_key: card._badge_count() for card in cards} == {
+        "person:person-a": 2,
+        "pet:pet-a": 3,
+    }
 
 
 def test_people_card_badge_falls_back_for_legacy_summary_object(qapp: QApplication) -> None:
@@ -998,7 +1355,6 @@ def test_people_dashboard_loader_reports_locked_database_without_raising(
         people_service=_LockedPeopleService(),
         pet_service=_PetService(),
         status_message=None,
-        pet_status_message=None,
         show_hidden_people=False,
         signals=signals,
     )
@@ -1027,6 +1383,95 @@ def test_people_dashboard_locked_load_schedules_retry(monkeypatch, qapp: QApplic
         "People & Pets is updating in the background. This page will retry shortly."
     )
     widget._refresh_timer.stop()
+
+
+@pytest.mark.parametrize(
+    ("retryable", "chinese_text", "german_text"),
+    [
+        (
+            True,
+            "人物与宠物数据正在后台更新，此页面将稍后重试。",
+            "„Personen & Haustiere“ wird im Hintergrund aktualisiert. "
+            "Die Seite versucht es in Kürze erneut.",
+        ),
+        (
+            False,
+            "无法加载人物与宠物。请尝试刷新页面。",
+            "„Personen & Haustiere“ konnte nicht geladen werden. Bitte aktualisieren Sie die Seite.",
+        ),
+    ],
+    ids=["busy", "error"],
+)
+def test_people_pets_load_failure_message_survives_retranslation(
+    tmp_path: Path,
+    dashboard_translations: TranslationManager,
+    retryable: bool,
+    chinese_text: str,
+    german_text: str,
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._service.set_library_root(tmp_path)
+    dashboard_translations.languageChanged.connect(widget.retranslate_ui)
+
+    widget._on_load_failed(0, 0, RuntimeError("test error"), retryable)
+
+    for language, expected in (("zh-CN", chinese_text), ("de", german_text)):
+        dashboard_translations.set_language(language)
+        assert widget._message.text() == expected
+        assert widget._empty.text() == expected
+
+    widget._on_load_completed(0, 0, True, [], [], [], 0, 0, None)
+    assert widget._empty.text() == (
+        "Noch keine Personen- oder Haustiercluster. Starten Sie einen Scan, um Gruppen zu erstellen."
+    )
+
+
+def test_pet_scan_status_retranslates_without_another_scan(
+    monkeypatch,
+    tmp_path: Path,
+    dashboard_translations: TranslationManager,
+) -> None:
+    monkeypatch.setenv("IPHOTO_PET_SCAN_DISABLED", "1")
+    widget = PeopleDashboardWidget()
+    widget._service.set_library_root(tmp_path)
+    dashboard_translations.languageChanged.connect(widget.retranslate_ui)
+    reload = Mock()
+    monkeypatch.setattr(widget, "reload", reload)
+    worker = PetScanWorker(tmp_path, pet_service=widget._pet_service)
+    manager = LibraryRuntimeController()
+    manager._connect_recognition_worker(worker, "pet")
+    manager.petScanStatusChanged.connect(widget.set_pet_status_message)
+    try:
+        dashboard_translations.set_language("de")
+        worker.run()
+        assert manager.pet_scan_status_message() == PetScanStatus(PetScanStatusCode.DISABLED)
+        for language, expected in (
+            ("de", "Der Haustierscan ist deaktiviert."),
+            ("zh-CN", "宠物扫描已禁用。"),
+            ("system", "Pet scanning is disabled."),
+        ):
+            dashboard_translations.set_language(language)
+            assert widget._message.text() == expected
+            assert widget._empty.text() == expected
+        reload.assert_not_called()
+    finally:
+        widget.shutdown()
+        manager.shutdown()
+
+
+def test_pet_scan_pause_retranslates_and_preserves_reason(
+    tmp_path: Path, dashboard_translations: TranslationManager
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._service.set_library_root(tmp_path)
+    dashboard_translations.languageChanged.connect(widget.retranslate_ui)
+    reason = "Could not read {asset}.jpg"
+    dashboard_translations.set_language("de")
+    widget.set_pet_status_message(PetScanStatus(PetScanStatusCode.PAUSED, reason))
+    assert widget._empty.text() == f"Der Haustierscan wurde angehalten: {reason}"
+
+    dashboard_translations.set_language("zh-CN")
+    assert widget._empty.text() == f"宠物扫描已暂停：{reason}"
 
 
 def test_person_menu_shows_pin_action_when_pinned_service_is_available(
@@ -1063,19 +1508,85 @@ def test_pin_unnamed_person_prompts_for_name_and_persists_pin(
         widget._service, "rename_cluster", lambda person_id, name: renamed.append((person_id, name))
     )
     monkeypatch.setattr(widget, "reload", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        PeopleDashboardWidget,
-        "_prompt_required_person_name",
-        lambda self, _summary: "Alice",
-    )
+    get_text = Mock(return_value=("  Alice  ", True))
+    monkeypatch.setattr(QInputDialog, "getText", get_text)
 
     widget._toggle_person_pin(summary)
 
+    get_text.assert_called_once_with(widget, "Name This Person", "Name:", text="")
     assert renamed == [("person-a", "Alice")]
     pinned = pinned_service.items_for_library(tmp_path)
     assert [(item.kind, item.item_id, item.label) for item in pinned] == [
         ("person", "person-a", "Alice")
     ]
+
+
+@pytest.mark.parametrize(
+    ("prompt_result", "rename_result", "warning"),
+    [
+        pytest.param(("  Miso  ", True), True, None, id="name-and-pin"),
+        pytest.param(("", False), None, None, id="cancel"),
+        pytest.param(
+            ("   ", True),
+            None,
+            "A name is required before pinning this pet.",
+            id="blank-name",
+        ),
+        pytest.param(
+            ("Miso", True),
+            False,
+            "Could not save the pet's name. Please try again.",
+            id="save-failed",
+        ),
+    ],
+)
+def test_pin_unnamed_pet_requires_a_saved_name(
+    monkeypatch,
+    tmp_path: Path,
+    qapp: QApplication,
+    prompt_result: tuple[str, bool],
+    rename_result: bool | None,
+    warning: str | None,
+) -> None:
+    settings = SettingsManager(path=tmp_path / "settings.json")
+    settings.load()
+    pins = PinnedItemsService(settings)
+    widget = PeopleDashboardWidget()
+    widget._service.set_library_root(tmp_path)
+    widget.set_pinned_service(pins)
+    summary = PetSummary("pet-a", None, "det-a", 2, None, "2024-01-01T00:00:00Z")
+    widget._pet_summaries = [summary]
+    get_text = Mock(return_value=prompt_result)
+    rename_pet = Mock(return_value=rename_result)
+    show_warning = Mock()
+    reload = Mock()
+    monkeypatch.setattr(QInputDialog, "getText", get_text)
+    monkeypatch.setattr(widget._pet_service, "rename_pet", rename_pet)
+    monkeypatch.setattr(people_dashboard_widget.dialogs, "show_warning", show_warning)
+    monkeypatch.setattr(widget, "reload", reload)
+
+    menu = widget._build_pet_menu(summary)
+    next(action for action in menu.actions() if action.data() == "toggle_pet_pin").trigger()
+
+    get_text.assert_called_once_with(widget, "Name This Pet", "Name:", text="")
+    if rename_result is None:
+        rename_pet.assert_not_called()
+    else:
+        rename_pet.assert_called_once_with("pet-a", "Miso")
+    if warning is None:
+        show_warning.assert_not_called()
+    else:
+        show_warning.assert_called_once_with(widget, warning)
+
+    pinned = pins.items_for_library(tmp_path)
+    if rename_result:
+        assert [(item.kind, item.item_id, item.label) for item in pinned] == [
+            ("pet", "pet-a", "Miso")
+        ]
+        reload.assert_called_once_with(preserve_content=True)
+    else:
+        assert not pinned
+        reload.assert_not_called()
 
 
 def test_hidden_person_pin_shows_warning_and_does_not_persist(
@@ -1172,7 +1683,8 @@ def test_merge_person_reuses_group_people_dialog(monkeypatch, qapp: QApplication
         ),
     )
 
-    widget._merge_person(widget._summaries[0])
+    menu = widget._build_card_menu(widget._summaries[0])
+    next(action for action in menu.actions() if action.data() == "merge").trigger()
 
     assert len(dialog_calls) == 1
     assert [summary.person_id for summary in dialog_calls[0]["summaries"]] == ["person:person-b"]
@@ -1337,7 +1849,8 @@ def test_right_click_pet_to_pet_uses_typed_merge_service_once(
     monkeypatch.setattr(widget._merge_service, "merge", merge)
     monkeypatch.setattr(widget, "reload", Mock())
 
-    widget._merge_pet(widget._pet_summaries[0])
+    menu = widget._build_pet_menu(widget._pet_summaries[0])
+    next(action for action in menu.actions() if action.data() == "merge_pet").trigger()
 
     merge.assert_called_once_with("pet:pet-a", "pet:pet-b")
     widget.reload.assert_not_called()
@@ -1528,7 +2041,8 @@ def test_disband_group_uses_confirmation_popup_and_deletes(monkeypatch, qapp: QA
         lambda *, preserve_content=False: reloads.append(bool(preserve_content)),
     )
 
-    widget._disband_group(summary)
+    menu = widget._build_group_menu(summary)
+    next(action for action in menu.actions() if action.data() == "disband_group").trigger()
 
     assert confirms == [
         (

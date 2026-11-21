@@ -81,8 +81,12 @@ the existing People dashboard, gallery, groups, pins, and media annotations.*
   snapshot coordination, and background `PetScanWorker` scheduling.
 
 #### 👥 People & Pets UI
-- Extended the People dashboard with pet cards, naming, merge/move, hide,
-  cover, delete-detection, pin, and gallery navigation actions.
+- Added pet cards with naming, hide, merge, pin, and detection deletion.
+- Added cover selection from a matching photo in the pet gallery. Sidebar pet
+  pins survive runtime rebuilds and show an empty gallery until matches return.
+- Saved one card order for people and pets, preserving existing hidden People
+  ranks. Drag release uses the highlighted merge target after reordering.
+- Pet scan notices update when the app language changes.
 - Added mixed person/pet identity groups and cross-kind redirects while keeping
   People and Pets runtime records in separate bounded contexts.
 - Added pet bounding-box/name annotations to image playback, detail overlays,

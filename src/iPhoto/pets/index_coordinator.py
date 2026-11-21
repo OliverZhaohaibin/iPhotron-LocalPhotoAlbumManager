@@ -646,13 +646,21 @@ class PetIndexCoordinator(QObject):
             )
             return result
 
-    def delete_detection(self, detection_id: str) -> PetSnapshotEvent | None:
+    def delete_detection(
+        self, detection_id: str, *, expected_pet_id: str | None = None
+    ) -> PetSnapshotEvent | None:
         with self._journal.try_mutation_scope() as acquired:
             if not acquired or self._shutdown_requested:
                 return None
             if not self._ensure_recovered_locked():
                 return None
             repository = self._repository()
+            # Validate before preparing an operation that recovery may replay.
+            if (
+                expected_pet_id is not None
+                and repository.get_detection_for_pet(expected_pet_id, detection_id) is None
+            ):
+                return None
             operation_id = self._try_prepare_operation_locked(
                 "pet_delete_detection",
                 {"detection_id": detection_id},

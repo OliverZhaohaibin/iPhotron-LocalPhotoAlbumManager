@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from iPhoto.utils.pathutils import tolerant_int
@@ -21,6 +23,26 @@ PET_STATUS_VALUES = frozenset(
         PET_STATUS_SKIPPED,
     }
 )
+
+
+class PetScanStatusCode(StrEnum):
+    DISABLED = "disabled"
+    UNAVAILABLE = "unavailable"
+    CONSOLIDATION_PAUSED = "consolidation_paused"
+    PAUSED = "paused"
+    ASSET_RETRY = "asset_retry"
+    ASSET_FAILED = "asset_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class PetScanStatus:
+    """Details of a scan status that the dashboard can translate."""
+
+    code: PetScanStatusCode
+    reason: str = ""
+
+
+type PetScanMessage = PetScanStatus | str
 
 
 def normalize_pet_status(value: object) -> str | None:

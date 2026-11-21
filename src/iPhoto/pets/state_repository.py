@@ -921,14 +921,14 @@ class PetStateRepository:
 
     def get_summary_state_maps(
         self,
-    ) -> tuple[dict[str, bool], dict[str, str], dict[str, str | None]]:
+    ) -> tuple[dict[str, bool], dict[str, tuple[str, str | None]], dict[str, str | None]]:
         """Load dashboard state with a fixed query budget independent of pet count."""
 
         self.initialize()
         with closing(self._connect()) as conn:
             hidden_rows = conn.execute("SELECT pet_id FROM hidden_pets").fetchall()
             cover_rows = conn.execute(
-                "SELECT pet_id, thumbnail_path FROM pet_covers"
+                "SELECT pet_id, thumbnail_path, detection_id FROM pet_covers"
             ).fetchall()
             profile_rows = conn.execute(
                 "SELECT pet_id, name FROM pet_profiles"
@@ -937,7 +937,10 @@ class PetStateRepository:
             str(row["pet_id"]): True for row in hidden_rows if row["pet_id"]
         }
         covers = {
-            str(row["pet_id"]): str(row["thumbnail_path"])
+            str(row["pet_id"]): (
+                str(row["thumbnail_path"]),
+                str(row["detection_id"]) if row["detection_id"] else None,
+            )
             for row in cover_rows
             if row["pet_id"] and row["thumbnail_path"]
         }

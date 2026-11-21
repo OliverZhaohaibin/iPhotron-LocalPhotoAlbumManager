@@ -295,15 +295,23 @@ class PetService:
             return PetMergeOutcome(False, PetMutationFailure.RECOVERY_PENDING)
         return coordinator.merge_pets(source_pet_id, target_pet_id)
 
+    def resolve_pet_cover_detection(self, pet_id: str, asset_id: str) -> str | None:
+        """Find the pet's cover crop in a single gallery asset."""
+
+        if self._shutdown or not pet_id or not asset_id or not self._valid_asset_ids([asset_id]):
+            return None
+        repository = self.repository()
+        return repository.resolve_pet_cover_detection(pet_id, asset_id) if repository else None
+
     def set_pet_cover(self, pet_id: str, detection_id: str) -> bool:
         coordinator = self.coordinator
         return bool(coordinator and coordinator.set_pet_cover(pet_id, detection_id))
 
-    def delete_detection(self, detection_id: str) -> bool:
+    def delete_detection(self, detection_id: str, *, expected_pet_id: str | None = None) -> bool:
         coordinator = self.coordinator
         if coordinator is None:
             return False
-        return coordinator.delete_detection(detection_id) is not None
+        return coordinator.delete_detection(detection_id, expected_pet_id=expected_pet_id) is not None
 
     def move_detection_to_pet(self, detection_id: str, target_pet_id: str) -> bool:
         return bool(self.move_detection_to_pet_with_outcome(detection_id, target_pet_id))
@@ -345,6 +353,12 @@ class PetService:
 
     def build_pet_query(self, pet_id: str) -> AssetQuery:
         return AssetQuery(asset_ids=self.pet_asset_ids(pet_id))
+
+    def has_pet_identity(self, pet_id: str) -> bool:
+        """Check whether a pet pin still has a target while its snapshot is rebuilt."""
+
+        repository = self.repository()
+        return repository is not None and repository.has_pet_identity(pet_id)
 
     def has_pet(self, pet_id: str) -> bool:
         if pet_id in self._redirected_source_ids("pet"):

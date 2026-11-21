@@ -12,6 +12,7 @@ from typing import Iterable
 
 import numpy as np
 
+from iPhoto.domain.recognition_edits import IdentityRef
 from iPhoto.sqlite_utils import configure_sqlite_connection, connect_sqlite
 from iPhoto.recognition.promotion import (
     PROMOTION_CONFIRMED,
@@ -43,6 +44,44 @@ from .repository_utils import (
 )
 
 _PEOPLE_PROMOTION_MIN_ASSETS = 3
+
+
+def _reorder_subset(current: tuple[str, ...], requested: tuple[str, ...]) -> tuple[str, ...]:
+    """Replace the requested slots while retaining entries absent from the view."""
+
+    requested_keys = set(requested)
+    replacements = iter(requested)
+    order = [next(replacements) if key in requested_keys else key for key in current]
+    order.extend(replacements)
+    return tuple(order)
+
+
+def _with_legacy_person_slots(order: tuple[str, ...], person_order: tuple[str, ...]) -> tuple[str, ...]:
+    """Insert missing People ranks before the next ranked person or at the end."""
+
+    if not order or not person_order:
+        return order
+
+    ranked = set(order)
+    insert_before: dict[str, list[str]] = {}
+    pending: list[str] = []
+    for person_id in person_order:
+        key = f"person:{person_id}"
+        if key not in ranked:
+            pending.append(key)
+        elif pending:
+            insert_before[key] = pending
+            pending = []
+
+    if not insert_before and not pending:
+        return order
+
+    merged = []
+    for key in order:
+        merged.extend(insert_before.get(key, ()))
+        merged.append(key)
+    merged.extend(pending)
+    return tuple(merged)
 
 
 @dataclass(frozen=True)
@@ -616,30 +655,113 @@ class FaceStateRepository:
     def set_person_order(self, person_ids: Iterable[str]) -> None:
         ordered_ids = _unique_person_ids(person_ids)
         self.initialize()
-        updated_at = _utc_now_iso()
         with closing(self._connect()) as conn:
-            conn.executemany(
-                """
-                INSERT INTO person_card_orders (person_id, sort_order, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(person_id) DO UPDATE SET
-                    sort_order = excluded.sort_order,
-                    updated_at = excluded.updated_at
-                """,
-                [
-                    (person_id, index, updated_at)
-                    for index, person_id in enumerate(ordered_ids)
-                ],
-            )
+            self._write_person_order(conn, ordered_ids)
             if ordered_ids:
                 placeholders = ", ".join(["?"] * len(ordered_ids))
                 conn.execute(
                     f"DELETE FROM person_card_orders WHERE person_id NOT IN ({placeholders})",
                     ordered_ids,
                 )
+                dashboard_order = self._read_identity_card_order(conn)
+                if dashboard_order:
+                    self._write_identity_card_order(
+                        conn,
+                        _reorder_subset(
+                            dashboard_order, tuple(f"person:{value}" for value in ordered_ids)
+                        ),
+                    )
             else:
                 conn.execute("DELETE FROM person_card_orders")
+                conn.execute("DELETE FROM identity_card_orders WHERE identity_key LIKE 'person:%'")
             conn.commit()
+
+    @staticmethod
+    def _write_person_order(conn: sqlite3.Connection, person_ids: tuple[str, ...]) -> None:
+        updated_at = _utc_now_iso()
+        conn.executemany(
+            """
+            INSERT INTO person_card_orders (person_id, sort_order, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(person_id) DO UPDATE SET
+                sort_order = excluded.sort_order,
+                updated_at = excluded.updated_at
+            """,
+            [(person_id, index, updated_at) for index, person_id in enumerate(person_ids)],
+        )
+
+    def get_identity_card_order(self) -> tuple[str, ...]:
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            order = self._read_identity_card_order(conn)
+            if not order:
+                return order
+            return _with_legacy_person_slots(order, self._read_legacy_person_order(conn))
+
+    def set_identity_card_order(self, identity_keys: Iterable[str]) -> tuple[str, ...]:
+        identities = tuple(dict.fromkeys(
+            identity for key in identity_keys if (identity := IdentityRef.parse(key)) is not None
+        ))
+        self.initialize()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            person_order = self._read_legacy_person_order(conn)
+            person_ids = tuple(identity.entity_id for identity in identities if identity.kind == "person")
+            next_person_order = _reorder_subset(person_order, person_ids)
+            order = _reorder_subset(
+                self._read_identity_card_order(conn), tuple(identity.key for identity in identities)
+            )
+            order = _with_legacy_person_slots(order, next_person_order)
+            self._write_identity_card_order(conn, order)
+            if next_person_order != person_order:
+                self._write_person_order(conn, next_person_order)
+            conn.commit()
+        return order
+
+    @staticmethod
+    def _read_legacy_person_order(conn: sqlite3.Connection) -> tuple[str, ...]:
+        return tuple(
+            row["person_id"]
+            for row in conn.execute(
+                """
+                SELECT orders.person_id
+                FROM person_card_orders AS orders
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM identity_redirects
+                    WHERE source_kind = 'person' AND source_id = orders.person_id
+                )
+                ORDER BY orders.sort_order, orders.person_id
+                """
+            )
+        )
+
+    @staticmethod
+    def _read_identity_card_order(conn: sqlite3.Connection) -> tuple[str, ...]:
+        return tuple(row["identity_key"] for row in conn.execute(
+            "SELECT identity_key FROM identity_card_orders ORDER BY sort_order, identity_key"
+        ))
+
+    @staticmethod
+    def _write_identity_card_order(conn: sqlite3.Connection, order: tuple[str, ...]) -> None:
+        conn.executemany(
+            """
+            INSERT INTO identity_card_orders (identity_key, sort_order) VALUES (?, ?)
+            ON CONFLICT(identity_key) DO UPDATE SET sort_order = excluded.sort_order
+            """,
+            [(key, index) for index, key in enumerate(order)],
+        )
+
+    @staticmethod
+    def _remap_identity_card_order(
+        conn: sqlite3.Connection, source_key: str, target_key: str
+    ) -> None:
+        # A ranked target keeps its own position; an unranked target inherits the source position.
+        conn.execute(
+            "UPDATE OR IGNORE identity_card_orders SET identity_key = ? WHERE identity_key = ?",
+            (target_key, source_key),
+        )
+        conn.execute("DELETE FROM identity_card_orders WHERE identity_key = ?", (source_key,))
 
     def set_group_order(self, group_ids: Iterable[str]) -> None:
         ordered_ids = [str(group_id) for group_id in dict.fromkeys(group_ids) if group_id]
@@ -1236,6 +1358,9 @@ class FaceStateRepository:
                     (target_person_id, merged_order, updated_at),
                 )
             conn.execute("DELETE FROM person_card_orders WHERE person_id = ?", (source_person_id,))
+            self._remap_identity_card_order(
+                conn, f"person:{source_person_id}", f"person:{target_person_id}"
+            )
             if hidden_state:
                 conn.execute(
                     """
@@ -1526,6 +1651,7 @@ class FaceStateRepository:
         self.initialize()
         updated_at = _utc_now_iso()
         with closing(self._connect()) as conn:
+            self._remap_identity_card_order(conn, f"pet:{source_pet_id}", f"pet:{target_pet_id}")
             redirects = self._remap_groups_for_merged_entity(
                 conn,
                 member_kind="pet",
@@ -1612,6 +1738,9 @@ class FaceStateRepository:
                 WHERE target_kind = ? AND target_id = ?
                 """,
                 (target_kind, target_id, timestamp, source_kind, source_id),
+            )
+            self._remap_identity_card_order(
+                conn, f"{source_kind}:{source_id}", f"{target_kind}:{target_id}"
             )
             conn.commit()
         return True
@@ -1723,6 +1852,9 @@ class FaceStateRepository:
                 target_kind=target_kind,
                 target_id=target_id,
                 updated_at=timestamp,
+            )
+            self._remap_identity_card_order(
+                conn, f"{source_kind}:{source_id}", f"{target_kind}:{target_id}"
             )
             conn.commit()
         return IdentityMergeEnsureResult(
@@ -2782,6 +2914,12 @@ class FaceStateRepository:
             "CREATE INDEX IF NOT EXISTS idx_person_card_orders_sort_order "
             "ON person_card_orders(sort_order)"
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS identity_card_orders (
+                identity_key TEXT PRIMARY KEY,
+                sort_order INTEGER NOT NULL
+            )
+            """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS group_card_orders (
                 group_id TEXT PRIMARY KEY,

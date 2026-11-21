@@ -27,6 +27,8 @@ from ...pets.service import PetService, pet_library_paths
 from ...pets.status import (
     PET_STATUS_PENDING,
     PET_STATUS_RETRY,
+    PetScanStatus,
+    PetScanStatusCode,
     is_pet_scan_candidate,
     normalize_pet_status,
 )
@@ -39,7 +41,7 @@ class PetScanWorker(QThread):
     """Consume pending Pets assets from the session service."""
 
     petIndexUpdated = Signal()  # noqa: N815
-    statusChanged = Signal(str)  # noqa: N815
+    statusChanged = Signal(object)  # noqa: N815
     modelUnavailable = Signal(str)
 
     BATCH_SIZE = 16
@@ -87,7 +89,7 @@ class PetScanWorker(QThread):
 
     def run(self) -> None:  # type: ignore[override]
         if str(os.environ.get("IPHOTO_PET_SCAN_DISABLED", "")).strip() == "1":
-            self.statusChanged.emit("Pet scanning is disabled.")
+            self.statusChanged.emit(PetScanStatus(PetScanStatusCode.DISABLED))
             return
         if self._cancelled:
             return
@@ -107,7 +109,7 @@ class PetScanWorker(QThread):
 
         coordinator = self._pet_service.coordinator
         if coordinator is None:
-            self.statusChanged.emit("Pet scanning is unavailable for this library.")
+            self.statusChanged.emit(PetScanStatus(PetScanStatusCode.UNAVAILABLE))
             return
 
         while not self._cancelled:
@@ -138,7 +140,9 @@ class PetScanWorker(QThread):
                                     "Pet scan consolidation failed: %s", exc, exc_info=True
                                 )
                                 reason = str(exc).strip() or exc.__class__.__name__
-                                self.statusChanged.emit(f"Pet scan consolidation paused: {reason}")
+                                self.statusChanged.emit(
+                                    PetScanStatus(PetScanStatusCode.CONSOLIDATION_PAUSED, reason)
+                                )
                                 return
                         return
                 continue
@@ -171,7 +175,7 @@ class PetScanWorker(QThread):
                 for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
                     self._queued_ids.discard(asset_id)
                 reason = str(exc).strip() or exc.__class__.__name__
-                self.statusChanged.emit(f"Pet scanning paused: {reason}")
+                self.statusChanged.emit(PetScanStatus(PetScanStatusCode.PAUSED, reason))
                 return
 
     def _report_unavailable(
@@ -268,9 +272,9 @@ class PetScanWorker(QThread):
         failed_ids = [asset_id for asset_id in retry_id_set if asset_id in retry_source_ids]
 
         if first_retry_ids:
-            self.statusChanged.emit("Some assets need a pet-scan retry.")
+            self.statusChanged.emit(PetScanStatus(PetScanStatusCode.ASSET_RETRY))
         if failed_ids:
-            self.statusChanged.emit("Some assets could not be pet scanned and were marked failed.")
+            self.statusChanged.emit(PetScanStatus(PetScanStatusCode.ASSET_FAILED))
         retry_detected = [
             item for item in detected if not item.asset_id or str(item.asset_id) not in failed_ids
         ]

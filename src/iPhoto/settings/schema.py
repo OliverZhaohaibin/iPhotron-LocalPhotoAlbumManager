@@ -8,6 +8,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+_PINNED_ITEM_KINDS = ("album", "person", "pet", "group")
+
 SETTINGS_SCHEMA: dict[str, Any] = {
     "$id": "iPhoto/settings.schema.json",
     "type": "object",
@@ -25,7 +27,7 @@ SETTINGS_SCHEMA: dict[str, Any] = {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "enum": ["album", "person", "group"],
+                            "enum": list(_PINNED_ITEM_KINDS),
                         },
                         "item_id": {"type": "string"},
                         "label": {"type": "string"},
@@ -157,7 +159,7 @@ def merge_with_defaults(data: dict[str, Any] | None) -> dict[str, Any]:
                         item_id = str(entry.get("item_id") or "").strip()
                         label = str(entry.get("label") or "").strip()
                         custom_label = bool(entry.get("custom_label", False))
-                        if kind not in {"album", "person", "group"}:
+                        if kind not in _PINNED_ITEM_KINDS:
                             continue
                         if not item_id or not label:
                             continue

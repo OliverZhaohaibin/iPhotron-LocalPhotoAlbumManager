@@ -465,10 +465,8 @@ class AlbumSidebar(QWidget):
                 _logger.info("_on_selection_changed: emitting staticNodeSelected(%r)", item.title)
                 self.staticNodeSelected.emit(item.title)
             return
-        if node_type in {NodeType.PINNED_ALBUM, NodeType.PINNED_PERSON, NodeType.PINNED_GROUP}:
-            pinned_item = item.pinned_item
-            if pinned_item is None:
-                return
+        pinned_item = item.pinned_item
+        if pinned_item is not None:
             self._current_selection = None
             self._current_static_selection = None
             self._current_pinned_selection = (pinned_item.kind, pinned_item.item_id)

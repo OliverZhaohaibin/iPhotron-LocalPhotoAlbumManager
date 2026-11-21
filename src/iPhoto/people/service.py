@@ -417,6 +417,19 @@ class PeopleService:
         if coordinator is not None:
             coordinator.set_person_order(person_ids)
 
+    def get_identity_card_order(self) -> tuple[str, ...]:
+        """Read the saved dashboard order for both identity kinds."""
+        repository = self.repository()
+        state = repository.state_repository if repository is not None else None
+        return state.get_identity_card_order() if state is not None else ()
+
+    def set_identity_card_order(self, identity_keys: tuple[str, ...]) -> tuple[str, ...] | None:
+        """Save the submitted order and return the full persisted order."""
+        coordinator = self.coordinator
+        if coordinator is None:
+            return None
+        return coordinator.set_identity_card_order(identity_keys)
+
     def set_group_order(
         self,
         group_ids: list[str] | tuple[str, ...],

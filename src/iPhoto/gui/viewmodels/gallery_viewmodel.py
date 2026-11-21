@@ -281,10 +281,8 @@ class GalleryViewModel(BaseViewModel):
         self.current_section.value = "people_cluster_gallery"
         self.static_selection.value = "People"
         self.active_root.value = root
-        self.current_query.value = query
-        self.current_direct_assets.value = None
         self.can_return_to_map.value = True
-        self._store.load_selection(root, query=query)
+        self._load_identity_gallery_selection(root, query)
         self.cluster_gallery_mode_changed.emit(True)
         self.route_requested.emit("gallery")
 
@@ -306,12 +304,22 @@ class GalleryViewModel(BaseViewModel):
         self.current_section.value = "pinned_people_gallery"
         self.static_selection.value = "Pinned"
         self.active_root.value = root
-        self.current_query.value = query
-        self.current_direct_assets.value = None
         self.can_return_to_map.value = False
-        self._store.load_selection(root, query=query)
+        self._load_identity_gallery_selection(root, query)
         self.cluster_gallery_mode_changed.emit(False)
         self.route_requested.emit("gallery")
+
+    def _load_identity_gallery_selection(self, root: Path, query: AssetQuery) -> None:
+        if query.asset_ids:
+            self.current_query.value = query
+            self.current_direct_assets.value = None
+            self._store.load_selection(root, query=query)
+            return
+
+        # AssetQuery treats an empty ID list as unrestricted.
+        self.current_query.value = None
+        self.current_direct_assets.value = []
+        self._store.load_selection(root, direct_assets=[], library_root=root)
 
     def return_from_cluster_gallery(self) -> None:
         if self._cluster_gallery_origin == "location" or (
@@ -327,10 +335,8 @@ class GalleryViewModel(BaseViewModel):
             self.open_people_dashboard()
 
     def handle_people_snapshot_committed(self, event: object) -> None:
-        if (
-            self._cluster_gallery_origin != "people"
-            and self.current_section.value != "pinned_people_gallery"
-        ):
+        is_pinned = self.current_section.value == "pinned_people_gallery"
+        if self._cluster_gallery_origin != "people" and not is_pinned:
             return
         if (
             self._people_cluster_kind not in {"person", "group", "pet"}
@@ -397,13 +403,12 @@ class GalleryViewModel(BaseViewModel):
                 return
             query = pet_service.build_pet_query(current_id)
 
-        if not query.asset_ids:
+        if not query.asset_ids and not is_pinned:
             self.return_from_cluster_gallery()
             return
 
         self._people_cluster_id = current_id
-        self.current_query.value = query
-        self._store.load_selection(root, query=query)
+        self._load_identity_gallery_selection(root, query)
 
     def return_to_map_from_cluster_gallery(self) -> None:
         self.return_from_cluster_gallery()

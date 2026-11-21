@@ -194,10 +194,9 @@ them as People cards. You can name people, merge duplicate clusters, hide or
 show hidden people, and keep chosen covers persistent across rescans.
 
 The independent Pets pipeline detects cats and dogs with YOLOX, creates DINOv2
-embeddings, and presents pet identity cards in the same dashboard. Pets can be
-named, merged, hidden, pinned, assigned covers, and opened as gallery queries.
-People and Pets may participate in the same identity groups while their runtime
-indexes and durable state remain separate.
+embeddings, and presents pet identity cards in the same dashboard. You can
+name, merge, hide, and pin pets. Open a pet's gallery from its card or sidebar
+pin and choose **Set as Cover** on a photo with a matching pet detection.
 
 Strong People/face conflicts normally suppress the duplicate pet detection so
 it does not create another dashboard card, gallery result, detail annotation,
@@ -206,14 +205,17 @@ contains a smaller human face, however, so a legitimate pet being held by a
 person is not discarded. This cross-type filter compares geometry only; People
 and Pets records, models, indexes, and durable state remain independently owned.
 
-Drag people into groups to collect shared photos for multiple people. Group
-cards can use a selected cover, be reordered, and be disbanded when they are not
-pinned. Face scanning uses the optional `ai-demo` dependencies; the core photo
-manager remains usable without installing the AI runtime, and People state is
-kept behind the library session so names, covers, hidden flags, groups, and
-manual faces survive rescans. Pet scanning uses the optional `pets-ai` extra;
-missing pet dependencies or models leave eligible rows pending without blocking
-the rest of the application.
+Drag person and pet cards to reorder them on the dashboard. Choose **New Group**
+from a card's context menu to collect photos where the selected people and pets
+appear together. Group cards support covers and drag reordering. You can disband
+an unpinned group.
+
+Face scanning uses the optional `ai-demo` dependencies. The core photo manager
+remains usable without the AI runtime, and People state is kept behind the
+library session so names, covers, hidden flags, groups, and manual faces survive
+rescans. Pet scanning uses the optional `pets-ai` extra. When dependencies or
+models are missing, eligible rows stay pending and the rest of the app remains
+usable.
 ![People and groups interface](docs/picture/People%20%26%20Group.png)
 
 ### ⚡ Large-Library Gallery

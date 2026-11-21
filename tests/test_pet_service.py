@@ -15,6 +15,7 @@ from PIL import Image
 from PySide6.QtTest import QSignalSpy
 
 from iPhoto.bootstrap.library_pet_service import create_pet_service
+from iPhoto.bootstrap.library_session import create_headless_library_session
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
@@ -52,6 +53,7 @@ from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 from iPhoto.pets.scan_session import PetScanSession
 from iPhoto.pets.state_repository import PetStateRepository
+from iPhoto.pets.status import PetScanMessage, PetScanStatus, PetScanStatusCode
 from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
@@ -946,6 +948,8 @@ def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Pa
     assert summaries == []
     assert repository.state_repository is not None
     assert repository.state_repository.get_rejected_pet_keys(["pet-key-a"]) == {"pet-key-a"}
+    profile = repository.state_repository.get_profile("pet-a")
+    assert profile is not None and profile.name == "Miso"
 
 
 def test_incremental_state_inputs_share_one_sqlite_read_snapshot(
@@ -1018,12 +1022,167 @@ def test_incremental_state_inputs_share_one_sqlite_read_snapshot(
     assert writer.get_profiles_by_ids(["pet-snapshot"])["pet-snapshot"].name == "After"
 
 
+def test_pet_cover_from_gallery_photo_survives_reopening_and_rescan(tmp_path: Path, qapp) -> None:
+    first = _detection(
+        detection_id="automatic",
+        asset_id="asset-a",
+        pet_key="v2:automatic",
+        pet_id="pet-a",
+        thumbnail_path="thumbnails/automatic.png",
+    )
+    selected = _detection(
+        detection_id="selected",
+        asset_id="asset-b",
+        pet_key="v2:selected",
+        pet_id="pet-a",
+        thumbnail_path="thumbnails/selected.png",
+    )
+    pet = PetRecord(
+        pet_id="pet-a",
+        name="Miso",
+        key_detection_id=first.detection_id,
+        detection_count=2,
+        center_embedding=first.embedding,
+        embedding_dim=first.embedding_dim,
+        created_at=first.detected_at,
+        updated_at=first.detected_at,
+        sample_count=2,
+    )
+    asset_repository = get_global_repository(tmp_path)
+    asset_repository.write_rows(
+        [
+            {"rel": detection.asset_rel, "id": detection.asset_id, "media_type": 0}
+            for detection in (first, selected)
+        ]
+    )
+
+    session = create_headless_library_session(tmp_path)
+    try:
+        service = session.pets
+        assert service is not None
+        repository = service.repository()
+        paths = service.paths()
+        assert repository is not None and paths is not None
+        paths.thumbnail_dir.mkdir(parents=True, exist_ok=True)
+        for detection in (first, selected):
+            Image.new("RGB", (8, 8)).save(paths.root_dir / detection.thumbnail_path)
+        repository.replace_all([first, selected], [pet])
+        assert repository.get_pet_summaries()[0].key_detection_id == "automatic"
+
+        coordinator = service.coordinator
+        assert coordinator is not None
+        snapshots = QSignalSpy(coordinator.snapshotCommitted)
+        assert service.resolve_pet_cover_detection("pet-b", "asset-b") is None
+        chosen_detection = service.resolve_pet_cover_detection("pet-a", "asset-b")
+        assert chosen_detection == "selected"
+        assert service.set_pet_cover("pet-a", chosen_detection)
+        qapp.processEvents()
+        assert snapshots.count() == 1
+        assert snapshots.at(0)[0].changed_pet_ids == ("pet-a",)
+    finally:
+        session.shutdown()
+
+    reopened = create_headless_library_session(tmp_path)
+    try:
+        service = reopened.pets
+        assert service is not None
+        repository = service.repository()
+        assert repository is not None and repository.state_repository is not None
+        cover = repository.state_repository.get_cover("pet-a")
+        assert cover is not None and cover.is_custom
+        assert cover.asset_id == "asset-b"
+        summary = repository.get_pet_summaries()[0]
+        assert summary.thumbnail_path == paths.thumbnail_dir / "selected.png"
+        assert summary.key_detection_id == "selected"
+
+        rescanned = replace(
+            selected, detection_id="rescanned", thumbnail_path="thumbnails/rescanned.png"
+        )
+        rescanned_thumbnail = paths.thumbnail_dir / "rescanned.png"
+        Image.new("RGB", (8, 8)).save(rescanned_thumbnail)
+        repository.replace_all([first, rescanned], [pet])
+        summary = repository.get_pet_summaries()[0]
+        assert summary.thumbnail_path == rescanned_thumbnail
+        assert summary.key_detection_id == "rescanned"
+
+        repository.replace_all([first], [replace(pet, detection_count=1, sample_count=1)])
+        summary = repository.get_pet_summaries()[0]
+        assert summary.thumbnail_path == rescanned_thumbnail
+        assert summary.key_detection_id == ""
+        assert rescanned_thumbnail.is_file()
+    finally:
+        reopened.shutdown()
+
+
+@pytest.mark.parametrize("custom_cover", [False, True], ids=["automatic", "custom"])
+def test_reassigned_pet_cover_cannot_be_deleted_from_pet_card(
+    tmp_path: Path, qapp, custom_cover: bool
+) -> None:
+    session = create_headless_library_session(tmp_path)
+    try:
+        service = session.pets
+        assert service is not None
+        repository = service.repository()
+        assert repository is not None and repository.state_repository is not None
+        cover = _detection(
+            detection_id="cover",
+            pet_id="pet-a",
+            pet_key="v2:cover",
+            thumbnail_path="thumbnails/cover.png",
+        )
+        other = _detection(detection_id="other", asset_id="asset-b", pet_id="pet-a")
+        pet = PetRecord(
+            pet_id="pet-a",
+            name="Miso",
+            key_detection_id=other.detection_id if custom_cover else cover.detection_id,
+            detection_count=2,
+            center_embedding=cover.embedding,
+            embedding_dim=cover.embedding_dim,
+            created_at=cover.detected_at,
+            updated_at=cover.detected_at,
+        )
+        repository.replace_all([cover, other], [pet])
+        if custom_cover:
+            assert service.set_pet_cover("pet-a", "cover")
+        assert repository.resolve_pet_cover_detection("pet-a", "asset-a") == "cover"
+        (stale_summary,) = repository.get_pet_summaries()
+        assert stale_summary.key_detection_id == "cover"
+        assert stale_summary.thumbnail_path is not None
+
+        identity_state = FaceStateRepository(tmp_path / ".iPhoto" / "faces" / "face_state.db")
+        assert identity_state.set_annotation_identity_assignment(
+            source_kind="pet",
+            source_annotation_id="cover",
+            target_kind="person",
+            target_id="person-a",
+        )
+
+        (summary,) = repository.get_pet_summaries()
+        assert summary.thumbnail_path == stale_summary.thumbnail_path
+        assert summary.key_detection_id == ""
+        assert repository.resolve_pet_cover_detection("pet-a", "asset-a") is None
+        assert not service.set_pet_cover("pet-a", "cover")
+        assert not service.delete_detection(
+            stale_summary.key_detection_id, expected_pet_id=stale_summary.pet_id
+        )
+        assert repository.get_detection("cover") is not None
+        assert not repository.state_repository.get_rejected_pet_keys([cover.pet_key])
+        assert identity_state.get_annotation_identity_assignments([("pet", "cover")]) == {
+            ("pet", "cover"): ("person", "person-a")
+        }
+        assert identity_state.clear_annotation_identity_assignment("pet", "cover")
+        assert service.delete_detection("cover", expected_pet_id="pet-a")
+        assert repository.get_detection("cover") is None
+    finally:
+        session.shutdown()
+
+
 def test_delete_detection_replaces_custom_cover_and_removes_thumbnail(tmp_path: Path) -> None:
     repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
     thumbnail_dir = tmp_path / "thumbnails"
     thumbnail_dir.mkdir()
-    deleted_thumbnail = thumbnail_dir / "det-a.png"
-    retained_thumbnail = thumbnail_dir / "det-b.png"
+    deleted_thumbnail = thumbnail_dir / "det-b.png"
+    retained_thumbnail = thumbnail_dir / "det-a.png"
     deleted_thumbnail.write_bytes(b"deleted")
     retained_thumbnail.write_bytes(b"retained")
     first = _detection(
@@ -1038,6 +1197,10 @@ def test_delete_detection_replaces_custom_cover_and_removes_thumbnail(tmp_path: 
         pet_id="pet-a",
         thumbnail_path="thumbnails/det-b.png",
     )
+    album_dir = tmp_path / "album"
+    album_dir.mkdir()
+    for detection in (first, second):
+        (tmp_path / detection.asset_rel).write_bytes(b"original")
     pet = PetRecord(
         pet_id="pet-a",
         name=None,
@@ -1050,15 +1213,24 @@ def test_delete_detection_replaces_custom_cover_and_removes_thumbnail(tmp_path: 
         sample_count=2,
     )
     repository.replace_all([first, second], [pet])
-    assert repository.set_pet_cover("pet-a", "det-a") is True
+    assert repository.set_pet_cover("pet-a", "det-b") is True
+    summary = repository.get_pet_summaries()[0]
+    assert summary.thumbnail_path == deleted_thumbnail.resolve()
+    assert summary.key_detection_id == "det-b"
 
-    assert repository.delete_detection("det-a") is not None
+    assert repository.delete_detection(summary.key_detection_id) is not None
 
     summary = repository.get_pet_summaries()[0]
-    assert summary.key_detection_id == "det-b"
+    assert summary.pet_id == "pet-a"
+    assert summary.detection_count == 1
+    assert summary.key_detection_id == "det-a"
     assert summary.thumbnail_path == retained_thumbnail.resolve()
+    assert repository.get_detection("det-b") is None
+    assert repository.get_detection("det-a") is not None
     assert not deleted_thumbnail.exists()
     assert retained_thumbnail.exists()
+    for detection in (first, second):
+        assert (tmp_path / detection.asset_rel).read_bytes() == b"original"
 
 
 def test_replace_all_prunes_unreferenced_pet_thumbnails(tmp_path: Path) -> None:
@@ -2863,7 +3035,7 @@ def test_pet_scan_worker_missing_runtime_keeps_pending(tmp_path: Path, monkeypat
 @pytest.mark.parametrize(
     ("error", "expected_message"),
     [
-        (RuntimeError("program bug"), "Pet scanning paused: program bug"),
+        (RuntimeError("program bug"), PetScanStatus(PetScanStatusCode.PAUSED, "program bug")),
         (PetRuntimeUnavailableError("missing dependency"), "missing dependency"),
         (PetModelUnavailableError("missing model"), "missing model"),
         (PetModelUnavailableError("download failed", reason="download_failed"), "download failed"),
@@ -2873,7 +3045,7 @@ def test_pet_scan_worker_only_typed_availability_errors_use_unavailable_path(
     tmp_path: Path,
     monkeypatch,
     error: RuntimeError,
-    expected_message: str,
+    expected_message: PetScanMessage,
 ) -> None:
     repo = get_global_repository(tmp_path)
     repo.write_rows(
@@ -2887,7 +3059,7 @@ def test_pet_scan_worker_only_typed_availability_errors_use_unavailable_path(
         PET_CLUSTERING_PIPELINE_VERSION,
     )
     worker = PetScanWorker(tmp_path, pet_service=service)
-    messages: list[str] = []
+    messages: list[PetScanMessage] = []
     failures: list[str] = []
     worker.statusChanged.connect(messages.append)
     worker.modelUnavailable.connect(failures.append)

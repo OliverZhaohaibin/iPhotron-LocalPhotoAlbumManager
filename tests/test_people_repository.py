@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -327,6 +328,71 @@ def test_person_card_order_persists_across_reload(tmp_path: Path) -> None:
     repository.replace_all(faces, persons)
     persisted = repository.get_person_summaries()
     assert [summary.person_id for summary in persisted] == ["person-b", "person-a"]
+
+
+def test_identity_card_order_keeps_omitted_slots_and_survives_a_rebuild(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_person_order(["alice", "bob"])
+    assert state.get_identity_card_order() == ()
+    state.set_identity_card_order(("person:alice", "pet:hidden", "pet:alice", "person:bob"))
+
+    reordered = ("person:bob", "pet:hidden", "pet:alice", "person:alice")
+    assert state.set_identity_card_order(("person:bob", "pet:alice", "person:alice")) == reordered
+    assert state.get_person_order_map(["alice", "bob"]) == {"bob": 0, "alice": 1}
+
+    state.sync_scan_results([], [])
+    reopened = FaceStateRepository(state.db_path)
+    assert reopened.get_identity_card_order() == reordered
+
+    reopened.set_person_order(["alice", "bob"])
+    assert reopened.get_identity_card_order() == ("person:alice", "pet:hidden", "pet:alice", "person:bob")
+
+
+def test_first_identity_card_order_preserves_omitted_legacy_people(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_person_order(["alice", "hidden-middle", "bob", "hidden-last"])
+    assert state.get_identity_card_order() == ()
+
+    visible_order = ("pet:miso", "person:alice", "person:bob")
+    expected = ("pet:miso", "person:alice", "person:hidden-middle", "person:bob", "person:hidden-last")
+    assert state.set_identity_card_order(visible_order) == expected
+
+    reopened = FaceStateRepository(state.db_path)
+    assert reopened.get_identity_card_order() == expected
+    assert reopened.set_identity_card_order(visible_order) == expected
+
+
+def test_existing_partial_identity_card_order_restores_omitted_legacy_people(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_person_order(["alice", "hidden", "retired", "bob"])
+    state.add_identity_redirect(source_kind="person", source_id="retired", target_kind="pet", target_id="miso")
+
+    # Earlier shared-order writes skipped people outside the current view.
+    visible_order = ("pet:miso", "person:alice", "person:bob")
+    with closing(sqlite3.connect(state.db_path)) as conn:
+        conn.executemany(
+            "INSERT INTO identity_card_orders (identity_key, sort_order) VALUES (?, ?)",
+            [(key, index) for index, key in enumerate(visible_order)],
+        )
+        conn.commit()
+
+    expected = ("pet:miso", "person:alice", "person:hidden", "person:bob")
+    assert state.get_identity_card_order() == expected
+    assert state.set_identity_card_order(visible_order) == expected
+
+
+def test_identity_card_order_follows_pet_and_cross_kind_merges(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_identity_card_order(("pet:source", "person:anchor", "pet:target"))
+
+    state.remap_pet_in_groups("source", "target")
+    assert state.get_identity_card_order() == ("person:anchor", "pet:target")
+
+    result = state.merge_identity_redirect_and_groups(
+        source_kind="pet", source_id="target", target_kind="person", target_id="new"
+    )
+    assert result.succeeded
+    assert state.get_identity_card_order() == ("person:anchor", "person:new")
 
 
 def test_person_hidden_state_filters_summaries_and_persists_across_reload(tmp_path: Path) -> None:

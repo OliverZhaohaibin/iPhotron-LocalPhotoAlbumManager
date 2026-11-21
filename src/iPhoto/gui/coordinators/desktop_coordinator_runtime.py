@@ -682,6 +682,14 @@ class DesktopCoordinatorRuntime(QObject):
         if hasattr(ui, "gallery_page") and hasattr(ui.gallery_page, "backRequested"):
             ui.gallery_page.backRequested.connect(self._gallery_vm.return_from_cluster_gallery)
 
+        # Pinned identity galleries can open before the People dashboard exists.
+        self._context.library.peopleSnapshotCommitted.connect(
+            self._gallery_vm.handle_people_snapshot_committed
+        )
+        self._context.library.petSnapshotCommitted.connect(
+            self._gallery_vm.handle_people_snapshot_committed
+        )
+
         # Dashboard Click
         if hasattr(ui, "albums_dashboard_page"):
             ui.albums_dashboard_page.albumSelected.connect(
@@ -694,12 +702,6 @@ class DesktopCoordinatorRuntime(QObject):
                 ui.people_page.petActivated.connect(self._on_pet_activated)
             self._context.library.peopleIndexUpdated.connect(ui.people_page.schedule_index_refresh)
             self._context.library.petIndexUpdated.connect(ui.people_page.schedule_index_refresh)
-            self._context.library.peopleSnapshotCommitted.connect(
-                self._gallery_vm.handle_people_snapshot_committed
-            )
-            self._context.library.petSnapshotCommitted.connect(
-                self._gallery_vm.handle_people_snapshot_committed
-            )
             self._context.library.peopleSnapshotCommitted.connect(
                 self._playback.handle_people_snapshot_committed
             )

@@ -334,10 +334,11 @@ def test_on_map_asset_activated_delegates_to_navigation() -> None:
     coordinator._navigation.open_location_asset.assert_called_once_with("nested/photo.jpg")
 
 
-def test_connect_signals_wires_location_scan_updates_from_library_and_service() -> None:
+def test_connect_signals_wires_library_updates_before_people_dashboard_exists() -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     coordinator._window = MagicMock()
     coordinator._window.ui = MagicMock()
+    del coordinator._window.ui.people_page
     coordinator._context = MagicMock()
     coordinator._recognition_extension = MagicMock()
     coordinator._facade = MagicMock()
@@ -373,6 +374,12 @@ def test_connect_signals_wires_location_scan_updates_from_library_and_service() 
     )
     coordinator._context.library.recognitionModelUnavailable.connect.assert_called_once_with(
         coordinator._recognition_extension.model_unavailable
+    )
+    coordinator._context.library.peopleSnapshotCommitted.connect.assert_called_once_with(
+        coordinator._gallery_vm.handle_people_snapshot_committed
+    )
+    coordinator._context.library.petSnapshotCommitted.connect.assert_called_once_with(
+        coordinator._gallery_vm.handle_people_snapshot_committed
     )
 
     coordinator._context.library.scanBatchCommitted.connect.assert_any_call(

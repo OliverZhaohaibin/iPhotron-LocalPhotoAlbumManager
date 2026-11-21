@@ -10,9 +10,13 @@ import numpy as np
 
 import iPhoto.gui.coordinators.navigation_coordinator as navigation_coordinator_module
 from iPhoto.bootstrap.library_session import create_headless_library_session
+from iPhoto.cache.index_store import get_global_repository
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
+from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
+from iPhoto.gui.viewmodels.gallery_viewmodel import GalleryViewModel
+from iPhoto.pets.index_coordinator import PetSnapshotEvent
 from iPhoto.pets.records import PetDetectionRecord, PetRecord
 from iPhoto.pets.repository_utils import utc_now_iso
 from iPhoto.settings.manager import SettingsManager
@@ -192,9 +196,34 @@ def test_pinned_pet_survives_an_empty_runtime_snapshot(tmp_path: Path, monkeypat
         pins = PinnedItemsService(settings, pet_service_getter=lambda _root: pets)
         pins.pin_pet("pet-a", "Miso", library_root=root)
         pins.pin_pet("missing", "Missing", library_root=root)
-        coord = _make_coordinator(pinned_items_service=pins)
-        coord._context.library.root.return_value = root
-        coord._context.library_session = session
+        get_global_repository(root).write_rows(
+            [
+                {
+                    "rel": filename,
+                    "id": asset_id,
+                    "media_type": 0,
+                    "thumbnail_state": "ready",
+                    "thumb_cache_key": f"thumb-{asset_id}",
+                }
+                for filename, asset_id in [(detection.asset_rel, detection.asset_id), ("other.jpg", "other")]
+            ]
+        )
+        context = SimpleNamespace(
+            library=SimpleNamespace(root=lambda: root), library_session=session
+        )
+        facade = MagicMock()
+        store = GalleryCollectionStore(session.asset_queries, library_root=root)
+        gallery = GalleryViewModel(
+            store=store, context=context, facade=facade, asset_state_service=None
+        )
+        coord = NavigationCoordinator(
+            sidebar=MagicMock(),
+            router=MagicMock(),
+            gallery_vm=gallery,
+            context=context,
+            facade=facade,
+            pinned_items_service=pins,
+        )
         warn = MagicMock()
         monkeypatch.setattr(navigation_coordinator_module.dialogs, "show_warning", warn)
 
@@ -208,9 +237,23 @@ def test_pinned_pet_survives_an_empty_runtime_snapshot(tmp_path: Path, monkeypat
 
         warn.assert_not_called()
         assert pins.items_for_library(root) == [pin]
-        coord._gallery_vm.open_pinned_people_query.assert_called_once_with(
-            AssetQuery(asset_ids=[]), kind="pet", entity_id="pet-a"
+        assert gallery.current_section.value == "pinned_people_gallery"
+        assert store.count() == 0
+
+        repository.replace_all([detection], [record])
+        gallery.handle_people_snapshot_committed(
+            PetSnapshotEvent(library_root=root, revision=1, changed_pet_ids=("pet-a",))
         )
+        assert store.count() == 1
+        asset = store.asset_at(0)
+        assert asset is not None and asset.id == "asset-a"
+
+        repository.replace_all([], [])
+        gallery.handle_people_snapshot_committed(
+            PetSnapshotEvent(library_root=root, revision=2, changed_pet_ids=("pet-a",))
+        )
+        assert store.count() == 0
+        assert pins.items_for_library(root) == [pin]
     finally:
         session.shutdown()
 

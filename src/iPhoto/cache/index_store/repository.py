@@ -59,7 +59,7 @@ logger = get_logger()
 # conservative chunk size so large scans never hit the limit regardless of
 # the SQLite version in use.
 _SQLITE_PARAM_CHUNK_SIZE = 900
-_COLLECTION_POSITION_POINT_LIMIT = 8
+_COLLECTION_POSITION_POINT_LIMIT = 32
 _DEEP_OFFSET_LIMIT = 5_000
 _DEEP_SEEK_CHUNK_SIZE = 1_024
 _MAX_COLLECTION_ANCHORS_PER_QUERY = 64
@@ -1477,37 +1477,59 @@ class AssetRepository:
         where, params = QueryBuilder.build_collection_where(query)
         where_sql = " AND ".join(where)
         columns = ", ".join(sort_columns)
-        # A unique-path equality keeps the lookup on the primary key even when
-        # SQLite would prefer scanning a collection index for a path list.
-        target_sql = f"SELECT {columns} FROM assets WHERE rel = ? AND {where_sql}"
+        values = ", ".join("(?)" for _ in rels)
+        order = QueryBuilder.build_collection_order(query)
+        # Drive the join from the requested paths, so SQLite sorts only the
+        # matching targets and looks up each asset by its primary key.
+        targets = conn.execute(
+            f"WITH requested(rel) AS (VALUES {values}) "
+            f"SELECT {columns} FROM requested CROSS JOIN assets USING (rel) WHERE {where_sql} {order}",
+            (*rels, *params),
+        ).fetchall()
         ascending = query.sort_direction == SortDirection.ASC
-        operator = "<" if ascending else ">"
+        inclusive_bound = ">=" if ascending else "<="
+        count_sql = f"SELECT COUNT(*) FROM assets WHERE {where_sql}"
         positions = []
-        for rel in rels:
-            target = conn.execute(target_sql, (rel, *params)).fetchone()
-            if target is None:
-                continue
-            count_sql = f"SELECT COUNT(*) FROM assets WHERE {where_sql}"
-            count_params = list(params)
-            rank = 0
-            # Count disjoint index ranges and keep SQLite's NULL ordering in
-            # both directions, including ties in older rows without an id.
-            for column in sort_columns:
-                value = target[column]
-                ranges: list[tuple[str, tuple[Any, ...]]] = []
-                if value is None:
-                    if not ascending:
-                        ranges.append((f"{column} IS NOT NULL", ()))
-                else:
-                    ranges.append((f"{column} {operator} ?", (value,)))
-                    if ascending:
-                        ranges.append((f"{column} IS NULL", ()))
-                for predicate, bounds in ranges:
-                    rank += conn.execute(f"{count_sql} AND {predicate}", (*count_params, *bounds)).fetchone()[0]
-                count_sql += f" AND {column} IS ?"
-                count_params.append(value)
+        preceding_groups = 0
+        previous = None
+        for target in targets:
+            value = target[sort_column]
+            if previous is None or value != previous[sort_column]:
+                range_sql, range_params = count_sql, params
+                if previous is not None and (bound := previous[sort_column]) is not None:
+                    range_sql += f" AND {sort_column} {inclusive_bound} ?"
+                    range_params = [*params, bound]
+                # Each primary sort range is counted once, even for paths
+                # scattered across distant windows of the same collection.
+                preceding_groups += AssetRepository._count_preceding_values(
+                    conn, range_sql, range_params, sort_column, value, ascending=ascending,
+                )
+            rank = preceding_groups
+            tie_sql, tie_params = count_sql, list(params)
+            for earlier, column in zip(sort_columns, sort_columns[1:]):
+                tie_sql += f" AND {earlier} IS ?"
+                tie_params.append(target[earlier])
+                rank += AssetRepository._count_preceding_values(
+                    conn, tie_sql, tie_params, column, target[column], ascending=ascending,
+                )
             positions.append((target["rel"], target["id"], rank))
+            previous = target
         return positions
+
+    @staticmethod
+    def _count_preceding_values(
+        conn: sqlite3.Connection, sql: str, params: list[Any], column: str, value: Any, *, ascending: bool,
+    ) -> int:
+        # SQLite places NULL first in ascending order and last in descending order.
+        if value is None:
+            if ascending:
+                return 0
+            return conn.execute(f"{sql} AND {column} IS NOT NULL", params).fetchone()[0]
+        operator = "<" if ascending else ">"
+        count = conn.execute(f"{sql} AND {column} {operator} ?", (*params, value)).fetchone()[0]
+        if ascending:
+            count += conn.execute(f"{sql} AND {column} IS NULL", params).fetchone()[0]
+        return count
 
     @staticmethod
     def _rank_collection_positions(

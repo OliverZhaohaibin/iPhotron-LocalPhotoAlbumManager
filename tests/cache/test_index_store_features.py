@@ -968,10 +968,11 @@ def test_small_collection_position_lookup_counts_only_indexed_prefixes(
         {"rel": "legacy-b.jpg", "is_favorite": 1, "thumbnail_state": "ready", "thumb_cache_key": "key"},
         {"rel": "non-favorite.jpg", "thumbnail_state": "ready", "thumb_cache_key": "key"},
     ])
-    window = store.read_gallery_collection_window(query, 0, 5)
+    window = store.read_gallery_collection_window(query, 0, 68)
     expected = {
         path: (str(row["id"] or path), rank)
         for rank, row in enumerate(window.rows)
+        if rank < 2 or rank % 3 == 1
         for path in (store.library_root / row["rel"],)
     }
     paths = (*expected, store.library_root / "non-favorite.jpg", store.library_root / "missing.jpg")

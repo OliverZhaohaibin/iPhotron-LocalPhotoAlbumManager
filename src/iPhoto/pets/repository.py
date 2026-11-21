@@ -2828,6 +2828,12 @@ class PetRepository:
         detection = self.get_detection_for_pet(canonical_pet_id, detection_id)
         return detection is not None and self._state_repo.set_pet_cover(canonical_pet_id, detection)
 
+    def has_pet_identity(self, pet_id: str) -> bool:
+        """Check durable profiles and legacy runtime records for a pin target."""
+
+        self.initialize()
+        return self._canonical_existing_pet_id(pet_id) is not None
+
     def _canonical_existing_pet_id(self, pet_id: str) -> str | None:
         if self._state_repo is None or not pet_id:
             return None

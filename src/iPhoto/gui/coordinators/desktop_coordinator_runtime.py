@@ -124,6 +124,7 @@ class DesktopCoordinatorRuntime(QObject):
         self._pinned_items_service = PinnedItemsService(
             context.settings,
             people_service_getter=self._people_service,
+            pet_service_getter=self._pet_service,
             parent=self,
         )
         window.ui.sidebar.set_pinned_service(self._pinned_items_service)

@@ -6,10 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from iPhoto.domain.models.query import AssetQuery
+import numpy as np
+
 import iPhoto.gui.coordinators.navigation_coordinator as navigation_coordinator_module
+from iPhoto.bootstrap.library_session import create_headless_library_session
+from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
-from iPhoto.gui.services.pinned_items_service import PinnedSidebarItem
+from iPhoto.gui.services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
+from iPhoto.pets.records import PetDetectionRecord, PetRecord
+from iPhoto.pets.repository_utils import utc_now_iso
+from iPhoto.settings.manager import SettingsManager
 
 
 def _make_coordinator(
@@ -126,17 +132,87 @@ def test_open_pinned_pet_uses_session_before_people_dashboard_loads(tmp_path: Pa
     query = AssetQuery(asset_ids=["pet-photo"])
     pets = MagicMock()
     pets.build_pet_query.return_value = query
-    pets.has_pet.return_value = True
     coord._context.library_session = SimpleNamespace(library_root=tmp_path, pets=pets)
 
     coord.open_pinned_item(PinnedSidebarItem(kind="pet", item_id="pet-a", label="Miso"))
 
     pets.build_pet_query.assert_called_once_with("pet-a")
+    pets.has_pet_identity.assert_not_called()
     coord._gallery_vm.open_pinned_people_query.assert_called_once_with(
         query, kind="pet", entity_id="pet-a"
     )
     pins.prune_missing_entity.assert_not_called()
     coord._context.library.activate_recognition_scans.assert_not_called()
+
+
+def test_pinned_pet_survives_an_empty_runtime_snapshot(tmp_path: Path, monkeypatch, qapp) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    session = create_headless_library_session(root)
+    try:
+        pets = session.pets
+        assert pets is not None
+        repository = pets.repository()
+        assert repository is not None
+        timestamp = utc_now_iso()
+        embedding = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+        detection = PetDetectionRecord(
+            detection_id="detection-a",
+            pet_key="v2:pet-a",
+            asset_id="asset-a",
+            asset_rel="pets.jpg",
+            box_x=0,
+            box_y=0,
+            box_w=80,
+            box_h=80,
+            confidence=0.9,
+            embedding=embedding,
+            embedding_dim=3,
+            embedding_model="dinov2_vits14",
+            detector_model="yolox_nano_coco",
+            thumbnail_path=None,
+            pet_id="pet-a",
+            detected_at=timestamp,
+            image_width=120,
+            image_height=120,
+        )
+        record = PetRecord(
+            pet_id="pet-a",
+            name="Miso",
+            key_detection_id="detection-a",
+            detection_count=1,
+            center_embedding=embedding,
+            embedding_dim=3,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        repository.replace_all([detection], [record])
+        settings = SettingsManager(path=tmp_path / "settings.json")
+        settings.load()
+        pins = PinnedItemsService(settings, pet_service_getter=lambda _root: pets)
+        pins.pin_pet("pet-a", "Miso", library_root=root)
+        pins.pin_pet("missing", "Missing", library_root=root)
+        coord = _make_coordinator(pinned_items_service=pins)
+        coord._context.library.root.return_value = root
+        coord._context.library_session = session
+        warn = MagicMock()
+        monkeypatch.setattr(navigation_coordinator_module.dialogs, "show_warning", warn)
+
+        repository.replace_all([], [])
+        assert not pets.has_pet("pet-a")
+        assert pins.prune_missing_people_entities(root, pet_ids=("pet-a", "missing"))
+        (pin,) = pins.items_for_library(root)
+        assert pin.item_id == "pet-a"
+
+        coord.open_pinned_item(pin)
+
+        warn.assert_not_called()
+        assert pins.items_for_library(root) == [pin]
+        coord._gallery_vm.open_pinned_people_query.assert_called_once_with(
+            AssetQuery(asset_ids=[]), kind="pet", entity_id="pet-a"
+        )
+    finally:
+        session.shutdown()
 
 
 def test_open_pinned_person_keeps_valid_empty_pin(tmp_path: Path, monkeypatch) -> None:

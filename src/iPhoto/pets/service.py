@@ -354,6 +354,12 @@ class PetService:
     def build_pet_query(self, pet_id: str) -> AssetQuery:
         return AssetQuery(asset_ids=self.pet_asset_ids(pet_id))
 
+    def has_pet_identity(self, pet_id: str) -> bool:
+        """Check whether a pet pin still has a target while its snapshot is rebuilt."""
+
+        repository = self.repository()
+        return repository is not None and repository.has_pet_identity(pet_id)
+
     def has_pet(self, pet_id: str) -> bool:
         if pet_id in self._redirected_source_ids("pet"):
             return False

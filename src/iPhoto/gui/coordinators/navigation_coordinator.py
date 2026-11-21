@@ -119,7 +119,9 @@ class NavigationCoordinator(QObject):
                 return
             try:
                 query = pet_service.build_pet_query(pinned_item.item_id)
-                entity_exists = pet_service.has_pet(pinned_item.item_id)
+                entity_exists = bool(query.asset_ids) or pet_service.has_pet_identity(
+                    pinned_item.item_id
+                )
             except Exception:
                 self._logger.warning(
                     "Failed to open pinned pet '%s' (%s)",
@@ -128,7 +130,7 @@ class NavigationCoordinator(QObject):
                     exc_info=True,
                 )
                 return
-            if not query.asset_ids and not entity_exists:
+            if not entity_exists:
                 self._handle_missing_pinned_item(
                     pinned_item,
                     library_root=library_root,

@@ -22,8 +22,11 @@ class PinnedPeopleEntityResolverPort(Protocol):
     def has_group(self, group_id: str) -> bool:
         """Return whether a People group exists."""
 
-    def has_pet(self, pet_id: str) -> bool:
-        """Return whether a pet cluster exists."""
+
+class PinnedPetEntityResolverPort(Protocol):
+    """Resolve pet pin targets across runtime snapshot rebuilds."""
+
+    def has_pet_identity(self, pet_id: str) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +48,12 @@ class PinnedSidebarStateService:
         people_resolver_getter: (
             Callable[[Path], PinnedPeopleEntityResolverPort | None] | None
         ) = None,
+        *,
+        pet_resolver_getter: Callable[[Path], PinnedPetEntityResolverPort | None] | None = None,
     ) -> None:
         self._repository = repository
         self._people_resolver_getter = people_resolver_getter
+        self._pet_resolver_getter = pet_resolver_getter
 
     def items_for_library(self, library_root: Path | None) -> list[PinnedSidebarItem]:
         library_key = self._library_key(library_root)
@@ -373,26 +379,27 @@ class PinnedSidebarStateService:
             for item in pinned_items
             if item.kind == "pet" and item.item_id in target_pet_ids
         }
-        if not pinned_person_ids and not pinned_pet_ids and not pinned_group_ids:
-            if updated:
-                self._persist(payload)
-                return True
-            return False
-
-        resolver = self._people_resolver_for_library(Path(library_key))
-        if resolver is None:
-            if updated:
-                self._persist(payload)
-                return True
-            return False
+        root = Path(library_key)
+        people_resolver = (
+            self._people_resolver_for_library(root) if pinned_person_ids or pinned_group_ids else None
+        )
+        pet_resolver = (
+            self._pet_resolver_getter(root) if pinned_pet_ids and self._pet_resolver_getter else None
+        )
         stale_person_ids = [
-            person_id for person_id in pinned_person_ids if not resolver.has_cluster(person_id)
+            person_id
+            for person_id in pinned_person_ids
+            if people_resolver is not None and not people_resolver.has_cluster(person_id)
         ]
         stale_group_ids = [
-            group_id for group_id in pinned_group_ids if not resolver.has_group(group_id)
+            group_id
+            for group_id in pinned_group_ids
+            if people_resolver is not None and not people_resolver.has_group(group_id)
         ]
         stale_pet_ids = [
-            pet_id for pet_id in pinned_pet_ids if not resolver.has_pet(pet_id)
+            pet_id
+            for pet_id in pinned_pet_ids
+            if pet_resolver is not None and not pet_resolver.has_pet_identity(pet_id)
         ]
         if not stale_person_ids and not stale_pet_ids and not stale_group_ids:
             if updated:

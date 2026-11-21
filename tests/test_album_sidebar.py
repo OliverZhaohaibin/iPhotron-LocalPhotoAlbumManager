@@ -112,7 +112,7 @@ def test_sidebar_retranslate_updates_title_and_menu_labels(
     sidebar.retranslate_ui()
 
     assert sidebar._title.text() == "基础图库"
-    assert sidebar._tree.currentIndex().data() == "人物和宠物"
+    assert sidebar._tree.currentIndex().data() == "人物与宠物"
 
     album_index = sidebar.tree_model().index_for_path(album_dir)
     item = sidebar.tree_model().item_from_index(album_index)

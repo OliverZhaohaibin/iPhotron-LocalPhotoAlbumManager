@@ -1213,7 +1213,7 @@
         </message>
         <message>
             <source>People&amp;pets</source>
-            <translation>人物和宠物</translation>
+            <translation>人物与宠物</translation>
         </message>
     </context>
     <context>

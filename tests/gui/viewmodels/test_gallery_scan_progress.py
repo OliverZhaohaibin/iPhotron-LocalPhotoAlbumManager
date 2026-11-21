@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
@@ -232,6 +234,163 @@ def test_ready_and_backfill_bursts_leave_one_followup(gallery, make_rows, qapp, 
         assert store.asset_at(10).rel_path.as_posix() == rows[0]["rel"]
     finally:
         release.set()
+
+
+@pytest.mark.parametrize(
+    ("notify_before_old_result", "cancel"),
+    [(False, False), (True, False), (True, True)],
+    ids=["result-first", "notification-first", "cancel-after-commit"],
+)
+def test_real_jpeg_scan_draws_committed_batches_before_scan_finishes(
+    gallery, qapp, monkeypatch, notify_before_old_result: bool, cancel: bool,
+) -> None:
+    root, repository, service, model = gallery
+    store, loader = model.store, model._window_loader
+    for i in range(205):
+        path = root / f"photo-{i:03}.jpg"
+        Image.new("RGB", (48, 32), (i, 30, 60)).save(path)
+        os.utime(path, ns=(0, 1_700_000_000_000_000_000 + i * 1_000_000_000))
+
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: loader._active_request is None)
+    assert model.rowCount() == 0
+    real_read = service.read_gallery_asset_window
+    read_old_window, deliver_old_window = Event(), Event()
+    permit_second, permit_final = Event(), Event()
+    cancelled = Event()
+    batches, resets = [], []
+    model.modelReset.connect(lambda: resets.append(True))
+    model._scan_batch_timer.setInterval(60_000)
+
+    def pause_first_snapshot(*args):
+        window = real_read(*args)
+        if not read_old_window.is_set():
+            assert window.total_count == 100
+            read_old_window.set()
+            assert deliver_old_window.wait(5)
+        return window
+
+    def on_commit(batch):
+        batches.append(batch)
+        if len(batches) == 1:
+            model.handle_scan_batch(batch)
+            assert permit_second.wait(5)
+        elif len(batches) == 2:
+            if notify_before_old_result:
+                model.handle_scan_batch(batch)
+            assert permit_final.wait(5)
+        else:
+            model.handle_scan_batch(batch)
+
+    monkeypatch.setattr(service, "read_gallery_asset_window", pause_first_snapshot)
+    scan = LibraryScanService(root, repository_factory=lambda _root: repository)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(
+            scan.scan_album, root, include=["*.jpg"], persist_chunks=True,
+            chunk_size=100, scan_batch_callback=on_commit, is_cancelled=cancelled.is_set,
+        )
+        try:
+            _wait_for(qapp, lambda: model._pending_scan_batch_count == 1)
+            model._flush_pending_scan_batches()
+            assert read_old_window.wait(5)
+            expected_first = root / real_read(root, AssetQuery(), 0, 1).rows[0]["rel"]
+            permit_second.set()
+            _wait_for(qapp, lambda: len(batches) == 2)
+            assert service.count_query_assets(AssetQuery()) == 200
+            if notify_before_old_result:
+                _wait_for(qapp, lambda: model._pending_scan_batch_count == 1)
+                model._flush_pending_scan_batches()
+
+            first_rows = []
+            model.rowsInserted.connect(lambda *_args: first_rows.append((
+                model.rowCount(), model.index(0, 0).data(Roles.ABS),
+                model.index(0, 0).data(Roles.MICRO_THUMBNAIL),
+            )))
+            deliver_old_window.set()
+            _wait_for(qapp, lambda: bool(first_rows))
+            assert first_rows[0][0] == 100
+            assert first_rows[0][1] == str(expected_first)
+            assert not first_rows[0][2].isNull()
+            if not notify_before_old_result:
+                assert model.rowCount() == 100
+                model.handle_scan_batch(batches[1])
+                model._flush_pending_scan_batches()
+            _wait_for(qapp, lambda: model.rowCount() == 200)
+            assert not result.done()
+            assert model.index(0, 0).data(Roles.ABS) == str(
+                root / real_read(root, AssetQuery(), 0, 1).rows[0]["rel"]
+            )
+
+            if cancel:
+                cancelled.set()
+            permit_final.set()
+            expected_total = 200 if cancel else 205
+            assert len(result.result(timeout=5).rows) == expected_total
+            store.handle_scan_finished(root, not cancel)
+            _wait_for(qapp, lambda: model.rowCount() == expected_total and loader._active_request is None)
+            fresh = real_read(root, AssetQuery(), 0, 50)
+            assert fresh.total_count == expected_total
+            assert [store.asset_at(i).id for i in range(50)] == [row["id"] for row in fresh.rows]
+            assert not resets
+        finally:
+            permit_second.set()
+            permit_final.set()
+            deliver_old_window.set()
+
+
+@pytest.mark.parametrize("switch_to", ["album", "favorites", "library"])
+def test_scan_refresh_cannot_publish_into_superseding_selection(
+    gallery, make_rows, qapp, monkeypatch, switch_to: str,
+) -> None:
+    root, repository, service, model = gallery
+    loader, store = model._window_loader, model.store
+    rows = make_rows(0, 5)
+    rows[0].update(rel="Trip/favorite.jpg", is_favorite=1)
+    repository.write_rows(rows[:4])
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == 4 and loader._active_request is None)
+    read, deliver = Event(), Event()
+    real_read = service.read_gallery_asset_window
+
+    def pause_old_snapshot(*args):
+        window = real_read(*args)
+        if not read.is_set():
+            read.set()
+            assert deliver.wait(5)
+        return window
+
+    monkeypatch.setattr(service, "read_gallery_asset_window", pause_old_snapshot)
+    observed = []
+    model.rowsInserted.connect(lambda *_args: observed.append(model.index(0, 0).data(Roles.ABS)))
+    replacement_repository = replacement_service = None
+    try:
+        repository.merge_scan_rows([rows[4]])
+        store.handle_scan_finished(root, True)
+        assert read.wait(5)
+        expected = root / rows[0]["rel"]
+        if switch_to == "album":
+            store.load_selection(root / "Trip", query=AssetQuery(album_path="Trip"))
+        elif switch_to == "favorites":
+            store.load_selection(root, query=AssetQuery(is_favorite=True))
+        else:
+            other = root / "other-library"
+            other.mkdir()
+            replacement_repository = AssetRepository(other)
+            replacement_repository.write_rows([rows[1]])
+            replacement_service = LibraryAssetQueryService(
+                other, repository_factory=lambda _root: replacement_repository,
+            )
+            model.rebind_asset_query_service(replacement_service, other)
+            store.load_selection(other, query=AssetQuery())
+            expected = other / rows[1]["rel"]
+        deliver.set()
+        _wait_for(qapp, lambda: model.rowCount() == 1 and loader._active_request is None)
+        assert observed == [str(expected)]
+    finally:
+        deliver.set()
+        if replacement_service is not None:
+            replacement_service.shutdown()
+            replacement_repository.close()
 
 
 def test_offscreen_anchor_does_not_report_missing_against_an_older_window(

@@ -1211,6 +1211,10 @@
             <source>Recently Deleted</source>
             <translation>Zuletzt gelöscht</translation>
         </message>
+        <message>
+            <source>People&amp;pets</source>
+            <translation>Personen &amp; Haustiere</translation>
+        </message>
     </context>
     <context>
         <name>AlbumsDashboard</name>

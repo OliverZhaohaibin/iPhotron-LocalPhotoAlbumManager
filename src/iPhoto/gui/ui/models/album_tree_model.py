@@ -338,7 +338,7 @@ class AlbumTreeModel(QAbstractItemModel):
             "Videos": tr("AlbumSidebar", "Videos"),
             "Live Photos": tr("AlbumSidebar", "Live Photos"),
             "Favorites": tr("AlbumSidebar", "Favorites"),
-            "People": tr("AlbumSidebar", "People"),
+            "People": tr("AlbumSidebar", "People&pets"),
             "Location": tr("AlbumSidebar", "Location"),
             "Pinned": tr("AlbumSidebar", "Pinned"),
             "Albums": tr("AlbumSidebar", "Albums"),

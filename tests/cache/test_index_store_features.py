@@ -952,6 +952,70 @@ def test_collection_revisions_follow_upserts_relocations_and_rollback(store: Ind
     assert store.get_rows_by_rels(["other/a.jpg"])["other/a.jpg"]["is_favorite"] == 1
 
 
+@pytest.mark.parametrize("direction", list(SortDirection))
+def test_small_collection_position_lookup_counts_only_indexed_prefixes(
+    store: IndexStore, direction: SortDirection,
+) -> None:
+    query = CollectionQuery(collection_type=CollectionType.FAVORITES, sort_direction=direction)
+    with store.transaction() as conn:
+        conn.execute("""
+            WITH RECURSIVE numbers(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM numbers WHERE n < 20000)
+            INSERT INTO assets (rel, id, sort_ts, is_favorite, thumbnail_state, thumb_cache_key)
+            SELECT printf('%05d.jpg', n), 'shared-id', n / 2, 1, 'ready', 'key' FROM numbers
+        """)
+    store.append_rows([
+        {"rel": "legacy-a.jpg", "is_favorite": 1, "thumbnail_state": "ready", "thumb_cache_key": "key"},
+        {"rel": "legacy-b.jpg", "is_favorite": 1, "thumbnail_state": "ready", "thumb_cache_key": "key"},
+        {"rel": "non-favorite.jpg", "thumbnail_state": "ready", "thumb_cache_key": "key"},
+    ])
+    window = store.read_gallery_collection_window(query, 0, 5)
+    expected = {
+        path: (str(row["id"] or path), rank)
+        for rank, row in enumerate(window.rows)
+        for path in (store.library_root / row["rel"],)
+    }
+    paths = (*expected, store.library_root / "non-favorite.jpg", store.library_root / "missing.jpg")
+    samples = 0
+
+    def sample_instructions() -> int:
+        nonlocal samples
+        samples += 1
+        return 0
+
+    with store.transaction() as conn:
+        conn.set_progress_handler(sample_instructions, 1000)
+        try:
+            assert store.find_collection_positions(query, paths, window.order_revision) == expected
+        finally:
+            conn.set_progress_handler(None, 0)
+    assert samples < 10
+
+
+def test_large_collection_position_lookup_ranks_once_across_path_chunks(store: IndexStore) -> None:
+    rows = [
+        {"rel": f"{i:04}.jpg", "id": f"asset-{i}", "sort_ts": i, "thumbnail_state": "ready", "thumb_cache_key": "key"}
+        for i in range(1050)
+    ]
+    store.write_rows(rows)
+    query = CollectionQuery()
+    window = store.read_gallery_collection_window(query, 0, 1)
+    paths = tuple(store.library_root / row["rel"] for row in rows if row["sort_ts"] != 1)
+    statements = []
+    with store.transaction() as conn:
+        conn.set_trace_callback(statements.append)
+        try:
+            positions = store.find_collection_positions(query, paths, window.order_revision)
+        finally:
+            conn.set_trace_callback(None)
+
+    expected = {
+        store.library_root / row["rel"]: (row["id"], rank)
+        for rank, row in enumerate(reversed(rows)) if row["sort_ts"] != 1
+    }
+    assert positions == expected
+    assert sum("ROW_NUMBER()" in statement for statement in statements) == 1
+
+
 def test_gallery_collection_window_uses_light_projection_with_micro(store: IndexStore) -> None:
     store.write_rows(
         [

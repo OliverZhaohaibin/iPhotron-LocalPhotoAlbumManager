@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from ...config import GLOBAL_INDEX_DB_NAME
 from ...domain.models.core import normalise_content_id
-from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
+from ...domain.models.query import CollectionQuery, PageCursor, PageResult, SortDirection, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
     emit_perf_event,
@@ -59,6 +59,7 @@ logger = get_logger()
 # conservative chunk size so large scans never hit the limit regardless of
 # the SQLite version in use.
 _SQLITE_PARAM_CHUNK_SIZE = 900
+_COLLECTION_POSITION_POINT_LIMIT = 8
 _DEEP_OFFSET_LIMIT = 5_000
 _DEEP_SEEK_CHUNK_SIZE = 1_024
 _MAX_COLLECTION_ANCHORS_PER_QUERY = 64
@@ -1453,23 +1454,81 @@ class AssetRepository:
             if path.is_relative_to(self.library_root) else self._library_relative_path(path): path
             for path in paths
         }
-        rels = tuple(by_rel)
+        with self._collection_snapshot() as (conn, _revision, cache):
+            if cache.order_revision != order_revision:
+                return None
+            if not by_rel:
+                return {}
+            if len(by_rel) <= _COLLECTION_POSITION_POINT_LIMIT:
+                rows = self._count_collection_positions(conn, query, tuple(by_rel))
+            else:
+                rows = self._rank_collection_positions(conn, query, by_rel)
+            return {
+                by_rel[rel]: (str(asset_id or by_rel[rel]), rank)
+                for rel, asset_id, rank in rows
+            }
+
+    @staticmethod
+    def _count_collection_positions(
+        conn: sqlite3.Connection, query: CollectionQuery, rels: tuple[str, ...],
+    ) -> list[tuple[str, str | None, int]]:
+        sort_column = QueryBuilder._collection_sort_column(query)
+        sort_columns = tuple(dict.fromkeys((sort_column, "id", "rel")))
+        where, params = QueryBuilder.build_collection_where(query)
+        where_sql = " AND ".join(where)
+        columns = ", ".join(sort_columns)
+        # A unique-path equality keeps the lookup on the primary key even when
+        # SQLite would prefer scanning a collection index for a path list.
+        target_sql = f"SELECT {columns} FROM assets WHERE rel = ? AND {where_sql}"
+        ascending = query.sort_direction == SortDirection.ASC
+        operator = "<" if ascending else ">"
+        positions = []
+        for rel in rels:
+            target = conn.execute(target_sql, (rel, *params)).fetchone()
+            if target is None:
+                continue
+            count_sql = f"SELECT COUNT(*) FROM assets WHERE {where_sql}"
+            count_params = list(params)
+            rank = 0
+            # Count disjoint index ranges and keep SQLite's NULL ordering in
+            # both directions, including ties in older rows without an id.
+            for column in sort_columns:
+                value = target[column]
+                ranges: list[tuple[str, tuple[Any, ...]]] = []
+                if value is None:
+                    if not ascending:
+                        ranges.append((f"{column} IS NOT NULL", ()))
+                else:
+                    ranges.append((f"{column} {operator} ?", (value,)))
+                    if ascending:
+                        ranges.append((f"{column} IS NULL", ()))
+                for predicate, bounds in ranges:
+                    rank += conn.execute(f"{count_sql} AND {predicate}", (*count_params, *bounds)).fetchone()[0]
+                count_sql += f" AND {column} IS ?"
+                count_params.append(value)
+            positions.append((target["rel"], target["id"], rank))
+        return positions
+
+    @staticmethod
+    def _rank_collection_positions(
+        conn: sqlite3.Connection, query: CollectionQuery, rels: Iterable[str],
+    ) -> list[tuple[str, str | None, int]]:
         order = QueryBuilder.build_collection_order(query)
         ranked_sql, params = QueryBuilder.build_collection_query(
             query, select_clause=f"SELECT rel, id, ROW_NUMBER() OVER ({order}) - 1", include_order=False,
         )
-        with self._collection_snapshot() as (conn, _revision, cache):
-            if cache.order_revision != order_revision:
-                return None
-            positions = {}
-            for start in range(0, len(rels), _SQLITE_PARAM_CHUNK_SIZE):
-                chunk = rels[start:start + _SQLITE_PARAM_CHUNK_SIZE]
-                placeholders = ", ".join("?" for _ in chunk)
-                sql = f"SELECT * FROM ({ranked_sql}) WHERE rel IN ({placeholders})"
-                for rel, asset_id, row in conn.execute(sql, (*params, *chunk)):
-                    path = by_rel[rel]
-                    positions[path] = (str(asset_id or path), int(row))
-            return positions
+        # The connection-local paths keep bindings bounded while the collection
+        # is ranked once, even when a selection exceeds SQLite's parameter limit.
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS gallery_position_paths (rel TEXT PRIMARY KEY) WITHOUT ROWID")
+        try:
+            conn.executemany("INSERT INTO temp.gallery_position_paths VALUES (?)", ((rel,) for rel in rels))
+            rows = conn.execute(
+                f"SELECT * FROM ({ranked_sql}) WHERE rel IN (SELECT rel FROM temp.gallery_position_paths)",
+                params,
+            )
+            return [(rel, asset_id, rank) for rel, asset_id, rank in rows]
+        finally:
+            conn.execute("DELETE FROM temp.gallery_position_paths")
 
     def _read_collection_window_rows(
         self,

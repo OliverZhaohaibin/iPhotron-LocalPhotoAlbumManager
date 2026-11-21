@@ -148,6 +148,65 @@ def test_root_media_changes_queue_scans_but_internal_writes_do_not(
 
 
 @pytest.mark.parametrize("polling", [False, True])
+def test_watcher_ignores_artifacts_during_commits_and_queues_real_root_change(
+    qapp, tmp_path: Path, polling: bool,
+) -> None:
+    root = tmp_path.resolve()
+    album = root / "Album"
+    album.mkdir()
+    for index, color in enumerate(("red", "green", "blue")):
+        Image.new("RGB", (32, 24), color).save(album / f"photo-{index}.jpg")
+    scan_service = LibraryScanService(root)
+    controller = LibraryRuntimeController()
+    controller._root = root
+    controller._background_watch_generation = 1
+    controller.bind_scan_service(scan_service)
+    controller._live_scan_root = root
+    worker = _LibraryWatchWorker()
+    worker._watcher = _FakeWatcher()  # type: ignore[assignment]
+    worker._batch_timer = _FakeTimer()  # type: ignore[assignment]
+    worker._poll_timer = _FakeTimer()  # type: ignore[assignment]
+    # Establish the watched album tree before the scan starts.
+    worker.configure(LibraryWatchRequest(1, root, (root, album), polling))
+    controller._nodes = {node.path: node for node in worker._albums}
+    worker.resultReady.connect(controller._on_background_watch_result)
+
+    def notify() -> None:
+        if polling:
+            worker._poll()
+        else:
+            worker._on_directory_changed(str(root))
+
+    batches = []
+
+    def on_commit(batch) -> None:
+        batches.append(batch)
+        notify()
+        assert not controller._watch_scan_queue
+
+    try:
+        with patch.object(controller, "start_scanning") as dispatch:
+            controller._current_scanner_worker = Mock()
+            scan_service.scan_album(
+                root, include=["*.jpg"], chunk_size=1, persist_chunks=True, scan_batch_callback=on_commit,
+            )
+            assert len(batches) == 3
+            assert get_global_repository(root).count() == 3
+            dispatch.assert_not_called()
+            Image.new("RGB", (32, 24), "black").save(root / "external.jpg")
+            notify()
+            notify()
+            assert controller._watch_scan_queue == [(root, True)]
+            controller._current_scanner_worker = None
+            controller._on_watcher_scan_finished(root, True)
+            dispatch.assert_called_once()
+            assert dispatch.call_args.args[0] == root
+            assert dispatch.call_args.kwargs == {"root_only": True}
+    finally:
+        controller._current_scanner_worker = None
+
+
+@pytest.mark.parametrize("polling", [False, True])
 def test_poll_detects_root_media_overwrite_without_a_directory_change(
     qapp, tmp_path: Path, polling: bool
 ) -> None:

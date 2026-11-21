@@ -18,6 +18,9 @@ viewmodels, or status/progress plumbing.
 - Empty-library scans must still refresh the initial Gallery window when the
   first batch arrives. Do not drop pending refresh just because there is no
   visible range yet.
+- Coalesce committed batches and run a follow-up after any read that could
+  predate a commit. Successful scan completion also requests a fresh snapshot.
+  Applying an older in-flight result must not consume newer batch notifications.
 - Location/Map scan consumers should subscribe to `ScanBatchCommitted`, not
   legacy chunk payloads.
 - Metadata commits may update Face/Pet eligibility and status, but must not

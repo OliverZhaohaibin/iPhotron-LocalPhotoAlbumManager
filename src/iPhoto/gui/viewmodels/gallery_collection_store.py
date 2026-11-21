@@ -96,12 +96,27 @@ class GalleryAssetQuerySurface(Protocol):
         """Return a live partner row for *asset_id*."""
 
 
+WindowPublisher = Callable[
+    [int, dict[int, AssetDTO], Callable[[int], None], Callable[[], None]], None
+]
+
+
 def _path_is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
     except ValueError:
         return False
     return True
+
+
+def _contiguous_ranges(rows: Iterable[int]) -> tuple[tuple[int, int], ...]:
+    ranges: list[tuple[int, int]] = []
+    for row in sorted(rows):
+        if ranges and row == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], row)
+        else:
+            ranges.append((row, row))
+    return tuple(ranges)
 
 
 def _ranges_intersect(first_a: int, last_a: int, first_b: int, last_b: int) -> bool:
@@ -127,6 +142,7 @@ class GalleryCollectionStore:
     ) -> None:
         self.data_changed = Signal()
         self.window_changed = Signal()
+        self.window_published = Signal()
         self.count_changed = Signal()
         self.row_changed = Signal()
         self.row_loaded = Signal()
@@ -163,16 +179,19 @@ class GalleryCollectionStore:
         self._selection_anchor_latest_result_generation = 0
         self._pending_scan_refresh = False
         self._pending_scan_rels: set[str] = set()
-        self._pending_scan_sort_keys: set[tuple[str, str]] = set()
         self._thumbnail_backfill_windows: set[tuple[int, int]] = set()
         self._thumbnail_backfill_pending = False
-        self._pending_thumbnail_ready_refresh = False
         self._direct_mode = False
         self._collection_revision = 0
+        self._snapshot_revision: int | None = None
+        self._order_revision: int | None = None
+        self._window_selection_generation = 0
         self._request_generation = 0
         self._demand_generation = 0
         self._pending_window_generations: set[int] = set()
+        self._latest_commit_refresh: tuple[int, tuple[tuple[int, int], ...]] | None = None
         self._window_request_handler: Callable[[GalleryWindowRequest], None] | None = None
+        self._window_publisher: WindowPublisher | None = None
         self._pending_row_loads: set[int] = set()
 
     def set_library_root(self, root: Optional[Path]) -> None:
@@ -227,6 +246,11 @@ class GalleryCollectionStore:
 
     def set_active_root(self, root: Optional[Path]) -> None:
         self._active_root = root
+
+    def set_window_publisher(self, publisher: WindowPublisher) -> None:
+        """Let the model bracket mutations to its rows and count with Qt signals."""
+
+        self._window_publisher = publisher
 
     def active_root(self) -> Optional[Path]:
         return self._active_root
@@ -382,6 +406,9 @@ class GalleryCollectionStore:
     ) -> tuple[int, Optional[tuple[tuple[int, int], ...]], int]:
         ranges = self._cache_window_ranges()
         return (self._total_count, ranges or None, self._collection_revision)
+
+    def collection_order_revision(self) -> int:
+        return self._order_revision if self._order_revision is not None else self._collection_revision
 
     def diagnostic_snapshot(self) -> dict[str, object]:
         """Return privacy-safe in-memory state for opt-in runtime diagnostics."""
@@ -717,6 +744,13 @@ class GalleryCollectionStore:
         if self._window_request_handler is None:
             self.prioritize_rows(*demand.warm_range)
             return
+        if self._latest_commit_refresh is not None:
+            _, windows = self._latest_commit_refresh
+            if not any(
+                start <= demand.visible_first and demand.visible_last < start + limit
+                for start, limit in windows
+            ):
+                self._request_commit_refresh()
 
         chunks: list[tuple[int, float, int, int, int]] = []
         view_center = (demand.visible_first + demand.visible_last) / 2.0
@@ -803,20 +837,22 @@ class GalleryCollectionStore:
         """Publish one background-loaded window on the owning GUI thread."""
 
         was_pending = result.generation in self._pending_window_generations
-        self._pending_window_generations.discard(result.generation)
-        if (
-            not was_pending
-            or result.error is not None
-            or (
-                result.requested_revision > 0
-                and result.requested_revision != self._collection_revision
-                and result.collection_revision < self._collection_revision
-            )
+        self.discard_window_requests((result.generation,))
+        if not was_pending or result.error is not None:
+            return False
+        versioned = result.order_revision is not None
+        if versioned and self._snapshot_revision is not None and result.collection_revision < self._snapshot_revision:
+            return False
+        if not versioned and (
+            result.requested_revision > 0
+            and result.requested_revision != self._collection_revision
+            and result.collection_revision < self._collection_revision
         ):
             return False
         anchor_result = result.selection_anchor_result
         anchor_request_is_current = (
-            result.requested_revision == self._collection_revision
+            versioned
+            or result.requested_revision == self._collection_revision
             or result.collection_revision >= self._collection_revision
         )
         anchor_is_current = (
@@ -833,6 +869,7 @@ class GalleryCollectionStore:
             return False
         if (
             current_surface_demand is not None
+            and not result.refresh_after_commit
             and result.demand_generation < current_surface_demand.generation
         ):
             relevant_rows = {
@@ -845,13 +882,26 @@ class GalleryCollectionStore:
         else:
             relevant_rows = dict(result.rows)
         old_total = self._total_count
+        new_total = max(0, int(result.total_count))
         old_revision = self._collection_revision
-        revision_advanced = result.collection_revision > old_revision
+        order_changed = versioned and (self._order_revision != result.order_revision or old_total != new_total)
+        revision_advanced = order_changed if versioned else result.collection_revision > old_revision
+        relevant_rows = {row: dto for row, dto in relevant_rows.items() if 0 <= row < new_total}
+        if order_changed and old_total > 0 and any(
+            row not in relevant_rows and not (
+                result.refresh_after_commit
+                and any(start <= row < start + limit for start, limit in result.requested_ranges)
+            )
+            for first, last in self._visible_ranges_for_count(new_total)
+            for row in range(first, last + 1)
+        ):
+            # A partial guard or explicit read must not replace the displayed
+            # order before its visible rows are available at the same revision.
+            self._request_commit_refresh(total_count=new_total)
+            return False
         retry_inflight_before_revision = self._selection_anchor_retry_inflight
         if revision_advanced:
             self._cancel_selection_anchor_retry()
-        if old_revision > 0 and revision_advanced:
-            self._row_cache.clear()
 
         anchor_state_changed = False
         request_anchor_followup = False
@@ -930,10 +980,30 @@ class GalleryCollectionStore:
                 row=None,
                 elapsed_ms=0.0,
             )
-        for row, dto in relevant_rows.items():
-            self._row_cache[row] = dto
-            self._row_cache.move_to_end(row)
-        self._total_count = max(0, int(result.total_count))
+        old_rows = self._row_cache
+        changed_rows = {row for row, dto in relevant_rows.items() if old_rows.get(row) != dto}
+
+        def set_count(count: int) -> None:
+            self._total_count = count
+
+        def publish_rows() -> None:
+            if order_changed or (not versioned and old_revision > 0 and revision_advanced):
+                self._row_cache = OrderedDict()
+            for row, dto in relevant_rows.items():
+                self._row_cache[row] = old_rows.get(row, dto) if row not in changed_rows else dto
+                self._row_cache.move_to_end(row)
+            if versioned:
+                self._snapshot_revision = result.collection_revision
+                self._order_revision = result.order_revision
+                self._collection_revision = result.collection_revision
+            else:
+                self._collection_revision = max(self._collection_revision, result.collection_revision)
+
+        if order_changed and self._window_publisher is not None:
+            self._window_publisher(new_total, relevant_rows, set_count, publish_rows)
+        else:
+            set_count(new_total)
+            publish_rows()
         self.trim_row_cache_step()
         self._window_range = self._cache_window_range()
         loaded_rows = sorted(self._pending_row_loads.intersection(self._row_cache))
@@ -945,15 +1015,20 @@ class GalleryCollectionStore:
             or result.first <= row <= result.last
         }
         self._pending_row_loads.difference_update(completed_pending_rows)
-        self._collection_revision = max(self._collection_revision, result.collection_revision)
-        self._pending_scan_refresh = False
-        self._pending_scan_rels.clear()
-        self._pending_scan_sort_keys.clear()
         if result.backfill_queued > 0:
             self._thumbnail_backfill_pending = True
 
         if old_total != self._total_count:
             self.count_changed.emit(old_total, self._total_count)
+        if versioned:
+            source_changed = order_changed or anchor_state_changed or self._pinned_row in changed_rows
+            if source_changed:
+                self.window_published.emit(order_changed)
+            for first, last in _contiguous_ranges(changed_rows):
+                self.window_changed.emit(first, last)
+            if source_changed:
+                self.data_changed.emit()
+        elif old_total != self._total_count:
             self.data_changed.emit()
         elif revision_advanced or anchor_state_changed:
             self.data_changed.emit()
@@ -1056,14 +1131,14 @@ class GalleryCollectionStore:
         if (
             active_ticket is not None
             and active_ticket.anchor == anchor
-            and active_ticket.collection_revision == self._collection_revision
+            and active_ticket.collection_revision == self.collection_order_revision()
         ):
             return
 
         self._cancel_selection_anchor_retry()
         ticket = GallerySelectionAnchorRetryTicket(
             anchor=anchor,
-            collection_revision=self._collection_revision,
+            collection_revision=self.collection_order_revision(),
             attempt=attempt,
             delay_ms=self.ANCHOR_RETRY_DELAYS_MS[attempt - 1],
         )
@@ -1084,7 +1159,7 @@ class GalleryCollectionStore:
             anchor is None
             or anchor != ticket.anchor
             or self._selection_anchor_status != "retry"
-            or self._collection_revision != ticket.collection_revision
+            or self.collection_order_revision() != ticket.collection_revision
             or ticket.attempt < 1
             or ticket.attempt > len(self.ANCHOR_RETRY_DELAYS_MS)
         ):
@@ -1144,7 +1219,10 @@ class GalleryCollectionStore:
     def discard_window_requests(self, generations: Iterable[int]) -> None:
         """Forget queued requests canceled before their worker started."""
 
-        self._pending_window_generations.difference_update(int(item) for item in generations)
+        discarded = tuple(int(item) for item in generations)
+        self._pending_window_generations.difference_update(discarded)
+        if self._latest_commit_refresh is not None and self._latest_commit_refresh[0] in discarded:
+            self._latest_commit_refresh = None
 
     def cached_rows(self, first: int, last: int) -> list[tuple[int, AssetDTO]]:
         """Return cached rows only; never load or query."""
@@ -1206,8 +1284,6 @@ class GalleryCollectionStore:
         self,
         first: int,
         last: int,
-        *,
-        refresh_after_commit: bool = False,
     ) -> None:
         if (
             self._window_request_handler is None
@@ -1224,7 +1300,45 @@ class GalleryCollectionStore:
             view_first + limit - 1,
             demand_generation=0,
             priority=0,
-            refresh_after_commit=refresh_after_commit,
+        )
+
+    def _visible_ranges_for_count(self, count: int | None) -> tuple[tuple[int, int], ...]:
+        if count == 0:
+            return ()
+        ranges = tuple(demand.visible_range for demand in self._surface_demands.values())
+        ranges = ranges or (self._visible_range or (0, self.INITIAL_VISIBLE_ROWS - 1),)
+        if count is None:
+            return ranges
+
+        adjusted = []
+        for first, last in ranges:
+            if first >= count:
+                first = max(0, count - (last - first + 1))
+                last = count - 1
+            elif last + 1 >= self._total_count and count > self._total_count:
+                # Viewport demand was clipped to the old count. Load enough
+                # rows to fill the same viewport when new slots become visible.
+                last = max(last, first + self.INITIAL_VISIBLE_ROWS - 1)
+            adjusted.append((first, min(last, count - 1)))
+        return tuple(adjusted)
+
+    def _request_commit_refresh(self, *, total_count: int | None = None) -> None:
+        ranges = self._visible_ranges_for_count(total_count) or ((0, self.INITIAL_VISIBLE_ROWS - 1),)
+        # Keep the primary surface's overscan and stage disjoint visible rows
+        # in the same snapshot. Include explicit pending Detail row loads.
+        windows = [self._compute_target_window_unbounded(*ranges[0])]
+        for first, last in ranges[1:]:
+            if not any(start <= first and last < start + limit for start, limit in windows):
+                windows.append((first, last - first + 1))
+        for row in sorted(self._pending_row_loads):
+            if total_count is not None and row >= total_count:
+                continue
+            if not any(start <= row < start + limit for start, limit in windows):
+                windows.append((row, 1))
+        first, limit = windows[0]
+        self._request_async_chunk(
+            first, first + limit - 1, demand_generation=0, priority=0,
+            refresh_after_commit=True, extra_ranges=tuple(windows[1:]),
         )
 
     def _request_async_chunk(
@@ -1239,6 +1353,7 @@ class GalleryCollectionStore:
         selection_anchor_retry_attempt: int = 0,
         surface_id: str = "gallery",
         refresh_after_commit: bool = False,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
     ) -> bool:
         if (
             self._window_request_handler is None
@@ -1256,6 +1371,8 @@ class GalleryCollectionStore:
         self._request_generation += 1
         generation = self._request_generation
         self._pending_window_generations.add(generation)
+        if refresh_after_commit:
+            self._latest_commit_refresh = generation, ((view_first, limit), *extra_ranges)
         pending_source_rows = tuple(
             self._pending_source_rows_for_query(self._current_query)
             if self._pending_moves
@@ -1307,6 +1424,8 @@ class GalleryCollectionStore:
                 ),
                 surface_id=str(surface_id),
                 refresh_after_commit=refresh_after_commit,
+                selection_generation=self._window_selection_generation,
+                extra_ranges=extra_ranges,
             )
         )
         if self._selection_anchor is not None:
@@ -1407,19 +1526,7 @@ class GalleryCollectionStore:
         return min(rows), max(rows)
 
     def _cache_window_ranges(self) -> tuple[tuple[int, int], ...]:
-        rows = sorted(self._row_cache)
-        if not rows:
-            return ()
-        ranges: list[tuple[int, int]] = []
-        first = last = rows[0]
-        for row in rows[1:]:
-            if row == last + 1:
-                last = row
-                continue
-            ranges.append((first, last))
-            first = last = row
-        ranges.append((first, last))
-        return tuple(ranges)
+        return _contiguous_ranges(self._row_cache)
 
     def pin_row(self, row: int) -> None:
         if row < 0 or row >= self._total_count:
@@ -1444,12 +1551,6 @@ class GalleryCollectionStore:
             return False
 
         self._pending_scan_rels.update(view_rel for view_rel, _row in mapped_entries)
-        self._pending_scan_sort_keys.update(
-            sort_key
-            for _view_rel, row in mapped_entries
-            for sort_key in [self._sort_key_from_scan_row(row)]
-            if sort_key is not None
-        )
         self._pending_scan_refresh = True
         return True
 
@@ -1467,24 +1568,20 @@ class GalleryCollectionStore:
         job_id = str(getattr(batch, "job_id", "") or "")
         is_thumbnail_backfill = job_id.startswith("thumbnail-backfill:")
         revision = getattr(batch, "collection_revision", None)
-        if isinstance(revision, int):
-            self._collection_revision = max(self._collection_revision, revision)
         if root is None:
             return False
         finished_active_backfill = is_thumbnail_backfill and self.finish_thumbnail_backfill(Path(root))
         if not rows:
             if (
                 finished_active_backfill
+                and self._window_request_handler is None
                 and not self._pending_scan_rels
-                and not self._pending_scan_sort_keys
             ):
                 self._pending_scan_refresh = False
             return False
         recorded = self._record_scan_rows(Path(root), list(rows))
-        if recorded and job_id == "thumbnail-ready":
-            # A ready-only query may have excluded this asset. Refresh even
-            # when no cached row or sort bound identifies its new position.
-            self._pending_thumbnail_ready_refresh = True
+        if recorded and self._window_request_handler is None and isinstance(revision, int):
+            self._collection_revision = max(self._collection_revision, revision)
         return recorded
 
     def finish_thumbnail_backfill(self, root: Path) -> bool:
@@ -1502,42 +1599,20 @@ class GalleryCollectionStore:
         if not self._scan_root_matches_active_root(root):
             return
         self._pending_scan_refresh = True
-        if self._visible_range is not None:
-            first, last = self._visible_range
-            if self._window_request_handler is not None:
-                self._request_async_window(first, last)
-                return
-            self._reload_window_for_visible_range(
-                first,
-                last,
-                emit_signals=True,
-                emit_source_changed=True,
-            )
+        self.flush_pending_scan_refresh()
 
     def flush_pending_scan_refresh(self) -> None:
         """Refresh the visible window after recorded scan/backfill rows."""
 
-        thumbnail_ready = self._pending_thumbnail_ready_refresh
-        self._pending_thumbnail_ready_refresh = False
-        if (not thumbnail_ready and not self._pending_scan_refresh) or self._current_query is None:
-            self._pending_scan_refresh = False
-            self._pending_scan_rels.clear()
-            self._pending_scan_sort_keys.clear()
+        pending = self._pending_scan_refresh
+        self._pending_scan_refresh = False
+        self._pending_scan_rels.clear()
+        if not pending or self._current_query is None:
             return
-        if self._visible_range is None:
-            first = 0
-            last = max(0, self.INITIAL_VISIBLE_ROWS - 1)
-        else:
-            first, last = self._visible_range
-            if (
-                not thumbnail_ready
-                and first != 0
-                and not self._pending_scan_affects_visible_window(first, last)
-            ):
-                return
         if self._window_request_handler is not None:
-            self._request_async_window(first, last, refresh_after_commit=thumbnail_ready)
+            self._request_commit_refresh()
             return
+        first, last = self._visible_range or (0, self.INITIAL_VISIBLE_ROWS - 1)
         self._reload_window_for_visible_range(
             first,
             last,
@@ -1615,7 +1690,6 @@ class GalleryCollectionStore:
         self._visible_range = (first, last)
         self._pending_scan_refresh = False
         self._pending_scan_rels.clear()
-        self._pending_scan_sort_keys.clear()
         self._collection_revision = max(self._collection_revision + 1, collection_revision)
 
         if emit_signals:
@@ -1959,9 +2033,6 @@ class GalleryCollectionStore:
                 mapped.append((view_rel, row))
         return mapped
 
-    def _pending_scan_affects_visible_window(self, first: int, last: int) -> bool:
-        return self._window_rel_intersects_pending_scan(first, last) or self._scan_sort_keys_affect_visible_window(first, last)
-
     def _window_rel_intersects_pending_scan(self, first: int, last: int) -> bool:
         if not self._pending_scan_rels:
             return False
@@ -1972,48 +2043,6 @@ class GalleryCollectionStore:
             if dto.rel_path.as_posix() in self._pending_scan_rels:
                 return True
         return False
-
-    def _scan_sort_keys_affect_visible_window(self, first: int, last: int) -> bool:
-        if not self._pending_scan_sort_keys:
-            return False
-
-        bounds = self._visible_window_sort_bounds(first, last)
-        if bounds is None:
-            return False
-
-        top_key, bottom_key = bounds
-        for key in self._pending_scan_sort_keys:
-            if top_key >= key >= bottom_key:
-                return True
-        return False
-
-    def _visible_window_sort_bounds(self, first: int, last: int) -> Optional[tuple[tuple[str, str], tuple[str, str]]]:
-        top_key: Optional[tuple[str, str]] = None
-        bottom_key: Optional[tuple[str, str]] = None
-        for row in range(first, last + 1):
-            dto = self._row_cache.get(row)
-            if dto is None:
-                continue
-            sort_key = self._sort_key_from_dto(dto)
-            if sort_key is None:
-                continue
-            if top_key is None:
-                top_key = sort_key
-            bottom_key = sort_key
-        if top_key is None or bottom_key is None:
-            return None
-        return top_key, bottom_key
-
-    def _sort_key_from_dto(self, dto: AssetDTO) -> Optional[tuple[str, str]]:
-        if dto.created_at is None:
-            return None
-        return dto.created_at.isoformat(), str(dto.id or "")
-
-    def _sort_key_from_scan_row(self, row: dict) -> Optional[tuple[str, str]]:
-        dt_raw = row.get("dt")
-        if not isinstance(dt_raw, str) or not dt_raw:
-            return None
-        return dt_raw, str(row.get("id") or "")
 
     def _scan_root_matches_active_root(self, scan_root: Path) -> bool:
         if self._active_root is None:
@@ -2341,12 +2370,14 @@ class GalleryCollectionStore:
             self._pending_paths.clear()
         self._pending_scan_refresh = False
         self._pending_scan_rels.clear()
-        self._pending_scan_sort_keys.clear()
         self._thumbnail_backfill_windows.clear()
         self._thumbnail_backfill_pending = False
-        self._pending_thumbnail_ready_refresh = False
         self._pending_row_loads.clear()
         self._pending_window_generations.clear()
+        self._latest_commit_refresh = None
+        self._window_selection_generation += 1
+        self._snapshot_revision = None
+        self._order_revision = None
         self._demand_generation = 0
         self._collection_revision += 1
         self._request_generation += 1

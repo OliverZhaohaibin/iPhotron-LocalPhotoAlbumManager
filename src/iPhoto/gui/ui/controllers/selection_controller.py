@@ -46,6 +46,7 @@ class SelectionController(QObject):
         self._bound_selection_model = None
         self._restoring_selection = False
         self._selection_tracking_suspended = False
+        self._window_update_active = False
 
         self._selection_button.clicked.connect(self._handle_toggle_requested)
         if handle_grid_clicks and self._playback is not None:
@@ -133,7 +134,15 @@ class SelectionController(QObject):
     def _bind_model_reset_signals(self, model) -> None:
         if model is self._bound_model:
             return
+        window_signals = (
+            ("windowUpdateStarted", self._begin_window_update),
+            ("windowUpdateFinished", self._finish_window_update),
+        )
         if self._bound_model is not None:
+            for name, handler in window_signals:
+                signal = getattr(self._bound_model, name, None)
+                if signal is not None:
+                    signal.disconnect(handler)
             try:
                 self._bound_model.modelAboutToBeReset.disconnect(
                     self._capture_selection_before_reset
@@ -166,6 +175,10 @@ class SelectionController(QObject):
                 pass
         self._bound_model = model
         if model is not None:
+            for name, handler in window_signals:
+                signal = getattr(model, name, None)
+                if signal is not None:
+                    signal.connect(handler)
             model.modelAboutToBeReset.connect(self._capture_selection_before_reset)
             model.modelReset.connect(self._restore_selection_after_model_change)
             model.dataChanged.connect(self._restore_selection_after_model_change)
@@ -190,6 +203,14 @@ class SelectionController(QObject):
         self._remember_current_selection()
         if self._active:
             self._selection_tracking_suspended = True
+
+    def _begin_window_update(self) -> None:
+        self._capture_selection_before_reset()
+        self._window_update_active = True
+
+    def _finish_window_update(self) -> None:
+        self._window_update_active = False
+        self._restore_selection_after_model_change()
 
     def _remember_current_selection(self, *_args) -> None:
         if (
@@ -220,10 +241,15 @@ class SelectionController(QObject):
         return paths
 
     def _restore_selection_after_model_change(self, *_args) -> None:
+        if self._window_update_active:
+            return
         if not self._active:
             self._selection_tracking_suspended = False
             return
         if not self._selection_paths:
+            self._selection_tracking_suspended = False
+            return
+        if self._current_selection_paths() == self._selection_paths:
             self._selection_tracking_suspended = False
             return
         model = self._grid_view.model()

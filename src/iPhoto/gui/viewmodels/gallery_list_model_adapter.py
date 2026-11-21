@@ -80,6 +80,8 @@ class GalleryListModelAdapter(QAbstractListModel):
     thumbnailBackfillReset = QtSignal()
     startupGalleryReady = QtSignal()
     startupFirstFrameReady = QtSignal()
+    windowUpdateStarted = QtSignal()
+    windowUpdateFinished = QtSignal()
 
     def __init__(
         self,
@@ -186,8 +188,12 @@ class GalleryListModelAdapter(QAbstractListModel):
             Qt.ConnectionType.QueuedConnection,
         )
         self._store.set_window_request_handler(self._window_loader.request)
+        self._store.set_window_publisher(self._publish_window)
 
         self._store.window_changed.connect(self._on_window_changed)
+        window_published = getattr(self._store, "window_published", None)
+        if window_published is not None:
+            window_published.connect(self._on_versioned_window_published)
         self._store.data_changed.connect(self._on_source_changed)
         self._store.row_changed.connect(self._on_row_changed)
         anchor_retry_signal = getattr(
@@ -246,10 +252,10 @@ class GalleryListModelAdapter(QAbstractListModel):
         return role_names(super().roleNames())
 
     def rowCount(self, parent=QModelIndex()) -> int:  # type: ignore[override]
-        return self._store.count()
+        return 0 if parent.isValid() else self._store.count()
 
     def columnCount(self, parent=QModelIndex()) -> int:  # type: ignore[override]
-        return 1
+        return 0 if parent.isValid() else 1
 
     def detail_prefetch_descriptor(
         self,
@@ -590,6 +596,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             collection_revision=result.collection_revision,
             rows=len(result.rows),
             total_count=result.total_count,
+            refresh_after_commit=result.refresh_after_commit,
             error=result.error,
             anchor_status=(anchor_result.status if anchor_result is not None else None),
         )
@@ -599,6 +606,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             generation=result.generation,
             collection_revision=result.collection_revision,
             applied=applied,
+            model_rows=self.rowCount(),
         )
         if applied:
             if self._startup_gallery_warmup_active:
@@ -618,7 +626,7 @@ class GalleryListModelAdapter(QAbstractListModel):
                 )
             if self._store.row_cache_needs_trim() and not self._micro_trim_timer.isActive():
                 self._micro_trim_timer.start()
-            self._reconcile_full_thumbnail_demand(getattr(result, "surface_id", "gallery"))
+            self._reconcile_full_thumbnail_demand(None if result.refresh_after_commit else result.surface_id)
             self._maybe_finish_startup_gallery_warmup("window_applied")
 
     @Slot()
@@ -931,6 +939,69 @@ class GalleryListModelAdapter(QAbstractListModel):
             return partner.rel_path, partner.abs_path
         return None, None
 
+    def _publish_window(
+        self,
+        count: int,
+        rows: dict[int, AssetDTO],
+        set_count: Callable[[int], None],
+        publish_rows: Callable[[], None],
+    ) -> None:
+        """Resize the virtual row slots and update their sorted mappings in one turn."""
+
+        previous_count = self.rowCount()
+        reordered = any(
+            (previous := self._store.asset_at(row)) is not None
+            and (previous.abs_path, previous.id) != (dto.abs_path, dto.id)
+            for row, dto in rows.items() if row < previous_count
+        )
+        if count == previous_count and not reordered:
+            publish_rows()
+            return
+
+        emit_perf_event(
+            "gallery_window_model_update",
+            before=previous_count, after=count, reordered=reordered,
+        )
+        self.windowUpdateStarted.emit()
+        if count > previous_count:
+            self.beginInsertRows(QModelIndex(), previous_count, count - 1)
+            set_count(count)
+            if not reordered:
+                publish_rows()
+            self.endInsertRows()
+
+        if reordered:
+            self.layoutAboutToBeChanged.emit()
+            indexes = self.persistentIndexList()
+            destinations = {(dto.abs_path, dto.id): row for row, dto in rows.items()}
+            new_indexes = []
+            for index in indexes:
+                previous = self._store.asset_at(index.row())
+                row = destinations.get((previous.abs_path, previous.id)) if previous is not None else None
+                new_indexes.append(self.index(row, index.column()) if row is not None else QModelIndex())
+            publish_rows()
+            self.changePersistentIndexList(indexes, new_indexes)
+            self.layoutChanged.emit()
+
+        if count < previous_count:
+            self.beginRemoveRows(QModelIndex(), count, previous_count - 1)
+            set_count(count)
+            if not reordered:
+                publish_rows()
+            self.endRemoveRows()
+        self._reanchor_current_asset_from_cache()
+        self.windowUpdateFinished.emit()
+
+    def _on_versioned_window_published(self, order_changed: bool) -> None:
+        self._reanchor_current_asset_from_cache()
+        self._last_snapshot = self._store.snapshot_signature()
+        self._last_selection_signature = self._selection_signature()
+        self._last_window_identity_signature = self._window_identity_signature(self._last_snapshot[1])
+        if order_changed:
+            self._duration_cache.clear()
+            self._demand_coordinator.hint_candidates_by_row.clear()
+            self._republish_thumbnail_demand_for_collection_revision()
+
     def _on_source_changed(self) -> None:
         # The store cache already contains the new revision when this callback
         # runs.  Re-anchor the visual current item by its stable path before
@@ -1115,6 +1186,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         count = self.rowCount()
         if count <= 0:
             return
+        if self._duration_cache:
+            for _row, dto in self._store.cached_rows(first, last):
+                self._duration_cache.pop(dto.abs_path, None)
         demands = tuple(self._demand_coordinator.viewports.values())
         ranges = []
         if demands:
@@ -1649,6 +1723,9 @@ class GalleryListModelAdapter(QAbstractListModel):
         )
 
     def _current_collection_revision(self) -> int:
+        order_revision = self._store.collection_order_revision()
+        if isinstance(order_revision, int):
+            return order_revision
         try:
             revision = self._store.snapshot_signature()[2]
         except (IndexError, TypeError, AttributeError):

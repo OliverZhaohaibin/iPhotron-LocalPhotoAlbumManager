@@ -69,6 +69,8 @@ class GalleryWindowRequest:
     selection_anchor_retry_attempt: int = 0
     surface_id: str = "gallery"
     refresh_after_commit: bool = False
+    selection_generation: int = 0
+    extra_ranges: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,9 @@ class GalleryWindowResult:
     purpose: Literal["viewport", "selection_anchor_retry"] = "viewport"
     selection_anchor_retry_attempt: int = 0
     surface_id: str = "gallery"
+    order_revision: int | None = None
+    refresh_after_commit: bool = False
+    requested_ranges: tuple[tuple[int, int], ...] = ()
 
 
 class _GalleryWindowSignals(QObject):
@@ -200,26 +205,42 @@ class _GalleryWindowWorker(QRunnable):
             reader = getattr(request.query_service, "read_gallery_asset_window", None)
             if not callable(reader):
                 reader = request.query_service.read_query_asset_window
-            window = reader(
-                request.root,
-                request.query,
-                request.raw_first,
-                request.limit + request.pending_source_count,
-            )
+            ranges = ((request.view_first, request.limit), *request.extra_ranges)
+            raw_ranges = [(request.raw_first, request.limit + request.pending_source_count)]
+            for first, limit in request.extra_ranges:
+                raw_first = first
+                for source_row in request.pending_source_rows:
+                    if source_row > raw_first:
+                        break
+                    raw_first += 1
+                raw_ranges.append((raw_first, limit + request.pending_source_count))
+            read_windows = getattr(request.query_service, "read_gallery_asset_windows", None)
+            if len(raw_ranges) > 1 and callable(read_windows):
+                windows = read_windows(request.root, request.query, tuple(raw_ranges))
+            else:
+                windows = tuple(reader(request.root, request.query, *bounds) for bounds in raw_ranges)
+            window = windows[0]
 
             rows: dict[int, AssetDTO] = {}
-            for raw_row in window.rows:
-                rel = raw_row.get("rel") if isinstance(raw_row, dict) else None
-                if not isinstance(rel, str) or not rel:
-                    continue
-                dto = scan_row_to_dto(request.root, rel, raw_row)
-                if dto is None or str(dto.id) in request.pending_source_ids:
-                    continue
-                if len(rows) >= request.limit:
-                    break
-                rows[request.view_first + len(rows)] = dto
+            last = request.view_first
+            for (first, limit), part in zip(ranges, windows, strict=True):
+                if part.collection_revision != window.collection_revision:
+                    raise RuntimeError("collection changed between window reads")
+                loaded = 0
+                for raw_row in part.rows:
+                    rel = raw_row.get("rel") if isinstance(raw_row, dict) else None
+                    if not isinstance(rel, str) or not rel:
+                        continue
+                    dto = scan_row_to_dto(request.root, rel, raw_row)
+                    if dto is None or str(dto.id) in request.pending_source_ids:
+                        continue
+                    if loaded >= limit:
+                        break
+                    rows[first + loaded] = dto
+                    loaded += 1
+                if first == request.view_first:
+                    last = max(first, first + loaded - 1)
 
-            loaded_count = len(rows)
             existing_keys = {
                 key
                 for dto in rows.values()
@@ -245,7 +266,6 @@ class _GalleryWindowWorker(QRunnable):
                 rows,
                 int(window.collection_revision),
             )
-            last = request.view_first + loaded_count - 1
             emit_perf_event(
                 "gallery_window_worker_finished",
                 generation=request.generation,
@@ -254,6 +274,7 @@ class _GalleryWindowWorker(QRunnable):
                 elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
                 rows=len(rows),
                 total_count=total_count,
+                refresh_after_commit=request.refresh_after_commit,
                 anchor_status=(
                     selection_anchor_result.status
                     if selection_anchor_result is not None
@@ -282,16 +303,11 @@ class _GalleryWindowWorker(QRunnable):
                         request.selection_anchor_retry_attempt
                     ),
                     surface_id=request.surface_id,
+                    order_revision=window.order_revision,
+                    refresh_after_commit=request.refresh_after_commit,
+                    requested_ranges=ranges,
                 )
             )
-            request_backfill = getattr(request.query_service, "request_thumbnail_backfill", None)
-            if request.request_backfill and callable(request_backfill):
-                request_backfill(
-                    request.root,
-                    request.query,
-                    request.raw_first,
-                    request.limit,
-                )
         except Exception as exc:  # noqa: BLE001 - worker boundary
             emit_perf_event(
                 "gallery_window_worker_failed",
@@ -317,8 +333,17 @@ class _GalleryWindowWorker(QRunnable):
                         request.selection_anchor_retry_attempt
                     ),
                     surface_id=request.surface_id,
+                    refresh_after_commit=request.refresh_after_commit,
                 )
             )
+        else:
+            request_backfill = getattr(request.query_service, "request_thumbnail_backfill", None)
+            if request.request_backfill and callable(request_backfill):
+                try:
+                    for (first, _raw_limit), (_view_first, limit) in zip(raw_ranges, ranges, strict=True):
+                        request_backfill(request.root, request.query, first, limit)
+                except Exception as exc:  # noqa: BLE001 - window result is already delivered
+                    emit_perf_event("gallery_window_backfill_failed", error=type(exc).__name__)
 
 
 class GalleryWindowLoader(QObject):
@@ -335,10 +360,22 @@ class GalleryWindowLoader(QObject):
         self._active_request: GalleryWindowRequest | None = None
         self._queued_requests: list[GalleryWindowRequest] = []
         self._latest_demand_generations: dict[str, int] = {}
+        self._selection_generation = 0
         self._last_started_surface: str | None = None
         self._signals: dict[int, _GalleryWindowSignals] = {}
 
     def request(self, request: GalleryWindowRequest) -> None:
+        if request.selection_generation < self._selection_generation:
+            self.requestsDropped.emit((request.generation,))
+            return
+        if request.selection_generation > self._selection_generation:
+            self._selection_generation = request.selection_generation
+            self._latest_demand_generations.clear()
+            dropped = tuple(queued.generation for queued in self._queued_requests)
+            self._queued_requests.clear()
+            if dropped:
+                self.requestsDropped.emit(dropped)
+
         demand_generation = int(request.demand_generation)
         surface_id = str(request.surface_id)
         latest_generation = self._latest_demand_generations.get(surface_id, 0)
@@ -378,7 +415,9 @@ class GalleryWindowLoader(QObject):
             self.requestsDropped.emit((request.generation,))
             return
         for index, queued in enumerate(self._queued_requests):
-            if self._request_signature(queued) != signature:
+            if request.refresh_after_commit != queued.refresh_after_commit:
+                continue
+            if not request.refresh_after_commit and self._request_signature(queued) != signature:
                 continue
             self._queued_requests[index] = request
             self.requestsDropped.emit((queued.generation,))
@@ -431,10 +470,14 @@ class GalleryWindowLoader(QObject):
         signals = self._signals.pop(result.generation, None)
         if signals is not None:
             signals.deleteLater()
-        self._active_generation = None
+        if result.generation != self._active_generation:
+            return
         self._active_request = None
-        self.resultReady.emit(result)
-        self._start_next()
+        try:
+            self.resultReady.emit(result)
+        finally:
+            self._active_generation = None
+            self._start_next()
 
     def _start_next(self) -> None:
         if not self._queued_requests:
@@ -445,6 +488,7 @@ class GalleryWindowLoader(QObject):
             range(len(self._queued_requests)),
             key=lambda index: (
                 self._queued_requests[index].priority,
+                not self._queued_requests[index].refresh_after_commit,
                 self._queued_requests[index].surface_id == self._last_started_surface,
                 -int(self._queued_requests[index].demand_generation),
             ),
@@ -470,6 +514,8 @@ class GalleryWindowLoader(QObject):
             request.purpose,
             request.selection_anchor_retry_attempt,
             request.surface_id,
+            request.selection_generation,
+            request.extra_ranges,
         )
 
 

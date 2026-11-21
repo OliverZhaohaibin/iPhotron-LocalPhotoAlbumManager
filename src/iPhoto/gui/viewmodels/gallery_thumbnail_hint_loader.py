@@ -128,7 +128,7 @@ class _HintWorker(QRunnable):
             result = GalleryThumbnailHintResult(
                 request_id=request.request_id,
                 generation=request.generation,
-                collection_revision=request.collection_revision,
+                collection_revision=window.order_revision or request.collection_revision,
                 root=request.root,
                 query=request.query,
                 first=request.first,

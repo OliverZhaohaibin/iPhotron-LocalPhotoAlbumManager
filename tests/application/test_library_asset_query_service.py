@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,6 +88,95 @@ def test_edit_keeps_published_thumbnail_drawable_through_failed_replacement(
         session.shutdown()
 
 
+@pytest.mark.parametrize("interruption", ["rejected", "cancelled", "shutdown"])
+def test_retained_thumbnail_recovers_after_queue_interruption(tmp_path: Path, interruption: str) -> None:
+    root = tmp_path.resolve()
+    path = root / "edit.jpg"
+    Image.new("RGB", (72, 60), "navy").save(path)
+    original_bytes = path.read_bytes()
+    session = create_headless_library_session(root)
+    repository = get_global_repository(root)
+    service = session.asset_queries
+    try:
+        session.scans.scan_album(root, include=["*.jpg"], persist_chunks=True)
+        original = repository.get_rows_by_rels([path.name])[path.name]
+        executor = _DeferredExecutor()
+        service._thumbnail_backfill_executor = executor
+        if interruption == "rejected":
+            with patch.object(executor, "submit", side_effect=RuntimeError("executor rejected work")):
+                edit = session.edit.write_adjustments(path, {"Light_Master": 0.9})
+            assert not service.thumbnail_backfill_pending()
+            assert not executor.submitted
+        elif interruption == "cancelled":
+            edit = session.edit.write_adjustments(path, {"Light_Master": 0.9})
+            assert service.mark_thumbnail_stale(path, edit.thumbnail_revision)
+            assert len(executor.submitted) == 1
+            assert executor.futures[0].cancel()
+            assert not service.thumbnail_backfill_pending()
+            assert service.mark_thumbnail_stale(path, edit.thumbnail_revision)
+            assert len(executor.submitted) == 2
+        else:
+            service.shutdown()
+            edit = session.edit.write_adjustments(path, {"Light_Master": 0.9})
+            assert not executor.submitted
+        assert edit.retained_thumbnail
+        pending = repository.get_rows_by_rels([path.name])[path.name]
+        assert pending["thumbnail_state"] == "ready"
+        assert pending["thumb_refresh_pending"]
+        assert pending["micro_thumbnail"] == original["micro_thumbnail"]
+    finally:
+        session.shutdown()
+
+    recovered = create_headless_library_session(root)
+    try:
+        completed: Future = Future()
+        recovered.asset_queries.thumbnail_backfill_completed.connect(completed.set_result)
+        assert recovered.asset_queries.request_thumbnail_backfill(root, AssetQuery(), 0, 20) == 1
+        assert completed.result(timeout=5).ready_count == 1
+        ready = recovered.asset_queries.read_gallery_asset_window(root, AssetQuery(), 0, 1).rows[0]
+        assert not ready["thumb_refresh_pending"]
+        assert ready["thumb_revision"] == edit.thumbnail_revision
+        assert ready["micro_thumbnail"] != original["micro_thumbnail"]
+        assert path.read_bytes() == original_bytes
+        assert recovered.edit.read_adjustments(path)["Light_Master"] == 0.9
+    finally:
+        recovered.shutdown()
+
+
+@pytest.mark.parametrize("corrupt", [False, True], ids=["missing", "corrupt"])
+def test_edit_refresh_repairs_unreadable_full_cache(tmp_path: Path, corrupt: bool) -> None:
+    root = tmp_path.resolve()
+    path = root / "photo.jpg"
+    Image.new("RGB", (72, 60), "gray").save(path)
+    source = path.read_bytes()
+    session = create_headless_library_session(root)
+    repository = get_global_repository(root)
+    try:
+        session.scans.scan_album(root, include=["*.jpg"], persist_chunks=True)
+        before = repository.get_rows_by_rels([path.name])[path.name]
+        artifact = thumbnail_cache_file_for_key(repository.path.parent / "cache" / "thumbs", before["thumb_cache_key"])
+        if corrupt:
+            artifact.write_bytes(b"corrupt cached JPEG")
+        else:
+            artifact.unlink()
+        with patch.object(session.asset_queries, "_queue_thumbnail_backfill", return_value=0):
+            edit = session.edit.write_adjustments(path, {"Light_Master": 0.9})
+        done: Future = Future()
+        session.asset_queries.thumbnail_backfill_completed.connect(done.set_result)
+        assert session.asset_queries.request_thumbnail_backfill(root, AssetQuery(), 0, 20) == 1
+        assert done.result(timeout=5).ready_count == 1
+        row = repository.get_rows_by_rels([path.name])[path.name]
+        assert row["thumb_revision"] == edit.thumbnail_revision
+        assert row["thumbnail_state"] == "ready" and not row["thumb_refresh_pending"]
+        with Image.open(artifact) as image:
+            image.load()
+            assert image.size == (512, 512)
+        assert path.read_bytes() == source
+        assert session.edit.read_adjustments(path)["Light_Master"] == 0.9
+    finally:
+        session.shutdown()
+
+
 class _Repository:
     def __init__(self) -> None:
         self.count_calls: list[dict[str, Any]] = []
@@ -159,11 +249,14 @@ class _BackfillRepository(_Repository):
 class _DeferredExecutor:
     def __init__(self) -> None:
         self.submitted = []
+        self.futures = []
         self.shutdown_called = False
 
     def submit(self, fn, *args):
         self.submitted.append((fn, args))
-        return None
+        future = Future()
+        self.futures.append(future)
+        return future
 
     def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
         del wait, cancel_futures

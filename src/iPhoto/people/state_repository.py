@@ -56,6 +56,34 @@ def _reorder_subset(current: tuple[str, ...], requested: tuple[str, ...]) -> tup
     return tuple(order)
 
 
+def _with_legacy_person_slots(order: tuple[str, ...], person_order: tuple[str, ...]) -> tuple[str, ...]:
+    """Insert missing People ranks before the next ranked person or at the end."""
+
+    if not order or not person_order:
+        return order
+
+    ranked = set(order)
+    insert_before: dict[str, list[str]] = {}
+    pending: list[str] = []
+    for person_id in person_order:
+        key = f"person:{person_id}"
+        if key not in ranked:
+            pending.append(key)
+        elif pending:
+            insert_before[key] = pending
+            pending = []
+
+    if not insert_before and not pending:
+        return order
+
+    merged = []
+    for key in order:
+        merged.extend(insert_before.get(key, ()))
+        merged.append(key)
+    merged.extend(pending)
+    return tuple(merged)
+
+
 @dataclass(frozen=True)
 class PersonCoverRecord:
     person_id: str
@@ -665,7 +693,11 @@ class FaceStateRepository:
     def get_identity_card_order(self) -> tuple[str, ...]:
         self.initialize()
         with closing(self._connect()) as conn:
-            return self._read_identity_card_order(conn)
+            conn.execute("BEGIN")
+            order = self._read_identity_card_order(conn)
+            if not order:
+                return order
+            return _with_legacy_person_slots(order, self._read_legacy_person_order(conn))
 
     def set_identity_card_order(self, identity_keys: Iterable[str]) -> tuple[str, ...]:
         identities = tuple(dict.fromkeys(
@@ -674,22 +706,35 @@ class FaceStateRepository:
         self.initialize()
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            person_order = self._read_legacy_person_order(conn)
+            person_ids = tuple(identity.entity_id for identity in identities if identity.kind == "person")
+            next_person_order = _reorder_subset(person_order, person_ids)
             order = _reorder_subset(
                 self._read_identity_card_order(conn), tuple(identity.key for identity in identities)
             )
+            order = _with_legacy_person_slots(order, next_person_order)
             self._write_identity_card_order(conn, order)
-            person_ids = tuple(identity.entity_id for identity in identities if identity.kind == "person")
-            if person_ids:
-                person_order = tuple(
-                    row["person_id"] for row in conn.execute(
-                        "SELECT person_id FROM person_card_orders ORDER BY sort_order, person_id"
-                    )
-                )
-                next_person_order = _reorder_subset(person_order, person_ids)
-                if next_person_order != person_order:
-                    self._write_person_order(conn, next_person_order)
+            if next_person_order != person_order:
+                self._write_person_order(conn, next_person_order)
             conn.commit()
         return order
+
+    @staticmethod
+    def _read_legacy_person_order(conn: sqlite3.Connection) -> tuple[str, ...]:
+        return tuple(
+            row["person_id"]
+            for row in conn.execute(
+                """
+                SELECT orders.person_id
+                FROM person_card_orders AS orders
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM identity_redirects
+                    WHERE source_kind = 'person' AND source_id = orders.person_id
+                )
+                ORDER BY orders.sort_order, orders.person_id
+                """
+            )
+        )
 
     @staticmethod
     def _read_identity_card_order(conn: sqlite3.Connection) -> tuple[str, ...]:

@@ -39,6 +39,19 @@ contract.
 - Use `MergeConfirmDialog` for People/Pets dashboard confirmation flows that should
   visually match the merge confirmation popup.
 
+### Dashboard drag and reorder
+
+- Lay out reordered identity cards before updating the merge preview. Update the
+  preview when the board reflows during a drag. On release, use the highlighted
+  pair for merge confirmation.
+- A release without a merge preview saves the changed order. A cancelled merge
+  keeps the preview arrangement in view until refresh and leaves the saved order
+  intact.
+- Apply the [AGENTS.md interaction rule](../../AGENTS.md#5-coding-and-ui-rules)
+  to gesture parameters. When a parameter must change, document the reason and
+  verify clicking, reordering, and confirming and cancelling a merge in the
+  desktop UI. Run the dashboard widget regressions as well.
+
 ## People visibility contract
 
 - Each People card must expose a right-click `Hide` / `Unhide` action.
@@ -65,8 +78,8 @@ contract.
 ## Group disband contract
 
 - Group cards must expose a right-click `Disband Group` action.
-- Disbanding a group must remove only the group card/container. It must not
-  delete the underlying people or their photos.
+- Disbanding a group removes the group card and preserves its member identities
+  and their photos.
 - Pinned groups must not be disbanded.
 - Attempting to disband a pinned group must show a project-styled warning popup,
   not a native/system-styled modal.
@@ -108,8 +121,10 @@ rules aligned across surfaces:
 - `Rename…` is the canonical label for rename actions. Use the same ellipsis
   style and the same empty-name validation across sidebar and pinned-item menus.
 - Pinned-item rename is a sidebar-local alias. Persist it through
-  `PinnedItemsService` instead of mutating the underlying album/person/group
-  entity name.
+  `PinnedItemsService` so the album, person, pet, or group retains its entity name.
+- Pet cover selection uses the `Set as Cover` action in the pet gallery. The
+  dashboard card exposes detection deletion for the current crop. See the
+  [pet cover and pin contract](PETS_RECOGNITION_RUNTIME.md#pet-covers-and-pins).
 - `Pin`/`Unpin` and `Rename…` should stay adjacent on sidebar-driven menus so
   users can manage the same entity without hunting across different surfaces.
 - Any regression around menu visibility or per-surface action parity needs a
@@ -119,15 +134,14 @@ rules aligned across surfaces:
 
 ### Reusable person-picker popup
 
-The canonical picker for choosing one or more People cards is
+The canonical picker for choosing one or more people or pets is
 `GroupPeopleDialog` in
 `src/iPhoto/gui/ui/widgets/people_dashboard_dialogs.py`.
 
-Use this dialog for People-card selection flows instead of creating ad-hoc
-`QInputDialog` or combo-box popups. Current uses include:
+Reuse this dialog for identity selection. Current uses include:
 
 - `New Group` from the People dashboard
-- `Merge Into...` from a People card context menu
+- `Merge Into...` from a person or pet card context menu
 - `Choose Someone Else...` from the Info panel face actions
 
 When reusing it:
@@ -148,6 +162,8 @@ Keep coverage for the following behaviors in
 
 - People card menu exposes `Hide` / `Unhide`.
 - Pet card menu exposes the matching visibility and management actions.
+- The merge preview and release target agree after drag reordering. A reorder
+  saves the shared People & Pets order, including preserved hidden People slots.
 - Hidden people can be included again with `Show Hidden People`.
 - Merge is blocked when hidden state differs.
 - Group menu exposes `Disband Group`.
@@ -158,7 +174,7 @@ Keep coverage for the following behaviors in
 - The themed popup is centered on the top-level window.
 
 When changing popup plumbing, theme detection, People/Pets filtering, identity
-merges, or group actions, run these tests before merging.
+merges, dashboard gestures, or group actions, run these tests before merging.
 Menu, cover, move, and picker changes also use the focused tests for their
 surface, including `tests/ui/controllers/test_context_menu_cover.py`,
 `tests/ui/controllers/test_context_menu_operations.py`, and

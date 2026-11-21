@@ -193,23 +193,28 @@ bleiben über erneute Scans hinweg erhalten.
 
 Die unabhängige Pets-Pipeline erkennt Katzen und Hunde mit YOLOX, erzeugt
 DINOv2-Embeddings und zeigt Tier-Identitätskarten im selben Dashboard. Tiere
-können benannt, zusammengeführt, versteckt, angepinnt und mit einem Cover
-versehen werden. Personen und Tiere können in gemeinsamen Identity-Gruppen
-erscheinen, während Laufzeitindex und dauerhafter Zustand getrennt bleiben.
+können benannt, zusammengeführt, ausgeblendet und angepinnt werden. Öffnen Sie
+die Galerie eines Haustiers über seine Karte oder den Eintrag in der
+Seitenleiste und wählen Sie **Als Cover festlegen** für ein Foto mit passender
+Tiererkennung.
 Deutliche People-/Gesichtskonflikte unterdrücken normalerweise eine doppelte
 Tiererkennung. Die Laufzeit behält jedoch einen deutlich größeren
 Tierkörper-Erkennungsrahmen bei, der ein kleineres menschliches Gesicht enthält,
 damit ein von einer Person gehaltenes Tier nicht verworfen wird.
 
-Mehrere Personen lassen sich zu Gruppen zusammenfassen, um gemeinsame Fotos
-anzuzeigen. Gruppenkarten unterstützen ein ausgewähltes Cover, Drag-and-drop-
-Sortierung und können aufgelöst werden, solange sie nicht angepinnt sind. Das
-Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten; die zentrale
+Personen- und Haustierkarten lassen sich per Ziehen neu anordnen. Wählen Sie
+**Neue Gruppe** im Kontextmenü einer Karte, um Fotos anzuzeigen, auf denen die
+ausgewählten Personen und Haustiere gemeinsam vorkommen. Gruppenkarten
+unterstützen eigene Cover und lassen sich per Ziehen sortieren. Gruppen ohne
+Anheftung können aufgelöst werden.
+
+Das Face Scanning nutzt die optionalen `ai-demo`-Abhängigkeiten. Die zentrale
 Fotoverwaltung bleibt auch ohne AI-Laufzeit nutzbar. People-Zustand bleibt
 hinter der Library-Session-Grenze dauerhaft erhalten, damit Namen, Cover,
 versteckte Personen, Gruppen und manuelle Gesichtsanmerkungen erneute Scans
-überstehen. Das Pets-Scanning verwendet das optionale `pets-ai`-Extra; fehlende
-Abhängigkeiten oder Modelle blockieren die übrige Anwendung nicht.
+überstehen. Das Pets-Scanning verwendet das optionale `pets-ai`-Extra. Bei
+fehlenden Abhängigkeiten oder Modellen bleiben betroffene Fotos zur Erkennung
+vorgemerkt und die übrige Anwendung bleibt nutzbar.
 ![People and groups interface](<../picture/People & Group.png>)
 
 ### ⚡ Gallery für große Bibliotheken

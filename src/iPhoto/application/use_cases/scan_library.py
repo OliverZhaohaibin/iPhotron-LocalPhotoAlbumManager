@@ -164,7 +164,10 @@ class ScanLibraryUseCase:
         )
         commit_elapsed_ms = round(_monotonic_ms() - started, 3)
         ready_chunk = _ready_visible_rows(emitted_chunk)
-        collection_revision = _collection_revision_from_rows(emitted_chunk)
+        read_revision = getattr(self._asset_repository, "collection_revision", None)
+        collection_revision = (
+            read_revision() if callable(read_revision) else _collection_revision_from_rows(emitted_chunk)
+        )
         stage_elapsed_ms = dict(request.scan_stage_elapsed_ms or {})
         if metadata_elapsed_ms is not None:
             stage_elapsed_ms["metadata_extraction"] = metadata_elapsed_ms

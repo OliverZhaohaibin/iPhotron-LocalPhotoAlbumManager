@@ -73,6 +73,33 @@ def test_schema_migrates_source_and_thumbnail_revision_columns() -> None:
     connection.close()
 
 
+def test_v7_upgrades_ready_index_without_rewriting_asset_state(tmp_path: Path) -> None:
+    database = tmp_path / ".iPhoto" / "global_index.db"
+    database.parent.mkdir()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for version in range(1, 7):
+            getattr(SchemaMigrator, f"_migrate_to_v{version}")(connection)
+        connection.execute("PRAGMA user_version = 6")
+        connection.execute("""
+            INSERT INTO assets (rel, id, is_favorite, thumbnail_state, thumb_cache_key, micro_thumbnail)
+            VALUES ('favorite.jpg', 'id', 1, 'ready', 'old-key', X'AB')
+        """)
+
+    repository = AssetRepository(tmp_path)
+    query = CollectionQuery()
+    first = repository.read_gallery_collection_window(query, 0, 4)
+    assert first.total_count == 1
+    assert first.order_revision > 0
+    asset = first.rows[0]
+    assert asset["is_favorite"] and asset["thumb_cache_key"] == "old-key"
+    assert asset["micro_thumbnail"] == b"\xab" and not asset["thumb_refresh_pending"]
+    assert repository.update_thumbnail_ready("favorite.jpg", micro_thumbnail=b"new", thumb_cache_key="old-key")
+    updated = repository.read_gallery_collection_window(query, 0, 4)
+    assert updated.collection_revision > first.collection_revision
+    assert updated.order_revision == first.order_revision
+    repository.close()
+
+
 def test_probe_returns_two_level_album_snapshot_without_creating_work_dir(
     tmp_path: Path,
 ) -> None:

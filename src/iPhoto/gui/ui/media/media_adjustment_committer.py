@@ -59,6 +59,7 @@ class MediaAdjustmentCommitter(QObject):
                 self._asset_vm.invalidate_thumbnail(
                     str(source),
                     desired_revision=desired_revision,
+                    retained_thumbnail=getattr(commit_result, "retained_thumbnail", False) is True,
                 )
             else:
                 self._asset_vm.invalidate_thumbnail(str(source))

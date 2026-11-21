@@ -33,6 +33,7 @@ _THUMBNAIL_STATE_FIELDS = (
     "thumb_updated_at",
     "thumb_error",
     "thumb_revision",
+    "thumb_refresh_pending",
 )
 
 
@@ -82,6 +83,16 @@ def merge_scan_row(
         _preserve_current_thumbnail_revision(
             merged, existing_row, current_thumbnail_revision
         )
+        # The stat cache can predate a concurrent thumbnail commit. Preserve
+        # its row version and advance it if this merge replaces thumbnail facts.
+        previous_revision = int(existing_row.get("index_revision") or 0)
+        refresh_changed = bool(merged.get("thumb_refresh_pending")) != bool(existing_row.get("thumb_refresh_pending"))
+        thumbnail_changed = any(
+            merged.get(field) != existing_row.get(field)
+            for field in _THUMBNAIL_STATE_FIELDS
+            if field != "thumb_refresh_pending"
+        ) or refresh_changed
+        merged["index_revision"] = previous_revision + int(not identity_unchanged or thumbnail_changed)
 
     existing_face_status = None
     existing_pet_status = None
@@ -141,7 +152,22 @@ def _preserve_current_thumbnail_revision(
 
     existing_revision = _thumbnail_revision(existing_row)
     incoming_revision = _thumbnail_revision(merged)
-    if not existing_revision or existing_revision == incoming_revision:
+    if existing_revision == incoming_revision:
+        late_failure = (
+            merged.get("thumbnail_state") != "ready"
+            and int(merged.get("index_revision") or 0) < int(existing_row.get("index_revision") or 0)
+        )
+        if (
+            (merged.get("thumb_refresh_pending") or late_failure)
+            and not existing_row.get("thumb_refresh_pending")
+            and existing_row.get("thumbnail_state") == "ready"
+            and existing_revision
+            and _asset_identity_unchanged(existing_row, merged)
+        ):
+            for field in _THUMBNAIL_STATE_FIELDS:
+                merged[field] = existing_row.get(field)
+        return
+    if not existing_revision:
         return
     if current_revision is not None:
         if current_revision == incoming_revision:
@@ -150,6 +176,7 @@ def _preserve_current_thumbnail_revision(
             merged.update(
                 thumb_revision=current_revision,
                 thumbnail_state="stale",
+                thumb_refresh_pending=False,
                 micro_thumbnail=None,
                 thumb_cache_key=(
                     merged.get("thumb_cache_key") or existing_row.get("thumb_cache_key")

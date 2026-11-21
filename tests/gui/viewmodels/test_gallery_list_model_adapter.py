@@ -1078,8 +1078,12 @@ def test_startup_gallery_warmup_keeps_guard_thumbnail_demand(
     )
 
     adapter.begin_startup_gallery_warmup()
-    with patch.object(adapter, "_request_thumbnail_hints") as request_hints:
-        adapter.update_viewport(demand)
+    try:
+        with patch.object(adapter, "_request_thumbnail_hints") as request_hints:
+            adapter.update_viewport(demand)
+    finally:
+        adapter._startup_gallery_timeout_timer.stop()
+        adapter._startup_gallery_heartbeat_timer.stop()
 
     mock_store.reconcile_viewport_demand.assert_called_once()
     request_hints.assert_called_once()
@@ -1226,6 +1230,7 @@ def test_startup_gallery_warmup_restores_full_prefetch_after_ready(
     adapter,
     mock_store,
     mock_thumb_service,
+    qapp,
 ):
     visible = _make_dto(abs_path=Path("/library/visible.jpg"))
     guard = _make_dto(abs_path=Path("/library/guard.jpg"))
@@ -1249,7 +1254,7 @@ def test_startup_gallery_warmup_restores_full_prefetch_after_ready(
     adapter.begin_startup_gallery_warmup()
     adapter._reconcile_full_thumbnail_demand()
     adapter._finish_startup_gallery_warmup("ready")
-    adapter._reconcile_full_thumbnail_demand()
+    qapp.processEvents()
 
     startup_snapshot = mock_thumb_service.reconcile_demand.call_args_list[0].args[0]
     restored = mock_thumb_service.reconcile_demand.call_args_list[-1].args[0]
@@ -1842,6 +1847,22 @@ def test_revisioned_invalidation_queues_stale_target_and_hides_local_micro(
         thumb_revision="revision-2",
     )
     assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is None
+
+
+def test_retained_edit_keeps_last_drawable_preview(adapter, mock_store, mock_thumb_service):
+    path = Path("/photos/edited.jpg")
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=path, micro_thumbnail=micro, thumbnail_state="ready",
+    )
+
+    adapter.invalidate_thumbnail(str(path), desired_revision="revision-2", retained_thumbnail=True)
+
+    mock_thumb_service.invalidate.assert_not_called()
+    mock_thumb_service.get_thumbnail.assert_not_called()
+    assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is micro
 
 
 def test_size_role_returns_trimmed_duration_for_video(adapter, mock_store):

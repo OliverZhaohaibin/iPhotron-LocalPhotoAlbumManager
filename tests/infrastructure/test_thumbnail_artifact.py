@@ -94,6 +94,32 @@ def test_publication_rejects_render_if_sidecar_changes_midflight(tmp_path: Path)
     assert green > red and green > blue
 
 
+def test_publication_uses_adjustments_for_the_requested_revision(tmp_path: Path) -> None:
+    source = tmp_path / "photo.jpg"
+    cache_dir = tmp_path / "thumbs"
+    Image.new("RGB", (32, 32), "gray").save(source)
+    neutral = {"Light_Master": 0.0}
+    save_adjustments(source, neutral)
+    revision = thumbnail_revision(source)
+    expected = publish_thumbnail_artifact(source, cache_dir, expected_revision=revision)
+    assert expected is not None
+    render = thumbnail_artifact.render_thumbnail_image
+
+    def render_during_another_edit(*args, **kwargs):
+        save_adjustments(source, {"Light_Master": 0.9})
+        try:
+            return render(*args, **kwargs)
+        finally:
+            save_adjustments(source, neutral)
+
+    with patch.object(thumbnail_artifact, "render_thumbnail_image", side_effect=render_during_another_edit):
+        result = publish_thumbnail_artifact(source, cache_dir, expected_revision=revision)
+
+    assert thumbnail_revision(source) == revision
+    assert result is not None
+    assert result.micro_thumbnail == expected.micro_thumbnail
+
+
 def test_publication_retries_transient_replace_lock(tmp_path: Path) -> None:
     source = tmp_path / "photo.jpg"
     cache_dir = tmp_path / "thumbs"

@@ -2878,7 +2878,7 @@ def test_handle_scan_finished_refreshes_count_outside_top_visible_window(tmp_pat
     assert observed_counts == [(240, 241)]
 
 
-def test_mid_scroll_rescan_updates_gallery_after_single_scan_finished(tmp_path: Path) -> None:
+def test_mid_scroll_rescan_updates_gallery_before_scan_finished(tmp_path: Path) -> None:
     root = tmp_path / "Library"
     root.mkdir()
     base_dt = datetime(2024, 1, 1, 12, 0, 0)
@@ -2925,7 +2925,7 @@ def test_mid_scroll_rescan_updates_gallery_after_single_scan_finished(tmp_path: 
         )
     )
 
-    assert store.count() == 240
+    assert store.count() == 241
 
     store.handle_scan_finished(root, True)
 

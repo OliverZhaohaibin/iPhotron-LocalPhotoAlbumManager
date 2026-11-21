@@ -82,6 +82,7 @@ class WindowResult:
     rows: list[dict]
     total_count: int
     collection_revision: int
+    order_revision: int | None = None
 
 @dataclass
 class AssetQuery:

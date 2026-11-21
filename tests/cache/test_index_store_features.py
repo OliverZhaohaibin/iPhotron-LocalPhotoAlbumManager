@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -837,7 +838,7 @@ def test_sync_favorites_mixed_unicode_forms(store: IndexStore) -> None:
     assert data["regular.jpg"] == 0
 
 
-def test_collection_window_reuses_count_revision_cache_until_invalidation(store: IndexStore) -> None:
+def test_collection_window_reuses_count_until_order_changes(store: IndexStore) -> None:
     store.write_rows(
         [
                 {
@@ -851,19 +852,169 @@ def test_collection_window_reuses_count_revision_cache_until_invalidation(store:
         )
     query = CollectionQuery()
 
-    first = store.read_collection_window(query, 0, 10)
-    second = store.read_collection_window(query, 0, 10)
+    with patch.object(store, "count_collection", wraps=store.count_collection) as count:
+        first = store.read_collection_window(query, 0, 10)
+        store.update_thumbnail_ready(
+            "ready.jpg", micro_thumbnail=b"new-thumb", thumb_cache_key="thumb-ready",
+        )
+        second = store.read_collection_window(query, 0, 10)
+        assert first.total_count == second.total_count == 1
+        assert first.order_revision == second.order_revision
+        assert first.collection_revision < second.collection_revision
+        assert second.rows[0]["micro_thumbnail"] == b"new-thumb"
+        count.assert_called_once_with(query)
 
-    assert first.total_count == second.total_count == 1
-    assert store._collection_meta_cache
+        store.remove_rows(["ready.jpg"])
+        empty = store.read_collection_window(query, 0, 10)
+        assert empty.total_count == 0
+        assert empty.order_revision > second.order_revision
+        assert empty.collection_revision > second.collection_revision
+        assert count.call_count == 2
 
-    store.update_thumbnail_ready(
-        "ready.jpg",
-        micro_thumbnail=b"new-thumb",
-        thumb_cache_key="thumb-ready",
-    )
 
-    assert store._collection_meta_cache == {}
+def test_old_window_cannot_republish_a_count_after_another_writer_commits(store: IndexStore) -> None:
+    query = CollectionQuery()
+
+    def ready_row(number: int) -> dict:
+        return {
+            "rel": f"{number:03}.jpg", "id": str(number), "sort_ts": number,
+            "thumbnail_state": "ready", "thumb_cache_key": f"key-{number}",
+        }
+
+    store.merge_scan_rows([ready_row(0)])
+    separate_writer = IndexStore(store.library_root)
+    count_read = Event()
+    finish_read = Event()
+    count_collection = store.count_collection
+
+    def pause_first_count(query: CollectionQuery) -> int:
+        count = count_collection(query)
+        if not count_read.is_set():
+            count_read.set()
+            assert finish_read.wait(5)
+        return count
+
+    with ThreadPoolExecutor(max_workers=1) as workers, patch.object(
+        store, "count_collection", side_effect=pause_first_count,
+    ):
+        old_window = workers.submit(store.read_gallery_collection_window, query, 0, 301)
+        try:
+            assert count_read.wait(5)
+            for start in (1, 101, 201):
+                separate_writer.merge_scan_rows(ready_row(i) for i in range(start, start + 100))
+            current = store.read_gallery_collection_window(query, 0, 301)
+            assert current.total_count == len(current.rows) == 301
+        finally:
+            finish_read.set()
+        old = old_window.result(timeout=5)
+        assert old.total_count == len(old.rows) == 1
+        assert old.collection_revision < current.collection_revision
+        newest = store.read_gallery_collection_window(query, 0, 301)
+        assert newest == current
+        assert [row["rel"] for row in newest.rows] == [f"{i:03}.jpg" for i in reversed(range(301))]
+
+
+def test_collection_revisions_follow_upserts_relocations_and_rollback(store: IndexStore) -> None:
+    query = CollectionQuery()
+    row = {
+        "rel": unicodedata.normalize("NFD", "album/café.jpg"), "id": "a", "sort_ts": 1, "is_favorite": 1,
+        "thumbnail_state": "ready", "thumb_cache_key": "key-a", "micro_thumbnail": b"original",
+    }
+    store.append_rows([row])
+    first = store.read_collection_window(query, 0, 5)
+    store.append_rows([{**row, "micro_thumbnail": b"refresh", "thumb_cache_key": "replacement"}])
+    replacement = store.read_collection_window(query, 0, 5)
+    assert replacement.collection_revision > first.collection_revision
+    assert replacement.order_revision == first.order_revision
+    assert replacement.rows[0]["micro_thumbnail"] == b"refresh"
+    asset_path = store.library_root / row["rel"]
+    assert store.find_collection_positions(query, (asset_path,), replacement.order_revision) == {asset_path: ("a", 0)}
+    indexed = store.get_rows_by_rels([row["rel"]])[row["rel"]]
+    store.merge_scan_rows([{**indexed, "sort_ts": 3}])
+    resorted = store.read_collection_window(query, 0, 5)
+    assert resorted.order_revision > replacement.order_revision
+    assert resorted.rows[0]["index_revision"] == indexed["index_revision"]
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with store.transaction(begin_mode="IMMEDIATE"):
+            store.append_rows([{**row, "rel": "album/b.jpg", "id": "b", "sort_ts": 4}])
+            uncommitted = store.read_collection_window(query, 0, 5)
+            assert uncommitted.total_count == len(uncommitted.rows) == 2
+            assert uncommitted.order_revision > resorted.order_revision
+            raise RuntimeError("rollback")
+    assert store.read_collection_window(query, 0, 5) == resorted
+
+    store.relocate_rows({row["rel"]: "other/a.jpg"}, expected_asset_ids={row["rel"]: "a"})
+    relocated = store.read_collection_window(query, 0, 5)
+    assert relocated.order_revision > resorted.order_revision
+    assert relocated.total_count == len(relocated.rows) == 0
+    assert store.find_collection_positions(query, (asset_path,), resorted.order_revision) is None
+    assert store.get_rows_by_rels(["other/a.jpg"])["other/a.jpg"]["is_favorite"] == 1
+
+
+@pytest.mark.parametrize("direction", list(SortDirection))
+def test_small_collection_position_lookup_counts_only_indexed_prefixes(
+    store: IndexStore, direction: SortDirection,
+) -> None:
+    query = CollectionQuery(collection_type=CollectionType.FAVORITES, sort_direction=direction)
+    with store.transaction() as conn:
+        conn.execute("""
+            WITH RECURSIVE numbers(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM numbers WHERE n < 20000)
+            INSERT INTO assets (rel, id, sort_ts, is_favorite, thumbnail_state, thumb_cache_key)
+            SELECT printf('%05d.jpg', n), 'shared-id', n / 2, 1, 'ready', 'key' FROM numbers
+        """)
+    store.append_rows([
+        {"rel": "legacy-a.jpg", "is_favorite": 1, "thumbnail_state": "ready", "thumb_cache_key": "key"},
+        {"rel": "legacy-b.jpg", "is_favorite": 1, "thumbnail_state": "ready", "thumb_cache_key": "key"},
+        {"rel": "non-favorite.jpg", "thumbnail_state": "ready", "thumb_cache_key": "key"},
+    ])
+    window = store.read_gallery_collection_window(query, 0, 68)
+    expected = {
+        path: (str(row["id"] or path), rank)
+        for rank, row in enumerate(window.rows)
+        if rank < 2 or rank % 3 == 1
+        for path in (store.library_root / row["rel"],)
+    }
+    paths = (*expected, store.library_root / "non-favorite.jpg", store.library_root / "missing.jpg")
+    samples = 0
+
+    def sample_instructions() -> int:
+        nonlocal samples
+        samples += 1
+        return 0
+
+    with store.transaction() as conn:
+        conn.set_progress_handler(sample_instructions, 1000)
+        try:
+            assert store.find_collection_positions(query, paths, window.order_revision) == expected
+        finally:
+            conn.set_progress_handler(None, 0)
+    assert samples < 10
+
+
+def test_large_collection_position_lookup_ranks_once_across_path_chunks(store: IndexStore) -> None:
+    rows = [
+        {"rel": f"{i:04}.jpg", "id": f"asset-{i}", "sort_ts": i, "thumbnail_state": "ready", "thumb_cache_key": "key"}
+        for i in range(1050)
+    ]
+    store.write_rows(rows)
+    query = CollectionQuery()
+    window = store.read_gallery_collection_window(query, 0, 1)
+    paths = tuple(store.library_root / row["rel"] for row in rows if row["sort_ts"] != 1)
+    statements = []
+    with store.transaction() as conn:
+        conn.set_trace_callback(statements.append)
+        try:
+            positions = store.find_collection_positions(query, paths, window.order_revision)
+        finally:
+            conn.set_trace_callback(None)
+
+    expected = {
+        store.library_root / row["rel"]: (row["id"], rank)
+        for rank, row in enumerate(reversed(rows)) if row["sort_ts"] != 1
+    }
+    assert positions == expected
+    assert sum("ROW_NUMBER()" in statement for statement in statements) == 1
 
 
 def test_gallery_collection_window_uses_light_projection_with_micro(store: IndexStore) -> None:
@@ -910,7 +1061,7 @@ def test_thumbnail_hint_window_omits_micro_and_does_not_count(store: IndexStore)
 
     with patch.object(
         store,
-        "_collection_count_and_revision",
+        "count_collection",
         side_effect=AssertionError("hint reads must not count"),
     ):
         window = store.read_thumbnail_hint_window(CollectionQuery(), 0, 10)
@@ -1077,6 +1228,26 @@ def test_late_scan_keeps_ready_thumbnail_for_committed_edit(store: IndexStore) -
     [merged] = store.merge_scan_rows([old_scan])
     assert merged["thumb_revision"] == edit_revision
     assert merged["micro_thumbnail"] == b"edited"
+
+
+def test_late_failed_scan_cannot_replace_success_for_same_revision(store: IndexStore) -> None:
+    store.append_rows([{
+        "rel": "photo.jpg", "id": "photo", "ts": 1, "thumbnail_state": "stale",
+        "thumb_revision": "edit-revision",
+    }])
+    scanned = store.get_rows_by_rels(["photo.jpg"])["photo.jpg"]
+    scanned.update(thumbnail_state="failed", thumb_error="temporarily unreadable")
+    assert store.update_thumbnail_ready(
+        "photo.jpg", expected_revision="edit-revision", thumb_cache_key="valid-key",
+        micro_thumbnail=b"edited",
+    )
+
+    store.merge_scan_rows([scanned])
+
+    row = store.get_rows_by_rels(["photo.jpg"])["photo.jpg"]
+    assert row["thumbnail_state"] == "ready"
+    assert row["micro_thumbnail"] == b"edited"
+    assert row["thumb_error"] is None
 
 
 def test_scan_accepts_replaced_source_while_edit_thumbnail_is_stale(store: IndexStore) -> None:

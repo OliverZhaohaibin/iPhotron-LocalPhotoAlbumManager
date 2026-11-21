@@ -40,6 +40,7 @@ def test_commit_persists_adjustments_and_emits_signal() -> None:
     asset_vm.invalidate_thumbnail.assert_called_once_with(
         str(source),
         desired_revision="revision-2",
+        retained_thumbnail=False,
     )
     resume.assert_called_once_with()
     assert emitted == [(source, "edit_done")]

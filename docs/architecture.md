@@ -399,6 +399,9 @@ future side design. The active query path is SQL-first and windowed:
   `read_gallery_asset_window()`; direct row lookup uses `find_row_by_path()`
   rather than scanning the model. Loaded chunks are merged into a bounded
   sparse cache, and stale generation/revision results are discarded.
+- SQL windows read rows, count, and revisions from one snapshot. The collection
+  revision orders asynchronous results. The order revision versions counts,
+  cursors, and numeric row positions so thumbnail-only updates can keep them.
 - Gallery SQL has two narrow projections in addition to the general collection
   window: `read_gallery_collection_window()` returns tile-rendering fields, and
   `read_thumbnail_hint_window()` returns only paths and existing full-thumbnail
@@ -422,6 +425,10 @@ future side design. The active query path is SQL-first and windowed:
 - Normal gallery collections default to `thumbnail_state='ready'` and require a
   non-empty `thumb_cache_key`; stale, pending, failed, or old no-key rows are
   repair/backfill candidates, not visible media grid rows.
+- A verified ready thumbnail can stay drawable during replacement. The index
+  keeps its key and preview and records `thumb_refresh_pending` until a render
+  for the desired revision succeeds. A row without a usable thumbnail follows
+  the normal repair path.
 - Scan publishing uses `ScanBatchCommitted`, split into small ready-row batches
   after DB commit. Production code must not restore the old `scanChunkReady`
   transport for real-time UI updates.

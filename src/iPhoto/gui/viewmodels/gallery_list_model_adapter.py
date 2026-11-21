@@ -50,6 +50,7 @@ from .gallery_thumbnail_hint_loader import (
 )
 from .gallery_tile import GalleryTileRecord, GalleryTileSnapshot
 from .gallery_window_loader import (
+    AssetIdentity,
     GallerySelectionAnchorRetryTicket,
     GalleryWindowLoader,
     GalleryWindowResult,
@@ -82,6 +83,7 @@ class GalleryListModelAdapter(QAbstractListModel):
     startupFirstFrameReady = QtSignal()
     windowUpdateStarted = QtSignal()
     windowUpdateFinished = QtSignal()
+    persistentRowsRequested = QtSignal(object)
 
     def __init__(
         self,
@@ -98,6 +100,7 @@ class GalleryListModelAdapter(QAbstractListModel):
         self._surface_sizes: dict[str, QSize] = {"gallery": QSize(512, 512)}
         self._current_row = -1
         self._current_path: Path | None = None
+        self._placeholder_start: int | None = None
         self._last_snapshot: Optional[tuple[int, object, int]] = None
         self._last_selection_signature: tuple[str, str, str] | None = None
         self._last_window_identity_signature: tuple[str, ...] | None = None
@@ -188,7 +191,7 @@ class GalleryListModelAdapter(QAbstractListModel):
             Qt.ConnectionType.QueuedConnection,
         )
         self._store.set_window_request_handler(self._window_loader.request)
-        self._store.set_window_publisher(self._publish_window)
+        self._store.set_window_publisher(self._publish_window, self._persistent_rows)
 
         self._store.window_changed.connect(self._on_window_changed)
         window_published = getattr(self._store, "window_published", None)
@@ -257,6 +260,16 @@ class GalleryListModelAdapter(QAbstractListModel):
     def columnCount(self, parent=QModelIndex()) -> int:  # type: ignore[override]
         return 0 if parent.isValid() else 1
 
+    def flags(self, index: QModelIndex) -> Qt.ItemFlags:  # type: ignore[override]
+        if self._placeholder_start is not None and index.row() >= self._placeholder_start:
+            return Qt.ItemFlag.NoItemFlags
+        return super().flags(index)
+
+    def _persistent_rows(self) -> set[int]:
+        rows = {index.row() for index in self.persistentIndexList()}
+        self.persistentRowsRequested.emit(rows)
+        return rows
+
     def detail_prefetch_descriptor(
         self,
         row: int,
@@ -296,6 +309,11 @@ class GalleryListModelAdapter(QAbstractListModel):
 
         asset: Optional[AssetDTO] = self._store.asset_at(row)
         if not asset:
+            if role_int in (Roles.ABS, Roles.ASSET_ID):
+                identity = self._store.identity_at(row)
+                if identity:
+                    path, asset_id = identity
+                    return str(path) if role_int == Roles.ABS else asset_id
             if role_int == Roles.TILE_SNAPSHOT:
                 return GalleryTileSnapshot(
                     record=None,
@@ -943,7 +961,7 @@ class GalleryListModelAdapter(QAbstractListModel):
     def _publish_window(
         self,
         count: int,
-        rows: dict[int, AssetDTO],
+        destinations: dict[AssetIdentity, int],
         set_count: Callable[[int], None],
         publish_rows: Callable[[], None],
     ) -> None:
@@ -951,9 +969,11 @@ class GalleryListModelAdapter(QAbstractListModel):
 
         previous_count = self.rowCount()
         reordered = any(
-            (previous := self._store.asset_at(row)) is not None
-            and (previous.abs_path, previous.id) != (dto.abs_path, dto.id)
-            for row, dto in rows.items() if row < previous_count
+            (previous := self._store.identity_at(row)) is not None and previous != identity
+            for identity, row in destinations.items() if row < previous_count
+        ) or any(
+            (identity := self._store.identity_at(row)) is not None and destinations.get(identity) != row
+            for row in self._persistent_rows()
         )
         if count == previous_count and not reordered:
             publish_rows()
@@ -965,22 +985,27 @@ class GalleryListModelAdapter(QAbstractListModel):
         )
         self.windowUpdateStarted.emit()
         if count > previous_count:
+            # Append inert slots while Qt still observes the old sorted rows.
             self.beginInsertRows(QModelIndex(), previous_count, count - 1)
             set_count(count)
-            if not reordered:
+            if reordered:
+                self._placeholder_start = previous_count
+            else:
                 publish_rows()
+                self._reanchor_current_asset_from_cache()
             self.endInsertRows()
 
         if reordered:
             self.layoutAboutToBeChanged.emit()
             indexes = self.persistentIndexList()
-            destinations = {(dto.abs_path, dto.id): row for row, dto in rows.items()}
-            new_indexes = []
-            for index in indexes:
-                previous = self._store.asset_at(index.row())
-                row = destinations.get((previous.abs_path, previous.id)) if previous is not None else None
-                new_indexes.append(self.index(row, index.column()) if row is not None else QModelIndex())
+            destination_rows = [destinations.get(self._store.identity_at(index.row())) for index in indexes]
             publish_rows()
+            self._placeholder_start = count if count < previous_count else None
+            self._reanchor_current_asset_from_cache()
+            new_indexes = [
+                self.index(row, index.column()) if row is not None else QModelIndex()
+                for index, row in zip(indexes, destination_rows, strict=True)
+            ]
             self.changePersistentIndexList(indexes, new_indexes)
             self.layoutChanged.emit()
 
@@ -989,8 +1014,9 @@ class GalleryListModelAdapter(QAbstractListModel):
             set_count(count)
             if not reordered:
                 publish_rows()
+                self._reanchor_current_asset_from_cache()
+            self._placeholder_start = None
             self.endRemoveRows()
-        self._reanchor_current_asset_from_cache()
         self.windowUpdateFinished.emit()
 
     def _on_versioned_window_published(self, order_changed: bool) -> None:
@@ -1068,7 +1094,10 @@ class GalleryListModelAdapter(QAbstractListModel):
         path = self._current_path
         if path is None:
             return
-        cached_row = self._store.cached_row_for_path(path)
+        cached_row = (
+            None if self._store.selection_anchor_status(path) == "missing"
+            else self._store.cached_row_for_path(path)
+        )
         self._current_row = -1 if cached_row is None else cached_row
 
     def _republish_thumbnail_demand_for_collection_revision(self) -> None:

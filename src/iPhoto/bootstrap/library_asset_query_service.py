@@ -353,6 +353,15 @@ class LibraryAssetQueryService:
         window = reader(self._collection_query_for_asset_query(query), first, limit)
         return replace(window, rows=list(self._scoped_rows(window.rows, album_path)))
 
+    def find_gallery_asset_positions(
+        self, query: AssetQuery, paths: tuple[Path, ...], order_revision: int,
+    ) -> dict[Path, tuple[str, int]] | None:
+        """Resolve offscreen index positions without changing the Gallery order snapshot."""
+
+        return self._repository().find_collection_positions(
+            self._collection_query_for_asset_query(query), paths, order_revision,
+        )
+
     def count_collection(self, query: CollectionQuery) -> int:
         """Return the number of assets matching a SQL-first collection query."""
 

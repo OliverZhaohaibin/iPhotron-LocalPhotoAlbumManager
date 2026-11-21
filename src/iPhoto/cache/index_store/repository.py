@@ -22,7 +22,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Mapping
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -1442,6 +1442,34 @@ class AssetRepository:
                 collection_revision=revision,
                 order_revision=cache.order_revision,
             )
+
+    def find_collection_positions(
+        self, query: CollectionQuery, paths: tuple[Path, ...], order_revision: int,
+    ) -> dict[Path, tuple[str, int]] | None:
+        """Return only the requested identities and their ranks at a known order."""
+
+        by_rel = {
+            path.relative_to(self.library_root).as_posix()
+            if path.is_relative_to(self.library_root) else self._library_relative_path(path): path
+            for path in paths
+        }
+        rels = tuple(by_rel)
+        order = QueryBuilder.build_collection_order(query)
+        ranked_sql, params = QueryBuilder.build_collection_query(
+            query, select_clause=f"SELECT rel, id, ROW_NUMBER() OVER ({order}) - 1", include_order=False,
+        )
+        with self._collection_snapshot() as (conn, _revision, cache):
+            if cache.order_revision != order_revision:
+                return None
+            positions = {}
+            for start in range(0, len(rels), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = rels[start:start + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join("?" for _ in chunk)
+                sql = f"SELECT * FROM ({ranked_sql}) WHERE rel IN ({placeholders})"
+                for rel, asset_id, row in conn.execute(sql, (*params, *chunk)):
+                    path = by_rel[rel]
+                    positions[path] = (str(asset_id or path), int(row))
+            return positions
 
     def _read_collection_window_rows(
         self,

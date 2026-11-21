@@ -6,10 +6,12 @@ from PySide6.QtCore import (
     QAbstractProxyModel,
     QModelIndex,
     QObject,
+    QPersistentModelIndex,
     Qt,
     QSize,
 )
 
+from .proxy_mapping import map_to_root_source, root_source_model
 from .roles import Roles
 
 
@@ -19,6 +21,7 @@ class SpacerProxyModel(QAbstractProxyModel):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._spacer_size = QSize(0, 0)
+        self._layout_indexes: list[tuple[QModelIndex, QPersistentModelIndex]] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -74,22 +77,36 @@ class SpacerProxyModel(QAbstractProxyModel):
                 )
 
         previous = self.sourceModel()
+        if previous is source_model:
+            return
+        source_signals = (
+            ("modelAboutToBeReset", self.beginResetModel),
+            ("modelReset", self.endResetModel),
+            ("rowsAboutToBeInserted", self._begin_source_insert),
+            ("rowsInserted", self.endInsertRows),
+            ("rowsAboutToBeRemoved", self._begin_source_remove),
+            ("rowsRemoved", self.endRemoveRows),
+            ("layoutAboutToBeChanged", self._begin_source_layout),
+            ("layoutChanged", self._finish_source_layout),
+            ("dataChanged", self._handle_source_data_changed),
+        )
         if previous is not None:
-            try:
-                previous.modelReset.disconnect(self._handle_source_reset)
-                previous.rowsInserted.disconnect(self._handle_source_reset)
-                previous.rowsRemoved.disconnect(self._handle_source_reset)
-                previous.dataChanged.disconnect(self._handle_source_data_changed)
-            except (RuntimeError, TypeError):  # pragma: no cover - Qt disconnect noise
-                pass
+            for name, handler in source_signals:
+                getattr(previous, name).disconnect(handler)
+            signal = getattr(root_source_model(previous), "persistentRowsRequested", None)
+            if signal is not None:
+                signal.disconnect(self._collect_persistent_source_rows)
 
+        self.beginResetModel()
         super().setSourceModel(source_model)
+        self.endResetModel()
 
         if source_model is not None:
-            source_model.modelReset.connect(self._handle_source_reset)
-            source_model.rowsInserted.connect(self._handle_source_reset)
-            source_model.rowsRemoved.connect(self._handle_source_reset)
-            source_model.dataChanged.connect(self._handle_source_data_changed)
+            for name, handler in source_signals:
+                getattr(source_model, name).connect(handler)
+            signal = getattr(root_source_model(source_model), "persistentRowsRequested", None)
+            if signal is not None:
+                signal.connect(self._collect_persistent_source_rows)
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
         if parent.isValid():
@@ -129,7 +146,7 @@ class SpacerProxyModel(QAbstractProxyModel):
     def index(
         self, row: int, column: int, parent: QModelIndex = QModelIndex()
     ) -> QModelIndex:
-        if parent.isValid():
+        if not self.hasIndex(row, column, parent):
             return QModelIndex()
         return self.createIndex(row, column)
 
@@ -174,9 +191,39 @@ class SpacerProxyModel(QAbstractProxyModel):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _handle_source_reset(self, *args, **_kwargs) -> None:  # pragma: no cover - Qt signal glue
-        self.beginResetModel()
-        self.endResetModel()
+    def _begin_source_insert(self, _parent: QModelIndex, first: int, last: int) -> None:
+        if not self.rowCount():
+            self.beginInsertRows(QModelIndex(), 0, last + 2)
+        else:
+            self.beginInsertRows(QModelIndex(), first + 1, last + 1)
+
+    def _begin_source_remove(self, _parent: QModelIndex, first: int, last: int) -> None:
+        if last - first + 1 == self.sourceModel().rowCount():
+            self.beginRemoveRows(QModelIndex(), 0, last + 2)
+        else:
+            self.beginRemoveRows(QModelIndex(), first + 1, last + 1)
+
+    def _collect_persistent_source_rows(self, rows: set[int]) -> None:
+        for proxy_index in self.persistentIndexList():
+            source_index = map_to_root_source(proxy_index)
+            if source_index.isValid():
+                rows.add(source_index.row())
+
+    def _begin_source_layout(self) -> None:
+        self.layoutAboutToBeChanged.emit()
+        self._layout_indexes = [
+            (index, QPersistentModelIndex(source_index))
+            for index in self.persistentIndexList()
+            if (source_index := self.mapToSource(index)).isValid()
+        ]
+
+    def _finish_source_layout(self) -> None:
+        self.changePersistentIndexList(
+            [index for index, _source in self._layout_indexes],
+            [self.mapFromSource(QModelIndex(source)) for _index, source in self._layout_indexes],
+        )
+        self._layout_indexes.clear()
+        self.layoutChanged.emit()
 
     def _handle_source_data_changed(
         self,

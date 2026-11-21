@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -911,6 +912,44 @@ def test_old_window_cannot_republish_a_count_after_another_writer_commits(store:
         newest = store.read_gallery_collection_window(query, 0, 301)
         assert newest == current
         assert [row["rel"] for row in newest.rows] == [f"{i:03}.jpg" for i in reversed(range(301))]
+
+
+def test_collection_revisions_follow_upserts_relocations_and_rollback(store: IndexStore) -> None:
+    query = CollectionQuery()
+    row = {
+        "rel": unicodedata.normalize("NFD", "album/café.jpg"), "id": "a", "sort_ts": 1, "is_favorite": 1,
+        "thumbnail_state": "ready", "thumb_cache_key": "key-a", "micro_thumbnail": b"original",
+    }
+    store.append_rows([row])
+    first = store.read_collection_window(query, 0, 5)
+    store.append_rows([{**row, "micro_thumbnail": b"refresh", "thumb_cache_key": "replacement"}])
+    replacement = store.read_collection_window(query, 0, 5)
+    assert replacement.collection_revision > first.collection_revision
+    assert replacement.order_revision == first.order_revision
+    assert replacement.rows[0]["micro_thumbnail"] == b"refresh"
+    asset_path = store.library_root / row["rel"]
+    assert store.find_collection_positions(query, (asset_path,), replacement.order_revision) == {asset_path: ("a", 0)}
+    indexed = store.get_rows_by_rels([row["rel"]])[row["rel"]]
+    store.merge_scan_rows([{**indexed, "sort_ts": 3}])
+    resorted = store.read_collection_window(query, 0, 5)
+    assert resorted.order_revision > replacement.order_revision
+    assert resorted.rows[0]["index_revision"] == indexed["index_revision"]
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with store.transaction(begin_mode="IMMEDIATE"):
+            store.append_rows([{**row, "rel": "album/b.jpg", "id": "b", "sort_ts": 4}])
+            uncommitted = store.read_collection_window(query, 0, 5)
+            assert uncommitted.total_count == len(uncommitted.rows) == 2
+            assert uncommitted.order_revision > resorted.order_revision
+            raise RuntimeError("rollback")
+    assert store.read_collection_window(query, 0, 5) == resorted
+
+    store.relocate_rows({row["rel"]: "other/a.jpg"}, expected_asset_ids={row["rel"]: "a"})
+    relocated = store.read_collection_window(query, 0, 5)
+    assert relocated.order_revision > resorted.order_revision
+    assert relocated.total_count == len(relocated.rows) == 0
+    assert store.find_collection_positions(query, (asset_path,), resorted.order_revision) is None
+    assert store.get_rows_by_rels(["other/a.jpg"])["other/a.jpg"]["is_favorite"] == 1
 
 
 def test_gallery_collection_window_uses_light_projection_with_micro(store: IndexStore) -> None:

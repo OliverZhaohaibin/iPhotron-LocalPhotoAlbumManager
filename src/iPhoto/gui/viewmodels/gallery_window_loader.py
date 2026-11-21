@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,6 +14,9 @@ from iPhoto.application.dtos import AssetDTO
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.infrastructure.services.performance_events import emit_perf_event
+
+
+AssetIdentity = tuple[Path, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +74,8 @@ class GalleryWindowRequest:
     refresh_after_commit: bool = False
     selection_generation: int = 0
     extra_ranges: tuple[tuple[int, int], ...] = ()
+    previous_order_revision: int | None = None
+    tracked_assets: frozenset[AssetIdentity] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +98,7 @@ class GalleryWindowResult:
     order_revision: int | None = None
     refresh_after_commit: bool = False
     requested_ranges: tuple[tuple[int, int], ...] = ()
+    tracked_rows: dict[AssetIdentity, int | None] = field(default_factory=dict)
 
 
 class _GalleryWindowSignals(QObject):
@@ -118,6 +124,7 @@ def _resolve_selection_anchor(
     reader: Any,
     rows: dict[int, AssetDTO],
     collection_revision: int,
+    order_revision: int | None,
 ) -> GallerySelectionAnchorResult | None:
     anchor = request.selection_anchor
     if anchor is None:
@@ -127,6 +134,8 @@ def _resolve_selection_anchor(
     target = _normalized_path(anchor.path)
     for view_row, dto in rows.items():
         if _normalized_path(dto.abs_path) == target:
+            if anchor.asset_id and dto.id != anchor.asset_id:
+                return GallerySelectionAnchorResult(anchor=anchor, status="missing")
             return GallerySelectionAnchorResult(
                 anchor=anchor,
                 status="resolved",
@@ -141,6 +150,11 @@ def _resolve_selection_anchor(
             raise RuntimeError("query service does not support anchor resolution")
         raw_row = find_row_by_path(request.query, anchor.path)
         if raw_row is None:
+            find_positions = getattr(request.query_service, "find_gallery_asset_positions", None)
+            if order_revision is not None and callable(find_positions):
+                positions = find_positions(request.query, (anchor.path,), order_revision)
+                if positions is None or positions:
+                    raise RuntimeError("collection changed during anchor lookup")
             return GallerySelectionAnchorResult(
                 anchor=anchor,
                 status="missing",
@@ -166,6 +180,11 @@ def _resolve_selection_anchor(
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 )
             if _normalized_path(candidate.abs_path) == target:
+                if anchor.asset_id and candidate.id != anchor.asset_id:
+                    return GallerySelectionAnchorResult(
+                        anchor=anchor, status="missing",
+                        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    )
                 dto = candidate
                 break
         if dto is None:
@@ -189,6 +208,32 @@ def _resolve_selection_anchor(
             status="retry",
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
         )
+
+
+def _resolve_tracked_rows(
+    request: GalleryWindowRequest,
+    rows: dict[int, AssetDTO],
+    order_revision: int | None,
+) -> dict[AssetIdentity, int | None]:
+    if order_revision is None or order_revision == request.previous_order_revision:
+        return {}
+    unresolved = request.tracked_assets.difference((dto.abs_path, dto.id) for dto in rows.values())
+    find_positions = getattr(request.query_service, "find_gallery_asset_positions", None)
+    if not unresolved or not callable(find_positions):
+        return {}
+    positions = find_positions(request.query, tuple(path for path, _ in unresolved), order_revision)
+    if positions is None:
+        return {}
+    tracked_rows = {}
+    for identity in unresolved:
+        path, asset_id = identity
+        position = positions.get(path)
+        if position is None or position[0] != asset_id or asset_id in request.pending_source_ids:
+            tracked_rows[identity] = None
+        else:
+            raw_row = position[1]
+            tracked_rows[identity] = raw_row - sum(row < raw_row for row in request.pending_source_rows)
+    return tracked_rows
 
 
 class _GalleryWindowWorker(QRunnable):
@@ -265,7 +310,9 @@ class _GalleryWindowWorker(QRunnable):
                 reader,
                 rows,
                 int(window.collection_revision),
+                window.order_revision,
             )
+            tracked_rows = _resolve_tracked_rows(request, rows, window.order_revision)
             emit_perf_event(
                 "gallery_window_worker_finished",
                 generation=request.generation,
@@ -306,6 +353,7 @@ class _GalleryWindowWorker(QRunnable):
                     order_revision=window.order_revision,
                     refresh_after_commit=request.refresh_after_commit,
                     requested_ranges=ranges,
+                    tracked_rows=tracked_rows,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - worker boundary
@@ -516,6 +564,8 @@ class GalleryWindowLoader(QObject):
             request.surface_id,
             request.selection_generation,
             request.extra_ranges,
+            request.previous_order_revision,
+            request.tracked_assets,
         )
 
 

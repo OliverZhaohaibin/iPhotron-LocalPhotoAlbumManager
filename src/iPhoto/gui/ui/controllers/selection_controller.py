@@ -5,7 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from PySide6.QtCore import QItemSelectionModel, QModelIndex, QObject, QCoreApplication, QPersistentModelIndex, Signal
+from PySide6.QtCore import (
+    QCoreApplication,
+    QItemSelection,
+    QItemSelectionModel,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    Signal,
+)
 from PySide6.QtWidgets import QPushButton
 
 from ..models.roles import Roles
@@ -138,6 +146,7 @@ class SelectionController(QObject):
             return
         window_signals = (
             ("windowUpdateStarted", self._begin_window_update),
+            ("layoutChanged", self._restore_window_selection),
             ("windowUpdateFinished", self._finish_window_update),
         )
         if self._bound_model is not None:
@@ -209,6 +218,26 @@ class SelectionController(QObject):
     def _begin_window_update(self) -> None:
         self._capture_selection_before_reset()
         self._window_update_active = True
+
+    def _restore_window_selection(self, *_args) -> None:
+        if not (self._window_update_active and self._active and self._selection_indexes):
+            return
+        selection_model = self._grid_view.selectionModel()
+        if selection_model is None:
+            return
+
+        indexes = [QModelIndex(index) for index in self._selection_indexes if index.isValid()]
+        selected = selection_model.selectedIndexes()
+        # Qt can keep the whole row range, including uncached replacement rows.
+        if len(selected) == len(indexes) and set(selected) == set(indexes):
+            return
+        selection = QItemSelection()
+        for index in indexes:
+            selection.select(index, index)
+        selection_model.select(
+            selection,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows,
+        )
 
     def _finish_window_update(self) -> None:
         self._window_update_active = False

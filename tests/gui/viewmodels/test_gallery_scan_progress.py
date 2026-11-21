@@ -589,6 +589,53 @@ def test_offscreen_indexes_and_selection_survive_delete_and_reorder(
     grid.deleteLater()
 
 
+@pytest.mark.parametrize("replacement_visible", [True, False])
+def test_scan_does_not_extend_a_large_select_all_to_replacement_assets(
+    gallery, make_rows, qapp, replacement_visible: bool,
+) -> None:
+    root, repository, _service, model = gallery
+    loader, store = model._window_loader, model.store
+    rows = make_rows(0, 1001)
+    repository.write_rows(rows)
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == len(rows) and loader._active_request is None)
+    store._request_async_chunk(0, len(rows) - 1, demand_generation=0, priority=0)
+    _wait_for(qapp, lambda: loader._active_request is None)
+
+    grid = GalleryGridView()
+    grid.setModel(model)
+    controller = SelectionController(QPushButton(grid), grid, None, MagicMock(), parent=grid)
+    controller.set_selection_mode(True)
+    try:
+        grid.selectAll()
+        selection = grid.selectionModel()
+        assert {index.data(Roles.ASSET_ID) for index in selection.selectedIndexes()} == {
+            row["id"] for row in rows
+        }
+
+        repository.remove_rows([rows[0]["rel"]])
+        replacement = make_rows(len(rows), 1)[0]
+        if not replacement_visible:
+            replacement["sort_ts"] = -1
+        repository.merge_scan_rows([replacement])
+        store.handle_scan_finished(root, True)
+        _wait_for(qapp, lambda: loader._active_request is None)
+
+        assert model.rowCount() == len(rows)
+        assert {index.data(Roles.ASSET_ID) for index in selection.selectedIndexes()} == {
+            row["id"] for row in rows[1:]
+        }
+        replacement_row = 0 if replacement_visible else len(rows) - 1
+        store.ensure_row_loaded(replacement_row)
+        _wait_for(qapp, lambda: loader._active_request is None)
+        replacement_index = model.index(replacement_row, 0)
+        assert replacement_index.data(Roles.ASSET_ID) == replacement["id"]
+        assert not selection.isSelected(replacement_index)
+    finally:
+        grid.setModel(None)
+        grid.deleteLater()
+
+
 @pytest.mark.parametrize("inserted", [20, 450])
 def test_scrolled_grid_keeps_anchor_offset_when_a_batch_sorts_ahead(gallery, make_rows, qapp, inserted) -> None:
     root, repository, _service, model = gallery

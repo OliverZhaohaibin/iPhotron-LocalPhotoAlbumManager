@@ -40,6 +40,7 @@ class NodeType(Enum):
     SUBALBUM = auto()
     PINNED_ALBUM = auto()
     PINNED_PERSON = auto()
+    PINNED_PET = auto()
     PINNED_GROUP = auto()
     SEPARATOR = auto()
 
@@ -106,6 +107,11 @@ class AlbumTreeModel(QAbstractItemModel):
         "people": "person.crop.square",
         "location": "mappin.and.ellipse",
         "recently deleted": "trash",
+    }
+    _PINNED_ICON_MAP: dict[NodeType, str] = {
+        NodeType.PINNED_PERSON: "person",
+        NodeType.PINNED_PET: "pawprint",
+        NodeType.PINNED_GROUP: "person.2",
     }
 
     def __init__(self, library: LibraryRuntimeController, parent: QObject | None = None) -> None:
@@ -332,7 +338,7 @@ class AlbumTreeModel(QAbstractItemModel):
             "Videos": tr("AlbumSidebar", "Videos"),
             "Live Photos": tr("AlbumSidebar", "Live Photos"),
             "Favorites": tr("AlbumSidebar", "Favorites"),
-            "People": tr("AlbumSidebar", "People"),
+            "People": tr("AlbumSidebar", "People&pets"),
             "Location": tr("AlbumSidebar", "Location"),
             "Pinned": tr("AlbumSidebar", "Pinned"),
             "Albums": tr("AlbumSidebar", "Albums"),
@@ -389,8 +395,9 @@ class AlbumTreeModel(QAbstractItemModel):
         group_lookup: dict[str, object] = {}
 
         needs_people = any(pinned_item.kind == "person" for pinned_item in pinned_items)
+        needs_pets = any(pinned_item.kind == "pet" for pinned_item in pinned_items)
         needs_groups = any(pinned_item.kind == "group" for pinned_item in pinned_items)
-        if needs_people or needs_groups:
+        if needs_people or needs_pets or needs_groups:
             people_service = resolve_people_service(
                 self._library,
                 library_root=library_root,
@@ -404,6 +411,18 @@ class AlbumTreeModel(QAbstractItemModel):
                         summary.group_id: summary
                         for summary in people_service.list_groups(summaries=cluster_summaries)
                     }
+            if needs_pets:
+                pet_service = getattr(self._library, "pet_service", None)
+                if pet_service is not None and hasattr(pet_service, "list_pets"):
+                    try:
+                        person_lookup.update(
+                            {
+                                f"pet:{summary.pet_id}": summary
+                                for summary in pet_service.list_pets(include_hidden=True)
+                            }
+                        )
+                    except Exception:
+                        pass
 
         for pinned_item in pinned_items:
             item = self._create_pinned_item(
@@ -446,6 +465,16 @@ class AlbumTreeModel(QAbstractItemModel):
             return AlbumTreeItem(
                 title,
                 NodeType.PINNED_PERSON,
+                pinned_item=pinned_item,
+            )
+        if pinned_item.kind == "pet":
+            summary = person_lookup.get(f"pet:{pinned_item.item_id}")
+            title = pinned_item.label if pinned_item.custom_label else (
+                str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            )
+            return AlbumTreeItem(
+                title,
+                NodeType.PINNED_PET,
                 pinned_item=pinned_item,
             )
         if pinned_item.kind == "group":
@@ -508,10 +537,9 @@ class AlbumTreeModel(QAbstractItemModel):
             return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.PINNED_ALBUM:
             return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
-        if item.node_type == NodeType.PINNED_PERSON:
-            return load_icon("person.svg", stroke_width=stroke_width, color=color)
-        if item.node_type == NodeType.PINNED_GROUP:
-            return load_icon("person.2.svg", stroke_width=stroke_width, color=color)
+        pinned_icon = self._PINNED_ICON_MAP.get(item.node_type)
+        if pinned_icon is not None:
+            return load_icon(f"{pinned_icon}.svg", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.HEADER:
             if item.title == "Pinned":
                 return QIcon()

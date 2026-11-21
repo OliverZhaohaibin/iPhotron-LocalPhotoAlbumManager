@@ -237,6 +237,70 @@
             <source>Zoom</source>
             <translation>Zoomen</translation>
         </message>
+        <message>
+            <source>The photo library could not be opened during startup: %1</source>
+            <translation>Die Fotobibliothek konnte beim Start nicht geöffnet werden: %1</translation>
+        </message>
+        <message>
+            <source>The photo library database is in use by another process. Close other iPhotron versions and retry.</source>
+            <translation>Die Datenbank der Fotobibliothek wird von einem anderen Prozess verwendet. Schließen Sie andere iPhotron-Versionen und versuchen Sie es erneut.</translation>
+        </message>
+        <message>
+            <source>Windows or security software is temporarily using a migration file. Close other programs or retry shortly.</source>
+            <translation>Windows oder eine Sicherheitssoftware verwendet vorübergehend eine Migrationsdatei. Schließen Sie andere Programme oder versuchen Sie es gleich erneut.</translation>
+        </message>
+        <message>
+            <source>The photo library database is damaged. The original file has been preserved.</source>
+            <translation>Die Datenbank der Fotobibliothek ist beschädigt. Die Originaldatei wurde beibehalten.</translation>
+        </message>
+        <message>
+            <source>The photo library database is read-only. Remove its read-only attribute or grant modify access.</source>
+            <translation>Die Datenbank der Fotobibliothek ist schreibgeschützt. Entfernen Sie das Schreibschutzattribut oder gewähren Sie Änderungszugriff.</translation>
+        </message>
+        <message>
+            <source>The .iPhoto work folder cannot be updated. Check that folder's permissions.</source>
+            <translation>Der Arbeitsordner .iPhoto kann nicht aktualisiert werden. Prüfen Sie die Berechtigungen dieses Ordners.</translation>
+        </message>
+        <message>
+            <source>There is not enough free disk space to prepare the photo library.</source>
+            <translation>Es ist nicht genügend freier Speicherplatz vorhanden, um die Fotobibliothek vorzubereiten.</translation>
+        </message>
+        <message>
+            <source>The photo library database could not be opened. Check the path, drive, and security software.</source>
+            <translation>Die Datenbank der Fotobibliothek konnte nicht geöffnet werden. Prüfen Sie Pfad, Laufwerk und Sicherheitssoftware.</translation>
+        </message>
+        <message>
+            <source>A safety backup could not be created. Migration did not start and the original database was preserved.</source>
+            <translation>Es konnte keine Sicherheitskopie erstellt werden. Die Migration wurde nicht gestartet und die Originaldatenbank wurde beibehalten.</translation>
+        </message>
+        <message>
+            <source>The photo library database update failed. The original database and backup were preserved.</source>
+            <translation>Die Aktualisierung der Fotobibliotheksdatenbank ist fehlgeschlagen. Originaldatenbank und Sicherung wurden beibehalten.</translation>
+        </message>
+        <message>
+            <source>This photo library was created by a newer app version. Open it with the same or a newer version.</source>
+            <translation>Diese Fotobibliothek wurde mit einer neueren App-Version erstellt. Öffnen Sie sie mit derselben oder einer neueren Version.</translation>
+        </message>
+        <message>
+            <source>The photo library index was restored after an interrupted update.</source>
+            <translation>Der Index der Fotobibliothek wurde nach einer unterbrochenen Aktualisierung wiederhergestellt.</translation>
+        </message>
+        <message>
+            <source>The photo library was recovered and opened, but temporary migration files could not be removed. They will be cleaned up later.</source>
+            <translation>Die Fotobibliothek wurde wiederhergestellt und geöffnet, temporäre Migrationsdateien konnten jedoch nicht entfernt werden. Sie werden später bereinigt.</translation>
+        </message>
+        <message>
+            <source>The photo library opened, but temporary migration files could not be removed. They will be cleaned up on a later start.</source>
+            <translation>Die Fotobibliothek wurde geöffnet, temporäre Migrationsdateien konnten jedoch nicht entfernt werden. Sie werden bei einem späteren Start bereinigt.</translation>
+        </message>
+        <message>
+            <source>Dismiss</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Download People &amp; Pets Extension…</source>
+            <translation>People-&amp;-Pets-Erweiterung herunterladen…</translation>
+        </message>
     </context>
     <context>
         <name>MapExtension</name>
@@ -320,6 +384,156 @@
             <source>Failed to relaunch the application automatically. Please restart it manually.</source>
             <translation>Die Anwendung konnte nicht automatisch neu gestartet werden. Bitte starten Sie sie manuell neu.</translation>
         </message>
+        <message>
+            <source>Install from File...</source>
+            <translation>Aus Datei installieren...</translation>
+        </message>
+        <message>
+            <source>Choose how to install the map extension.</source>
+            <translation>Wählen Sie, wie die Kartenerweiterung installiert werden soll.</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>Im Browser herunterladen</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>Wählen Sie nach dem Download das Archiv aus, um die Installation fortzusetzen.</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>Der Browser konnte nicht geöffnet werden. Kopieren Sie diesen Link, um das Archiv herunterzuladen.</translation>
+        </message>
+        <message>
+            <source>Could not download the map extension from GitHub.</source>
+            <translation>Die Kartenerweiterung konnte nicht von GitHub heruntergeladen werden.</translation>
+        </message>
+        <message>
+            <source>Check your VPN or network proxy settings, or download the archive in your browser and install it from a file.</source>
+            <translation>Prüfen Sie Ihre VPN- oder Proxy-Einstellungen oder laden Sie das Archiv im Browser herunter und installieren Sie es aus der Datei.</translation>
+        </message>
+        <message>
+            <source>Install Map Extension</source>
+            <translation>Kartenerweiterung installieren</translation>
+        </message>
+        <message>
+            <source>Map extension archives (*.zip *.tar.xz)</source>
+            <translation>Kartenerweiterungsarchive (*.zip *.tar.xz)</translation>
+        </message>
+        <message>
+            <source>Map extension is ready. Restart now to activate it?</source>
+            <translation>Die Kartenerweiterung ist bereit. Zum Aktivieren jetzt neu starten?</translation>
+        </message>
+        <message>
+            <source>Map extension is staged and waiting for restart. Restart now?</source>
+            <translation>Die Kartenerweiterung ist vorgemerkt und wartet auf einen Neustart. Jetzt neu starten?</translation>
+        </message>
+        <message>
+            <source>The map extension folder is not writable or its files are in use. Check the folder shown in Details.</source>
+            <translation>Der Ordner der Kartenerweiterung ist nicht beschreibbar oder Dateien werden verwendet. Prüfen Sie den Ordner unter Details.</translation>
+        </message>
+        <message>
+            <source>There is not enough disk space to install the map extension.</source>
+            <translation>Nicht genügend Speicherplatz zum Installieren der Kartenerweiterung.</translation>
+        </message>
+        <message>
+            <source>Another map extension installation is running. Try again when it finishes.</source>
+            <translation>Eine andere Installation der Kartenerweiterung läuft. Versuchen Sie es nach deren Abschluss erneut.</translation>
+        </message>
+        <message>
+            <source>This is not a supported map extension package. Download the official package for this app version.</source>
+            <translation>Dieses Kartenerweiterungspaket wird nicht unterstützt. Laden Sie das offizielle Paket für diese App-Version herunter.</translation>
+        </message>
+        <message>
+            <source>This map extension package is incompatible with this app or platform.</source>
+            <translation>Dieses Kartenerweiterungspaket ist mit dieser App oder Plattform nicht kompatibel.</translation>
+        </message>
+        <message>
+            <source>The map extension package is damaged or incomplete. Download it again.</source>
+            <translation>Das Kartenerweiterungspaket ist beschädigt oder unvollständig. Laden Sie es erneut herunter.</translation>
+        </message>
+        <message>
+            <source>The map extension is missing required map, search or runtime files.</source>
+            <translation>Der Kartenerweiterung fehlen erforderliche Karten-, Such- oder Laufzeitdateien.</translation>
+        </message>
+        <message>
+            <source>The map extension archive contains an unsafe path.</source>
+            <translation>Das Kartenerweiterungsarchiv enthält einen unsicheren Pfad.</translation>
+        </message>
+        <message>
+            <source>The selected map extension archive could not be found.</source>
+            <translation>Das ausgewählte Kartenerweiterungsarchiv wurde nicht gefunden.</translation>
+        </message>
+        <message>
+            <source>Map extension installation failed. Try again or install a downloaded archive.</source>
+            <translation>Die Installation der Kartenerweiterung ist fehlgeschlagen. Versuchen Sie es erneut oder installieren Sie ein heruntergeladenes Archiv.</translation>
+        </message>
+        <message>
+            <source>Retry</source>
+            <translation>Erneut versuchen</translation>
+        </message>
+        <message>
+            <source>Downloading map extension...</source>
+            <translation>Kartenerweiterung wird heruntergeladen...</translation>
+        </message>
+        <message>
+            <source>Extracting map extension...</source>
+            <translation>Kartenerweiterung wird entpackt...</translation>
+        </message>
+        <message>
+            <source>Validating map extension...</source>
+            <translation>Kartenerweiterung wird überprüft...</translation>
+        </message>
+        <message>
+            <source>Installing map extension...</source>
+            <translation>Kartenerweiterung wird installiert...</translation>
+        </message>
+        <message>
+            <source>On macOS, the map extension is included with the app and prepared automatically the first time you use maps.</source>
+            <translation>Unter macOS ist die Kartenerweiterung in der App enthalten und wird bei der ersten Kartennutzung automatisch vorbereitet.</translation>
+        </message>
+        <message>
+            <source>Manual map extension installation is not available on this platform.</source>
+            <translation>Auf dieser Plattform kann die Kartenerweiterung nicht manuell installiert werden.</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
+        </message>
+        <message>
+            <source>Details</source>
+            <translation>Details</translation>
+        </message>
+        <message>
+            <source>Restart</source>
+            <translation>Neu starten</translation>
+        </message>
+    </context>
+    <context>
+        <name>QMessageBox</name>
+        <message>
+            <source>Show Details...</source>
+            <translation>Details anzeigen…</translation>
+        </message>
+        <message>
+            <source>Hide Details...</source>
+            <translation>Details ausblenden…</translation>
+        </message>
+    </context>
+    <context>
+        <name>QPlatformTheme</name>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
+        </message>
     </context>
     <context>
         <name>StatusBar</name>
@@ -362,6 +576,10 @@
         <message>
             <source>Thumbnails updated.</source>
             <translation>Miniaturen aktualisiert.</translation>
+        </message>
+        <message>
+            <source>Thumbnail update failed.</source>
+            <translation>Miniaturen konnten nicht aktualisiert werden.</translation>
         </message>
         <message>
             <source>Loading items…</source>
@@ -444,7 +662,11 @@
         </message>
         <message>
             <source>Choose Someone Else…</source>
-            <translation>Andere Person auswählen …</translation>
+            <translation>Anderen Namen auswählen …</translation>
+        </message>
+        <message>
+            <source>New Name…</source>
+            <translation>Neuer Name …</translation>
         </message>
         <message>
             <source>New Person…</source>
@@ -459,8 +681,16 @@
             <translation>Nicht diese Person</translation>
         </message>
         <message>
+            <source>Not This Name</source>
+            <translation>Nicht dieser Name</translation>
+        </message>
+        <message>
             <source>Choose Someone Else</source>
-            <translation>Andere Person auswählen</translation>
+            <translation>Anderen Namen auswählen</translation>
+        </message>
+        <message>
+            <source>Assign to</source>
+            <translation>Zuweisen zu</translation>
         </message>
         <message>
             <source>Assign this face to</source>
@@ -475,8 +705,16 @@
             <translation>Neue Person</translation>
         </message>
         <message>
+            <source>New Name</source>
+            <translation>Neuer Name</translation>
+        </message>
+        <message>
             <source>Person name:</source>
             <translation>Name der Person:</translation>
+        </message>
+        <message>
+            <source>Name:</source>
+            <translation>Name:</translation>
         </message>
         <message>
             <source>Unnamed</source>
@@ -643,6 +881,34 @@
             <translation>Personen können nicht zusammengeführt werden</translation>
         </message>
         <message>
+            <source>Merge Failed</source>
+            <translation>Zusammenführen fehlgeschlagen</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. No photos were deleted.</source>
+            <translation>Die Identitäten konnten nicht zusammengeführt werden. Es wurden keine Fotos gelöscht.</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. They may have changed since this view was loaded.</source>
+            <translation>Die Identitäten konnten nicht zusammengeführt werden. Möglicherweise wurden sie seit dem Laden dieser Ansicht geändert.</translation>
+        </message>
+        <message>
+            <source>Recognition Busy</source>
+            <translation>Erkennung ausgelastet</translation>
+        </message>
+        <message>
+            <source>Recognition data is still recovering. Please try again shortly.</source>
+            <translation>Die Erkennungsdaten werden noch wiederhergestellt. Bitte versuchen Sie es in Kürze erneut.</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Pets</source>
+            <translation>Haustiere können nicht zusammengeführt werden</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>Eine Haustieridentität darf nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie stattdessen eine doppelte Erkennung.</translation>
+        </message>
+        <message>
             <source>Merge Person</source>
             <translation>Person zusammenführen</translation>
         </message>
@@ -713,6 +979,118 @@
         <message>
             <source>People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.</source>
             <translation>Ausgeblendete und sichtbare Personen können nicht zusammengeführt werden. Blenden Sie zuerst beide Personenkarten aus oder ein.</translation>
+        </message>
+        <message>
+            <source>Make both cards visible or both hidden before merging them.</source>
+            <translation>Blenden Sie vor dem Zusammenführen entweder beide Karten ein oder beide aus.</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Cards</source>
+            <translation>Karten können nicht zusammengeführt werden</translation>
+        </message>
+        <message>
+            <source>Name This Pet</source>
+            <translation>Dieses Haustier benennen</translation>
+        </message>
+        <message>
+            <source>Delete Detection</source>
+            <translation>Erkennung löschen</translation>
+        </message>
+        <message>
+            <source>Rename Pet</source>
+            <translation>Haustier umbenennen</translation>
+        </message>
+        <message>
+            <source>Merge Pet</source>
+            <translation>Haustier zusammenführen</translation>
+        </message>
+        <message>
+            <source>Delete This Detection?</source>
+            <translation>Diese Erkennung löschen?</translation>
+        </message>
+        <message>
+            <source>Deleting this pet detection will hide this matched crop after future rescans.</source>
+            <translation>Wenn Sie diese Haustiererkennung löschen, wird der zugehörige Bildausschnitt auch bei künftigen Scans ausgeblendet.</translation>
+        </message>
+        <message>
+            <source>Unnamed</source>
+            <translation>Unbenannt</translation>
+        </message>
+        <message>
+            <source>Hide This Pet?</source>
+            <translation>Dieses Haustier ausblenden?</translation>
+        </message>
+        <message>
+            <source>Hiding {name} will remove this pet from the People &amp; Pets view until you choose Show Hidden People or unhide it.</source>
+            <translation>Wenn Sie {name} ausblenden, verschwindet das Haustier aus der Ansicht „Personen &amp; Haustiere“, bis Sie „Ausgeblendete Personen anzeigen“ wählen oder das Haustier wieder einblenden.</translation>
+        </message>
+        <message>
+            <source>Hide Pet</source>
+            <translation>Haustier ausblenden</translation>
+        </message>
+        <message>
+            <source>Bind a Basic Library to see People &amp; Pets clusters.</source>
+            <translation>Verbinden Sie eine Basisbibliothek, um Personen- und Haustiercluster zu sehen.</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets appear here after a library is bound and scanned.</source>
+            <translation>Personen und Haustiere erscheinen hier, nachdem eine Bibliothek verbunden und gescannt wurde.</translation>
+        </message>
+        <message>
+            <source>Loading People &amp; Pets dashboard…</source>
+            <translation>Die Übersicht „Personen &amp; Haustiere“ wird geladen …</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets is updating in the background. This page will retry shortly.</source>
+            <translation>„Personen &amp; Haustiere“ wird im Hintergrund aktualisiert. Die Seite versucht es in Kürze erneut.</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets could not be loaded. Please try refreshing the page.</source>
+            <translation>„Personen &amp; Haustiere“ konnte nicht geladen werden. Bitte aktualisieren Sie die Seite.</translation>
+        </message>
+        <message>
+            <source>Click a person, pet, or group card to open matching assets.</source>
+            <translation>Klicken Sie auf die Karte einer Person, eines Haustiers oder einer Gruppe, um die zugehörigen Elemente zu öffnen.</translation>
+        </message>
+        <message>
+            <source>Scanning faces and pets in the background. This page will fill in as clusters are ready.</source>
+            <translation>Gesichter und Haustiere werden im Hintergrund gescannt. Die Cluster erscheinen hier, sobald sie bereit sind.</translation>
+        </message>
+        <message>
+            <source>No People or Pets clusters yet. Run a scan to build groups.</source>
+            <translation>Noch keine Personen- oder Haustiercluster. Starten Sie einen Scan, um Gruppen zu erstellen.</translation>
+        </message>
+        <message>
+            <source>Pet scanning is disabled.</source>
+            <translation>Der Haustierscan ist deaktiviert.</translation>
+        </message>
+        <message>
+            <source>Pet scanning is unavailable for this library.</source>
+            <translation>Der Haustierscan ist für diese Bibliothek nicht verfügbar.</translation>
+        </message>
+        <message>
+            <source>Pet scan consolidation paused: {reason}</source>
+            <translation>Die Gruppierung der Haustiererkennungen wurde angehalten: {reason}</translation>
+        </message>
+        <message>
+            <source>Pet scanning paused: {reason}</source>
+            <translation>Der Haustierscan wurde angehalten: {reason}</translation>
+        </message>
+        <message>
+            <source>Some assets need a pet-scan retry.</source>
+            <translation>Einige Elemente müssen erneut auf Haustiere gescannt werden.</translation>
+        </message>
+        <message>
+            <source>Some assets could not be pet scanned and were marked failed.</source>
+            <translation>Einige Elemente konnten nicht auf Haustiere gescannt werden und wurden als fehlgeschlagen markiert.</translation>
+        </message>
+        <message>
+            <source>A name is required before pinning this pet.</source>
+            <translation>Vor dem Anheften dieses Haustiers ist ein Name erforderlich.</translation>
+        </message>
+        <message>
+            <source>Could not save the pet's name. Please try again.</source>
+            <translation>Der Name des Haustiers konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.</translation>
         </message>
     </context>
     <context>
@@ -832,6 +1210,10 @@
         <message>
             <source>Recently Deleted</source>
             <translation>Zuletzt gelöscht</translation>
+        </message>
+        <message>
+            <source>People&amp;pets</source>
+            <translation>Personen &amp; Haustiere</translation>
         </message>
     </context>
     <context>
@@ -1070,6 +1452,22 @@
         <message>
             <source>Writing data, please wait...</source>
             <translation>Daten werden geschrieben, bitte warten …</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. Please try again.</source>
+            <translation>Der Name konnte nicht zugewiesen werden. Bitte versuchen Sie es erneut.</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. The identities may have changed.</source>
+            <translation>Der Name konnte nicht zugewiesen werden. Die Identitäten wurden möglicherweise geändert.</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>Eine Haustieridentität kann nicht zwei Erkennungen aus demselben Foto enthalten. Löschen Sie eine doppelte Erkennung, anstatt sie zusammenzuführen.</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>Eine Haustieridentität darf nicht zwei Erkennungen aus demselben Foto enthalten. Wählen Sie eine andere Identität für diese Erkennung.</translation>
         </message>
     </context>
     <context>
@@ -1349,6 +1747,10 @@
         <message>
             <source>unnamed</source>
             <translation>unbenannt</translation>
+        </message>
+        <message>
+            <source>Pending confirmation</source>
+            <translation>Bestätigung ausstehend</translation>
         </message>
         <message>
             <source>Please enter a name before saving the face.</source>
@@ -1793,6 +2195,131 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
         <message>
             <source>Return to Map</source>
             <translation>Zurück zur Karte</translation>
+        </message>
+    </context>
+    <context>
+        <name>PetCard</name>
+        <message>
+            <source>Unconfirmed Cat</source>
+            <translation>Unbestätigte Katze</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Dog</source>
+            <translation>Unbestätigter Hund</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Pet</source>
+            <translation>Unbestätigtes Haustier</translation>
+        </message>
+        <message>
+            <source>Unconfirmed</source>
+            <translation>Unbestätigt</translation>
+        </message>
+    </context>
+    <context>
+        <name>RecognitionExtension</name>
+        <message>
+            <source>People &amp; Pets Extension</source>
+            <translation>People-&amp;-Pets-Erweiterung</translation>
+        </message>
+        <message>
+            <source>Choose how to install the People &amp; Pets extension.</source>
+            <translation>Wählen Sie, wie die People-&amp;-Pets-Erweiterung installiert werden soll.</translation>
+        </message>
+        <message>
+            <source>Download</source>
+            <translation>Herunterladen</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>Abbrechen</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>Im Browser herunterladen</translation>
+        </message>
+        <message>
+            <source>Install from File…</source>
+            <translation>Aus Datei installieren…</translation>
+        </message>
+        <message>
+            <source>Later</source>
+            <translation>Später</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>Schließen</translation>
+        </message>
+        <message>
+            <source>Could not automatically get all People &amp; Pets recognition models. Download the package in your browser, then install it from a file.</source>
+            <translation>Die Erkennungsmodelle für People &amp; Pets konnten nicht vollständig automatisch heruntergeladen werden. Laden Sie das Paket im Browser herunter und installieren Sie es aus der Datei.</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>Wählen Sie das Archiv aus, sobald der Download abgeschlossen ist.</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>Der Browser konnte nicht geöffnet werden. Kopieren Sie diesen Link, um das Archiv herunterzuladen.</translation>
+        </message>
+        <message>
+            <source>Install People &amp; Pets Extension</source>
+            <translation>People-&amp;-Pets-Erweiterung installieren</translation>
+        </message>
+        <message>
+            <source>Recognition extension archives (*.zip)</source>
+            <translation>Archive der Erkennungserweiterung (*.zip)</translation>
+        </message>
+        <message>
+            <source>Preparing recognition extension…</source>
+            <translation>Erkennungserweiterung wird vorbereitet…</translation>
+        </message>
+        <message>
+            <source>Downloading recognition extension…</source>
+            <translation>Erkennungserweiterung wird heruntergeladen…</translation>
+        </message>
+        <message>
+            <source>Validating recognition extension…</source>
+            <translation>Erkennungserweiterung wird überprüft…</translation>
+        </message>
+        <message>
+            <source>Extracting recognition extension…</source>
+            <translation>Erkennungserweiterung wird entpackt…</translation>
+        </message>
+        <message>
+            <source>Installing recognition extension…</source>
+            <translation>Erkennungserweiterung wird installiert…</translation>
+        </message>
+        <message>
+            <source>Could not download the People &amp; Pets extension. Download it in your browser and install it from a file.</source>
+            <translation>Die People-&amp;-Pets-Erweiterung konnte nicht heruntergeladen werden. Laden Sie sie im Browser herunter und installieren Sie sie aus der Datei.</translation>
+        </message>
+        <message>
+            <source>The selected archive is missing, damaged, or unsupported.</source>
+            <translation>Das ausgewählte Archiv fehlt, ist beschädigt oder wird nicht unterstützt.</translation>
+        </message>
+        <message>
+            <source>Another People &amp; Pets extension installation is running.</source>
+            <translation>Die People-&amp;-Pets-Erweiterung wird bereits installiert.</translation>
+        </message>
+        <message>
+            <source>Could not install the People &amp; Pets extension.</source>
+            <translation>Die People-&amp;-Pets-Erweiterung konnte nicht installiert werden.</translation>
+        </message>
+        <message>
+            <source>Face scanning unavailable: '{path}' is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>Gesichtsscan nicht verfügbar: In „{path}“ fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
+        </message>
+        <message>
+            <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>Im Verzeichnis aus IPHOTO_FACE_MODEL_DIR fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
+        </message>
+    </context>
+    <context>
+        <name>NotificationToast</name>
+        <message>
+            <source>Installed</source>
+            <translation>Installiert</translation>
         </message>
     </context>
 </TS>

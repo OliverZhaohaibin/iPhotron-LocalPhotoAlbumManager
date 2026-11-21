@@ -80,15 +80,18 @@ class ResizeStrategy(InteractionStrategy):
             -float(delta_view.y()) * scale_y / view_scale,
         )
 
-        # Crop box definition must be constrained by the original
-        # texture bounds (scale=1, offset=0), not by the view transform state
+        # Crop coordinates live in logical post-transform space.  Perspective
+        # and straighten can project valid source pixels outside the original
+        # unit square, so fixed-ratio calculations use the transformed quad's
+        # outer bounds; exact polygon validation still happens below.
         half_width_orig = tex_w * 0.5
         half_height_orig = tex_h * 0.5
+        bound_left, bound_top, bound_right, bound_bottom = self._model.get_crop_bounds()
         img_bounds_world = {
-            "left": -half_width_orig,
-            "right": half_width_orig,
-            "bottom": -half_height_orig,
-            "top": half_height_orig,
+            "left": (bound_left - 0.5) * tex_w,
+            "right": (bound_right - 0.5) * tex_w,
+            "bottom": (0.5 - bound_bottom) * tex_h,
+            "top": (0.5 - bound_top) * tex_h,
         }
 
         # Convert the current crop rectangle into world coordinates
@@ -150,7 +153,7 @@ class ResizeStrategy(InteractionStrategy):
         crop_state.cy = (new_px_top + new_px_bottom) * 0.5 / tex_h
         crop_state.width = new_width / tex_w
         crop_state.height = new_height / tex_h
-        crop_state.clamp()
+        crop_state.clamp(self._model.get_crop_bounds())
 
         if not self._model.ensure_valid_or_revert(snapshot, allow_shrink=False):
             return

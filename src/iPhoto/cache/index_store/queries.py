@@ -13,6 +13,9 @@ from ...config import RECENTLY_DELETED_DIR_NAME
 from ...domain.models.query import CollectionQuery, CollectionType, PageCursor, SortDirection
 
 ESCAPE_CLAUSE = "ESCAPE '\\'"
+READY_THUMBNAIL_PREDICATE = (
+    "thumbnail_state = 'ready' AND TRIM(COALESCE(thumb_cache_key, '')) != ''"
+)
 
 
 def normalize_path(path_str: str) -> str:
@@ -49,6 +52,19 @@ class QueryBuilder:
     # Whitelist of allowed filter modes to prevent injection and logic errors
     _VALID_FILTER_MODES = frozenset({"videos", "live", "favorites"})
     _COLLECTION_SORT_COLUMNS = frozenset({"sort_ts", "ts", "dt", "id", "rel", "bytes"})
+
+    @staticmethod
+    def build_latest_scan_job(root: str, scope: str | None) -> tuple[str, list[str]]:
+        where = "root = ?"
+        params = [root]
+        if scope is not None:
+            where += " AND scope = ?"
+            params.append(scope)
+        return (
+            f"SELECT * FROM scan_jobs WHERE {where} "
+            "ORDER BY COALESCE(updated_at, started_at, 0) DESC, started_at DESC, rowid DESC LIMIT 1",
+            params,
+        )
 
     @staticmethod
     def build_filter_clauses(
@@ -331,12 +347,11 @@ class QueryBuilder:
         params: List[Any] = []
 
         if collection_query.min_thumbnail_state:
-            where_clauses.append("thumbnail_state = ?")
-            params.append(collection_query.min_thumbnail_state)
             if collection_query.min_thumbnail_state == "ready":
-                where_clauses.append(
-                    "TRIM(COALESCE(thumb_cache_key, '')) != ''"
-                )
+                where_clauses.append(READY_THUMBNAIL_PREDICATE)
+            else:
+                where_clauses.append("thumbnail_state = ?")
+                params.append(collection_query.min_thumbnail_state)
 
         if collection_query.collection_type == CollectionType.ALBUM or album_path:
             album_where, album_params = QueryBuilder.build_album_filter(

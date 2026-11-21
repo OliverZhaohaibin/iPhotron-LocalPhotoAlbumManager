@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from iPhoto.gui.i18n import formatters, tr
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
+from iPhoto.utils.image_loader import load_qpixmap
 
 from ....application.services.album_manifest_service import Album
 from ....bootstrap.library_asset_query_service import LibraryAssetQueryService
@@ -438,8 +439,8 @@ class DashboardThumbnailLoader(QObject):
         cache_path = generate_cache_path(effective_library_root, image_path, size, stamp)
 
         if cache_path.exists():
-            pixmap = QPixmap(str(cache_path))
-            if not pixmap.isNull():
+            pixmap = load_qpixmap(cache_path)
+            if pixmap is not None and not pixmap.isNull():
                 self.thumbnailReady.emit(album_root, image_path, pixmap)
                 return
 
@@ -694,8 +695,8 @@ class AlbumsDashboard(QWidget):
         if card is None or not cover_path.exists():
             return
         self._requested_cover_paths[card.path] = cover_path
-        pixmap = QPixmap(str(cover_path))
-        if not pixmap.isNull():
+        pixmap = load_qpixmap(cover_path)
+        if pixmap is not None and not pixmap.isNull():
             card.set_cover_image(pixmap)
         self._thumb_loader.request_with_absolute_key(card.path, cover_path, QSize(512, 512))
 

@@ -11,11 +11,78 @@ import sys
 import pytest
 
 from iPhoto.utils import ffmpeg
-from iPhoto.errors import ExternalToolError
+from iPhoto.errors import ExternalToolError, ExternalToolTimeoutError
 
 
 def _fake_completed_process(command: list[str], stdout: bytes = b"") -> subprocess.CompletedProcess[bytes]:
     return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
+
+
+def test_run_command_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_subprocess_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        captured["command"] = command
+        captured.update(kwargs)
+        return _fake_completed_process(command, stdout=b"{}")
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+    ffmpeg._run_command(["ffprobe", "movie.mov"], timeout_seconds=15.0)
+
+    assert captured["command"] == ["ffprobe", "movie.mov"]
+    assert captured["timeout"] == 15.0
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "timeout_seconds"),
+    [("ffprobe", 15.0), ("ffmpeg", 30.0)],
+)
+def test_run_command_converts_timeout_to_external_tool_timeout_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    timeout_seconds: float,
+) -> None:
+    def raise_timeout(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", raise_timeout)
+
+    with pytest.raises(
+        ExternalToolTimeoutError,
+        match=rf"{tool_name} timed out after {int(timeout_seconds)} seconds",
+    ):
+        ffmpeg._run_command([tool_name, "movie.mov"], timeout_seconds=timeout_seconds)
+
+
+def test_probe_media_uses_ffprobe_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "movie.mov"
+    video.touch()
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[bytes]:
+        captured["command"] = command
+        captured["timeout"] = timeout_seconds
+        return _fake_completed_process(command, stdout=b"{}")
+
+    monkeypatch.setattr(ffmpeg, "_run_command", fake_run)
+
+    assert ffmpeg.probe_media(video) == {}
+    assert captured["command"][0] == "ffprobe"  # type: ignore[index]
+    assert captured["timeout"] == ffmpeg._FFPROBE_COMMAND_TIMEOUT_SECONDS
 
 
 @pytest.fixture(autouse=True)
@@ -406,10 +473,15 @@ def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.Monkey
 
     input_path = tmp_path / "movie.mp4"
     input_path.touch()
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
-    def fake_run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(
+        command: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[bytes]:
         captured["cmd"] = command
+        captured["timeout"] = timeout_seconds
         return _fake_completed_process(command, stdout=b"jpeg")
 
     monkeypatch.setattr(ffmpeg, "_run_command", fake_run)
@@ -419,6 +491,8 @@ def test_extract_video_frame_uses_yuv_format_for_jpeg(monkeypatch: pytest.Monkey
     assert data == b"jpeg"
     assert "cmd" in captured
     command = captured["cmd"]
+    assert isinstance(command, list)
+    assert captured["timeout"] == ffmpeg._FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS
 
     # Check for hardware acceleration
     assert "-hwaccel" in command
@@ -443,7 +517,12 @@ def test_extract_video_frame_uses_rgba_for_png(monkeypatch: pytest.MonkeyPatch, 
     input_path.touch()
     captured: dict[str, list[str]] = {}
 
-    def fake_run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(
+        command: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert timeout_seconds == ffmpeg._FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS
         captured["cmd"] = command
         return _fake_completed_process(command, stdout=b"png")
 
@@ -477,7 +556,12 @@ def test_extract_video_frame_without_scale_enforces_even_dimensions(monkeypatch:
     input_path.touch()
     captured: dict[str, list[str]] = {}
 
-    def fake_run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(
+        command: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert timeout_seconds == ffmpeg._FFMPEG_FRAME_COMMAND_TIMEOUT_SECONDS
         captured["cmd"] = command
         return _fake_completed_process(command, stdout=b"jpeg")
 
@@ -515,6 +599,30 @@ def test_extract_video_frame_falls_back_to_opencv(monkeypatch: pytest.MonkeyPatc
     data = ffmpeg.extract_video_frame(input_path, at=0.1, scale=(100, 100), format="jpeg")
 
     assert data is fallback_data
+
+
+def test_extract_video_frame_timeout_does_not_fall_back_to_opencv(
+    monkeypatch: pytest.MonkeyPatch,
+    mocker,
+    tmp_path: Path,
+) -> None:
+    """A bounded ffmpeg timeout must not enter the unbounded OpenCV path."""
+
+    input_path = tmp_path / "stalled.mov"
+    input_path.touch()
+    timeout_error = ExternalToolTimeoutError("ffmpeg timed out after 30 seconds")
+
+    def fake_ffmpeg(*args: object, **kwargs: object) -> bytes:
+        raise timeout_error
+
+    monkeypatch.setattr(ffmpeg, "_extract_with_ffmpeg", fake_ffmpeg)
+    fallback = mocker.patch.object(ffmpeg, "_extract_with_opencv")
+
+    with pytest.raises(ExternalToolTimeoutError) as exc_info:
+        ffmpeg.extract_video_frame(input_path, format="jpeg")
+
+    assert exc_info.value is timeout_error
+    fallback.assert_not_called()
 
 
 def test_extract_video_frame_propagates_error_when_no_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

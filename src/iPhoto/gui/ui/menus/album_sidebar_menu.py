@@ -163,6 +163,7 @@ class AlbumSidebarContextMenu(QMenu):
             self.addAction(tr("AlbumSidebar", "Unpin"), self._unpin_sidebar_item)
         if self._item.node_type in {
             NodeType.PINNED_PERSON,
+            NodeType.PINNED_PET,
             NodeType.PINNED_GROUP,
         }:
             self.addAction(tr("AlbumSidebar", "Rename…"), self._prompt_rename_pinned_item)
@@ -304,11 +305,12 @@ class AlbumSidebarContextMenu(QMenu):
             )
             return
         try:
+            # albumRenamed preserves the active section and child path before
+            # treeUpdated. Do not queue a path-only selection after it returns.
             self._library.rename_album(item.album, target_name)
         except LibraryError as exc:  # pragma: no cover - GUI feedback
             dialogs.show_warning(self.parentWidget(), str(exc))
             return
-        self._set_pending_selection(item.album.path.parent / target_name)
 
     @staticmethod
     def _reveal_path(album: AlbumNode | None) -> None:

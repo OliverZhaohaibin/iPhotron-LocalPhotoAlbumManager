@@ -6,7 +6,6 @@ from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
-    QGuiApplication,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -38,7 +37,7 @@ from .people_dashboard_shared import (
     AVATAR_TILE_WIDTH,
     PLACEHOLDER_BACKDROPS,
     _qcolor,
-    _widget_uses_dark_theme,
+    _resolve_dashboard_dark_mode,
     people_cover_cache,
     request_cover_pixmap,
 )
@@ -202,32 +201,7 @@ class MergeConfirmDialog(QDialog):
 
     @staticmethod
     def _resolve_dark_mode(parent: QWidget | None) -> bool:
-        widget = parent.window() if parent is not None and parent.window() is not None else parent
-        coordinator = getattr(widget, "coordinator", None)
-        context = getattr(coordinator, "_context", None)
-        theme_manager = getattr(context, "theme", None)
-        if theme_manager is not None and hasattr(theme_manager, "get_effective_theme_mode"):
-            return theme_manager.get_effective_theme_mode() == "dark"
-
-        settings = getattr(context, "settings", None)
-        if settings is not None and hasattr(settings, "get"):
-            theme_setting = settings.get("ui.theme", "system")
-            if theme_setting == "dark":
-                return True
-            if theme_setting == "light":
-                return False
-
-        # Prefer the actual widget palette before falling back to the global
-        # OS color scheme; the app can be in Light Mode while the system stays dark.
-        if _widget_uses_dark_theme(widget):
-            return True
-        if parent is not None and _widget_uses_dark_theme(parent):
-            return True
-
-        app = QGuiApplication.instance()
-        if app is not None and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
-            return True
-        return False
+        return _resolve_dashboard_dark_mode(parent)
 
     def _sync_geometry(self) -> None:
         parent = self.parentWidget()
@@ -409,7 +383,9 @@ class GroupPeopleDialog(QDialog):
         self._selected_ids: set[str] = set()
         self._selection_order: list[str] = []
         self._anchor_index: int | None = None
-        self._dark_mode = _widget_uses_dark_theme(parent) if dark_mode is None else bool(dark_mode)
+        self._dark_mode = (
+            _resolve_dashboard_dark_mode(parent) if dark_mode is None else bool(dark_mode)
+        )
         self._drag_pos: QPoint | None = None
         self._min_selection = max(1, int(min_selection))
         self._max_selection = None if max_selection is None else max(1, int(max_selection))

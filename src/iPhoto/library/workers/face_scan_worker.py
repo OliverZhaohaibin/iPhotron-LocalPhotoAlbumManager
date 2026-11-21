@@ -6,12 +6,14 @@ import queue
 from pathlib import Path
 from typing import Iterable
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QCoreApplication, QThread, Signal
 
+from ...people.errors import FaceModelUnavailableError, FaceRuntimeUnavailableError
 from ...people.index_coordinator import (
     PeopleIndexCoordinator,
     PeopleSnapshotCommittedError,
 )
+from ...people.model_paths import face_model_override_dir, resolve_face_model_dir
 from ...people.pipeline import FaceClusterPipeline
 from ...people.service import PeopleService, face_library_paths
 from ...people.status import (
@@ -31,6 +33,7 @@ class FaceScanWorker(QThread):
 
     peopleIndexUpdated = Signal()
     statusChanged = Signal(str)
+    modelUnavailable = Signal(str)
 
     BATCH_SIZE = 4
     QUEUE_TARGET_SIZE = 16
@@ -80,7 +83,10 @@ class FaceScanWorker(QThread):
             return
 
         paths = face_library_paths(self._library_root)
-        pipeline = FaceClusterPipeline(model_root=paths.model_dir)
+        model_override = face_model_override_dir()
+        pipeline = FaceClusterPipeline(
+            model_root=model_override or resolve_face_model_dir(paths.model_dir)
+        )
         coordinator = self._people_service.coordinator
         if coordinator is None:
             self.statusChanged.emit("Face scanning is unavailable for this library.")
@@ -113,21 +119,35 @@ class FaceScanWorker(QThread):
                     self._queued_ids.discard(asset_id)
                 self.statusChanged.emit(str(exc))
                 return
-            except RuntimeError as exc:
-                self._mark_remaining_failed(batch)
-                self.statusChanged.emit(str(exc))
+            except FaceModelUnavailableError as exc:
+                if not self._cancelled:
+                    if model_override is not None:
+                        self.statusChanged.emit(
+                            QCoreApplication.translate(
+                                "RecognitionExtension",
+                                "Face scanning unavailable: '{path}' is missing usable face "
+                                "models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.",
+                            ).format(path=model_override)
+                        )
+                        self.modelUnavailable.emit("invalid_override")
+                    else:
+                        self.statusChanged.emit(str(exc))
+                        self.modelUnavailable.emit(exc.reason)
                 return
-            except Exception as exc:  # pragma: no cover - defensive runtime guard
+            except FaceRuntimeUnavailableError as exc:
+                if not self._cancelled:
+                    self.statusChanged.emit(str(exc))
+                return
+            except RuntimeError as exc:
+                if not self._cancelled:
+                    self.statusChanged.emit(str(exc))
+                return
+            except Exception as exc:
                 LOGGER.warning("Face scan batch failed: %s", exc, exc_info=True)
-                # The batch is retried so the assets remain pending/retry in the
-                # store and will be re-detected on the next scan.  We do NOT
-                # extend pending_done_ids here because we cannot guarantee
-                # session.commit() will succeed for partially staged results.
-                self._mark_rows_retry(batch)
-                reason = str(exc).strip() or exc.__class__.__name__
-                self.statusChanged.emit(f"Face scanning paused: {reason}")
-                if self._input_closed:
-                    return
+                if not self._cancelled:
+                    reason = str(exc).strip() or exc.__class__.__name__
+                    self.statusChanged.emit(f"Face scanning paused: {reason}")
+                return
 
     def _prime_pending_rows(self) -> None:
         self._top_up_pending_rows()
@@ -173,8 +193,11 @@ class FaceScanWorker(QThread):
     ) -> bool:
         """Detect faces for *batch* and commit a realtime People snapshot."""
         if self._cancelled:
-            self._mark_rows_retry(batch)
             return False
+        attempted_statuses = {
+            Path(str(row["rel"])).as_posix(): normalize_face_status(row.get("face_status"))
+            for row in batch if row.get("rel")
+        }
         detected = list(
             pipeline.detect_faces_for_rows(
                 batch,
@@ -185,7 +208,6 @@ class FaceScanWorker(QThread):
         )
 
         if self._cancelled:
-            self._mark_rows_retry(batch)
             return False
 
         retry_items = [item for item in detected if item.asset_id and item.error]
@@ -196,76 +218,44 @@ class FaceScanWorker(QThread):
                 item.asset_rel,
                 item.error,
             )
-        retry_id_set = {str(item.asset_id) for item in retry_items}
-        retry_source_ids = {
-            str(row.get("id") or "")
-            for row in batch
-            if str(row.get("id") or "") in retry_id_set
-            and normalize_face_status(row.get("face_status")) == FACE_STATUS_RETRY
-        }
-        first_retry_ids = [asset_id for asset_id in retry_id_set if asset_id not in retry_source_ids]
-        failed_ids = [asset_id for asset_id in retry_id_set if asset_id in retry_source_ids]
-
-        if first_retry_ids:
+        event = coordinator.submit_detected_batch(
+            detected,
+            distance_threshold=pipeline.distance_threshold,
+            min_samples=pipeline.min_samples,
+            is_cancelled=lambda: self._cancelled,
+            attempted_statuses=attempted_statuses,
+        )
+        statuses: list[str | None] = []
+        store = self._people_service.asset_repository
+        if retry_items and not self._cancelled and store is not None:
+            rows = store.get_rows_by_rels(item.asset_rel for item in retry_items)
+            statuses = [
+                normalize_face_status(row.get("face_status"))
+                for item in retry_items
+                if (row := rows.get(item.asset_rel)) is not None and row.get("id") == item.asset_id
+            ]
+        if FACE_STATUS_RETRY in statuses:
             self.statusChanged.emit("Some assets need a face-scan retry.")
-        if failed_ids:
-            self._update_face_statuses(
-                failed_ids,
-                FACE_STATUS_FAILED,
-            )
+        if FACE_STATUS_FAILED in statuses:
             self.statusChanged.emit(
                 "Some assets could not be face scanned and will be retried after a rescan."
             )
-        retry_detected = [
-            item
-            for item in detected
-            if not item.asset_id or str(item.asset_id) not in failed_ids
-        ]
-
-        event = coordinator.submit_detected_batch(
-            retry_detected,
-            distance_threshold=pipeline.distance_threshold,
-            min_samples=pipeline.min_samples,
+        metrics = getattr(pipeline, "last_scan_metrics", None)
+        LOGGER.info(
+            "Face scan batch processed for %s: assets=%d candidates=%d accepted=%d "
+            "low_confidence=%d too_small=%d tiny_area=%d relative_area=%d "
+            "retry=%d failed=%d quality_version=%s",
+            self._library_root,
+            len(batch),
+            getattr(metrics, "face_candidates_total", 0),
+            getattr(metrics, "face_accepted", 0),
+            getattr(metrics, "face_rejected_confidence", 0),
+            getattr(metrics, "face_rejected_size", 0),
+            getattr(metrics, "face_rejected_tiny_area", 0),
+            getattr(metrics, "face_rejected_relative_area", 0),
+            statuses.count(FACE_STATUS_RETRY),
+            statuses.count(FACE_STATUS_FAILED),
+            getattr(pipeline, "candidate_quality_version", "legacy"),
         )
+
         return event is not None
-
-    def _mark_rows_retry(self, rows: Iterable[dict]) -> None:
-        ids = [str(row.get("id") or "") for row in rows if row.get("id")]
-        self._update_face_statuses(ids, FACE_STATUS_RETRY)
-        for asset_id in ids:
-            self._queued_ids.discard(asset_id)
-
-    def _mark_remaining_retry(self, initial_rows: Iterable[dict]) -> None:
-        self._mark_rows_retry(initial_rows)
-        remaining = list(
-            self._read_rows_by_face_status([FACE_STATUS_PENDING, FACE_STATUS_RETRY])
-        )
-        self._mark_rows_retry(remaining)
-
-    def _mark_rows_failed(self, rows: Iterable[dict]) -> None:
-        ids = [str(row.get("id") or "") for row in rows if row.get("id")]
-        self._update_face_statuses(ids, FACE_STATUS_FAILED)
-        for asset_id in ids:
-            self._queued_ids.discard(asset_id)
-
-    def _mark_remaining_failed(self, initial_rows: Iterable[dict]) -> None:
-        self._mark_rows_failed(initial_rows)
-        remaining = list(self._read_rows_by_face_status([FACE_STATUS_PENDING, FACE_STATUS_RETRY]))
-        self._mark_rows_failed(remaining)
-
-    def _read_rows_by_face_status(
-        self,
-        statuses: Iterable[str],
-        *,
-        limit: int | None = None,
-    ) -> Iterable[dict]:
-        store = self._people_service.asset_repository
-        if store is None:
-            return ()
-        return store.read_rows_by_face_status(statuses, limit=limit)
-
-    def _update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
-        store = self._people_service.asset_repository
-        if store is None:
-            return
-        store.update_face_statuses(asset_ids, status)

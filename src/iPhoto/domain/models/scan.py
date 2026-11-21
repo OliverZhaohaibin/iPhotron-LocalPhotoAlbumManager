@@ -29,6 +29,10 @@ class ScanJob:
     failed_count: int = 0
 
 
+def scan_job_completed(job: dict[str, Any] | None) -> bool:
+    return bool(job and job.get("status") == "completed" and job.get("finished_at") is not None)
+
+
 @dataclass(frozen=True)
 class ScanBatchCommitted:
     job_id: str

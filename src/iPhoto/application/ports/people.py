@@ -12,6 +12,9 @@ class PeopleAssetRepositoryPort(Protocol):
     def get_rows_by_ids(self, asset_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
         """Return asset rows keyed by asset id."""
 
+    def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return asset rows keyed by library-relative path."""
+
     def read_rows_by_face_status(
         self,
         statuses: Iterable[str],
@@ -23,8 +26,17 @@ class PeopleAssetRepositoryPort(Protocol):
     def update_face_status(self, asset_id: str, status: str) -> None:
         """Persist the face status for one asset row."""
 
-    def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
-        """Persist the same face status for many asset rows."""
+    def update_face_statuses(
+        self,
+        asset_ids: Iterable[str],
+        status: str,
+        *,
+        expected_statuses: tuple[str | None, ...] | None = None,
+    ) -> None:
+        """Persist face status only for rows matching the expected statuses, if given."""
+
+    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
+        """Reset every eligible done asset without materializing all IDs."""
 
     def count_by_face_status(self) -> dict[str, int]:
         """Return face-status counts from the asset index."""

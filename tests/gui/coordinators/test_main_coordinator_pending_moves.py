@@ -2,7 +2,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+from iPhoto.gui.coordinators.main_coordinator import DesktopCoordinatorRuntime
+
+MainCoordinator = DesktopCoordinatorRuntime
 
 
 class _PendingMoveModel:
@@ -83,14 +85,17 @@ def test_move_finished_failure_rolls_back_pending_moves() -> None:
     assert model.cleared == []
 
 
-def test_library_tree_update_rebinds_location_write_queue() -> None:
+def test_library_tree_update_rebinds_created_location_domain() -> None:
     root = Path("/library")
-    location_queue = Mock(bind_library_root=Mock())
+    location_info = Mock(rebind_library=Mock())
     coordinator = SimpleNamespace(
         _library_root=lambda: root,
         _logger=Mock(debug=Mock()),
         _context=SimpleNamespace(asset_runtime=Mock(bind_library_root=Mock())),
-        _location_write_queue=location_queue,
+        _location_info=location_info,
+        _recognition=None,
+        gallery=Mock(rebind_library=Mock()),
+        detail=Mock(rebind_library=Mock()),
         _asset_list_vm=Mock(rebind_asset_query_service=Mock()),
         _asset_query_service=Mock(return_value=object()),
         _asset_state_service=Mock(return_value=object()),
@@ -101,6 +106,7 @@ def test_library_tree_update_rebinds_location_write_queue() -> None:
         _detail_vm=Mock(bind_asset_state_service=Mock()),
         _window=SimpleNamespace(ui=None),
         _people_service=Mock(return_value=None),
+        _pet_service=Mock(return_value=None),
         _map_runtime=Mock(return_value=None),
         _map_interaction_service=Mock(return_value=None),
         _map_extension_download=Mock(set_package_root=Mock()),
@@ -110,4 +116,4 @@ def test_library_tree_update_rebinds_location_write_queue() -> None:
 
     MainCoordinator._on_library_tree_updated(coordinator)
 
-    location_queue.bind_library_root.assert_called_once_with(root)
+    location_info.rebind_library.assert_called_once_with()

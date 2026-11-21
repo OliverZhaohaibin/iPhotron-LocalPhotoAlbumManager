@@ -9,7 +9,12 @@ from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QMenu, QWidget
 
 
-def apply_menu_style(menu: QMenu, anchor: QWidget | None) -> None:
+def apply_menu_style(
+    menu: QMenu,
+    anchor: QWidget | None,
+    *,
+    scrollable: bool = False,
+) -> None:
     """Apply the main window's rounded popup styling to ``menu``."""
 
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -20,19 +25,27 @@ def apply_menu_style(menu: QMenu, anchor: QWidget | None) -> None:
         | Qt.WindowType.Popup
     )
 
+    stylesheet: Optional[str] = None
     main_window = anchor.window() if anchor is not None else None
     if main_window is not None:
         menu.setPalette(main_window.palette())
         menu.setBackgroundRole(QPalette.ColorRole.Base)
 
         accessor = getattr(main_window, "get_qmenu_stylesheet", None)
-        stylesheet: Optional[str]
         if callable(accessor):
             stylesheet = accessor()
         else:
             fallback_accessor = getattr(main_window, "menu_stylesheet", None)
             stylesheet = fallback_accessor() if callable(fallback_accessor) else None
-        if isinstance(stylesheet, str) and stylesheet:
-            menu.setStyleSheet(stylesheet)
+
+    if scrollable:
+        # Avoid platform-default columns overflowing the screen for long menus.
+        stylesheet = (stylesheet or menu.styleSheet()) + "\nQMenu { menu-scrollable: 1; }"
+        # Qt initializes its scroller on style changes. Polish inherited styles
+        # first so applying this hint also updates an unshown submenu's scroller.
+        menu.ensurePolished()
+
+    if isinstance(stylesheet, str) and stylesheet:
+        menu.setStyleSheet(stylesheet)
 
     menu.setGraphicsEffect(None)

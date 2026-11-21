@@ -125,7 +125,11 @@ class LibraryAssetOperationService:
                 errors=[f"Move destination is not a directory: {destination_root}"],
             )
 
-        if self._paths_equal(destination_root, source_root):
+        # A move can flatten files from subalbums into this source scope. Only
+        # each file's parent determines whether it is already at the target.
+        if operation_normalized != "move" and self._paths_equal(
+            destination_root, source_root
+        ):
             return self._rejected_move(
                 operation_normalized,
                 source_root=source_root,

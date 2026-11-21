@@ -32,6 +32,7 @@ def test_thumbnail_loader_retries_once_on_failure(tmp_path):
         False,
         None,
         None,
+        loader._generation_token(rel),
     )
     loader._pending_keys.add(base_key)
     loader._active_jobs_count = 1

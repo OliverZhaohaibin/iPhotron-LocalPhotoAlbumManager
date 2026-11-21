@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for context menu tests", exc_type=ImportError)
 
+from iPhoto.bootstrap.library_asset_lifecycle_service import AssetLifecycleResult
+from iPhoto.bootstrap.library_asset_operation_service import (
+    AssetMovePlan,
+    LibraryAssetOperationService,
+)
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinatorRuntime
+from iPhoto.gui.services.asset_move_service import AssetMoveService
 from iPhoto.gui.services.restoration_service import RestoreBatch, RestoreScheduleResult
 from iPhoto.gui.ui.controllers.context_menu_controller import ContextMenuController
 from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
+from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
+from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
 
 
 def _make_controller(
@@ -20,10 +32,16 @@ def _make_controller(
 ):
     grid_view = MagicMock()
     selection_model = MagicMock()
-    selected_index = MagicMock()
-    selected_index.isValid.return_value = True
-    selected_index.row.return_value = 0
-    selection_model.selectedIndexes.return_value = [selected_index]
+    selected_indexes = []
+    for row, path in enumerate(selected_paths or [None]):
+        selected_index = MagicMock()
+        selected_index.isValid.return_value = True
+        selected_index.row.return_value = row
+        selected_index.data.side_effect = (
+            lambda role=None, path=path: path if role == Roles.ABS else None
+        )
+        selected_indexes.append(selected_index)
+    selection_model.selectedIndexes.return_value = selected_indexes
     grid_view.selectionModel.return_value = selection_model
 
     facade = MagicMock()
@@ -45,6 +63,43 @@ def _make_controller(
     if mock_optimistic:
         controller._apply_optimistic_move = MagicMock(return_value=True)  # type: ignore[method-assign]
     return controller, facade
+
+
+def _submitted_plan(paths: list[Path], target: Path) -> AssetMovePlan:
+    return AssetMovePlan(
+        operation="move",
+        source_root=target.parent,
+        destination_root=target,
+        sources=paths,
+    )
+
+
+@pytest.mark.parametrize(
+    ("selected_rel_paths", "last_album", "expected_targets"),
+    [
+        (["B/photo.jpg"], "A", ["A", "A/Child", "C"]),
+        (["A/photo.jpg", "B/photo.jpg"], "A", ["A", "A/Child", "B", "C"]),
+        (["A/Child/photo.jpg"], "A", ["A", "B", "C"]),
+        (["A/photo.jpg"], "A", ["A/Child", "B", "C"]),
+        ([], "A", ["A", "A/Child", "B", "C"]),
+    ],
+)
+def test_move_targets_follow_selected_sources_instead_of_browsing_history(
+    tmp_path: Path,
+    selected_rel_paths: list[str],
+    last_album: str,
+    expected_targets: list[str],
+) -> None:
+    controller, facade = _make_controller(
+        selected_paths=[tmp_path / path for path in selected_rel_paths],
+    )
+    facade.current_album = SimpleNamespace(root=tmp_path / last_album)
+    entries = [(name, tmp_path / name) for name in ("A", "A/Child", "B", "C")]
+    controller._navigation.sidebar_model.return_value.iter_album_entries.return_value = entries
+
+    assert controller._collect_move_targets() == [
+        (name, tmp_path / name) for name in expected_targets
+    ]
 
 
 def test_delete_selection_prepares_paths_before_mutation() -> None:
@@ -94,8 +149,8 @@ def test_execute_move_to_album_prepares_paths_before_move() -> None:
     controller._apply_optimistic_move = MagicMock(  # type: ignore[method-assign]
         side_effect=lambda paths, destination_root: events.append("optimistic") or True
     )
-    facade.move_assets.side_effect = (
-        lambda paths, target: events.append(f"move:{target}") or True
+    facade.move_assets_with_plan.side_effect = (
+        lambda paths, target: events.append(f"move:{target}") or _submitted_plan(paths, target)
     )
 
     controller._execute_move_to_album(destination)
@@ -112,8 +167,8 @@ def test_execute_move_to_album_waits_for_backend_acceptance() -> None:
     controller._apply_optimistic_move = MagicMock(  # type: ignore[method-assign]
         side_effect=lambda paths, destination_root: events.append("optimistic") or True
     )
-    facade.move_assets.side_effect = (
-        lambda paths, target: events.append(f"move:{target}") or False
+    facade.move_assets_with_plan.side_effect = (
+        lambda paths, target: events.append(f"move:{target}")
     )
 
     controller._execute_move_to_album(destination)
@@ -224,17 +279,97 @@ def test_move_selection_uses_current_grid_model_for_optimistic_move() -> None:
     selected_index.data.side_effect = (
         lambda role=None: str(asset_path) if role == Roles.ABS else None
     )
-    facade.move_assets.return_value = True
+    facade.move_assets_with_plan.return_value = _submitted_plan([asset_path], destination)
 
     controller._execute_move_to_album(destination)
 
-    facade.move_assets.assert_called_once_with([asset_path], destination)
+    facade.move_assets_with_plan.assert_called_once_with([asset_path], destination)
     current_model.optimistic_move_paths.assert_called_once_with(
         [asset_path],
         destination,
         is_delete=False,
     )
     stale_model.optimistic_move_paths.assert_not_called()
+
+
+def test_move_fallback_removes_only_accepted_selection_rows(tmp_path: Path) -> None:
+    skipped = tmp_path / "A" / "already.jpg"
+    movable = tmp_path / "B" / "move.jpg"
+    controller, facade = _make_controller(selected_paths=[skipped, movable])
+    facade.move_assets_with_plan.return_value = _submitted_plan([movable], skipped.parent)
+    controller._apply_optimistic_move.return_value = False
+    controller._remove_selection_rows = MagicMock()
+    indexes = controller._grid_view.selectionModel().selectedIndexes()
+
+    controller._execute_move_to_album(skipped.parent)
+
+    controller._apply_optimistic_move.assert_called_once_with(
+        [movable], destination_root=skipped.parent
+    )
+    controller._remove_selection_rows.assert_called_once_with([indexes[1]])
+
+
+@pytest.mark.parametrize("source_album", ["B", "A/Child"])
+def test_mixed_move_to_last_album_clears_all_pending_state(
+    tmp_path: Path, qapp, source_album: str
+) -> None:
+    root = tmp_path.resolve()
+    target = root / "A"
+    source = root / source_album
+    target.mkdir()
+    source.mkdir(parents=True)
+    skipped = target / "already.jpg"
+    movable = source / "move.jpg"
+    skipped.write_bytes(b"already")
+    movable.write_bytes(b"move")
+    lifecycle = SimpleNamespace(apply_move=lambda **_kwargs: AssetLifecycleResult())
+    library = SimpleNamespace(
+        root=lambda: root,
+        asset_operation_service=LibraryAssetOperationService(
+            root, lifecycle_service=lifecycle
+        ),
+    )
+    tasks = MagicMock()
+    service = AssetMoveService(
+        task_manager=tasks,
+        current_album_getter=lambda: SimpleNamespace(root=target),
+        library_manager_getter=lambda: library,
+    )
+    store = GalleryCollectionStore(None, library_root=root)
+    store._current_query = AssetQuery()
+    store.append_dtos([
+        scan_row_to_dto(root, path.relative_to(root).as_posix(), {"id": str(path)})
+        for path in (skipped, movable)
+    ])
+    model = GalleryListModelAdapter(store, MagicMock())
+    controller, facade = _make_controller(
+        selected_paths=[skipped, movable], mock_optimistic=False
+    )
+    controller._grid_view.model.return_value = model
+    facade.move_assets_with_plan.side_effect = service.move_assets_with_plan
+    coordinator = SimpleNamespace(_asset_list_vm=model)
+    service.moveCompletedDetailed.connect(
+        lambda *args: DesktopCoordinatorRuntime._handle_move_completed_pending_cleanup(
+            coordinator, *args
+        )
+    )
+
+    controller._execute_move_to_album(target)
+
+    assert len(store._pending_moves) == 1
+    assert store._pending_moves[0].source_abs == movable
+    assert store.row_for_path(skipped) is not None
+    submitted = tasks.submit_task.call_args.kwargs
+    worker = submitted["worker"]
+    worker.signals.finished.connect(submitted["on_finished"])
+    worker.run()
+
+    assert skipped.read_bytes() == b"already"
+    assert (target / movable.name).read_bytes() == b"move"
+    assert not movable.exists()
+    assert store._pending_moves == []
+    assert store._pending_paths == set()
+    assert store.row_for_path(skipped) is not None
 
 
 def test_restore_selection_uses_current_grid_model_for_optimistic_move() -> None:

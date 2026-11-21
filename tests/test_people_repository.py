@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 
 import numpy as np
 import pytest
@@ -101,6 +102,130 @@ def _person_record(
         sample_count=sample_count,
         profile_state="stable" if sample_count >= 3 else "unstable",
     )
+
+
+def test_person_summaries_read_while_writer_holds_reserved_lock(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db")
+    repository.initialize()
+    locker = sqlite3.connect(repository.db_path, timeout=0.1)
+    try:
+        locker.execute("BEGIN IMMEDIATE")
+
+        assert repository.get_person_summaries() == []
+    finally:
+        locker.rollback()
+        locker.close()
+
+
+def test_person_summary_asset_count_counts_unique_auto_and_manual_assets(
+    tmp_path: Path,
+) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    face_a = _face_record(
+        face_id="face-a",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    face_b = _face_record(
+        face_id="face-b",
+        asset_id="asset-a",
+        asset_rel="album/a.jpg",
+        person_id="person-a",
+    )
+    person = _person_record(
+        person_id="person-a",
+        key_face_id="face-a",
+        face_count=2,
+        name="Alice",
+    )
+    repository.replace_all([face_a, face_b], [person])
+    assert repository.state_repository is not None
+    repository.state_repository.add_manual_face(
+        ManualFaceRecord(
+            face_id="manual-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            box_x=20,
+            box_y=20,
+            box_w=80,
+            box_h=80,
+            thumbnail_path=None,
+            person_id="person-a",
+            created_at=_now_iso(),
+            image_width=400,
+            image_height=300,
+        )
+    )
+
+    summaries = repository.get_person_summaries()
+
+    assert summaries[0].face_count == 3
+    assert summaries[0].asset_count == 1
+
+
+def test_group_members_legacy_schema_migrates_to_identity_members(tmp_path: Path) -> None:
+    db_path = tmp_path / "face_state.db"
+    timestamp = _now_iso()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE people_groups (
+                group_id TEXT PRIMARY KEY,
+                member_key TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE people_group_members (
+                group_id TEXT NOT NULL,
+                person_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (group_id, person_id)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO people_groups VALUES (?, ?, ?, ?)",
+            ("group-a", "person-a|person-b", timestamp, timestamp),
+        )
+        conn.executemany(
+            "INSERT INTO people_group_members VALUES (?, ?, ?)",
+            [
+                ("group-a", "person-a", 0),
+                ("group-a", "person-b", 1),
+            ],
+        )
+
+    repository = FaceStateRepository(db_path)
+    repository.initialize()
+
+    [group] = repository.list_groups()
+    assert group.member_person_ids == ("person-a", "person-b")
+    assert [(member.kind, member.entity_id) for member in group.member_entities] == [
+        ("person", "person-a"),
+        ("person", "person-b"),
+    ]
+    duplicate = repository.create_group(("person-a", "person-b"))
+    assert duplicate is not None
+    assert duplicate.group_id == "group-a"
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(people_group_members)").fetchall()
+        }
+        [member_key] = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT member_key FROM people_groups WHERE group_id = ?",
+                ("group-a",),
+            ).fetchall()
+        ]
+    assert {"member_kind", "member_id"}.issubset(columns)
+    assert member_key == "person:person-a\x1fperson:person-b"
 
 
 def test_remove_faces_for_assets_deletes_affected_person_rows_first(tmp_path: Path) -> None:
@@ -203,6 +328,71 @@ def test_person_card_order_persists_across_reload(tmp_path: Path) -> None:
     repository.replace_all(faces, persons)
     persisted = repository.get_person_summaries()
     assert [summary.person_id for summary in persisted] == ["person-b", "person-a"]
+
+
+def test_identity_card_order_keeps_omitted_slots_and_survives_a_rebuild(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_person_order(["alice", "bob"])
+    assert state.get_identity_card_order() == ()
+    state.set_identity_card_order(("person:alice", "pet:hidden", "pet:alice", "person:bob"))
+
+    reordered = ("person:bob", "pet:hidden", "pet:alice", "person:alice")
+    assert state.set_identity_card_order(("person:bob", "pet:alice", "person:alice")) == reordered
+    assert state.get_person_order_map(["alice", "bob"]) == {"bob": 0, "alice": 1}
+
+    state.sync_scan_results([], [])
+    reopened = FaceStateRepository(state.db_path)
+    assert reopened.get_identity_card_order() == reordered
+
+    reopened.set_person_order(["alice", "bob"])
+    assert reopened.get_identity_card_order() == ("person:alice", "pet:hidden", "pet:alice", "person:bob")
+
+
+def test_first_identity_card_order_preserves_omitted_legacy_people(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_person_order(["alice", "hidden-middle", "bob", "hidden-last"])
+    assert state.get_identity_card_order() == ()
+
+    visible_order = ("pet:miso", "person:alice", "person:bob")
+    expected = ("pet:miso", "person:alice", "person:hidden-middle", "person:bob", "person:hidden-last")
+    assert state.set_identity_card_order(visible_order) == expected
+
+    reopened = FaceStateRepository(state.db_path)
+    assert reopened.get_identity_card_order() == expected
+    assert reopened.set_identity_card_order(visible_order) == expected
+
+
+def test_existing_partial_identity_card_order_restores_omitted_legacy_people(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_person_order(["alice", "hidden", "retired", "bob"])
+    state.add_identity_redirect(source_kind="person", source_id="retired", target_kind="pet", target_id="miso")
+
+    # Earlier shared-order writes skipped people outside the current view.
+    visible_order = ("pet:miso", "person:alice", "person:bob")
+    with closing(sqlite3.connect(state.db_path)) as conn:
+        conn.executemany(
+            "INSERT INTO identity_card_orders (identity_key, sort_order) VALUES (?, ?)",
+            [(key, index) for index, key in enumerate(visible_order)],
+        )
+        conn.commit()
+
+    expected = ("pet:miso", "person:alice", "person:hidden", "person:bob")
+    assert state.get_identity_card_order() == expected
+    assert state.set_identity_card_order(visible_order) == expected
+
+
+def test_identity_card_order_follows_pet_and_cross_kind_merges(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_identity_card_order(("pet:source", "person:anchor", "pet:target"))
+
+    state.remap_pet_in_groups("source", "target")
+    assert state.get_identity_card_order() == ("person:anchor", "pet:target")
+
+    result = state.merge_identity_redirect_and_groups(
+        source_kind="pet", source_id="target", target_kind="person", target_id="new"
+    )
+    assert result.succeeded
+    assert state.get_identity_card_order() == ("person:anchor", "person:new")
 
 
 def test_person_hidden_state_filters_summaries_and_persists_across_reload(tmp_path: Path) -> None:
@@ -617,7 +807,7 @@ def test_merge_persons_rewrites_group_memberships_and_deduplicates_groups(tmp_pa
     ]
 
 
-def test_merge_persons_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
+def test_merge_persons_rejects_mismatched_hidden_state(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [
         _face_record(
@@ -644,10 +834,45 @@ def test_merge_persons_blocks_mismatched_hidden_state(tmp_path: Path) -> None:
 
     assert merged is False
     assert redirects == {}
-    assert {summary.person_id for summary in repository.get_person_summaries(include_hidden=True)} == {
-        "person-a",
-        "person-b",
-    }
+    summaries = repository.get_person_summaries(include_hidden=True)
+    assert {s.person_id: s.is_hidden for s in summaries} == {"person-a": True, "person-b": False}
+
+
+def test_merge_persons_fills_blank_target_name_from_source(tmp_path: Path) -> None:
+    repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
+    faces = [
+        _face_record(
+            face_id="face-a",
+            asset_id="asset-a",
+            asset_rel="album/a.jpg",
+            person_id="person-a",
+        ),
+        _face_record(
+            face_id="face-b",
+            asset_id="asset-b",
+            asset_rel="album/b.jpg",
+            person_id="person-b",
+        ),
+    ]
+    repository.replace_all(
+        faces,
+        [
+            _person_record(
+                person_id="person-a", key_face_id="face-a", face_count=1, name="Alice"
+            ),
+            _person_record(
+                person_id="person-b", key_face_id="face-b", face_count=1, name=None
+            ),
+        ],
+    )
+
+    merged, _redirects = repository.merge_persons_with_redirects("person-a", "person-b")
+
+    assert merged is True
+    summaries = repository.get_person_summaries()
+    assert [(summary.person_id, summary.name) for summary in summaries] == [
+        ("person-b", "Alice")
+    ]
 
 
 def test_list_asset_face_annotations_returns_only_matching_asset(tmp_path: Path) -> None:
@@ -1421,3 +1646,61 @@ def test_get_person_ids_for_asset_ids_chunks_large_sqlite_in_queries(tmp_path: P
     )
 
     assert person_ids == [f"person-{index:04d}" for index in range(face_count)]
+
+
+def test_cross_identity_group_failure_rolls_back_redirect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+    state_repository.initialize()
+
+    def fail_group_remap(*_args, **_kwargs):
+        raise sqlite3.OperationalError("forced group remap failure")
+
+    monkeypatch.setattr(
+        state_repository,
+        "_remap_groups_for_merged_identity",
+        fail_group_remap,
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="forced group remap failure"):
+        state_repository.merge_identity_redirect_and_groups(
+            source_kind="person",
+            source_id="person-a",
+            target_kind="pet",
+            target_id="pet-a",
+        )
+
+    assert state_repository.get_identity_redirects() == []
+
+
+def test_cross_identity_redirect_ensure_is_idempotent_and_rejects_conflict(
+    tmp_path: Path,
+) -> None:
+    state_repository = FaceStateRepository(tmp_path / "face_state.db")
+
+    applied = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-a",
+    )
+    repeated = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-a",
+    )
+    conflict = state_repository.merge_identity_redirect_and_groups(
+        source_kind="person",
+        source_id="person-a",
+        target_kind="pet",
+        target_id="pet-b",
+    )
+
+    assert applied.status == "applied"
+    assert repeated.status == "already_applied"
+    assert repeated.succeeded is True
+    assert conflict.status == "conflict"
+    assert conflict.succeeded is False

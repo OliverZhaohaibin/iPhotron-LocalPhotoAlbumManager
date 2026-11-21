@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QMouseEvent, QPalette
 from PySide6.QtWidgets import QAbstractItemView, QLabel, QListView
 
@@ -25,6 +25,7 @@ class GalleryGridView(AssetGrid):
     # errors or strict boundary checks. This accounts for frame borders and
     # potential internal margins.
     SAFETY_MARGIN = 10
+    detailPrefetchRequested = Signal(object)
 
     def __init__(self, parent=None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -45,6 +46,8 @@ class GalleryGridView(AssetGrid):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setWordWrap(False)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.setSelectionRectVisible(False)
 
         # Ensure the viewport paints an opaque background so the gallery is not
@@ -66,6 +69,35 @@ class GalleryGridView(AssetGrid):
         self._updating_style = False
         self._apply_scrollbar_style()
         self._update_empty_state()
+        self._detail_prefetch_index = QModelIndex()
+        self._detail_prefetch_timer = QTimer(self)
+        self._detail_prefetch_timer.setSingleShot(True)
+        self._detail_prefetch_timer.setInterval(150)
+        self._detail_prefetch_timer.timeout.connect(self._emit_detail_prefetch)
+        self.entered.connect(self._schedule_detail_prefetch)
+
+    def _schedule_detail_prefetch(self, index: QModelIndex) -> None:
+        self._detail_prefetch_timer.stop()
+        self._detail_prefetch_index = QModelIndex(index)
+        if index.isValid() and not self._selection_mode_enabled:
+            self._detail_prefetch_timer.start()
+
+    def _emit_detail_prefetch(self) -> None:
+        index = self._detail_prefetch_index
+        if not index.isValid() or self._selection_mode_enabled:
+            return
+        descriptor_getter = getattr(self.model(), "detail_prefetch_descriptor", None)
+        descriptor = descriptor_getter(index.row()) if callable(descriptor_getter) else None
+        if descriptor is not None:
+            self.detailPrefetchRequested.emit(descriptor)
+
+    def _cancel_detail_prefetch(self, *_args: object) -> None:
+        self._detail_prefetch_timer.stop()
+        self._detail_prefetch_index = QModelIndex()
+
+    def leaveEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        self._cancel_detail_prefetch()
+        super().leaveEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -183,11 +215,21 @@ class GalleryGridView(AssetGrid):
                 previous.rowsRemoved.disconnect(self._update_empty_state)
             except (RuntimeError, TypeError):
                 pass
+            for signal_name in ("modelReset", "rowsRemoved"):
+                signal = getattr(previous, signal_name, None)
+                if signal is not None:
+                    try:
+                        signal.disconnect(self._cancel_detail_prefetch)
+                    except (RuntimeError, TypeError):
+                        pass
+        self._cancel_detail_prefetch()
         super().setModel(model)
         if model is not None:
             model.modelReset.connect(self._update_empty_state)
             model.rowsInserted.connect(self._update_empty_state)
             model.rowsRemoved.connect(self._update_empty_state)
+            model.modelReset.connect(self._cancel_detail_prefetch)
+            model.rowsRemoved.connect(self._cancel_detail_prefetch)
         self._update_empty_state()
 
     def _update_empty_state(self) -> None:
@@ -214,6 +256,7 @@ class GalleryGridView(AssetGrid):
             return
         self._selection_mode_enabled = desired_state
         if desired_state:
+            self._cancel_detail_prefetch()
             self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
             self.setSelectionRectVisible(True)
         else:
@@ -229,6 +272,7 @@ class GalleryGridView(AssetGrid):
     # ------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            self._cancel_detail_prefetch()
             viewport_pos = self._viewport_pos(event)
             # Check for favorite badge click
             index = self.indexAt(viewport_pos)

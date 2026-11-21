@@ -6,7 +6,8 @@ import pytest
 
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME
-from iPhoto.index_sync_service import ensure_links, prune_index_scope
+from iPhoto.domain.models.core import LiveGroup
+from iPhoto.index_sync_service import ensure_links, prune_index_scope, sync_live_roles_to_db
 
 
 @pytest.fixture(autouse=True)
@@ -14,6 +15,106 @@ def _reset_global_repo() -> None:
     reset_global_repository()
     yield
     reset_global_repository()
+
+
+def test_sync_live_roles_updates_still_and_motion_rows(tmp_path: Path) -> None:
+    album_root = tmp_path / "album"
+    album_root.mkdir()
+    store = get_global_repository(album_root)
+    store.write_rows(
+        [
+            {"rel": "photo.jpg", "id": "photo"},
+            {"rel": "video.mov", "id": "video"},
+            {"rel": "other.png", "id": "other"},
+        ]
+    )
+    group = LiveGroup(
+        id="group-1",
+        still="photo.jpg",
+        motion="video.mov",
+        confidence=1.0,
+        content_id="content-1",
+        still_image_time=0.0,
+    )
+
+    sync_live_roles_to_db(album_root, [group], repository=store)
+
+    rows = {row["rel"]: row for row in store.read_all(filter_hidden=False)}
+    assert rows["photo.jpg"]["live_role"] == 0
+    assert rows["photo.jpg"]["live_partner_rel"] == "video.mov"
+    assert rows["video.mov"]["live_role"] == 1
+    assert rows["video.mov"]["live_partner_rel"] == "photo.jpg"
+    assert rows["other.png"]["live_partner_rel"] is None
+
+
+def test_sync_live_roles_empty_result_clears_existing_roles(tmp_path: Path) -> None:
+    album_root = tmp_path / "album"
+    album_root.mkdir()
+    store = get_global_repository(album_root)
+    store.write_rows([{"rel": "photo.jpg"}, {"rel": "video.mov"}])
+    store.apply_live_role_updates([("video.mov", 1, "photo.jpg")])
+
+    sync_live_roles_to_db(album_root, [], repository=store)
+
+    rows = {row["rel"]: row for row in store.read_all(filter_hidden=False)}
+    assert rows["video.mov"]["live_role"] == 0
+    assert rows["video.mov"]["live_partner_rel"] is None
+
+
+def test_sync_live_roles_skips_incomplete_groups(tmp_path: Path) -> None:
+    album_root = tmp_path / "album"
+    album_root.mkdir()
+    store = get_global_repository(album_root)
+    store.write_rows([{"rel": "only.jpg"}, {"rel": "missing.mov"}])
+    incomplete_group = LiveGroup(
+        id="group-1",
+        still="only.jpg",
+        motion="",
+        confidence=0.5,
+        content_id=None,
+        still_image_time=None,
+    )
+
+    sync_live_roles_to_db(album_root, [incomplete_group], repository=store)
+
+    rows = {row["rel"]: row for row in store.read_all(filter_hidden=False)}
+    assert rows["only.jpg"]["live_partner_rel"] is None
+    assert rows["missing.mov"]["live_partner_rel"] is None
+
+
+def test_sync_live_roles_only_clears_target_album_prefix(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    album_root = library_root / "album"
+    album_root.mkdir(parents=True)
+    store = get_global_repository(library_root)
+    store.write_rows(
+        [
+            {"rel": "album/photo.jpg"},
+            {"rel": "album/video.mov"},
+            {"rel": "other/keep.jpg"},
+        ]
+    )
+    store.apply_live_role_updates([("other/keep.jpg", 1, "other/partner.mov")])
+    group = LiveGroup(
+        id="group-1",
+        still="photo.jpg",
+        motion="video.mov",
+        confidence=1.0,
+        content_id=None,
+        still_image_time=None,
+    )
+
+    sync_live_roles_to_db(
+        album_root,
+        [group],
+        library_root=library_root,
+        repository=store,
+    )
+
+    rows = {row["rel"]: row for row in store.read_all(filter_hidden=False)}
+    assert rows["album/photo.jpg"]["live_partner_rel"] == "album/video.mov"
+    assert rows["album/video.mov"]["live_partner_rel"] == "album/photo.jpg"
+    assert rows["other/keep.jpg"]["live_role"] == 1
 
 
 def test_prune_index_scope_removes_only_rows_within_scan_prefix(tmp_path: Path) -> None:

@@ -94,6 +94,12 @@ class MapWidgetBase(Protocol):
     def event_target(self) -> QObject:  # pragma: no cover - interface definition only
         ...
 
+    def prepare_surface(self) -> None:  # pragma: no cover - interface definition only
+        ...
+
+    def start_deferred_content(self) -> None:  # pragma: no cover - interface definition only
+        ...
+
 
 class MapWidgetController:
     """Encapsulate rendering, tile management, and input handling logic."""

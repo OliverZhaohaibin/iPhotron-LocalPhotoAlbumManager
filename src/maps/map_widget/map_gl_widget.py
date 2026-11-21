@@ -119,6 +119,8 @@ class MapGLWidget(QOpenGLWidget):
     panFinished = Signal()
     """Signal emitted once the current pan gesture completes."""
 
+    firstFramePresented = Signal()
+
     _GL_COLOR_BUFFER_BIT = 0x00004000
     _GL_DEPTH_BUFFER_BIT = 0x00000100
     _GL_SCISSOR_TEST = 0x0C11
@@ -151,6 +153,10 @@ class MapGLWidget(QOpenGLWidget):
         self._logged_initialize_gl = False
         self._logged_paint_gl = False
         self._post_render_painters: list[Callable[[QPainter], None]] = []
+        self._first_frame_presented = False
+        frame_swapped = getattr(self, "frameSwapped", None)
+        if frame_swapped is not None:
+            frame_swapped.connect(self._emit_first_frame_presented)
 
         # ``MapWidgetController`` mirrors the logic used by the QWidget variant,
         # keeping rendering, tile loading, and input handling identical between
@@ -250,6 +256,12 @@ class MapGLWidget(QOpenGLWidget):
 
         return self
 
+    def prepare_surface(self) -> None:
+        """The QOpenGLWidget surface is fully constructed during initialisation."""
+
+    def start_deferred_content(self) -> None:
+        self.request_full_update()
+
     # ------------------------------------------------------------------
     def initializeGL(self) -> None:  # type: ignore[override]
         """Initialize the GL clear color to match the map background."""
@@ -281,6 +293,7 @@ class MapGLWidget(QOpenGLWidget):
                     continue
         finally:
             painter.end()
+        self._emit_first_frame_presented()
 
     # ------------------------------------------------------------------
     def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
@@ -296,16 +309,13 @@ class MapGLWidget(QOpenGLWidget):
         """Request a full repaint when the widget becomes visible."""
 
         super().showEvent(event)
-        self.setUpdatesEnabled(True)
         self.request_full_update()
         self._queue_macos_followup_update()
 
     # ------------------------------------------------------------------
     def hideEvent(self, event: QHideEvent) -> None:  # type: ignore[override]
-        """Pause repaint requests while the GL map surface is hidden."""
+        """Keep the reusable GL surface stable while its parent is hidden."""
 
-        if sys.platform != "darwin":
-            self.setUpdatesEnabled(False)
         super().hideEvent(event)
 
     # ------------------------------------------------------------------
@@ -337,6 +347,12 @@ class MapGLWidget(QOpenGLWidget):
 
         if sys.platform == "darwin":
             QTimer.singleShot(0, self.request_full_update)
+
+    def _emit_first_frame_presented(self) -> None:
+        if self._first_frame_presented:
+            return
+        self._first_frame_presented = True
+        self.firstFramePresented.emit()
 
     # ------------------------------------------------------------------
     def _clear_opaque_backbuffer(self) -> None:
@@ -673,6 +689,7 @@ class MapGLWindowWidget(QWidget):
     viewChanged = Signal(float, float, float)
     panned = Signal(QPointF)
     panFinished = Signal()
+    firstFramePresented = Signal()
 
     def __init__(
         self,
@@ -697,6 +714,8 @@ class MapGLWindowWidget(QWidget):
             tile_root=tile_root,
             style_path=style_path,
         )
+        self._first_frame_presented = False
+        self._window.frameSwapped.connect(self._emit_first_frame_presented)
         self._container = QWidget.createWindowContainer(self._window, self)
         self._container.setObjectName("MapGLWindowContainer")
         self._container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
@@ -763,6 +782,12 @@ class MapGLWindowWidget(QWidget):
     def event_target(self) -> _MapOpenGLWindow:
         return self._window
 
+    def prepare_surface(self) -> None:
+        """The native window container is fully constructed during initialisation."""
+
+    def start_deferred_content(self) -> None:
+        self.request_full_update()
+
     # ------------------------------------------------------------------
     def request_full_update(self) -> None:
         self._window.request_full_update()
@@ -803,6 +828,12 @@ class MapGLWindowWidget(QWidget):
     # ------------------------------------------------------------------
     def _emit_pan_finished(self) -> None:
         self.panFinished.emit()
+
+    def _emit_first_frame_presented(self) -> None:
+        if self._first_frame_presented:
+            return
+        self._first_frame_presented = True
+        self.firstFramePresented.emit()
 
 
 __all__ = ["MapGLWidget", "MapGLWindowWidget"]

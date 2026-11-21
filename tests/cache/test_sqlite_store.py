@@ -34,15 +34,20 @@ def test_wal_mode_enabled(store: IndexStore, tmp_path: Path) -> None:
         assert mode.upper() == "WAL"
 
 
-def test_init_upgrades_collection_indexes_for_unique_keyset_order(
+@pytest.mark.parametrize("old_definition", [
+    "(live_role, is_deleted, thumbnail_state, sort_ts DESC, id DESC)",
+    "(live_role, is_deleted, sort_ts DESC, id DESC, rel DESC) "
+    "WHERE thumbnail_state IN ('ready', 'stale') AND TRIM(COALESCE(thumb_cache_key, '')) != ''",
+])
+def test_init_upgrades_visible_collection_index(
     store: IndexStore,
     tmp_path: Path,
+    old_definition: str,
 ) -> None:
     with sqlite3.connect(store.path) as conn:
         conn.execute("DROP INDEX idx_assets_visible_global")
         conn.execute(
-            "CREATE INDEX idx_assets_visible_global "
-            "ON assets (live_role, is_deleted, thumbnail_state, sort_ts DESC, id DESC)"
+            f"CREATE INDEX idx_assets_visible_global ON assets {old_definition}"
         )
 
     IndexStore(tmp_path)
@@ -52,8 +57,12 @@ def test_init_upgrades_collection_indexes_for_unique_keyset_order(
             row[2]
             for row in conn.execute("PRAGMA index_info(idx_assets_visible_global)")
         ]
+        index_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_assets_visible_global'"
+        ).fetchone()[0]
 
     assert columns[-3:] == ["sort_ts", "id", "rel"]
+    assert "thumbnail_state = 'ready'" in index_sql
 
 
 def test_write_and_read_rows(store: IndexStore) -> None:
@@ -186,7 +195,7 @@ def test_merge_scan_rows_preserves_manual_location_and_metadata(
 def test_read_geotagged(store: IndexStore) -> None:
     gps_data = {"lat": 51.5, "lon": -0.1}
     rows = [
-        {"rel": "geo.jpg", "gps": gps_data},
+        {"rel": "geo.jpg", "gps": gps_data, "micro_thumbnail": b"thumbnail", "location": "London"},
         {"rel": "plain.jpg", "gps": None},
         {"rel": "geo2.jpg", "gps": {"lat": 0, "lon": 0}}
     ]
@@ -198,6 +207,10 @@ def test_read_geotagged(store: IndexStore) -> None:
     assert "geo.jpg" in rels
     assert "geo2.jpg" in rels
     assert "plain.jpg" not in rels
+    row = next(r for r in geotagged if r["rel"] == "geo.jpg")
+    assert row["gps"] == gps_data
+    assert row["location"] == "London"
+    assert "micro_thumbnail" not in row
 
 def test_upsert_row(store: IndexStore) -> None:
     rows = [{"rel": "a.jpg", "id": "1"}]

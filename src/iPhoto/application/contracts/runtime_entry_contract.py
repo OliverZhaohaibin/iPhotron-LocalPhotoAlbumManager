@@ -15,6 +15,9 @@ if TYPE_CHECKING:  # pragma: no cover
     from ...library.runtime_controller import LibraryRuntimeController
     from ...settings.manager import SettingsManager
     from ...bootstrap.library_session import LibrarySession
+    from ...bootstrap.library_probe import LibraryProbeRequest, ValidatedPreparedLibrary
+    from ..services.map_extension_service import MapExtensionService
+    from ..services.recognition_extension_service import RecognitionExtensionService
 
 
 @runtime_checkable
@@ -33,14 +36,32 @@ class RuntimeEntryContract(Protocol):
     recent_albums: list[Path]
     defer_startup_tasks: bool
 
+    @property
+    def library_epoch(self) -> int: ...
+
+    @property
+    def map_extensions(self) -> "MapExtensionService": ...
+
+    @property
+    def recognition_extensions(self) -> "RecognitionExtensionService": ...
+
     def open_library(self, root: Path) -> "LibrarySession":
         """Bind and return the active library session."""
+
+    def request_library_switch_probe(self, root: Path) -> "LibraryProbeRequest": ...
+
+    def commit_validated_library(
+        self, validated: "ValidatedPreparedLibrary", *, defer_scan: bool = True,
+    ) -> "LibrarySession": ...
 
     def close_library(self) -> None:
         """Close the active library session."""
 
-    def resume_startup_tasks(self) -> None:
+    def resume_startup_tasks(self, *, defer_scan: bool = False) -> None:
         """Run deferred startup work."""
+
+    def start_deferred_startup_scan(self) -> None:
+        """Start a scan deferred until after the first gallery load."""
 
     def remember_album(self, root: Path) -> None:
         """Track *root* in the recent albums list."""

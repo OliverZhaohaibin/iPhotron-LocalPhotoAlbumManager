@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ...bootstrap.library_scan_service import LibraryScanService
+from ...errors import AlbumNotFoundError
 from ...utils.pathutils import ensure_work_dir
 from ...utils.logging import get_logger
 
@@ -43,6 +44,12 @@ class ScannerWorker(QRunnable):
         signals: ScannerSignals,
         library_root: Optional[Path] = None,
         scan_service: Optional[LibraryScanService] = None,
+        *,
+        root_only: bool = False,
+        finalize_scan: bool = False,
+        reconcile_missing_scope: bool = False,
+        relocation_roots: Iterable[Path] = (),
+        watched_albums: frozenset[Path] = frozenset(),
     ) -> None:
         super().__init__()
         self.setAutoDelete(False)
@@ -53,11 +60,17 @@ class ScannerWorker(QRunnable):
         # Use library_root for database if provided, otherwise use root
         self._library_root = library_root if library_root else root
         self._scan_service = scan_service
+        self.root_only = root_only
+        self._finalize_scan = finalize_scan
+        self._reconcile_missing_scope = reconcile_missing_scope
+        self._relocation_roots = tuple(relocation_roots)
+        self._watched_albums = watched_albums
         self._is_cancelled = False
         self._had_error = False
         self._failed_count = 0
         self._scan_job_id: str | None = None
         self._scan_started_at_ms: int | None = None
+        self.reconciliation_deferred = False
 
     @property
     def root(self) -> Path:
@@ -76,6 +89,12 @@ class ScannerWorker(QRunnable):
         """Return the database root used by this worker."""
 
         return self._library_root
+
+    @property
+    def relocation_roots(self) -> tuple[Path, ...] | None:
+        """Return reconciliation hints, or None when this is a normal scan."""
+
+        return self._relocation_roots if self._reconcile_missing_scope else None
 
     @property
     def scan_service(self) -> LibraryScanService:
@@ -120,6 +139,26 @@ class ScannerWorker(QRunnable):
 
         rows: List[dict] = []
         try:
+            if self._finalize_scan and self._reconcile_missing_scope:
+                reconcile = getattr(self.scan_service, "reconcile_missing_album_scope", None)
+                relocation_options = (
+                    {"relocation_roots": self._relocation_roots} if self._relocation_roots else {}
+                )
+                if callable(reconcile):
+                    reconciled = reconcile(
+                        self._root,
+                        is_cancelled=lambda: self._is_cancelled,
+                        **relocation_options,
+                    )
+                    if reconciled is None:
+                        self.reconciliation_deferred = True
+                        return
+                    if reconciled is True:
+                        return
+            # An older queued scan may run after a rename but before the
+            # watcher reconciliation that carries its destination hints.
+            if self._finalize_scan and not self._root.is_dir():
+                raise AlbumNotFoundError(f"Album directory is unavailable: {self._root}")
             ensure_work_dir(self._root)
 
             # Emit an initial indeterminate update
@@ -143,11 +182,28 @@ class ScannerWorker(QRunnable):
                 chunk_size=self.SCAN_CHUNK_SIZE,
                 max_chunk_interval_ms=self.SCAN_CHUNK_MAX_INTERVAL_MS,
                 persist_chunks=True,
+                root_only=self.root_only,
             )
             rows = result.rows
             self._failed_count += result.failed_count
             self._scan_job_id = result.scan_job_id
             self._scan_started_at_ms = result.scan_started_at_ms
+            if self._finalize_scan and not self._is_cancelled:
+                try:
+                    rows = self.scan_service.finalize_scan_result(
+                        self._root,
+                        rows,
+                        pair_live=True,
+                        preserve_modified_after_ms=self._scan_started_at_ms,
+                        current_scan_job_id=self._scan_job_id,
+                        root_only=self.root_only,
+                        watched_albums=self._watched_albums,
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Failed to persist scan finalization for %s: %s", self._root, exc
+                    )
+                    self._had_error = True
 
         except Exception as exc:  # pragma: no cover - best-effort error propagation
             if not self._is_cancelled:
@@ -156,8 +212,7 @@ class ScannerWorker(QRunnable):
         finally:
             if not self._is_cancelled and not self._had_error:
                 # Consumers should use `batchCommitted` for progressive UI updates.
-                # The `finished` signal provides the complete dataset for
-                # authoritative operations (e.g. writing the index file).
+                # The `finished` signal carries the final scan result.
                 self._signals.finished.emit(self._root, rows)
             else:
                 self._signals.finished.emit(self._root, [])

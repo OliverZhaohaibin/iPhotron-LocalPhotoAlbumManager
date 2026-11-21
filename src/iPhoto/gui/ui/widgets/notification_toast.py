@@ -12,17 +12,17 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
-from PySide6.QtWidgets import QWidget
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import QStyle, QWidget
 
-from ..icons import load_icon
+from ..icon import icon_path
 
 
 class NotificationToast(QWidget):
     """Fade-in/out toast that floats above the main window.
 
-    The widget renders an opaque rounded rectangle with a checkmark glyph and an
+    The widget renders a translucent rounded rectangle with a checkmark glyph and an
     optional message.  Calling :meth:`show_toast` performs a full animation cycle:
 
     1. Instantly position the toast in the centre of its parent window.
@@ -61,11 +61,8 @@ class NotificationToast(QWidget):
 
         self.setFixedSize(self._DEFAULT_WIDTH, self._DEFAULT_HEIGHT)
 
-        # Load the checkmark icon once so we can simply repaint it with a clipping
-        # animation.  The SVG asset is supplied externally and may be tinted by the
-        # shared icon loader so the toast appearance stays consistent with the rest
-        # of the UI chrome.
-        self._checkmark_icon = load_icon("checkmark.svg")
+        # Keep this glyph as SVG so it can fill the toast's icon area at any DPR.
+        self._checkmark_renderer = QSvgRenderer(str(icon_path("checkmark.svg")), self)
         self._checkmark_progress = 0.0
         self._checkmark_animation = QPropertyAnimation(self, b"checkmark_progress")
         self._checkmark_animation.setDuration(500)
@@ -179,12 +176,19 @@ class NotificationToast(QWidget):
             int(self.height() * 0.4),
         )
         clip_width = int(icon_rect.width() * self._checkmark_progress)
-        if clip_width > 0 and not self._checkmark_icon.isNull():
+        renderer = self._checkmark_renderer
+        if clip_width > 0 and renderer.isValid():
+            icon_size = renderer.defaultSize().scaled(
+                icon_rect.size(), Qt.AspectRatioMode.KeepAspectRatio
+            )
+            bounds = QStyle.alignedRect(
+                Qt.LayoutDirection.LeftToRight, Qt.AlignmentFlag.AlignCenter, icon_size, icon_rect
+            )
             painter.save()
             painter.setClipRect(
                 QRect(icon_rect.left(), icon_rect.top(), clip_width, icon_rect.height())
             )
-            self._checkmark_icon.paint(painter, icon_rect, Qt.AlignmentFlag.AlignCenter)
+            renderer.render(painter, QRectF(bounds))
             painter.restore()
 
         # Render the caption beneath the icon using a bold sans-serif font.

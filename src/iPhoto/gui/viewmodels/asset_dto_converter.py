@@ -224,6 +224,12 @@ def to_dto(asset: Asset, library_root: Optional[Path]) -> AssetDTO:
             if isinstance(metadata.get("thumb_cache_key"), str)
             else None
         ),
+        thumbnail_state=str(metadata.get("thumbnail_state") or "ready"),
+        thumb_revision=(
+            metadata.get("thumb_revision")
+            if isinstance(metadata.get("thumb_revision"), str)
+            else None
+        ),
     )
 
 
@@ -359,6 +365,12 @@ def scan_row_to_dto(
         is_pano=is_pano,
         micro_thumbnail=micro_thumbnail,
         thumb_cache_key=thumb_cache_key if isinstance(thumb_cache_key, str) else None,
+        thumbnail_state=str(row.get("thumbnail_state") or "ready"),
+        thumb_revision=(
+            row.get("thumb_revision")
+            if isinstance(row.get("thumb_revision"), str)
+            else None
+        ),
     )
 
 

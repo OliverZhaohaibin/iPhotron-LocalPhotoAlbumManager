@@ -6,6 +6,7 @@ from .face_repository import FaceRepository
 from .records import (
     AssetFaceAnnotation,
     FaceRecord,
+    IdentityGroupMember,
     ManualFaceRecord,
     PeopleGroupRecord,
     PeopleGroupSummary,
@@ -19,6 +20,7 @@ from .state_repository import FaceStateRepository
 __all__ = [
     "AssetFaceAnnotation",
     "FaceRecord",
+    "IdentityGroupMember",
     "ManualFaceRecord",
     "FaceRepository",
     "FaceStateRepository",

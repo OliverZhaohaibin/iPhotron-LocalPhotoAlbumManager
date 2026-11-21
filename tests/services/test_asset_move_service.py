@@ -143,6 +143,27 @@ def test_move_assets_allows_aggregate_source_without_current_album(
     )
 
 
+def test_move_assets_with_plan_returns_none_for_no_op(
+    mocker, tmp_path: Path, qapp: QApplication
+) -> None:
+    target = tmp_path / "Album"
+    target.mkdir()
+    asset = target / "already.jpg"
+    asset.write_bytes(b"data")
+    tasks = mocker.MagicMock()
+    library = mocker.MagicMock()
+    library.root.return_value = tmp_path
+    library.asset_operation_service = _build_operation_service(tmp_path)
+    album = mocker.MagicMock()
+    album.root = target
+    service = _create_service(
+        task_manager=tasks, current_album=lambda: album, library_manager=library
+    )
+
+    assert service.move_assets_with_plan([asset], target) is None
+    tasks.submit_task.assert_not_called()
+
+
 def test_move_assets_uses_library_scope_when_source_is_outside_active_album(
     mocker,
     tmp_path: Path,
@@ -812,17 +833,26 @@ def test_delete_records_original_path_for_restore(
     assert not any(str(row.get("rel", "")).endswith(".ipo") for row in rows)
 
 
-def test_move_from_library_root_updates_source_album_index(
-    tmp_path: Path, qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("source_rel", "destination_rel", "scope_rel"),
+    [("AlbumA", "AlbumB", "."), ("AlbumA/Child", "AlbumA", "AlbumA")],
+)
+def test_move_updates_source_album_index(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    source_rel: str,
+    destination_rel: str,
+    scope_rel: str,
 ) -> None:
-    """Moving from the library view must trim the concrete source album index."""
+    """Moves update source rows even when the source scope is the target parent."""
 
     library_root = tmp_path / "Library"
-    album_a = library_root / "AlbumA"
-    album_b = library_root / "AlbumB"
+    album_a = library_root / source_rel
+    album_b = library_root / destination_rel
     library_root.mkdir()
     album_a.mkdir(parents=True)
-    album_b.mkdir(parents=True)
+    album_b.mkdir(parents=True, exist_ok=True)
 
     asset = album_a / "IMG_0100.JPG"
     asset.write_bytes(b"asset")
@@ -839,13 +869,13 @@ def test_move_from_library_root_updates_source_album_index(
 
     # Pre-populate the global library-root DB (MoveWorker only uses this DB).
     IndexStore(library_root).write_rows(
-        [{"rel": f"AlbumA/{asset.name}", "abs": str(asset.resolve())}]
+        [{"rel": (asset.relative_to(library_root)).as_posix(), "abs": str(asset.resolve())}]
     )
 
     signals = MoveSignals()
     worker = MoveWorker(
         [asset],
-        library_root,
+        library_root / scope_rel,
         album_b,
         signals,
         library_root=library_root,
@@ -859,8 +889,10 @@ def test_move_from_library_root_updates_source_album_index(
     # The MoveWorker only uses the single global DB at library_root.
     library_rows = list(IndexStore(library_root).read_all())
     # Source row removed, destination row inserted.
-    assert not any(r.get("rel") == f"AlbumA/{asset.name}" for r in library_rows)
-    assert any(r.get("rel") == f"AlbumB/{asset.name}" for r in library_rows)
+    assert not any(r.get("rel") == f"{source_rel}/{asset.name}" for r in library_rows)
+    assert any(r.get("rel") == f"{destination_rel}/{asset.name}" for r in library_rows)
+    assert not asset.exists()
+    assert (album_b / asset.name).exists()
 
 
 def test_delete_collision_assigns_unique_trash_paths(

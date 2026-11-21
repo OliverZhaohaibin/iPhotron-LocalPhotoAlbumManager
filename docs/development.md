@@ -1,905 +1,146 @@
-# 🧰 Development Guide
+# Development Guide
 
-> Development environment, dependencies, build/package, debugging, code style, and commit conventions for **iPhotron**.
-
----
-
-## Prerequisites
-
-| Requirement | Version |
-|-------------|---------|
-| Python | ≥ 3.12 |
-| ExifTool | Latest (in `PATH`) |
-| FFmpeg / FFprobe | Latest (in `PATH`) |
-| Git | Latest |
-
----
+Environment setup, routine commands, debugging, and contribution conventions for
+**iPhotron**. [Architecture](architecture.md) owns cross-module runtime and
+persistence contracts; focused documents under `misc/` own subsystem details.
+[AGENTS.md](../AGENTS.md) is the task-to-reference index. Keep detailed rules in
+one owning reference and link to it from this guide.
 
 ## Setup
 
-### 1. Clone the Repository
+Use Python 3.12 or newer and Git. External ExifTool and FFmpeg/FFprobe binaries
+are needed for the workflows that invoke them; their absence follows the
+application's warning/degradation paths. Installing `pyexiftool` installs the
+Python wrapper, not the ExifTool executable.
 
 ```bash
 git clone https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager.git
 cd iPhotron-LocalPhotoAlbumManager
-```
-
-### 2. Create a Virtual Environment
-
-```bash
 python -m venv .venv
-source .venv/bin/activate   # macOS / Linux
-.venv\Scripts\activate      # Windows
 ```
 
-### 3. Install Dependencies
+Activate the environment on macOS/Linux:
 
 ```bash
-# Core + development dependencies
-pip install -e ".[dev]"
+source .venv/bin/activate
 ```
 
-This installs all runtime dependencies plus dev tools (`pytest`, `ruff`, `black`, `mypy`).
+On Windows PowerShell:
 
----
+```powershell
+.venv\Scripts\Activate.ps1
+```
 
-## Architecture Guardrails
-
-Current production development follows the vNext runtime boundary:
-
-- `RuntimeContext` owns the active `LibrarySession`.
-- GUI, CLI, file watchers, and Qt workers must use session/application
-  surfaces instead of legacy compatibility facades.
-- Production source must not import `iPhoto.legacy` or `iPhoto.models.*`.
-- New business behavior belongs in application use cases/services, session
-  services, domain values/pure services, or infrastructure adapters.
-- GUI code should remain presentation and Qt transport.
-
-Read these before architecture-sensitive work:
-
-- [AGENT.md](../AGENT.md)
-- [Architecture](architecture.md)
-- [Completed vNext refactor archive](finished/refactor/vnext-2026-06/README.md)
-
-Run the architecture guard before or with focused tests:
+Install the core application and development tools:
 
 ```bash
-python3 tools/check_architecture.py
-.venv/bin/python -m pytest tests/architecture -q
+python -m pip install -e ".[dev]"
+iphoto-gui
 ```
 
-The GitHub Actions test workflow runs `python tools/check_architecture.py`
-before the Python test suite.
-
----
-
-## Regression Guardrails
-
-Small behavior contracts that are easy to break during feature work live in
-`docs/misc/`. Read the relevant note before touching these areas:
-
-| Area | Guardrail |
-|------|-----------|
-| Scan UI publishing | [SCAN_VISIBLE_PUBLISH_GUARDRAILS.md](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) |
-| Large library collection queries | [LARGE_LIBRARY_QUERY_GUARDRAILS.md](misc/LARGE_LIBRARY_QUERY_GUARDRAILS.md) |
-| Gallery scrolling, sparse windows, and thumbnail demand | [GALLERY_SCROLL_PIPELINE_GUARDRAILS.md](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) |
-| Trash and restore state | [TRASH_RESTORE_STATE_GUARDRAILS.md](misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |
-| Move/restore optimistic UI | [MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md) |
-| Project popups and People UI regressions | [PROJECT_POPUP_GUARDRAILS.md](misc/PROJECT_POPUP_GUARDRAILS.md) |
-| macOS map GL transparency | [MACOS_MAP_GL_TRANSPARENCY_NOTES.md](misc/MACOS_MAP_GL_TRANSPARENCY_NOTES.md) |
-| GUI internationalization | [I18N_UI_TEXT_GUARDRAILS.md](misc/I18N_UI_TEXT_GUARDRAILS.md) |
-
-Useful focused checks when touching scan, query, trash, move, or restore:
+[pyproject.toml](../pyproject.toml) is the dependency and tool-configuration
+source of truth. `dev` includes pytest, Ruff, Black, mypy, and typing stubs;
+it does not install the optional recognition runtimes or the Nuitka build tool.
+Install optional runtimes in the same environment when needed:
 
 ```bash
-.venv/bin/python -m pytest tests/application/test_scan_library_use_case.py tests/application/test_library_scan_service.py tests/library/test_scanner_worker.py -q
-.venv/bin/python -m pytest tests/application/test_library_asset_query_service.py tests/cache/test_index_store_features.py tests/performance/test_refactor_performance_baseline.py -q
-.venv/bin/python -m pytest tests/application/test_temp_library_end_to_end.py tests/application/test_library_asset_lifecycle_service.py tests/services/test_asset_move_service.py tests/services/test_restoration_service.py -q
-.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/gui/coordinators/test_main_coordinator_pending_moves.py -q
-.venv/bin/python -m pytest tests/test_gallery_demand.py tests/test_asset_grid_scroll.py tests/gui/viewmodels/test_gallery_demand_coordinator.py tests/gui/viewmodels/test_gallery_thumbnail_hint_loader.py tests/test_thumbnail_cache_service.py tests/test_thumbnail_runtime_policy.py -q
+python -m pip install -e ".[ai-demo]"  # People: InsightFace and ONNX Runtime
+python -m pip install -e ".[pets-ai]"  # Pets: ONNX Runtime, Torch, torchvision, USearch
 ```
 
-Gallery performance work has an additional opt-in real Qt event-loop benchmark:
+Model files are installed separately from Python runtimes. The Settings action
+for the People & Pets extension downloads or imports the combined model ZIP;
+missing models may also trigger installation after recognition activation.
+The ignored `src/extension/models/` directory is optional local/release staging
+input, not content supplied by a fresh clone. See the
+[shared installation contract](architecture.md#recognition-extension-installation),
+[People runtime](misc/PEOPLE_RECOGNITION_RUNTIME.md), and
+[Pets runtime](misc/PETS_RECOGNITION_RUNTIME.md) for lookup, recovery, and status.
+Core browsing remains usable when an optional runtime or model is unavailable.
 
-```bash
-IPHOTO_RUN_GALLERY_SCROLL_BENCHMARK=1 .venv/bin/python -m pytest tests/performance/test_gallery_scroll_qt_benchmark.py -q
-```
+## Architecture And Task References
 
-Run it on the affected target platform with a populated L2 thumbnail cache.
-Timing results from macOS do not replace Windows or Linux validation.
+Use `RuntimeContext`, `LibrarySession`, and application/session surfaces for
+library behavior. Headless callers use `create_headless_library_session(root)`.
+Business workflows belong in their owning application/session service or bounded
+context; GUI code owns presentation and Qt transport. Read the
+[layer boundaries](architecture.md#layer-boundaries) before changing composition.
+The completed vNext migration is [historical material](finished/refactor/vnext-2026-06/README.md).
 
----
+| Area | Owning reference |
+| --- | --- |
+| Runtime, library preparation, and state | [Architecture](architecture.md#runtime-contract) |
+| Album naming and compatibility | [Album names](architecture.md#album-names-and-compatibility) |
+| Scan UI publishing and recognition activation | [Scan guardrails](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) |
+| Collection SQL and visibility flag migration | [Large-library queries](misc/LARGE_LIBRARY_QUERY_GUARDRAILS.md) |
+| Gallery/Filmstrip scrolling and thumbnails | [Gallery guardrails](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) |
+| Move/delete/restore planning and UI | [Move/restore](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md), [trash state](misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |
+| People models, scanning, and stable state | [People runtime](misc/PEOPLE_RECOGNITION_RUNTIME.md) |
+| Pets models, clustering, and stable state | [Pets runtime](misc/PETS_RECOGNITION_RUNTIME.md) |
+| People & Pets dashboard gestures | [Dashboard drag and reorder](misc/PROJECT_POPUP_GUARDRAILS.md#dashboard-drag-and-reorder) |
+| Maps SDK build, sync, and source diagnostics | [Maps development](misc/MAP_EXTENSION_DEVELOPMENT.md) |
+| Map installation and recovery | [Map installation](misc/MAP_EXTENSION_INSTALLATION.md) |
+| Windows graphics support and D3D11 experiment | [Windows QRhi matrix](misc/WINDOWS_D3D11_QRHI_STATUS.md) |
+| macOS legacy map composition | [macOS map notes](misc/MACOS_MAP_GL_TRANSPARENCY_NOTES.md) |
+| Text, popups, menus, and People pickers | [i18n](misc/I18N_UI_TEXT_GUARDRAILS.md), [popup/menu guardrails](misc/PROJECT_POPUP_GUARDRAILS.md) |
 
-## Internationalization Development Workflow
+## Internationalization Workflow
 
-The desktop GUI has runtime language support through
-`RuntimeContext.translation` and the `ui.language` setting. Current supported
-stored choices are `system`, `de`, and `zh-CN`; the menu shows the `system`
-choice as `English`, and English is the fallback when no translator is
-installed.
-
-When adding or changing UI text:
-
-- Wrap user-visible strings with `iPhoto.gui.i18n.tr(context, source_text)` or
-  `QCoreApplication.translate(...)`.
-- Keep source strings in English and use a stable context name.
-- Use named placeholders for dynamic values. File names, paths, people names,
-  place results, camera/lens/codec values, backend names, environment
-  variables, and exception details should stay as original data.
-- Use `iPhoto.gui.i18n.formatters` for UI-facing dates, counts, decimals, and
-  file sizes.
-- Add `retranslate_ui()` on long-lived widgets that own labels, tooltips,
-  placeholders, menus, or status text.
-- Drive menu and control behavior from stable ids, callbacks, node types, or
-  `QAction.data()`, not translated labels.
-
-Update and compile translation resources after text changes:
+Wrap new GUI text with the translation helpers and refresh long-lived widgets
+through `retranslate_ui()`. The full rules, locale formatters, and focused tests
+are in the [i18n guardrail](misc/I18N_UI_TEXT_GUARDRAILS.md). After text changes:
 
 ```bash
 bash scripts/i18n_extract.sh
 bash scripts/i18n_compile.sh
-```
-
-Run focused i18n checks before merging:
-
-```bash
 python tools/check_i18n_strings.py src/iPhoto/gui src/maps
-.venv/bin/python -m pytest tests/test_i18n_extract_tool.py tests/test_i18n_translation_manager.py tests/architecture/test_i18n_string_gate.py -q
 ```
 
-Process notes and terminology references live under `docs/requirements/i18n/`.
-Those files document the completed i18n rollout and Apple Photos-aligned edit
-terminology; the long-term regression contract is
-[`docs/misc/I18N_UI_TEXT_GUARDRAILS.md`](misc/I18N_UI_TEXT_GUARDRAILS.md).
-
-The pet recognition and clustering materials under
-`docs/requirements/pets-cluster/` are requirements and development planning
-documents. Do not treat them as implemented runtime behavior until production
-code and tests land.
-
----
-
-## Dependencies
-
-### Runtime Dependencies
-
-Managed in `pyproject.toml`:
-
-| Package | Purpose |
-|---------|---------|
-| `jsonschema` | JSON Schema validation |
-| `PySide6` | Qt6 GUI framework |
-| `Pillow` / `pillow-heif` | Image loading (HEIC support) |
-| `imagehash` / `xxhash` | Perceptual & fast hashing |
-| `opencv-python-headless` | Image processing |
-| `reverse-geocoder` | GPS → location name |
-| `pyexiftool` | ExifTool wrapper |
-| `numpy` / `numba` | Numeric computation & JIT |
-| `mapbox-vector-tile` | Map tile parsing |
-| `av` | Video decoding |
-| `PyOpenGL` / `PyOpenGL_accelerate` | OpenGL rendering |
-
-### Optional Face Recognition Dependencies
-
-The People face-scanning pipeline is installed through the optional `ai-demo`
-extra:
-
-```bash
-pip install -e ".[ai-demo]"
-```
-
-That extra intentionally stays small:
-
-| Package | Purpose |
-|---------|---------|
-| `insightface>=0.7.3,<1.0` | Face detection and face embeddings |
-| `onnxruntime>=1.18,<2` | ONNX model execution backend |
-
-Do not add InsightFace's unused mask-rendering dependency chain to the runtime
-unless the product starts using it directly. The app does not need
-`albumentations` or `pydantic` for People clustering.
-
-The editable source install remains valid without this extra. In that mode the
-desktop app should still open libraries and use albums, maps, Live Photos, and
-editing; only the background People face scan is unavailable until `ai-demo` is
-installed.
-
-### Dev Dependencies
-
-```bash
-pip install -e ".[dev]"
-```
-
-Includes: `pytest`, `pytest-mock`, `pytest-qt`, `ruff`, `black`, `mypy`, `types-Pillow`, `types-python-dateutil`.
-
----
-
-## Album Naming Rules
-
-### Filesystem case stability
-
-`v5.0.0` already used `.iPhoto` as the runtime work directory on Windows and
-Linux (`WORK_DIR_NAME = ".iPhoto"`). That spelling is the canonical storage
-contract for new libraries.
-
-Linux filesystems are case-sensitive, so a directory rename that only changes
-letter case is a real path migration, not a harmless spelling cleanup. Treat
-lowercase `.iphoto` as a legacy-compatible alias only: code may read and exclude
-it when it already exists, but new libraries must create `.iPhoto`.
-
-Do not change managed library names such as `.iPhoto`, `.iphoto`,
-`.iphoto.album.json`, or `.iPhoto/manifest.json` by case alone unless the
-change includes an explicit migration plan, compatibility reads for existing
-libraries, and focused tests on a case-sensitive filesystem.
-
-### Reserved album directories
-
-Album creation and rename flows must reject directory names reserved for
-internal library infrastructure. Today the reserved names are:
-
-- `.iPhoto` and legacy `.iphoto` case variants
-- `.Trash`
-- `exported`
-
-These names are intentionally hidden by the library scan layer and therefore
-must never be accepted as user album names. If a create/rename flow allows one
-of them, the album can appear to "disappear" because the directory still exists
-on disk but is filtered out of the visible album tree/dashboard.
-
-Implementation rules:
-
-- Keep the validation in the library layer so every entry point stays aligned
-  (`album dashboard`, sidebar menus, and any future CLI/API path).
-- Keep the reserved-name list in a single shared source of truth used by both
-  name validation and album discovery.
-- Raise a normal `LibraryError` path such as `AlbumOperationError` with a clear
-  user-facing message; UI surfaces should only display the warning and should
-  not duplicate the rule locally.
-- Add regression coverage when touching album naming logic:
-  library tests should verify reserved names are rejected and existing albums
-  remain listed, while UI tests should verify reserved-name rename attempts show
-  a warning instead of removing the album from the dashboard.
-
-### Index-store visibility flags
-
-Collection queries use denormalized columns such as `is_deleted`, `has_gps`,
-`thumbnail_state`, and `live_role` so large libraries can stay on covering
-indexes instead of scanning path/text payloads. When adding or tightening one
-of these flags, update both row writes and schema migration:
-
-- New scan rows should derive the flag at write time in the index-store mapper.
-- Existing databases need a migration backfill before hot queries depend on the
-  new flag.
-- Do not remove compatibility path predicates from a query unless the migration
-  proves equivalent legacy rows are backfilled. `.Trash` is especially
-  sensitive: normal collections must exclude it, but the Recently Deleted album
-  still needs to show it.
-- Add one focused upgrade regression test for legacy rows and one query-level
-  test for the visible collection behavior.
-
----
-
-## Maps Extension Development Workflow
-
-### What the maps extension is
-
-iPhotron's offline OsmAnd/OBF runtime is expected to live in a self-contained
-directory rooted at `src/maps/tiles/extension/`. At runtime,
-`MapSourceSpec.osmand_default()` resolves that directory and expects the
-following layout:
-
-| Path | Purpose |
-|------|---------|
-| `src/maps/tiles/extension/World_basemap_2.obf` | Default offline OBF map dataset |
-| `src/maps/tiles/extension/misc/` | OsmAnd miscellaneous resources |
-| `src/maps/tiles/extension/poi/` | OsmAnd POI resources |
-| `src/maps/tiles/extension/rendering_styles/` | OsmAnd style XML files; the default is `snowmobile.render.xml` |
-| `src/maps/tiles/extension/routing/` | OsmAnd routing resources |
-| `src/maps/tiles/extension/search/geonames.sqlite3` | Offline place search database used by Assign Location |
-| `src/maps/tiles/extension/bin/` | Platform-specific helper/native widget binaries and dependent libraries (`.exe`/`.dll` on Windows, ELF binaries/`.so` on Linux, Mach-O binaries/`.dylib`/frameworks on macOS) |
-
-This directory is the contract used by:
-
-- local source checkouts
-- `iphoto-gui` map startup and `PhotoMapView`
-- `scripts/build_nuitka_windows.ps1`
-- `scripts/build_nuitka_fast.sh` and Linux standalone packaging
-- the Windows installer's optional map-extension package
-
-### Platform runtime notes
-
-On Linux, iPhotron can use both the helper-backed OBF renderer and the native
-OsmAnd widget. The native widget currently expects Qt's XCB desktop OpenGL path,
-so when that backend is selected iPhotron auto-sets:
-
-- `QT_QPA_PLATFORM=xcb`
-- `QT_OPENGL=desktop`
-- `QT_XCB_GL_INTEGRATION=xcb_glx`
-
-That means native maps on Linux currently run best on X11 or XWayland. If a
-`PySide6-OsmAnd-SDK/` checkout exists either inside this repository root or as a
-sibling directory next to it, iPhotron prefers its
-`tools/osmand_render_helper_native/dist-linux/` widget build during development.
-
-On macOS, the legacy Python/OpenGL map path deliberately uses
-`QOpenGLWindow + QWidget.createWindowContainer()` instead of `QOpenGLWidget`.
-That keeps map tiles opaque inside the app's transparent, frameless main
-window. The native OsmAnd widget can also be discovered from the extension
-`bin/` directory or from a sibling SDK checkout when a `dist-macosx` runtime is
-available.
-
-Media preview widgets use QRhi backend selection rather than a fixed raw-GL
-path. `IPHOTO_RHI_BACKEND=auto` selects Metal on macOS when Qt exposes it, and
-OpenGL elsewhere. Use `IPHOTO_RHI_BACKEND=opengl` to force the legacy OpenGL
-path for diagnostics.
-
-### Upstream sub-project: `PySide6-OsmAnd-SDK`
-
-The source of truth for building the map extension is the standalone upstream
-repository:
-
-- `https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK`
-
-That repository exists specifically to build and validate the OsmAnd runtime
-outside of the main iPhotron application. It contains:
-
-- vendored `OsmAnd-core`, `OsmAnd-core-legacy`, and `OsmAnd-resources`
-- Windows, Linux, and macOS build scripts/output directories for helper and
-  native widget runtimes
-- the PySide6/OsmAnd preview app used to validate the runtime independently
-- a stable place to iterate on Qt6/PySide6 integration without touching the
-  entire iPhotron application
-
-In practice:
-
-- `PySide6-OsmAnd-SDK` builds the runtime
-- `iPhotron` vendors the produced runtime into `src/maps/tiles/extension/`
-- packaged builds then consume the vendored extension from this repository
-
-### Recommended build strategy
-
-For Windows, Linux, and macOS packaging, the recommended path is:
-
-1. build the runtime in `PySide6-OsmAnd-SDK`
-2. copy the resulting map data, OsmAnd resources, and native binaries into
-   `iPhotron/src/maps/tiles/extension/`
-3. verify the runtime from the iPhotron checkout
-4. package with Nuitka from the iPhotron checkout
-
-This keeps the OsmAnd-specific toolchain work in the dedicated side project,
-while keeping iPhotron releases self-contained.
-
-### Step 1: Clone and prepare the side project
-
-```powershell
-git clone https://github.com/OliverZhaohaibin/PySide6-OsmAnd-SDK
-cd PySide6-OsmAnd-SDK
-python -m venv .venv
-.venv\Scripts\activate
-python -m pip install -e .
-```
-
-If you want to work with the same Python environment as iPhotron, that is also
-fine as long as `PySide6`, `cmake`, and the required Windows toolchains are
-available.
-
-### Step 2: Build the native runtime in the side project
-
-For the full iPhotron maps extension on Windows, prefer the MSVC build because
-it produces the complete native widget runtime mirrored under
-`tools\osmand_render_helper_native\dist-msvc`:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\osmand_render_helper_native\build_native_widget_msvc.ps1 -BuildType Release
-```
-
-For Linux, build the native helper/widget runtime into `dist-linux`:
-
-```bash
-bash tools/osmand_render_helper_native/build_linux.sh
-```
-
-For macOS, build the helper/widget runtime into `dist-macosx` from the SDK
-checkout:
-
-```bash
-QT_ROOT=/opt/homebrew/opt/qt bash tools/osmand_render_helper_native/build_macos.sh
-```
-
-Useful alternatives inside `PySide6-OsmAnd-SDK`:
-
-- `build_helper.ps1`
-  Shortest path if you only need the helper EXE and optional MinGW widget build.
-- `build_helper_official.ps1`
-  Runs the official OsmAnd MinGW-oriented chain in a staged workspace.
-- `build_native_widget_msvc.ps1`
-  Recommended for iPhotron release work because it produces the native widget
-  DLL and the `dist-msvc` runtime consumed most directly by the packaging flow.
-- `build_linux.sh`
-  Produces the Linux helper and `.so` widget runtime under `dist-linux`.
-- `build_macos.sh`
-  Produces the macOS helper and `.dylib` widget runtime under `dist-macosx`.
-
-The main outputs you need are:
-
-| Side-project output | Why it matters in iPhotron |
-|---------------------|----------------------------|
-| `tools\osmand_render_helper_native\dist-msvc\osmand_render_helper.exe` | Helper-backed Python OBF rendering |
-| `tools\osmand_render_helper_native\dist-msvc\osmand_native_widget.dll` | Native Qt/OpenGL OsmAnd widget |
-| `tools\osmand_render_helper_native\dist-msvc\OsmAndCore_shared.dll` | Native OsmAnd core runtime |
-| `tools\osmand_render_helper_native\dist-msvc\OsmAndCoreTools_shared.dll` | Native OsmAnd tools runtime |
-| `tools\osmand_render_helper_native\dist-msvc\Qt6*.dll` | Required Qt runtime dependencies for the native/helper binaries |
-| `tools/osmand_render_helper_native/dist-linux/osmand_render_helper` | Linux helper-backed Python OBF rendering |
-| `tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so` | Linux native Qt/OpenGL OsmAnd widget |
-| `tools/osmand_render_helper_native/dist-linux/libOsmAndCore_shared.so` | Linux native OsmAnd core runtime |
-| `tools/osmand_render_helper_native/dist-linux/libOsmAndCoreTools_shared.so` | Linux native OsmAnd tools runtime |
-| `tools/osmand_render_helper_native/dist-macosx/osmand_render_helper` | macOS helper-backed Python OBF rendering |
-| `tools/osmand_render_helper_native/dist-macosx/osmand_native_widget.dylib` | macOS native Qt/OpenGL OsmAnd widget |
-| `plugin/data/geonames.sqlite3` | Offline search database for Assign Location |
-| `vendor\osmand\resources\...` | Rendering styles and supporting OsmAnd resources |
-| `src\maps\tiles\World_basemap_2.obf` | Default demo OBF dataset used by the extension |
-
-### Step 3: Sync the side-project outputs into `iPhotron`
-
-The safest approach is to copy the side-project outputs into
-`src/maps/tiles/extension/` so the iPhotron checkout stays self-contained.
-
-Example PowerShell sync:
-
-```powershell
-$sdkRoot = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK"
-$repoRoot = "D:\python_code\iPhoto\iPhotron-LocalPhotoAlbumManager"
-$extensionRoot = Join-Path $repoRoot "src\maps\tiles\extension"
-$binRoot = Join-Path $extensionRoot "bin"
-$searchRoot = Join-Path $extensionRoot "search"
-
-New-Item -ItemType Directory -Force -Path $extensionRoot, $binRoot, $searchRoot | Out-Null
-
-Copy-Item -LiteralPath (Join-Path $sdkRoot "src\maps\tiles\World_basemap_2.obf") `
-  -Destination $extensionRoot -Force
-Copy-Item -LiteralPath (Join-Path $sdkRoot "plugin\data\geonames.sqlite3") `
-  -Destination $searchRoot -Force
-
-foreach ($resourceDir in "misc", "poi", "rendering_styles", "routing") {
-  Copy-Item -LiteralPath (Join-Path $sdkRoot "vendor\osmand\resources\$resourceDir") `
-    -Destination $extensionRoot -Recurse -Force
-}
-
-Copy-Item -LiteralPath (Join-Path $sdkRoot "tools\osmand_render_helper_native\dist-msvc\*") `
-  -Destination $binRoot -Recurse -Force
-```
-
-Equivalent Linux sync:
-
-```bash
-sdk_root="$HOME/python-code/PySide6-OsmAnd-SDK"
-repo_root="$HOME/python-code/iPhotron-LocalPhotoAlbumManager"
-extension_root="$repo_root/src/maps/tiles/extension"
-bin_root="$extension_root/bin"
-search_root="$extension_root/search"
-
-mkdir -p "$extension_root" "$bin_root" "$search_root"
-cp -f "$sdk_root/src/maps/tiles/World_basemap_2.obf" "$extension_root/"
-cp -f "$sdk_root/plugin/data/geonames.sqlite3" "$search_root/"
-for resource_dir in misc poi rendering_styles routing; do
-  rm -rf "$extension_root/$resource_dir"
-  cp -a "$sdk_root/vendor/osmand/resources/$resource_dir" "$extension_root/"
-done
-cp -a "$sdk_root/tools/osmand_render_helper_native/dist-linux/." "$bin_root/"
-```
-
-Recommended macOS sync:
-
-```bash
-python scripts/sync_macos_map_extension.py \
-  --sdk-root "$HOME/python-code/PySide6-OsmAnd-SDK"
-```
-
-The macOS sync script copies `World_basemap_2.obf`, `search/geonames.sqlite3`,
-the OsmAnd resource directories, `osmand_render_helper`,
-`osmand_native_widget.dylib`, recursively resolved non-system Mach-O
-dependencies, then patches `install_name`/rpaths and ad-hoc signs copied
-binaries.
-
-If you are intentionally using the MinGW path instead of MSVC, replace
-`dist-msvc` with `dist`. The helper-backed Python renderer only requires the
-helper executable plus its dependent DLLs, but the native widget path also
-requires a usable widget DLL in the same `bin/` directory.
-
-On Linux, native widget discovery prefers the sibling `PySide6-OsmAnd-SDK`
-build when it exists. On macOS, the local extension is checked first and the
-SDK `dist-macosx` output is also searched for development convenience. Keep the
-checkout in sync with the runtime you actually want to exercise.
-
-### Step 4: Verify the runtime from the iPhotron checkout
-
-After syncing the extension, return to the iPhotron repository and verify the
-runtime before packaging:
-
-```powershell
-cd D:\python_code\iPhoto\iPhotron-LocalPhotoAlbumManager
-python -m pip install -e ".[dev]"
-python src\maps\main.py --backend auto
-python src\maps\main.py --backend python
-python src\maps\main.py --backend native
-python src\maps\main.py --backend legacy
-```
-
-Recommended additional checks:
-
-```powershell
-python -m pytest tests\test_maps_main.py tests\test_photo_map_view.py -q
-iphoto-gui
-```
-
-What to look for:
-
-- `--backend auto` chooses the native widget when it is healthy
-- `--backend python` succeeds with the helper-backed OBF renderer
-- `--backend native` loads the native widget library without missing runtime errors
-- `--backend legacy` still renders the bundled legacy vector tiles
-- the GUI Location view starts without falling back unexpectedly
-- on Linux, the native path starts under X11/XWayland rather than failing with missing GLX/XCB support
-- on macOS, the legacy GL map reports a `MapGLWindowWidget`/`MapGLWindow`
-  diagnostic and does not show transparent tile areas
-
-### Development-time overrides
-
-For experimentation you can override the managed extension root or individual
-runtime binaries:
-
-| Environment variable | Purpose |
-|----------------------|---------|
-| `IPHOTO_OSMAND_EXTENSION_ROOT` | Override the managed extension root. The directory must already use the `tiles/extension` layout described above |
-| `IPHOTO_OSMAND_RENDER_HELPER` | Override the helper executable/command |
-| `IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY` | Override the native widget library path |
-| `IPHOTO_PREFER_OSMAND_NATIVE_WIDGET` | Set to `0` to force the Python OBF path in auto mode |
-| `IPHOTO_DISABLE_OPENGL` | Set to `1` to force CPU/fallback rendering where supported |
-| `IPHOTO_MAP_GL_DEBUG` | Set to `1` to print one-shot map GL surface diagnostics |
-| `IPHOTO_OSMAND_GL_PARTIAL_UPDATE` | Set to `1` to allow partial updates on platforms that default to full GL repaint |
-| `IPHOTO_RHI_BACKEND` | `auto`, `metal`, or `opengl` for media preview QRhi backend selection |
-| `IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND` | Set to `1` only when deliberately testing packaged Linux maps outside the default XCB/GLX path |
-
-Example:
-
-```powershell
-$env:IPHOTO_OSMAND_EXTENSION_ROOT = "D:\tmp\iphoto-extension\extension"
-$env:IPHOTO_OSMAND_RENDER_HELPER = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\tools\osmand_render_helper_native\dist-msvc\osmand_render_helper.exe"
-$env:IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY = "D:\python_code\iPhoto\PySide6-OsmAnd-SDK\tools\osmand_render_helper_native\dist-msvc\osmand_native_widget.dll"
-iphoto-gui
-```
-
-Linux example:
-
-```bash
-export IPHOTO_OSMAND_EXTENSION_ROOT="$HOME/tmp/iphoto-extension/extension"
-export IPHOTO_OSMAND_RENDER_HELPER="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-linux/osmand_render_helper"
-export IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-linux/osmand_native_widget.so"
-iphoto-gui
-```
-
-macOS example:
-
-```bash
-export IPHOTO_OSMAND_EXTENSION_ROOT="$HOME/tmp/iphoto-extension/extension"
-export IPHOTO_OSMAND_RENDER_HELPER="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-macosx/osmand_render_helper"
-export IPHOTO_OSMAND_NATIVE_WIDGET_LIBRARY="$HOME/python-code/PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/dist-macosx/osmand_native_widget.dylib"
-iphoto-gui
-```
-
-This is convenient for debugging, but release builds should still copy the
-runtime into `src/maps/tiles/extension/` so the repository and packaged app stay
-self-contained.
-
-### Linux packaged native-widget guardrails
-
-The Linux source checkout and the Linux Nuitka bundle must be treated as two
-separate runtime targets. A map preview that works from `python src/maps/main.py`
-does **not** prove that the packaged GUI will survive opening the map section.
-The failure mode that triggered this guidance was:
-
-```text
-ERROR: Failed to initialize GLEW: GLX 1.2 and up are not supported
-```
-
-That error appeared only after entering the map section in a packaged build,
-even though the unfrozen source checkout already had Linux X11 forcing in the
-main entry point.
-
-When touching Linux map packaging, keep these rules in place:
-
-- Treat packaged/frozen Linux runs as a dedicated code path. Before
-  `QApplication` is created, force `QT_QPA_PLATFORM=xcb` for packaged builds
-  unless `IPHOTO_ALLOW_PACKAGED_LINUX_WAYLAND=1` is set explicitly for
-  debugging.
-- When `QT_QPA_PLATFORM=xcb`, keep `QT_OPENGL=desktop` and
-  `QT_XCB_GL_INTEGRATION=xcb_glx` aligned so the native OsmAnd widget gets the
-  GLX-backed desktop OpenGL context expected by GLEW.
-- Do not use the generic OpenGL probe as the only gate for the native widget.
-  Backend selection must still run `probe_native_widget_runtime(...)`; if the
-  native library loads cleanly, prefer it even when the generic Qt OpenGL probe
-  failed, and if the runtime probe fails, log the reason and fall back to the
-  Python OBF path.
-- Keep the Linux/Nuitka packaging inputs explicit. The current fast build
-  script needs `--enable-plugin=pyside6`,
-  `--include-qt-plugins=qml,multimedia`, `--include-package=OpenGL`, and
-  `--include-package=OpenGL_accelerate` so the packaged runtime matches the
-  editable environment more closely.
-- After a Linux Nuitka build, verify the packaged OsmAnd binaries can still
-  resolve Qt at runtime. If the packaged `maps/tiles/extension/bin` runtime can
-  not find the bundled PySide6 Qt libraries, repair its RUNPATH before treating
-  the build as releasable.
-- Regressions must be tested from the packaged executable, not only from the
-  source checkout. The minimum smoke test is: start the packaged app on Linux,
-  switch into the map section, confirm no GLEW/GLX error is emitted, and verify
-  the view uses the native widget only when `probe_native_widget_runtime(...)`
-  succeeds.
-
-For future work, do not remove the packaged-Linux override just because
-development mode works under Wayland/XWayland. If you want to relax that rule,
-first prove the packaged map section is stable from a fresh Nuitka bundle and
-keep the opt-out behind a documented environment variable.
-
----
-
-## Face Recognition Development Workflow
-
-### Runtime contract
-
-The People feature scans assets in the background, detects faces with
-InsightFace, stores face embeddings, and clusters those embeddings into people.
-The runtime model cache is shared at:
-
-| Path | Purpose |
-|------|---------|
-| `src/extension/models/buffalo_s/` | Checked-in InsightFace model cache |
-| `src/extension/models/buffalo_s/det_500m.onnx` | Face detector |
-| `src/extension/models/buffalo_s/w600k_mbf.onnx` | Face recognition embedding model |
-
-The default packaged path is resolved from the installed package as
-`extension/models`. For local debugging, override it with:
-
-```powershell
-$env:IPHOTO_FACE_MODEL_DIR = "D:\python_code\iPhoto\iPhotos\src\extension\models"
-```
-
-The model directory may be absent in a packaged build. In that case
-InsightFace can download the model pack on first use, but release builds should
-still bundle the model cache when an offline-ready distribution is required.
-
-### InsightFace import rules
-
-Always import the concrete FaceAnalysis module through the People pipeline's
-compatibility path:
-
-```python
-from insightface.app.face_analysis import FaceAnalysis
-```
-
-Do not switch back to:
-
-```python
-from insightface.app import FaceAnalysis
-```
-
-The package-level import pulls in InsightFace's mask-rendering path, which can
-drag in `albumentations` and `pydantic`. In Nuitka builds this has produced
-runtime annotation failures such as `name 'Literal' is not defined` and
-`name 'NDArray' is not defined`.
-
-The pipeline intentionally installs two compatibility shims before importing
-InsightFace:
-
-- runtime typing names in `builtins`, for third-party annotations evaluated at
-  runtime inside packaged apps
-- a lightweight `albumentations` stub, because iPhotron does not use
-  InsightFace mask rendering
-
-Keep these shims in place unless the packaging strategy changes and the
-replacement has been verified in a Nuitka build.
-
-### Required InsightFace modules
-
-People clustering only needs bounding boxes and embeddings. Keep
-`FaceAnalysis` constrained to:
-
-```python
-allowed_modules=["detection", "recognition"]
-```
-
-Do not load `landmark_2d_106`, `landmark_3d_68`, or `genderage` for the People
-scan. Those models are not used for clustering and have caused packaged
-asset-level failures such as:
-
-```text
-'NoneType' object has no attribute 'shape'
-```
-
-If a future feature needs landmarks or gender/age attributes, add that feature
-behind a separate tested path and validate it in a Nuitka package before
-enabling it for background scanning.
-
-### Scan status and retry rules
-
-Face scan state is stored per asset. The intended behavior is:
-
-- `pending`: asset has not been scanned yet
-- `done`: scan completed, with or without detected faces
-- `skipped`: asset is not eligible for face scanning
-- `retry`: asset failed once and should be attempted again
-- `failed`: asset failed after a retry and should not block the whole queue
-
-Important rules:
-
-- A batch-level exception should pause scanning and surface the real exception
-  text in the People page.
-- An asset-level exception should be logged, then marked `retry` on the first
-  failure.
-- If the same asset fails again while already in `retry`, mark it `failed` so
-  the queue can continue.
-- A full library rescan must reset `retry` and `failed` face statuses back to
-  the initial status. It should preserve only stable completed states such as
-  `done` and `skipped` when the asset identity is unchanged.
-
-This prevents a broken image or transient packaged-runtime issue from
-deadlocking People scanning until the user deletes the database manually.
-
-### Stable People state
-
-Keep the People runtime snapshot and user decisions separate:
-
-- `.iPhoto/faces/face_index.db` is the rebuildable runtime snapshot containing
-  detected/manual faces and clustered person records.
-- `.iPhoto/faces/face_state.db` stores human decisions: names, canonical
-  identities, selected covers, hidden flags, person order, groups, group order,
-  pinned state, group covers, and group asset caches.
-- A scan commit may recluster all faces and rewrite the runtime snapshot, but it
-  must preserve the stable state and repair it through repository/coordinator
-  APIs instead of dropping it.
-- Group asset caches must be refreshed when scan commits, merges, manual face
-  edits, person deletion, or group membership changes can affect common-photo
-  results.
-- People in different hidden states must not be merged. Keep this enforced in
-  both UI and repository/service layers.
-
-### Debugging packaged face scan failures
-
-The app writes rotating logs to:
-
-```powershell
-%LOCALAPPDATA%\iPhoto\iPhoto.log
-```
-
-For custom locations:
-
-```powershell
-$env:IPHOTO_LOG_DIR = "D:\tmp\iphoto-logs"
-```
-
-Useful log messages:
-
-- `Face scanning paused: ...`
-  Batch-level failure; the message should include the actual exception.
-- `Face detection failed for ...`
-  Full traceback for an asset-level detection failure.
-- `Face scan failed for asset ...`
-  The worker marked a specific asset for retry or failure.
-
-When a packaged build says `Some assets could not be face scanned and will be
-retried after a rescan`, inspect the log before changing model paths. That
-message means model initialization succeeded far enough to process assets, but
-at least one asset failed during detection/embedding.
-
-### Verification checklist
-
-After changing People scanning, run the focused tests:
-
-```powershell
-python -m pytest tests\test_people_pipeline.py tests\test_people_service.py tests\cache\test_global_repository.py tests\test_face_cluster_pipeline.py
-```
-
-When changing People UI, groups, covers, hidden-state filtering, merges, or
-popup/menu behavior, also run:
-
-```powershell
-python -m pytest tests\gui\widgets\test_people_dashboard_widget.py tests\test_people_repository.py tests\test_people_service.py tests\test_information_popup.py tests\ui\controllers\test_context_menu_cover.py
-```
-
-For a local smoke test against a real image:
-
-```powershell
-python -c "from pathlib import Path; from iPhoto.people.pipeline import FaceClusterPipeline; p=FaceClusterPipeline(model_root=Path('src/extension/models')); out=p.detect_faces_for_rows([{'id':'test','rel':'DSCF5586.JPG'}], library_root=Path(r'C:\Users\Olive\Downloads\face'), thumbnail_dir=Path(r'C:\Users\Olive\Downloads\face\.iPhoto\faces')); print([(x.asset_rel, x.error, len(x.faces)) for x in out]); print(sorted(p._ensure_face_analysis().models.keys()))"
-```
-
-The loaded InsightFace models should be only:
-
-```text
-['detection', 'recognition']
-```
-
-For release verification, rebuild with Nuitka and test the People page from the
-packaged executable, not from the editable source checkout.
-
----
-
-## Build & Package
-
-### Running the Application
-
-```bash
-# Launch the GUI
-iphoto-gui
-```
-
-### Building the Executable
-
-For distribution, iPhotron uses **Nuitka** with an AOT compilation step for Numba filters.
-
-#### Step 1: AOT Compilation
-
-```bash
-python src/iPhoto/core/filters/build_jit.py
-```
-
-This generates a compiled C-extension (`.so` / `.pyd`) in `src/iPhoto/core/filters/`.
-
-#### Step 2: Build with Nuitka
-
-```bash
-bash scripts/build_nuitka_fast.sh
-```
-
-The script uses a startup-optimized Nuitka profile (`--standalone`, `--python-flag=no_site`, `--lto=yes`, `--clang`) and excludes heavy dev/runtime-only packages from the final bundle.
-It also includes `src/maps/tiles`, so Linux standalone builds keep the bundled
-OBF/resources layout intact as long as `src/maps/tiles/extension/` is staged
-correctly before packaging.
-
-Any manual Nuitka profile must include the QRhi shader assets next to the media
-widgets. The current Windows script includes `image_viewer_rhi.*`,
-`image_viewer_overlay.*`, and `video_renderer.*` source/QSB files explicitly so
-macOS/Metal and OpenGL QRhi previews share the same packaged shader set.
-
-For Windows release work that includes the native maps extension, prefer:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -OutputDir build
-```
-
-That script stages `src/maps/tiles/extension/bin` from the native runtime before
-invoking Nuitka, so it is the recommended packaging entry point whenever the
-OsmAnd helper/native widget runtime is part of the build.
-
-For macOS packaging, run the SDK build and sync script first:
-
-```bash
-QT_ROOT=/opt/homebrew/opt/qt bash ../PySide6-OsmAnd-SDK/tools/osmand_render_helper_native/build_macos.sh
-python scripts/sync_macos_map_extension.py --sdk-root ../PySide6-OsmAnd-SDK
-```
-
-Then use the same AOT/Nuitka discipline: bundle `src/maps/tiles`, include the
-QRhi `.qsb` files, and verify the packaged app opens both media previews and
-the Location view from the frozen runtime.
-
-See [docs/misc/BUILD_EXE.md](misc/BUILD_EXE.md) for detailed troubleshooting and manual flags.
-
----
-
-## Desktop Startup Performance
-
-The GUI startup contract is “paint the window shell, then warm optional
-features.” Do not use a zero-delay timer as a substitute for the boundary:
-startup work must be connected to `MainWindow.firstPainted`. Widget creation
-still belongs on the GUI thread and should be split across event-loop turns.
-
-Keep imports above that boundary narrow. In particular, importing
-`iPhoto.gui.main` or `MainWindow` must not load NumPy, Qt Multimedia, the People
-pipeline, map rendering, asset-import services, edit-session models, or
-`MainCoordinator`. Package-level convenience imports in startup-reachable
-packages should use `__getattr__` lazy exports, while imports needed only by a
-scan or optional feature should live at the call site. Preserve public names so
-callers and test patch targets continue to work.
-
-Enable checkpoint logging for a local diagnostic run with:
+The [edit terminology glossary](misc/apple_photos_edit_glossary.md) is the
+current terminology reference. Material under
+[finished i18n requirements](finished/requirements/i18n/) records the completed
+rollout and is historical, not another source of current rules.
+
+## Build And Package
+
+Install Nuitka into the selected build interpreter and the optional runtimes
+required by the release. The maintained scripts explicitly include the People
+runtime, so a core-only development environment is not sufficient for those
+builds. Follow [Building the executable](misc/BUILD_EXE.md) for AOT compilation,
+platform preflight, assets, and actual recognition capability checks.
+
+| Target | Maintained entry point / procedure |
+| --- | --- |
+| Windows base standalone | `scripts/build_nuitka_windows.ps1 -OutputDir build` |
+| Windows with staged optional assets | Same script with `-IncludeOptionalAssets` |
+| macOS app | `bash scripts/build_nuitka_macos.sh` after Maps SDK sync |
+| Linux standalone | `bash scripts/build_nuitka_fast.sh` after AOT and Maps staging |
+| Linux AppImage | [AppImage guide](misc/BUILD_APPIMAGE.md) |
+| Linux Flatpak | [Flatpak guide](misc/BUILD_FLATPAK.md) |
+| Manual Debian package | [Debian recipe](misc/BUILD_DEB.md) |
+
+The [Maps development guide](misc/MAP_EXTENSION_DEVELOPMENT.md) owns SDK build
+and sync steps. The runtime can use managed user installations; a source staging
+directory is not necessarily the runtime installation target.
+A copied model directory does not prove that the frozen app contains its Python
+AI runtime. Source tests, package-content checks, and native packaged acceptance
+are separate evidence. Keep final standalone payloads consistent with their
+build manifests; see the [Flatpak provenance contract](misc/BUILD_FLATPAK.md#build).
+
+## Detail And Startup Diagnostics
+
+Read the [Detail/Edit rendering contract](architecture.md#gallery-to-detailedit-rendering)
+and [Detail benchmark runbook](requirements/DETAIL_OPEN_BENCHMARK_RUNBOOK.md)
+before changing decoders, caches, rendering, or Edit. They own transaction
+stages, decoder names, budgets, packaged benchmark commands, and acceptance.
+
+For startup, the native hierarchy is prepared before `show()` and optional work
+follows `firstPainted`. The [runtime contract](architecture.md#runtime-contract)
+and [startup runbook](requirements/STARTUP_BENCHMARK_RUNBOOK.md) own lifecycle,
+import boundaries, profiler fields, and scheduling requirements.
+In a startup profile, `main_window.first_paint` should precede
+`desktop_coordinator_runtime.started` and `startup.probe.started`.
+Enable local checkpoint logging with:
 
 ```bash
 IPHOTO_STARTUP_PROFILE=1 iphoto-gui
@@ -912,168 +153,74 @@ $env:IPHOTO_STARTUP_PROFILE = "1"
 iphoto-gui
 ```
 
-The profiler appends JSON Lines records containing `stage`, `elapsed_ms`,
-`pid`, and wall time. Logs are written to:
+Default startup JSONL paths:
 
 - Windows: `%LOCALAPPDATA%\iPhoto\logs\startup.jsonl`
 - macOS: `~/Library/Logs/iPhoto/logs/startup.jsonl`
 - Linux: `${XDG_STATE_HOME:-~/.local/state}/iPhoto/logs/startup.jsonl`
 
-Unset the variable for normal launches; disabled profiling does not create a
-file. Compare at least `main_window.show_called`, `main_window.first_paint`,
-feature creation, and `main_coordinator.started` when investigating a
-regression.
-
-Run the focused startup guardrails with:
-
-```bash
-python -m pytest tests/gui/test_startup_import_boundary.py tests/gui/test_main.py
-```
-
-On Windows, also verify that startup shows one stable top-level window. The
-detail feature intentionally remains pre-show there because adding its QRhi
-widgets after the window is visible can recreate the native window.
-
----
+Unset the variable for normal launches; disabled profiling creates no log.
+Native lifecycle/backend changes also require the
+[startup manual matrix](requirements/STARTUP_MANUAL_VALIDATION_MATRIX.md).
+Historical smoke reports do not establish acceptance for a new revision.
 
 ## Running Tests
 
+Use temporary libraries/settings or isolated copies, and dedicated libraries for
+performance runs. Never clear or mutate a user's production library for tests.
+Select focused suites from [verification by change type](architecture.md#verification-by-change-type)
+and the owning task reference. For boundary changes:
+
 ```bash
-# Architecture guardrail
 python3 tools/check_architecture.py
-
-# Run all tests
-python -m pytest
-
-# Run with verbose output
-python -m pytest -v
-
-# Run a specific test file
-python -m pytest tests/application/test_library_session.py
-
-# Run tests matching a pattern
-python -m pytest -k "test_scan"
-
-# Run architecture tests explicitly
-python -m pytest tests/architecture -q
-```
-
-Test configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`:
-- Test paths: `tests/`
-- GUI tests (`tests/ui`, `tests/gui`) are excluded by default.
-
-Use the project virtual environment explicitly when the shell does not have
-`pytest` on `PATH`:
-
-```bash
 .venv/bin/python -m pytest tests/architecture -q
 ```
 
----
+Common commands with the environment activated:
+
+```bash
+python -m pytest
+python -m pytest tests/application/test_library_session.py -q
+python -m pytest -k "test_scan"
+```
+
+The project virtual environment can be addressed explicitly as
+`.venv/bin/python` on macOS/Linux or `.venv\Scripts\python.exe` on Windows.
+The pytest configuration disables the `pytest-qt` plugin; GUI tests remain in
+normal discovery and provide their own Qt fixtures/offscreen setup as needed.
+CI runs the architecture checker before the broader test suite.
+
+The Gallery real-Qt benchmark is opt-in:
+
+```bash
+IPHOTO_RUN_GALLERY_SCROLL_BENCHMARK=1 .venv/bin/python -m pytest tests/performance/test_gallery_scroll_qt_benchmark.py -q
+```
+
+Follow the [Gallery guardrail](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) for
+required Windows/Linux runs and the separate macOS baseline. Timing and native
+compositor results from one OS do not replace another platform's evidence.
+Report commands actually run, results, skips, and remaining validation gaps.
 
 ## Debugging
 
-### GUI Debugging
+For Qt plugin discovery diagnostics on macOS/Linux:
 
 ```bash
-# Enable Qt debug output
-export QT_DEBUG_PLUGINS=1
-iphoto-gui
+QT_DEBUG_PLUGINS=1 iphoto-gui
 ```
 
-### Common Issues
+| Issue | Check |
+| --- | --- |
+| ExifTool or FFmpeg/FFprobe unavailable | Check the executable and its discovery path; Python wrappers alone do not supply the external tools. Flatpak has its own sandbox contract. |
+| Graphics initialization or blank media | Inspect the selected media and map backends using the owning platform guide; the application does not impose one universal OpenGL version/profile. |
+| Windows Detail repeatedly falls back from WIC | Run `tests/gui/test_detail_decode_backend.py` on Windows and inspect fixed-width COM ABI declarations. |
+| AOT module unavailable | Follow the AOT build and distribution checks in the executable guide. |
+| macOS legacy map tiles transparent | Follow the macOS map notes; inspect `MapGLWindowWidget` and opt-in `IPHOTO_MAP_GL_DEBUG=1` output. |
+| Packaged preview missing shaders | Verify image, overlay, and video QSB files in the final artifact. |
+| Recognition paused or models missing | Follow the People/Pets runtime guide and shared extension recovery contract; preserve pending work and durable user state. |
 
-| Issue | Solution |
-|-------|----------|
-| `ExifTool not found` | Ensure `exiftool` is in your `PATH` |
-| `FFmpeg not found` | Ensure `ffmpeg` and `ffprobe` are in your `PATH` |
-| OpenGL errors | Update GPU drivers; ensure OpenGL 3.3+ support |
-| `_jit_compiled` module not found | Run AOT compilation step (see Build section) |
-| macOS map tile area is transparent | Verify the active backend is `MapGLWindowWidget`/`MapGLWindow`, keep `IPHOTO_MAP_GL_DEBUG=1` diagnostics, and avoid forcing the legacy `QOpenGLWidget` map path |
-| Packaged media preview cannot load QRhi shaders | Ensure `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` `.qsb` files are included in the Nuitka data files |
-
----
-
-## Popup Guardrails
-
-The application has shared popup plumbing for information/warning surfaces.
-When popup code is refactored, prefer the project's own popup implementation
-instead of dropping back to native/system-styled `QMessageBox` windows.
-
-- Route routine in-app warning/info popups through the shared themed helpers.
-- Make popup theme resolution follow the active app/window theme before the OS
-  color scheme.
-- Keep popup positioning centered on the hosting top-level window.
-- See
-  [`docs/misc/PROJECT_POPUP_GUARDRAILS.md`](misc/PROJECT_POPUP_GUARDRAILS.md)
-  for the project-wide rule plus the People dashboard regression checklist.
-
-### Context Menu Guardrails
-
-Qt context menus must use the project menu styling instead of bare `QMenu`
-instances. The main window uses translucent rounded chrome, and unstyled menus
-can inherit that translucency and render with a transparent background.
-
-- For sidebar and album-related menus, call
-  `_apply_main_window_menu_style(menu, parent)` from
-  `iPhoto.gui.ui.menus.album_sidebar_menu` before adding or executing actions.
-- If a menu uses a local stylesheet instead, set
-  `menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)` and apply
-  an explicit opaque `QMenu { background-color: ... }` rule.
-- Do not create and execute a naked `QMenu(self)` from widgets such as
-  dashboards, cards, sidebars, or popups.
-- When adding a new right-click surface, add or update a focused GUI test that
-  verifies the menu is styled and that important actions are present.
-
-#### Unified Right-Click Menu Rules
-
-The app now treats sidebar, dashboard, and gallery context menus as one shared
-interaction system. When you add or change a right-click entry, keep these
-rules aligned across surfaces:
-
-- Use `MenuContext` + `populate_menu()` for declarative menus whenever the
-  surface already participates in the shared menu system.
-- Right-clicking an asset in gallery must first sync selection to the clicked
-  row before computing menu visibility, so selection-scoped actions operate on
-  the intended asset.
-- Album-cover actions must resolve paths relative to the active album root
-  before calling `facade.set_cover(...)`. Do not assume `AssetDTO.rel_path`
-  already matches the current album root.
-- `Rename…` is the canonical label for rename actions. Use the same ellipsis
-  style and the same empty-name validation across sidebar and pinned-item menus.
-- Pinned-item rename is a sidebar-local alias. Persist it through
-  `PinnedItemsService` instead of mutating the underlying album/person/group
-  entity name.
-- `Pin`/`Unpin` and `Rename…` should stay adjacent on sidebar-driven menus so
-  users can manage the same entity without hunting across different surfaces.
-- Any regression around menu visibility or per-surface action parity needs a
-  targeted test in the menu/controller/widget layer that owns that surface.
-
-### People UI Conventions
-
-#### Reusable person-picker popup
-
-The canonical picker for choosing one or more People cards is
-`GroupPeopleDialog` in
-`src/iPhoto/gui/ui/widgets/people_dashboard_dialogs.py`.
-
-Use this dialog for all People-selection flows instead of creating ad-hoc
-`QInputDialog` or combo-box popups. Current uses include:
-
-- `New Group` from the People dashboard
-- `Merge Into...` from a People card context menu
-- `Choose Someone Else...` from the Info panel face actions
-
-When reusing it:
-
-- pass `dark_mode=` from the hosting window/theme context explicitly when the
-  caller is not the People dashboard itself
-- use `min_selection=1` and `max_selection=1` for single-target pickers
-- customize `title_text`, `prompt_text`, and `confirm_text` per workflow
-- keep multi-select behavior only for true grouping flows
-
-
----
+Confirmed implementation gaps live under
+[technical debt](technical-debt/README.md); they do not waive current contracts.
 
 ## Code Style
 
@@ -1153,7 +300,7 @@ test(core): add unit tests for curve resolver
 
 | Command | Entry Point | Description |
 |---------|-------------|-------------|
-| `iphoto-gui` | `iPhoto.gui.main:main` | GUI application |
+| `iphoto-gui` | `iPhoto.entrypoint:main` | Lightweight dispatch and startup preparation before `iPhoto.gui.main.main` |
 | `iphoto` | `iPhoto.cli:app` | Typer CLI, using headless `LibrarySession` surfaces |
 
 Important runtime entry classes:
@@ -1161,5 +308,5 @@ Important runtime entry classes:
 | Class / Function | Module | Description |
 |------------------|--------|-------------|
 | `RuntimeContext` | `iPhoto.bootstrap.runtime_context` | Process composition root and active library lifecycle |
-| `LibrarySession` | `iPhoto.bootstrap.library_session` | Library-scoped assets, state, scans, People, Maps, edit, thumbnails, and location surfaces |
+| `LibrarySession` | `iPhoto.bootstrap.library_session` | Library-scoped assets, state, scans, People, Pets, Maps, edit, thumbnails, and location surfaces |
 | `create_headless_library_session()` | `iPhoto.bootstrap.library_session` | CLI/non-GUI session construction |

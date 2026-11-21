@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import sys
 import logging
+import time
 from enum import StrEnum
-from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QMetaObject, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
@@ -64,20 +64,19 @@ def _configure_main_view_stack(view_stack: QStackedWidget, map_view: object) -> 
     """Keep the native map page alive across view switches when possible."""
 
     stack_layout = view_stack.layout()
-    if (
-        isinstance(stack_layout, QStackedLayout)
-        and hasattr(map_view, "uses_native_osmand_widget")
+    if not isinstance(stack_layout, QStackedLayout):
+        return
+    # Keeping the map visible avoids tearing down its packaged OpenGL context
+    # on each view switch. Some Qt builds warn when that page remains stacked
+    # beneath other views, so this is opt-in.
+    keep_alive = (
+        hasattr(map_view, "uses_native_osmand_widget")
         and map_view.uses_native_osmand_widget()
         and sys.platform != "darwin"
         and os.environ.get("IPHOTO_KEEP_NATIVE_MAP_PAGE_ALIVE", "").strip().lower()
         in {"1", "true", "yes", "on"}
-    ):
-        # Keeping the native map page visible underneath the active page
-        # avoids Qt tearing down the packaged QOpenGLWidget context every
-        # time the user leaves the Location section. This is opt-in because
-        # some packaged Qt builds emit QPainter/QGraphicsEffect warnings when
-        # a hidden OpenGL page remains stacked beneath the active page.
-        stack_layout.setStackingMode(QStackedLayout.StackAll)
+    )
+    stack_layout.setStackingMode(QStackedLayout.StackAll if keep_alive else QStackedLayout.StackOne)
 
 
 class Ui_MainWindow(QObject):
@@ -88,6 +87,8 @@ class Ui_MainWindow(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._features: dict[FeatureKind, object] = {}
+        self._prepared_detail_page = None
+        self._detail_native_prepare_duration_ms = 0.0
         self._main_window: QMainWindow | None = None
         self._library = None
 
@@ -148,47 +149,6 @@ class Ui_MainWindow(QObject):
         self.title_separator.setFixedHeight(1)
         window_chrome_layout.addWidget(self.title_separator)
 
-        self.main_header = MainHeaderWidget(self.window_shell, MainWindow)
-        self.menu_bar_container = self.main_header
-        self.menu_bar = self.main_header.menu_bar
-        self.rescan_button = self.main_header.rescan_button
-        self.selection_button = self.main_header.selection_button
-        self.open_album_action = self.main_header.open_album_action
-        self.rescan_action = self.main_header.rescan_action
-        self.rebuild_links_action = self.main_header.rebuild_links_action
-        self.bind_library_action = self.main_header.bind_library_action
-        self.download_map_extension_action = self.main_header.download_map_extension_action
-        self.toggle_filmstrip_action = self.main_header.toggle_filmstrip_action
-        self.toggle_face_names_action = self.main_header.toggle_face_names_action
-        self.toggle_hidden_people_action = self.main_header.toggle_hidden_people_action
-        self.export_all_edited_action = self.main_header.export_all_edited_action
-        self.export_selected_action = self.main_header.export_selected_action
-        self.export_destination_group = self.main_header.export_destination_group
-        self.export_destination_library = self.main_header.export_destination_library
-        self.export_destination_ask = self.main_header.export_destination_ask
-        self.export_format_group = self.main_header.export_format_group
-        self.export_format_jpg = self.main_header.export_format_jpg
-        self.export_format_png = self.main_header.export_format_png
-        self.export_format_tiff = self.main_header.export_format_tiff
-        self.share_action_group = self.main_header.share_action_group
-        self.share_action_copy_file = self.main_header.share_action_copy_file
-        self.share_action_copy_path = self.main_header.share_action_copy_path
-        self.share_action_reveal_file = self.main_header.share_action_reveal_file
-        self.wheel_action_group = self.main_header.wheel_action_group
-        self.wheel_action_navigate = self.main_header.wheel_action_navigate
-        self.wheel_action_zoom = self.main_header.wheel_action_zoom
-        self.theme_group = self.main_header.theme_group
-        self.theme_system = self.main_header.theme_system
-        self.theme_light = self.main_header.theme_light
-        self.theme_dark = self.main_header.theme_dark
-        self.language_group = self.main_header.language_group
-        self.language_system = self.main_header.language_system
-        self.language_de = self.main_header.language_de
-        self.language_zh_cn = self.main_header.language_zh_cn
-
-        self.window_shell_layout.addWidget(self.window_chrome)
-        self.window_shell_layout.addWidget(self.menu_bar_container)
-
         self.sidebar = AlbumSidebar(library, MainWindow)
         self.gallery_page = GalleryPageWidget()
         self.grid_view = self.gallery_page.grid_view
@@ -217,11 +177,60 @@ class Ui_MainWindow(QObject):
 
         self.window_shell_layout.addWidget(self.splitter)
 
+        # QMenuBar forces macOS to create the top-level native QWindow.  The
+        # complete QRhi hierarchy must already be attached at that point so Qt
+        # creates the window with MetalSurface (or the selected desktop API)
+        # instead of permanently committing a RasterSurface first.
+        MainWindow.setCentralWidget(self.window_shell)
+        self.prepare_detail_native_hierarchy()
+
+        self.main_header = MainHeaderWidget(self.window_shell, MainWindow)
+        self.menu_bar_container = self.main_header
+        self.menu_bar = self.main_header.menu_bar
+        self.rescan_button = self.main_header.rescan_button
+        self.selection_button = self.main_header.selection_button
+        self.open_album_action = self.main_header.open_album_action
+        self.rescan_action = self.main_header.rescan_action
+        self.rebuild_links_action = self.main_header.rebuild_links_action
+        self.bind_library_action = self.main_header.bind_library_action
+        self.download_map_extension_action = self.main_header.download_map_extension_action
+        self.download_recognition_extension_action = (
+            self.main_header.download_recognition_extension_action
+        )
+        self.toggle_filmstrip_action = self.main_header.toggle_filmstrip_action
+        self.toggle_face_names_action = self.main_header.toggle_face_names_action
+        self.toggle_hidden_people_action = self.main_header.toggle_hidden_people_action
+        self.export_all_edited_action = self.main_header.export_all_edited_action
+        self.export_selected_action = self.main_header.export_selected_action
+        self.export_destination_group = self.main_header.export_destination_group
+        self.export_destination_library = self.main_header.export_destination_library
+        self.export_destination_ask = self.main_header.export_destination_ask
+        self.export_format_group = self.main_header.export_format_group
+        self.export_format_jpg = self.main_header.export_format_jpg
+        self.export_format_png = self.main_header.export_format_png
+        self.export_format_tiff = self.main_header.export_format_tiff
+        self.share_action_group = self.main_header.share_action_group
+        self.share_action_copy_file = self.main_header.share_action_copy_file
+        self.share_action_copy_path = self.main_header.share_action_copy_path
+        self.share_action_reveal_file = self.main_header.share_action_reveal_file
+        self.wheel_action_group = self.main_header.wheel_action_group
+        self.wheel_action_navigate = self.main_header.wheel_action_navigate
+        self.wheel_action_zoom = self.main_header.wheel_action_zoom
+        self.theme_group = self.main_header.theme_group
+        self.theme_system = self.main_header.theme_system
+        self.theme_light = self.main_header.theme_light
+        self.theme_dark = self.main_header.theme_dark
+        self.language_group = self.main_header.language_group
+        self.language_system = self.main_header.language_system
+        self.language_de = self.main_header.language_de
+        self.language_zh_cn = self.main_header.language_zh_cn
+
+        self.window_shell_layout.insertWidget(0, self.window_chrome)
+        self.window_shell_layout.insertWidget(1, self.menu_bar_container)
+
         self.status_bar = ChromeStatusBar(self.window_shell)
         self.window_shell_layout.addWidget(self.status_bar)
         self.progress_bar = self.status_bar.progress_bar
-
-        MainWindow.setCentralWidget(self.window_shell)
 
         self.notification_toast = NotificationToast(MainWindow)
 
@@ -248,13 +257,9 @@ class Ui_MainWindow(QObject):
         return created
 
     def _create_detail_feature(self) -> object:
-        from .widgets.detail_page import DetailPageWidget
-        from .widgets.gl_image_viewer import GLImageViewer
-        from .widgets.info_panel import InfoPanel
-
         assert self._main_window is not None
-        shared_image_viewer = GLImageViewer()
-        self.detail_page = DetailPageWidget(self._main_window, image_viewer=shared_image_viewer)
+        self.detail_page = self.prepare_detail_native_hierarchy()
+        self.detail_page.complete_feature()
         for name in (
             "back_button", "info_button", "share_button", "favorite_button",
             "rotate_left_button", "edit_button", "zoom_widget", "zoom_slider",
@@ -264,21 +269,76 @@ class Ui_MainWindow(QObject):
             "detail_chrome_container", "detail_header_separator", "player_stack",
             "player_placeholder", "video_area", "player_bar", "video_trim_bar",
             "face_name_overlay", "filmstrip_view", "live_badge", "badge_host",
-            "player_container", "edit_mode_group", "edit_adjust_action", "edit_crop_action",
+            "player_container",
+        ):
+            setattr(self, name, getattr(self.detail_page, name))
+        self.image_viewer = self.detail_page.image_viewer
+        self.edit_image_viewer = self.detail_page.image_viewer
+        self.player_container.installEventFilter(self._main_window)
+        self.retranslateUi(self._main_window)
+        return self.detail_page
+
+    def prepare_detail_native_hierarchy(self):
+        """Attach every Detail QRhi widget to its final top-level pre-show."""
+
+        existing = self._prepared_detail_page
+        if existing is not None:
+            return existing
+        from .widgets.detail_page import DetailPageWidget
+
+        assert self._main_window is not None
+        current_page = self.view_stack.currentWidget()
+        detail_page = None
+        started_ns = time.perf_counter_ns()
+        try:
+            detail_page = DetailPageWidget(
+                self._main_window,
+                parent=self.view_stack,
+                staged=True,
+            )
+            self.view_stack.addWidget(detail_page)
+            if current_page is not None:
+                self.view_stack.setCurrentWidget(current_page)
+        except Exception:
+            if detail_page is not None:
+                self.view_stack.removeWidget(detail_page)
+                detail_page.deleteLater()
+            raise
+        finally:
+            self._detail_native_prepare_duration_ms = (
+                time.perf_counter_ns() - started_ns
+            ) / 1_000_000.0
+
+        self._prepared_detail_page = detail_page
+        return detail_page
+
+    def ensure_detail_edit_bundle(self) -> object:
+        """Publish the edit-only Detail controls on first edit use."""
+
+        detail_page = self.ensure_feature(FeatureKind.DETAIL)
+        detail_page.ensure_edit_bundle()
+        for name in (
+            "edit_mode_group", "edit_adjust_action", "edit_crop_action",
             "edit_compare_button", "edit_reset_button", "edit_done_button",
             "edit_rotate_left_button", "edit_sidebar", "edit_mode_control",
             "edit_header_container", "edit_zoom_host", "edit_zoom_host_layout",
             "edit_right_controls_layout",
         ):
-            setattr(self, name, getattr(self.detail_page, name))
-        self.image_viewer = shared_image_viewer
-        self.edit_image_viewer = shared_image_viewer
-        self.view_stack.addWidget(self.detail_page)
+            setattr(self, name, getattr(detail_page, name))
+        return detail_page
+
+    def ensure_info_panel(self):
+        """Create the metadata/location panel on first explicit use."""
+
+        existing = getattr(self, "info_panel", None)
+        if existing is not None:
+            return existing
+        from .widgets.info_panel import InfoPanel
+
+        assert self._main_window is not None
         self.info_panel = InfoPanel(self._main_window)
         self.info_panel.set_map_runtime(getattr(self._library, "map_runtime", None))
-        self.player_container.installEventFilter(self._main_window)
-        self.retranslateUi(self._main_window)
-        return self.detail_page
+        return self.info_panel
 
     def _create_preview_feature(self) -> object:
         from .widgets.preview_window import PreviewWindow
@@ -288,17 +348,12 @@ class Ui_MainWindow(QObject):
         return self.preview_window
 
     def _create_map_feature(self) -> object:
-        from maps.map_sources import apply_pending_osmand_extension_install
         from .widgets.photo_map_view import PhotoMapView
 
         assert self._main_window is not None
-        maps_root = Path(__file__).resolve().parents[3] / "maps"
-        try:
-            apply_pending_osmand_extension_install(maps_root)
-        except Exception:
-            _LOGGER.warning("Failed to apply pending map extension install", exc_info=True)
         self.map_view = PhotoMapView(
-            map_runtime=getattr(self._library, "map_runtime", None),
+            map_runtime=None,
+            defer_runtime=True,
             map_interaction_service=getattr(self._library, "map_interaction_service", None),
         )
         self.map_page = QWidget()
@@ -309,7 +364,9 @@ class Ui_MainWindow(QObject):
         layout.setSpacing(0)
         layout.addWidget(self.map_view)
         self.view_stack.addWidget(self.map_page)
-        _configure_main_view_stack(self.view_stack, self.map_view)
+        self.map_view.backendChanged.connect(
+            lambda: _configure_main_view_stack(self.view_stack, self.map_view)
+        )
         return self.map_page
 
     def _create_people_feature(self) -> object:

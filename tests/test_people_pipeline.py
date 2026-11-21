@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 import builtins
 from datetime import datetime, timezone
@@ -95,105 +94,104 @@ def _profile(
     )
 
 
-def test_face_pipeline_uses_shared_model_root(monkeypatch, tmp_path: Path) -> None:
-    calls: dict[str, object] = {}
+@pytest.fixture
+def local_insightface(monkeypatch):
+    calls = []
 
     class FakeFaceAnalysis:
-        def __init__(
-            self,
-            *,
-            name: str,
-            root: str,
-            allowed_modules: list[str],
-            providers: list[str],
-        ) -> None:
-            calls["name"] = name
-            calls["root"] = root
-            calls["allowed_modules"] = allowed_modules
-            calls["providers"] = providers
+        def __init__(self, **_kwargs):
+            pytest.fail("InsightFace's downloading constructor was called")
 
-        def prepare(self, *, ctx_id: int, det_size: tuple[int, int]) -> None:
-            calls["ctx_id"] = ctx_id
-            calls["det_size"] = det_size
+        def prepare(self, *, ctx_id, det_size):
+            assert (ctx_id, det_size) == (-1, (640, 640))
 
-    insightface_module = ModuleType("insightface")
-    app_module = ModuleType("insightface.app")
-    face_analysis_module = ModuleType("insightface.app.face_analysis")
-    face_analysis_module.FaceAnalysis = FakeFaceAnalysis
-    app_module.face_analysis = face_analysis_module
-    insightface_module.app = app_module
+    def get_model(path, *, download, providers):
+        assert download is False
+        assert providers == ["CPUExecutionProvider"]
+        model_path = Path(path)
+        assert model_path.is_file()
+        calls.append(model_path)
+        taskname = "detection" if model_path.name == "det_500m.onnx" else "recognition"
+        return SimpleNamespace(taskname=taskname)
 
-    monkeypatch.setitem(sys.modules, "insightface", insightface_module)
-    monkeypatch.setitem(sys.modules, "insightface.app", app_module)
-    monkeypatch.setitem(sys.modules, "insightface.app.face_analysis", face_analysis_module)
+    insightface = ModuleType("insightface")
+    app = ModuleType("insightface.app")
+    face_analysis = ModuleType("insightface.app.face_analysis")
+    face_analysis.FaceAnalysis = FakeFaceAnalysis
+    model_zoo = ModuleType("insightface.model_zoo")
+    model_zoo.get_model = get_model
+    onnx_state = ModuleType("onnxruntime.capi.onnxruntime_pybind11_state")
+    for name in ("InvalidGraph", "InvalidProtobuf", "NoSuchFile"):
+        setattr(onnx_state, name, type(name, (Exception,), {}))
+    for module in (insightface, app, face_analysis, model_zoo, onnx_state):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
     monkeypatch.setattr(
         "iPhoto.people.pipeline._resolve_execution_providers",
         lambda: ["CPUExecutionProvider"],
     )
+    return calls
 
-    monkeypatch.setenv("INSIGHTFACE_HOME", str(tmp_path / "legacy-cache"))
 
-    model_root = tmp_path / "extension" / "models"
+@pytest.mark.parametrize("folder", ["models", "custom-models"])
+def test_face_pipeline_loads_only_local_models(local_insightface, tmp_path, folder):
+    model_root = tmp_path / folder
+    pack = model_root / "buffalo_s"
+    pack.mkdir(parents=True)
+    paths = [pack / name for name in ("det_500m.onnx", "w600k_mbf.onnx")]
+    for path in paths:
+        path.write_bytes(b"model")
     pipeline = FaceClusterPipeline(model_root=model_root)
 
     app = pipeline._ensure_face_analysis()
 
     assert app is pipeline._ensure_face_analysis()
-    assert model_root.is_dir()
-    assert calls == {
-        "name": "buffalo_s",
-        "root": str((tmp_path / "extension").resolve()),
-        "allowed_modules": ["detection", "recognition"],
-        "providers": ["CPUExecutionProvider"],
-        "ctx_id": -1,
-        "det_size": (640, 640),
-    }
-    assert os.environ["INSIGHTFACE_HOME"] == str((tmp_path / "extension").resolve())
+    assert app.det_model is app.models["detection"]
+    assert local_insightface == [path.resolve() for path in paths]
 
 
-def test_face_pipeline_reports_missing_cached_model_with_actionable_message(
-    monkeypatch, tmp_path: Path
-) -> None:
-    class FakeFaceAnalysis:
-        def __init__(
-            self,
-            *,
-            name: str,
-            root: str,
-            allowed_modules: list[str],
-            providers: list[str],
-        ) -> None:
-            del allowed_modules
-            raise RuntimeError("network unreachable")
+@pytest.mark.parametrize("reason", ["missing", "incomplete"])
+def test_face_pipeline_reports_missing_pack_without_using_insightface_downloader(
+    local_insightface, tmp_path, reason
+):
+    from iPhoto.people.errors import FaceModelUnavailableError
 
-    insightface_module = ModuleType("insightface")
-    app_module = ModuleType("insightface.app")
-    face_analysis_module = ModuleType("insightface.app.face_analysis")
-    face_analysis_module.FaceAnalysis = FakeFaceAnalysis
-    app_module.face_analysis = face_analysis_module
-    insightface_module.app = app_module
-
-    monkeypatch.setitem(sys.modules, "insightface", insightface_module)
-    monkeypatch.setitem(sys.modules, "insightface.app", app_module)
-    monkeypatch.setitem(sys.modules, "insightface.app.face_analysis", face_analysis_module)
-    monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
-    monkeypatch.setattr(
-        "iPhoto.people.pipeline._resolve_execution_providers",
-        lambda: ["CPUExecutionProvider"],
-    )
-
-    model_root = tmp_path / "extension" / "models"
+    model_root = tmp_path / "models"
+    if reason == "incomplete":
+        pack = model_root / "buffalo_s"
+        pack.mkdir(parents=True)
+        (pack / "det_500m.onnx").write_bytes(b"model")
     pipeline = FaceClusterPipeline(model_root=model_root)
 
-    monkeypatch.delenv("INSIGHTFACE_HOME", raising=False)
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(FaceModelUnavailableError, match="Install the People & Pets extension") as exc:
         pipeline._ensure_face_analysis()
 
-    message = str(excinfo.value)
-    assert "not cached" in message
-    assert str(model_root.resolve()) in message
-    assert "github.com" in message
+    assert exc.value.reason == reason
+    assert not local_insightface
+
+
+@pytest.mark.parametrize("error_name", ["InvalidProtobuf", "RuntimeError"])
+def test_face_pipeline_distinguishes_damaged_models_from_runtime_errors(
+    local_insightface, monkeypatch, tmp_path, error_name
+):
+    from iPhoto.people.errors import FaceModelUnavailableError, FaceRuntimeUnavailableError
+
+    pack = tmp_path / "buffalo_s"
+    pack.mkdir()
+    for name in ("det_500m.onnx", "w600k_mbf.onnx"):
+        (pack / name).write_bytes(b"nonempty")
+    onnx_state = sys.modules["onnxruntime.capi.onnxruntime_pybind11_state"]
+    error_type = getattr(onnx_state, error_name, RuntimeError)
+
+    def broken_model(*args, **kwargs):
+        raise error_type("could not load")
+
+    monkeypatch.setattr(sys.modules["insightface.model_zoo"], "get_model", broken_model)
+    expected = FaceRuntimeUnavailableError if error_type is RuntimeError else FaceModelUnavailableError
+    with pytest.raises(expected) as failed:
+        FaceClusterPipeline(model_root=tmp_path)._ensure_face_analysis()
+    if expected is FaceModelUnavailableError:
+        assert failed.value.reason == "incomplete"
 
 
 def test_face_pipeline_installs_lightweight_albumentations_stub(

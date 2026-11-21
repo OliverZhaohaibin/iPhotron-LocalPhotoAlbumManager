@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for tree tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QModelIndex
+from PySide6.QtCore import QLocale, QModelIndex
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.i18n import TranslationManager
@@ -66,6 +66,7 @@ def test_placeholder_when_unbound(qapp: QApplication) -> None:
 def test_model_translates_static_display_text_without_changing_keys(
     tmp_path: Path,
     qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "Library"
     root.mkdir()
@@ -73,24 +74,26 @@ def test_model_translates_static_display_text_without_changing_keys(
     manager.bind_path(root)
     qapp.processEvents()
 
+    monkeypatch.setattr(QLocale, "system", staticmethod(lambda: QLocale("en_US")))
     translations = TranslationManager(_settings(tmp_path))
-    translations.apply_language("zh-CN")
-    model = AlbumTreeModel(manager)
-    qapp.processEvents()
+    try:
+        translations.apply_language("zh-CN")
+        model = AlbumTreeModel(manager)
+        qapp.processEvents()
 
-    header_index = model.index(0, 0)
-    header_item = model.item_from_index(header_index)
-    assert header_item is not None
-    assert header_item.title == "Basic Library"
-    assert model.data(header_index) == "基础图库"
+        header_index = model.index(0, 0)
+        header_item = model.item_from_index(header_index)
+        assert header_item is not None
+        assert header_item.title == "Basic Library"
+        assert model.data(header_index) == "基础图库"
 
-    people_index = _find_child(model, header_index, "人物")
-    assert people_index is not None
-    people_item = model.item_from_index(people_index)
-    assert people_item is not None
-    assert people_item.title == "People"
-
-    translations._remove_installed_translator(qapp)
+        people_index = _find_child(model, header_index, "人物与宠物")
+        assert people_index is not None
+        people_item = model.item_from_index(people_index)
+        assert people_item is not None
+        assert people_item.title == "People"
+    finally:
+        translations.apply_language("system")
 
 
 def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
@@ -105,7 +108,7 @@ def test_model_populates_albums(tmp_path: Path, qapp: QApplication) -> None:
 
     header_index = model.index(0, 0)
     assert model.data(header_index) == "Basic Library"
-    people_index = _find_child(model, header_index, "People")
+    people_index = _find_child(model, header_index, "People&pets")
     location_index = _find_child(model, header_index, "Location")
     assert people_index is not None
     assert location_index is not None

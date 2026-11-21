@@ -10,6 +10,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TYPE_CH
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from ...bootstrap.library_scan_service import LibraryScanService
+from ...bootstrap.startup_profile import mark
 from ...config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 from ...errors import IPhotoError
 from ...utils.pathutils import resolve_work_dir
@@ -141,11 +142,13 @@ class LibraryUpdateService(QObject):
         self.linksUpdated.emit(album.root)
         return rows
 
-    def rescan_album_async(self, album: "Album") -> None:
+    def rescan_album_async(self, album: "Album", *, retry_recognition: bool = False) -> None:
         """Start an asynchronous rescan for *album* using the background pool."""
 
         include, exclude = self._scan_filters(album)
-        self.scan_root_async(album.root, include=include, exclude=exclude)
+        self.scan_root_async(
+            album.root, include=include, exclude=exclude, retry_recognition=retry_recognition
+        )
 
     def scan_root_async(
         self,
@@ -153,6 +156,8 @@ class LibraryUpdateService(QObject):
         *,
         include: Iterable[str],
         exclude: Iterable[str],
+        startup: bool = False,
+        retry_recognition: bool = False,
     ) -> None:
         """Start an asynchronous scan for *root* through the bound session."""
 
@@ -178,9 +183,13 @@ class LibraryUpdateService(QObject):
                     scan_root,
                     include=include,
                     exclude=exclude,
+                    startup=startup,
+                    retry_recognition=retry_recognition,
                 )
                 return
 
+        if startup:
+            mark("startup_metadata_scan.started", root=scan_root)
         self._task_runner.start_scan(
             root=scan_root,
             include=include,

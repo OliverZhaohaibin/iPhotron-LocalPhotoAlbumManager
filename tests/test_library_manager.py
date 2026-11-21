@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -14,9 +16,15 @@ pytest.importorskip("PySide6.QtTest", reason="Qt test helpers not available", ex
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.application.use_cases.scan_library import ScanLibraryResult
+from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.bootstrap.library_session import LibrarySession
+from iPhoto.cache.index_store import get_global_repository
+from iPhoto.domain.models.query import AssetQuery
+from iPhoto.gui.facade import AppFacade
 from iPhoto.errors import AlbumDepthError, AlbumOperationError, LibraryUnavailableError
 from iPhoto.library.runtime_controller import LibraryRuntimeController
+from iPhoto.pets.pipeline import PET_DETECTOR_PIPELINE_VERSION
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +88,20 @@ def test_bind_path_relays_people_snapshot_events(tmp_path: Path, qapp: QApplicat
     assert index_spy.count() == 1
 
 
+def test_people_snapshot_reconciles_people_priority_pet_detections(
+    qapp: QApplication,
+) -> None:
+    manager = LibraryRuntimeController()
+    pet_service = SimpleNamespace(reconcile_people_overlaps=Mock())
+    manager._pet_service = pet_service
+    event = SimpleNamespace(changed_asset_ids=("asset-a", "asset-b"))
+
+    manager._on_people_snapshot_committed(event)
+    qapp.processEvents()
+
+    pet_service.reconcile_people_overlaps.assert_called_once_with(("asset-a", "asset-b"))
+
+
 def test_bind_path_rebinds_people_snapshot_events_for_prebound_session(
     tmp_path: Path,
     qapp: QApplication,
@@ -107,7 +129,7 @@ def test_bind_path_rebinds_people_snapshot_events_for_prebound_session(
     assert index_spy.count() == 1
 
 
-def test_bind_path_from_session_rebinds_people_snapshot_events(
+def test_bind_path_from_session_defers_snapshot_coordinator_until_scan_activation(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
@@ -120,11 +142,15 @@ def test_bind_path_from_session_rebinds_people_snapshot_events(
     manager.bind_path_from_session(root)
     qapp.processEvents()
 
+    assert manager._people_index_coordinator is None
+
+    manager.activate_recognition_scans()
+    qapp.processEvents()
+
     snapshot_spy = QSignalSpy(manager.peopleSnapshotCommitted)
     index_spy = QSignalSpy(manager.peopleIndexUpdated)
     coordinator = manager._people_index_coordinator
     assert coordinator is not None
-
     event = object()
     coordinator.snapshotCommitted.emit(event)
     qapp.processEvents()
@@ -185,6 +211,132 @@ def test_create_and_rename_album(tmp_path: Path, qapp: QApplication) -> None:
     )
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert data["title"] == "Arrival"
+
+
+def test_rename_album_publishes_ready_index_before_gallery_reopens(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    root = tmp_path / "Library"
+    old = root / "Trip"
+    (old / "Day1").mkdir(parents=True)
+    manager = LibraryRuntimeController()
+    facade = AppFacade()
+    try:
+        manager.bind_path(root)
+        facade._inject_scan_dependencies_for_tests(library_manager=manager)
+        repository = get_global_repository(root)
+        rows = [
+            {"rel": rel, "id": rel, "thumbnail_state": "ready", "thumb_cache_key": rel,
+             "thumb_revision": "existing-revision", "micro_thumbnail": b"existing-preview",
+             "is_favorite": True, "face_status": "done", "pet_status": "done"}
+            for rel in ("Trip/photo.jpg", "Trip/Day1/child.jpg")
+        ]
+        repository.write_rows(rows)
+        for path in (old, old / "Day1"):
+            repository.create_scan_job(job_id=path.name, root=path.as_posix(), scope="album")
+            repository.update_scan_job_stage(path.name, status="completed", finished=True)
+        observed = []
+
+        def reopen_album(_old, new):
+            observed.append((
+                repository.count(album_path="Renamed Trip", filter_hidden=False),
+                manager.scan_service.is_scan_scope_complete(new),
+                manager.scan_service.is_scan_scope_complete(new / "Day1"),
+            ))
+            facade.open_album(new)
+
+        manager.albumRenamed.connect(reopen_album)
+        with patch.object(manager, "start_session_scan") as scans:
+            manager.rename_album(manager.list_albums()[0], "Renamed Trip")
+            scans.assert_not_called()
+
+        assert observed == [(2, True, True)]
+        assert facade.current_album.root == root / "Renamed Trip"
+        assert not repository.get_rows_by_rels([row["rel"] for row in rows])
+        renamed = repository.get_rows_by_rels(["Renamed Trip/photo.jpg", "Renamed Trip/Day1/child.jpg"])
+        assert len(renamed) == 2
+        for row in renamed.values():
+            assert row["thumbnail_state"] == "ready"
+            assert row["thumb_cache_key"]
+            assert row["thumb_revision"] is None
+            assert row["micro_thumbnail"] == b"existing-preview"
+            assert row["is_favorite"]
+            assert row["face_status"] == "done"
+            assert row["pet_status"] == "done"
+    finally:
+        manager.shutdown()
+
+
+def test_failed_album_index_rename_rolls_back_folder_and_manifest(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    root = tmp_path / "Library"
+    old = root / "Trip"
+    old.mkdir(parents=True)
+    _write_manifest(old, "Trip")
+    manager = LibraryRuntimeController()
+    try:
+        manager.bind_path(root)
+        repository = get_global_repository(root)
+        repository.write_rows([
+            {"rel": "Trip/photo.jpg", "id": "source", "is_favorite": True},
+            {"rel": "New/photo.jpg", "id": "durable-destination", "is_favorite": True},
+        ])
+        before = repository.get_rows_by_rels(["Trip/photo.jpg", "New/photo.jpg"])
+        renamed = QSignalSpy(manager.albumRenamed)
+
+        with pytest.raises(AlbumOperationError, match="already has indexed assets"):
+            manager.rename_album(manager.list_albums()[0], "New")
+
+        assert old.is_dir()
+        assert not (root / "New").exists()
+        assert json.loads((old / ".iphoto.album.json").read_text())["title"] == "Trip"
+        assert repository.get_rows_by_rels(before) == before
+        assert renamed.count() == 0
+        assert str(root) in manager._watcher.directories()
+        assert manager._watch_suspend_depth == 0
+    finally:
+        manager.shutdown()
+
+
+def test_internal_album_rename_rejects_stale_background_tree_snapshot(
+    tmp_path: Path, qapp: QApplication
+) -> None:
+    from iPhoto.library.watch_service import LibraryWatchResult
+
+    root = tmp_path / "Library"
+    old = root / "Trip"
+    old.mkdir(parents=True)
+    manager = LibraryRuntimeController()
+    try:
+        manager.bind_path(root)
+        old_node = manager.list_albums()[0]
+        manager._background_watch_generation = 41
+        manager._background_watch_polling = True
+        rename = manager.scan_service.rename_album
+
+        def rename_without_watches(source, destination):
+            assert not manager._watcher.directories()
+            assert manager._watch_suspend_depth == 1
+            rename(source, destination)
+
+        with (
+            patch.object(manager._watch_service, "configure", return_value=42) as configure,
+            patch.object(manager.scan_service, "rename_album", side_effect=rename_without_watches),
+        ):
+            manager.rename_album(old_node, "New")
+        assert configure.call_args.kwargs["polling"] is True
+        assert root / "New" in configure.call_args.args[1]
+        assert old not in configure.call_args.args[1]
+        assert str(root / "New") in manager._watcher.directories()
+        assert manager._watch_suspend_depth == 0
+
+        with patch.object(manager, "start_scanning") as scans:
+            manager._on_background_watch_result(LibraryWatchResult(41, (root,), (old_node,)))
+            scans.assert_not_called()
+        assert [node.path for node in manager.list_albums()] == [root / "New"]
+    finally:
+        manager.shutdown()
 
 
 @pytest.mark.parametrize("reserved_name", [".iPhoto", ".iphoto", ".IPHOTO", ".Trash", "exported"])
@@ -354,8 +506,11 @@ def test_shutdown_cancels_and_waits_for_scan_workers(
     worker = _Worker()
     face_scanner = Mock()
     face_scanner.isRunning.return_value = False
+    pet_scanner = Mock()
+    pet_scanner.isRunning.return_value = False
     manager._current_scanner_worker = worker
     manager._current_face_scanner = face_scanner
+    manager._current_pet_scanner = pet_scanner
     manager._live_scan_root = root
 
     with patch.object(
@@ -368,6 +523,8 @@ def test_shutdown_cancels_and_waits_for_scan_workers(
     assert worker.cancelled is True
     face_scanner.cancel.assert_called_once_with()
     face_scanner.wait.assert_called_once_with(2000)
+    pet_scanner.cancel.assert_called_once_with()
+    pet_scanner.wait.assert_called_once_with(2000)
     wait_for_done.assert_called_once_with(2000)
 
 
@@ -402,26 +559,80 @@ def test_scan_finished_reports_failure_when_finalization_fails(
     manager = LibraryRuntimeController()
     manager.bind_path(root)
     scan_service = Mock()
+    scan_service.scan_album.return_value = ScanLibraryResult(rows=[{"rel": "a.jpg"}])
     scan_service.finalize_scan_result.side_effect = RuntimeError("finalize failed")
+    manager.bind_scan_service(scan_service)
 
-    worker = Mock(cancelled=False, failed=False, scan_service=scan_service)
     spy = QSignalSpy(manager.scanFinished)
-    manager._current_scanner_worker = worker
-    manager._live_scan_root = root
 
-    with patch.object(manager._scan_thread_pool, "start") as start_mock:
-        manager._on_scan_finished(worker, root, [{"rel": "a.jpg"}])
+    with patch.object(
+        manager._scan_thread_pool, "start", side_effect=lambda task: task.run()
+    ) as start_mock:
+        manager.start_scanning(root, ["*.jpg"], ["*.mov"])
         qapp.processEvents()
 
     scan_service.finalize_scan_result.assert_called_once()
-    start_mock.assert_not_called()
+    assert start_mock.call_count == 1
     assert spy.count() == 1
     assert spy.at(0)[1] is False
 
 
+@pytest.mark.parametrize("pairing_fails", [False, True], ids=["paired", "pairing-failed"])
+def test_recursive_scan_finishes_after_live_photo_pairing(
+    tmp_path: Path,
+    qapp: QApplication,
+    pairing_fails: bool,
+) -> None:
+    root = tmp_path.resolve()
+    rows = [
+        {
+            "rel": "still.jpg", "id": "still", "mime": "image/jpeg", "media_type": 0,
+            "content_id": "live", "thumbnail_state": "ready", "thumb_cache_key": "still",
+        },
+        {
+            "rel": "motion.mov", "id": "motion", "mime": "video/quicktime", "media_type": 1,
+            "content_id": "live", "thumbnail_state": "ready", "thumb_cache_key": "motion",
+        },
+    ]
+    for row in rows:
+        (root / row["rel"]).touch()
+    scanner = Mock()
+    scanner.scan.return_value = iter(rows)
+    service = LibraryScanService(root, scanner=scanner)
+    if pairing_fails:
+        service.pair_album = Mock(side_effect=OSError("pairing failed"))
+
+    manager = LibraryRuntimeController()
+    try:
+        manager.bind_path(root)
+        manager.bind_scan_service(service)
+        query_service = manager.asset_query_service
+        assert query_service is not None
+        observations = []
+
+        def record_completion(_root: Path, success: bool) -> None:
+            window = query_service.read_gallery_asset_window(root, AssetQuery(), 0, 10)
+            complete = service.is_scan_scope_complete(root)
+            observations.append((success, complete, window.total_count))
+
+        manager.scanFinished.connect(record_completion)
+        with patch.object(
+            manager._scan_thread_pool, "start", side_effect=lambda task: task.run(),
+        ) as start:
+            manager.start_scanning(root, ["**/*.jpg", "**/*.mov"], [], startup=True)
+            qapp.processEvents()
+
+        assert observations == ([(False, False, 2)] if pairing_fails else [(True, True, 1)])
+        start.assert_called_once()
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("retry_recognition", [False, True])
 def test_scan_request_is_queued_until_active_scan_finishes(
     tmp_path: Path,
     qapp: QApplication,
+    retry_recognition: bool,
 ) -> None:
     root = tmp_path / "Library"
     first = root / "First"
@@ -437,25 +648,39 @@ def test_scan_request_is_queued_until_active_scan_finishes(
     manager._live_scan_root = first
 
     manager.start_scanning(second, ["*.jpg"], ["*.mov"])
-    assert manager._deferred_scan_queue == [(second, ["*.jpg"], ["*.mov"])]
+    if retry_recognition:
+        manager.start_session_scan(
+            second, include=["*.jpg"], exclude=["*.mov"], retry_recognition=True
+        )
+    assert manager._deferred_scan_queue == [
+        (second, ["*.jpg"], ["*.mov"], False, retry_recognition, False)
+    ]
 
     with patch.object(manager, "start_scanning") as start_mock:
         manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
         qapp.processEvents()
 
-    scan_service.finalize_scan_result.assert_called_once()
-    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"])
+    start_mock.assert_called_once_with(
+        second,
+        ["*.jpg"],
+        ["*.mov"],
+        startup=False,
+        retry_recognition=retry_recognition,
+        root_only=False,
+    )
 
 
+@pytest.mark.parametrize("root_only", [False, True])
 def test_deferred_scan_waits_for_face_scan_to_finish(
     tmp_path: Path,
     qapp: QApplication,
+    root_only: bool,
 ) -> None:
     root = tmp_path / "Library"
     first = root / "First"
-    second = root / "Second"
+    second = root if root_only else root / "Second"
     first.mkdir(parents=True)
-    second.mkdir(parents=True)
+    second.mkdir(parents=True, exist_ok=True)
     manager = LibraryRuntimeController()
     manager.bind_path(root)
     scan_service = Mock()
@@ -467,7 +692,7 @@ def test_deferred_scan_waits_for_face_scan_to_finish(
     manager._current_face_scanner = face_scanner
     manager._live_scan_root = first
 
-    manager.start_scanning(second, ["*.jpg"], ["*.mov"])
+    manager.start_scanning(second, ["*.jpg"], ["*.mov"], root_only=root_only)
 
     with patch.object(manager, "start_scanning") as start_mock:
         manager._on_scan_finished(worker, first, [{"rel": "a.jpg"}])
@@ -478,4 +703,564 @@ def test_deferred_scan_waits_for_face_scan_to_finish(
         face_scanner.isRunning.return_value = False
         manager._on_face_scan_finished(face_scanner)
 
-    start_mock.assert_called_once_with(second, ["*.jpg"], ["*.mov"])
+    start_mock.assert_called_once_with(
+        second,
+        ["*.jpg"],
+        ["*.mov"],
+        startup=False,
+        retry_recognition=False,
+        root_only=root_only,
+    )
+
+
+@pytest.mark.parametrize("activated,retry_recognition", [(False, True), (True, False), (True, True)])
+def test_regular_scan_starts_ai_workers_only_after_recognition_activation(
+    tmp_path: Path,
+    qapp: QApplication,
+    activated: bool,
+    retry_recognition: bool,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    manager.bind_scan_service(Mock())
+    if activated:
+        manager._recognition_scans_root = root
+        manager._recognition_blocked_models["face"] = manager._recognition_model_revision
+
+    with (
+        patch.object(manager._scan_thread_pool, "start") as start_thread,
+        patch.object(manager, "_start_ai_scan_workers") as start_ai,
+    ):
+        manager.start_session_scan(
+            root, include=["*.jpg"], exclude=["*.mov"], retry_recognition=retry_recognition
+        )
+
+    if activated:
+        start_ai.assert_called_once_with(root)
+    else:
+        start_ai.assert_not_called()
+    assert ("face" in manager._recognition_blocked_models) == (activated and not retry_recognition)
+    start_thread.assert_called_once()
+
+
+def test_startup_scan_leaves_ai_workers_for_first_recognition_use(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    scan_service = Mock()
+    scan_service.scan_album.return_value = ScanLibraryResult(rows=[])
+    scan_service.finalize_scan_result.return_value = []
+    manager.bind_scan_service(scan_service)
+
+    with (
+        patch.object(manager._scan_thread_pool, "start") as start_thread,
+        patch.object(manager, "_start_ai_scan_workers") as start_ai,
+        patch("iPhoto.library.scan_coordinator.mark") as profile_mark,
+    ):
+        manager.start_scanning(root, ["*.jpg"], ["*.mov"], startup=True)
+
+        worker = manager._current_scanner_worker
+        assert worker is not None
+        start_ai.assert_not_called()
+        profile_mark.assert_called_once_with("startup_metadata_scan.started", root=root)
+        start_thread.assert_called_once_with(worker)
+
+        worker.run()
+
+    scan_service.finalize_scan_result.assert_called_once_with(
+        root,
+        [],
+        pair_live=True,
+        preserve_modified_after_ms=None,
+        current_scan_job_id=None,
+        root_only=False,
+        watched_albums=frozenset(),
+    )
+    start_ai.assert_not_called()
+
+
+def test_recognition_activation_binds_services_and_starts_finite_ai_scan(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    people_service = Mock()
+    people_service.coordinator = None
+    pet_service = Mock()
+    pet_service.coordinator = None
+
+    with patch.object(manager, "_start_ai_scan_workers") as start_ai:
+        manager.activate_recognition_services(people_service, pet_service)
+
+    assert manager.people_service is people_service
+    assert manager.pet_service is pet_service
+    start_ai.assert_called_once_with(root, startup=True)
+
+
+def test_recognition_binding_does_not_start_ai_before_viewport_ready(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    people_service = Mock()
+    people_service.coordinator = None
+    pet_service = Mock()
+    pet_service.coordinator = None
+
+    with patch.object(manager, "_start_ai_scan_workers") as start_ai:
+        manager.bind_recognition_services(people_service, pet_service)
+        start_ai.assert_not_called()
+        manager.activate_recognition_scans()
+
+    start_ai.assert_called_once_with(root, startup=True)
+
+
+def test_upgraded_library_schedules_pet_backfill_after_recognition_activation(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.side_effect = lambda key: {
+        "pet_backfill_required": None,
+        "detector_pipeline_version": "legacy-detector",
+        "detector_migration_target": None,
+        "detector_migration_state": None,
+    }[key]
+    asset_repository = Mock()
+    asset_repository.count_by_pet_status.return_value = {"done": 3}
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = asset_repository
+
+    with (
+        patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot,
+        patch.object(manager, "_start_pet_backfill_worker") as start_backfill,
+    ):
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_not_called()
+        manager._recognition_scans_root = root
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_called_once()
+        single_shot.call_args.args[1]()
+
+    repository.set_scan_metadata_many.assert_called_once_with(
+        {
+            "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+            "detector_migration_state": "pending",
+            "pet_backfill_required": "1",
+        }
+    )
+    start_backfill.assert_called_once_with(root)
+
+
+def test_new_library_does_not_schedule_pet_backfill_until_feature_use(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.return_value = None
+    asset_repository = Mock()
+    asset_repository.count_by_pet_status.return_value = {"done": 0}
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = asset_repository
+
+    with patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot:
+        manager.bind_recognition_services(Mock(), pet_service)
+
+    single_shot.assert_not_called()
+    repository.set_scan_metadata.assert_not_called()
+
+
+def test_current_library_schedules_ordinary_pending_retry_drain_after_activation(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.side_effect = lambda key: {
+        "pet_backfill_required": None,
+        "detector_pipeline_version": PET_DETECTOR_PIPELINE_VERSION,
+        "detector_migration_target": PET_DETECTOR_PIPELINE_VERSION,
+        "detector_migration_state": "complete",
+    }[key]
+    asset_repository = Mock()
+    asset_repository.count_by_pet_status.return_value = {"pending": 2, "retry": 1}
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = asset_repository
+
+    with (
+        patch("iPhoto.library.runtime_controller.QTimer.singleShot") as single_shot,
+        patch.object(manager, "_start_pet_backfill_worker") as start_drain,
+    ):
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_not_called()
+        manager._recognition_scans_root = root
+        manager.bind_recognition_services(Mock(), pet_service)
+        single_shot.assert_called_once()
+        single_shot.call_args.args[1]()
+
+    start_drain.assert_called_once_with(root)
+    repository.set_scan_metadata_many.assert_not_called()
+
+
+def test_pet_backfill_event_does_not_block_face_activation(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    repository = Mock()
+    repository.get_scan_metadata.side_effect = lambda key: {
+        "pet_backfill_required": "1",
+        "detector_pipeline_version": "legacy-detector",
+        "detector_migration_target": None,
+        "detector_migration_state": None,
+    }[key]
+    pet_service = Mock()
+    pet_service.repository.return_value = repository
+    pet_service.asset_repository = Mock()
+    pet_service.asset_repository.count_by_pet_status.return_value = {"done": 1}
+    pet_service.coordinator = None
+    people_service = Mock()
+    people_service.coordinator = None
+    class _BackfillWorker:
+        def cancel(self) -> None:
+            return None
+
+        def wait(self, _timeout: int = 0) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+    backfill = _BackfillWorker()
+    created_faces: list[object] = []
+
+    class _FakeSignal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class _FaceWorker:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.statusChanged = _FakeSignal()
+            self.finished = _FakeSignal()
+            self.started = False
+            self.input_closed = False
+            created_faces.append(self)
+
+        def setObjectName(self, _name: str) -> None:
+            return None
+
+        def finish_input(self) -> None:
+            self.input_closed = True
+
+        def start(self) -> None:
+            self.started = True
+
+        def cancel(self) -> None:
+            return None
+
+        def wait(self, _timeout: int = 0) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.face_scan_worker",
+        SimpleNamespace(FaceScanWorker=_FaceWorker),
+    )
+    manager.bind_recognition_services(people_service, pet_service)
+    manager._current_pet_scanner = backfill
+    manager.activate_recognition_scans()
+
+    assert len(created_faces) == 1
+    assert created_faces[0].started is True
+    assert created_faces[0].input_closed is True
+    assert manager._current_pet_scanner is backfill
+    assert manager._recognition_scans_root == root
+
+
+def test_recognition_activation_retries_only_failed_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager._root = root
+    manager._recognition_services_root = root
+    manager._people_service = Mock(coordinator=None)
+    manager._pet_service = Mock(coordinator=None)
+    face_starts: list[int] = []
+    pet_instances: list[object] = []
+
+    class _FakeSignal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class _WorkerBase:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.statusChanged = _FakeSignal()
+            self.finished = _FakeSignal()
+
+        def setObjectName(self, _name: str) -> None:
+            return None
+
+        def finish_input(self) -> None:
+            return None
+
+        def cancel(self) -> None:
+            return None
+
+        def wait(self, _timeout: int = 0) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+    class _FaceWorker(_WorkerBase):
+        def start(self) -> None:
+            face_starts.append(1)
+
+    class _PetWorker(_WorkerBase):
+        def __init__(self, *_args, **_kwargs) -> None:
+            super().__init__(*_args, **_kwargs)
+            pet_instances.append(self)
+
+        def start(self) -> None:
+            if len(pet_instances) == 1:
+                raise RuntimeError("injected Pet start failure")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.face_scan_worker",
+        SimpleNamespace(FaceScanWorker=_FaceWorker),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.pet_scan_worker",
+        SimpleNamespace(PetScanWorker=_PetWorker),
+    )
+
+    manager.activate_recognition_scans()
+    assert manager._recognition_scans_root is None
+    assert len(face_starts) == 1
+    assert len(pet_instances) == 1
+
+    manager.activate_recognition_scans()
+    assert manager._recognition_scans_root == root
+    assert len(face_starts) == 1
+    assert len(pet_instances) == 2
+
+
+def test_library_switch_retires_pet_worker_and_rejects_late_status(
+    qapp: QApplication,
+) -> None:
+    manager = LibraryRuntimeController()
+    worker = Mock()
+    worker._recognition_generation_token = manager._recognition_generation
+    manager._current_pet_scanner = worker
+    old_generation = manager._recognition_generation
+
+    manager.stop_scanning(wait=False)
+
+    worker.cancel.assert_called_once_with()
+    worker.wait.assert_not_called()
+    assert manager._recognition_generation == old_generation + 1
+    assert worker in manager._retiring_recognition_workers
+
+    manager._on_recognition_worker_status(worker, "pet", "late old-library status")
+    assert manager._pet_scan_status_message is None
+
+    manager._on_pet_scan_finished(worker)
+    assert worker not in manager._retiring_recognition_workers
+
+
+def test_map_activation_binds_location_runtime_and_interaction_services() -> None:
+    manager = LibraryRuntimeController.__new__(LibraryRuntimeController)
+    manager.bind_location_service = Mock()
+    manager.bind_map_runtime = Mock()
+    manager.bind_map_interaction_service = Mock()
+    location_service = object()
+    map_runtime = object()
+    interaction_service = object()
+
+    manager.activate_map_services(
+        location_service,
+        map_runtime,
+        interaction_service,
+    )
+
+    manager.bind_location_service.assert_called_once_with(location_service)
+    manager.bind_map_runtime.assert_called_once_with(map_runtime)
+    manager.bind_map_interaction_service.assert_called_once_with(interaction_service)
+
+
+def test_session_binding_does_not_materialize_location_before_map_use(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    session = LibrarySession(root)
+
+    manager.bind_library_session(session)
+
+    assert vars(session)["locations"] is None
+    assert manager.location_service is None
+
+
+def test_startup_ai_workers_close_input_after_metadata_scan(
+    tmp_path: Path,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Library"
+    root.mkdir()
+    manager = LibraryRuntimeController()
+    manager.bind_path(root)
+    created: list[object] = []
+
+    class _FakeSignal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class _FakeAiWorker:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.statusChanged = _FakeSignal()
+            self.finished = _FakeSignal()
+            self.input_closed = False
+            self.started = False
+            created.append(self)
+
+        def finish_input(self) -> None:
+            self.input_closed = True
+
+        def cancel(self) -> None:
+            self.input_closed = True
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return True
+
+        def isRunning(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.started = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.face_scan_worker",
+        SimpleNamespace(FaceScanWorker=_FakeAiWorker),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "iPhoto.library.workers.pet_scan_worker",
+        SimpleNamespace(PetScanWorker=_FakeAiWorker),
+    )
+
+    with patch("iPhoto.library.scan_coordinator.mark") as profile_mark:
+        manager._start_ai_scan_workers(root, startup=True)
+
+    profile_mark.assert_called_once_with("startup_ai_scan.started", root=root)
+    assert len(created) == 2
+    assert all(worker.input_closed for worker in created)
+    assert all(worker.started for worker in created)
+
+
+@pytest.mark.parametrize("install_first", [False, True])
+def test_recognition_model_install_restarts_only_worker_that_failed(
+    tmp_path: Path, qapp, monkeypatch, install_first: bool
+) -> None:
+    from PySide6.QtCore import QThread, Signal
+
+    class Worker(QThread):
+        statusChanged = Signal(str)
+        modelUnavailable = Signal(str)
+
+        def cancel(self) -> None:
+            self.requestInterruption()
+
+        def run(self) -> None:
+            self.modelUnavailable.emit("incomplete")
+
+    manager = LibraryRuntimeController()
+    manager._root = manager._recognition_scans_root = tmp_path
+    face = Worker(manager)
+    pet = Worker(manager)
+    manager._current_face_scanner = face
+    manager._current_pet_scanner = pet
+    manager._connect_recognition_worker(face, "face")
+    def assert_main_thread(*_args, **_kwargs):
+        assert QThread.currentThread() == manager.thread()
+        return True
+
+    restart = Mock(side_effect=assert_main_thread)
+    monkeypatch.setattr(manager, "_start_ai_scan_workers", restart)
+    errors = QSignalSpy(manager.recognitionModelUnavailable)
+    if install_first:
+        manager.recognition_extension_installed()
+
+    face.start()
+    assert face.wait(5000)
+    qapp.processEvents()
+    assert manager._current_face_scanner is None
+    if install_first:
+        assert errors.count() == 0
+    else:
+        assert errors.count() == 1
+        assert manager.recognition_model_failure_is_current(errors.at(0)[0])
+        restart.assert_not_called()
+        manager.recognition_extension_installed()
+        assert not manager.recognition_model_failure_is_current(errors.at(0)[0])
+
+    restart.assert_called_once_with(tmp_path, startup=True, kinds=frozenset({"face"}))
+    assert manager._current_pet_scanner is pet
+
+
+def test_invalid_face_override_can_retry_without_install(tmp_path, qapp):
+    manager = LibraryRuntimeController()
+    manager._root = manager._recognition_scans_root = tmp_path
+    face = Mock(
+        _recognition_generation_token=manager._recognition_generation,
+        _recognition_model_revision=manager._recognition_model_revision,
+    )
+    manager._current_face_scanner = face
+    failures = QSignalSpy(manager.recognitionModelUnavailable)
+
+    manager._on_recognition_model_failure(face, "face", "invalid_override")
+
+    assert failures.count() == 1
+    assert manager.recognition_model_failure_is_current(failures.at(0)[0])
+    assert "face" not in manager._recognition_blocked_models

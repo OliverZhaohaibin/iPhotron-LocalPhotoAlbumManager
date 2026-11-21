@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QAbstractAnimation, QPoint, QParallelAnimationGroup, Signal
+from PySide6.QtCore import QAbstractAnimation, QParallelAnimationGroup, QPoint, Signal
 from PySide6.QtWidgets import QWidget
 
-from .people_dashboard_cards import GroupCard, PeopleCard
+from .people_dashboard_cards import GroupCard, IdentityCard
 from .people_dashboard_shared import (
     CANVAS_MARGIN,
     CARD_HEIGHT,
@@ -20,15 +20,15 @@ from .people_dashboard_shared import (
 )
 
 
-class PeopleBoard(QWidget):
+class IdentityBoard(QWidget):
     mergeRequested = Signal(str, str)
     orderChanged = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("PeopleBoard")
-        self.top_cards: list[PeopleCard] = []
-        self.proximity_pair: tuple[PeopleCard, PeopleCard] | None = None
+        self.top_cards: list[IdentityCard] = []
+        self.proximity_pair: tuple[IdentityCard, IdentityCard] | None = None
         self._active_anim: QParallelAnimationGroup | None = None
         self._drag_start_order: tuple[str, ...] | None = None
 
@@ -46,10 +46,19 @@ class PeopleBoard(QWidget):
         self.setStyleSheet("#PeopleBoard { background: transparent; }")
         self.setMinimumHeight(260)
 
-    def set_cards(self, cards: list[PeopleCard]) -> None:
+    def set_cards(self, cards: list[IdentityCard]) -> None:
         self.clear_cards()
-        self.top_cards = list(cards)
-        for card in self.top_cards:
+        self.append_cards(cards)
+
+    def append_cards(self, cards: list[IdentityCard]) -> None:
+        """Append one presentation batch without rebuilding existing cards."""
+
+        if not cards:
+            return
+        self.top_cards.extend(cards)
+        if self._drag_start_order is not None:
+            self._drag_start_order += tuple(card.identity_key for card in cards)
+        for card in cards:
             card.setParent(self)
             card.show()
         self.update_positions()
@@ -64,14 +73,19 @@ class PeopleBoard(QWidget):
             card.hide()
             card.deleteLater()
         self.top_cards = []
+        self._drag_start_order = None
         self.merge_frame.hide()
         self.proximity_pair = None
         self.setMinimumHeight(260)
 
-    def visible_cards(self) -> list[PeopleCard]:
+    def visible_cards(self) -> list[IdentityCard]:
         return list(self.top_cards)
 
-    def calculate_positions(self, cards: list[PeopleCard] | None = None) -> list[QPoint]:
+    @property
+    def is_dragging(self) -> bool:
+        return self._drag_start_order is not None
+
+    def calculate_positions(self, cards: list[IdentityCard] | None = None) -> list[QPoint]:
         visible = list(cards) if cards is not None else self.visible_cards()
         width = max(self.width(), 360)
         per_row = max(1, (width - CANVAS_MARGIN * 2 + SPACING) // (CARD_WIDTH + SPACING))
@@ -89,8 +103,11 @@ class PeopleBoard(QWidget):
 
     def update_positions(self) -> None:
         positions = self.calculate_positions()
+        dragged = None
         for card, position in zip(self.visible_cards(), positions):
-            if not card.is_dragging:
+            if card.is_dragging:
+                dragged = card
+            else:
                 card.move(position)
             card.show()
 
@@ -98,31 +115,33 @@ class PeopleBoard(QWidget):
         if positions:
             max_bottom = max(point.y() for point in positions) + CARD_HEIGHT + CANVAS_MARGIN
         self.setMinimumHeight(max_bottom)
+        if dragged is not None and self.is_dragging:
+            self.check_card_proximity(dragged)
 
-    def begin_drag(self, card: PeopleCard) -> None:
+    def begin_drag(self, card: IdentityCard) -> None:
         del card
-        self._drag_start_order = tuple(item.person_id for item in self.visible_cards())
+        self._drag_start_order = tuple(item.identity_key for item in self.visible_cards())
         if (
             self._active_anim is not None
             and self._active_anim.state() == QAbstractAnimation.State.Running
         ):
             self._active_anim.stop()
 
-    def finish_drag(self, card: PeopleCard) -> None:
-        self.check_card_proximity(card)
-        should_persist_order = self.proximity_pair is None
-        if self.proximity_pair is not None:
-            source, target = self.proximity_pair
-            self.mergeRequested.emit(source.person_id, target.person_id)
+    def finish_drag(self, card: IdentityCard) -> None:
+        target = None
+        if self.proximity_pair is not None and self.proximity_pair[0] is card:
+            target = self.proximity_pair[1]
+            self.mergeRequested.emit(card.identity_key, target.identity_key)
 
         self.hide_merge_frame()
         self.proximity_pair = None
-        self.animate_to_layout()
-        if should_persist_order:
-            current_order = tuple(item.person_id for item in self.visible_cards())
-            if current_order != (self._drag_start_order or current_order):
-                self.orderChanged.emit(list(current_order))
+        start_order = self._drag_start_order
         self._drag_start_order = None
+        self.animate_to_layout()
+        if target is None:
+            current_order = tuple(item.identity_key for item in self.visible_cards())
+            if start_order is not None and current_order != start_order:
+                self.orderChanged.emit(list(current_order))
 
     def animate_to_layout(self) -> None:
         if (
@@ -149,7 +168,11 @@ class PeopleBoard(QWidget):
         self._active_anim = group
         group.start()
 
-    def update_card_order(self, dragged: PeopleCard) -> None:
+    def update_drag(self, dragged: IdentityCard) -> None:
+        self.update_card_order(dragged)
+        self.check_card_proximity(dragged)
+
+    def update_card_order(self, dragged: IdentityCard) -> None:
         visible = self.visible_cards()
         targets = self.calculate_positions(visible)
         if not targets:
@@ -173,7 +196,7 @@ class PeopleBoard(QWidget):
                 continue
             card.move(target)
 
-    def check_card_proximity(self, dragged: PeopleCard) -> None:
+    def check_card_proximity(self, dragged: IdentityCard) -> None:
         candidates = [card for card in self.visible_cards() if card is not dragged]
         if not candidates:
             self.hide_merge_frame()
@@ -189,7 +212,7 @@ class PeopleBoard(QWidget):
             self.hide_merge_frame()
             self.proximity_pair = None
 
-    def show_merge_frame(self, first: PeopleCard, second: PeopleCard) -> None:
+    def show_merge_frame(self, first: IdentityCard, second: IdentityCard) -> None:
         left = min(first.x(), second.x()) - 10
         top = min(first.y(), second.y()) - 10
         right = max(first.x() + CARD_WIDTH, second.x() + CARD_WIDTH) + 10
@@ -204,6 +227,9 @@ class PeopleBoard(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self.update_positions()
+
+
+PeopleBoard = IdentityBoard
 
 
 class GroupBoard(QWidget):
@@ -221,8 +247,15 @@ class GroupBoard(QWidget):
 
     def set_cards(self, cards: list[GroupCard]) -> None:
         self.clear_cards()
-        self.top_cards = list(cards)
-        for card in self.top_cards:
+        self.append_cards(cards)
+
+    def append_cards(self, cards: list[GroupCard]) -> None:
+        """Append one presentation batch without rebuilding existing cards."""
+
+        if not cards:
+            return
+        self.top_cards.extend(cards)
+        for card in cards:
             card.setParent(self)
             card.show()
         self.update_positions()

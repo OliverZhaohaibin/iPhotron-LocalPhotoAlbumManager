@@ -20,9 +20,14 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import uuid
+from collections.abc import Mapping
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from ...config import GLOBAL_INDEX_DB_NAME
+from ...domain.models.core import normalise_content_id
 from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
 from ...infrastructure.services.performance_events import (
     audit_full_scan_query,
@@ -30,20 +35,23 @@ from ...infrastructure.services.performance_events import (
     explain_enabled,
     monotonic_ms,
 )
+from ...infrastructure.services.thumbnail_cache_keys import (
+    thumbnail_cache_file_for_key,
+    thumbnail_cache_key,
+)
 from ...people.status import normalize_face_status
+from ...pets.status import normalize_pet_status
 from ...utils.logging import get_logger
-from ...utils.pathutils import ensure_work_dir
+from ...utils.pathutils import LibraryAssetPathError, ensure_work_dir, resolve_library_asset_path
 from .engine import DatabaseManager
-from .migrations import SchemaMigrator
+from .migrations import MIGRATION_STATE_NAME, SchemaMigrator, SchemaPreparationError
 from .queries import QueryBuilder
 from .recovery import RecoveryService
 from .row_mapper import db_row_to_dict, insert_rows, row_to_db_params
+from .scan_merge import conflicting_thumbnail_revisions
 from .scan_merge import merge_scan_rows as merge_scan_rows_payload
 
 logger = get_logger()
-
-# Database filename for the global index
-GLOBAL_INDEX_DB_NAME = "global_index.db"
 
 # SQLite supports at most SQLITE_MAX_VARIABLE_NUMBER bound parameters per query
 # (compile-time default 999, raised to 32766 in SQLite ≥3.32).  Use a
@@ -58,6 +66,7 @@ _OMIT_METADATA_VALUE = object()
 # Global singleton instance and lock for thread-safe access
 _global_instance: Optional["AssetRepository"] = None
 _global_lock = threading.Lock()
+_prepared_roots: dict[Path, Any] = {}
 
 
 def _coerce_json_metadata_value(value: Any) -> Any:
@@ -117,20 +126,35 @@ def get_global_repository(library_root: Path) -> "AssetRepository":
     with _global_lock:
         resolved_root = library_root.resolve()
         
+        credential = _prepared_roots.pop(resolved_root, None)
+        if (
+            credential is None
+            and _global_instance is not None
+            and _global_instance.library_root == resolved_root
+        ):
+            return _global_instance
+        if credential is not None:
+            matches_current = getattr(credential, "matches_current", None)
+            if not callable(matches_current) or not matches_current():
+                raise RuntimeError("prepared repository credential is stale")
+
+        repository = AssetRepository(resolved_root, initialize=credential is None)
+        if credential is not None and repository.path != getattr(credential, "database_path", None):
+            raise RuntimeError("prepared repository credential is stale")
         if _global_instance is not None:
-            # Verify the instance matches the requested root
-            if _global_instance.library_root.resolve() == resolved_root:
-                return _global_instance
-            # Different root requested - close old instance and create new one
             logger.info(
-                "Switching global database from %s to %s",
-                _global_instance.library_root,
-                resolved_root,
+                "Rebinding global database from %s to %s", _global_instance.path, repository.path
             )
             _global_instance.close()
-        
-        _global_instance = AssetRepository(resolved_root)
+        _global_instance = repository
         return _global_instance
+
+
+def mark_repository_prepared(library_root: Path, credential: Any) -> None:
+    """Register one consume-on-open schema preparation credential."""
+
+    with _global_lock:
+        _prepared_roots[Path(library_root)] = credential
 
 
 def reset_global_repository() -> None:
@@ -144,6 +168,7 @@ def reset_global_repository() -> None:
         if _global_instance is not None:
             _global_instance.close()
             _global_instance = None
+        _prepared_roots.clear()
 
 
 class AssetRepository:
@@ -161,7 +186,7 @@ class AssetRepository:
     Note: For the global database singleton, use `get_global_repository()`.
     """
 
-    def __init__(self, library_root: Path):
+    def __init__(self, library_root: Path, *, initialize: bool = True):
         """Initialize the asset repository.
         
         Args:
@@ -178,15 +203,16 @@ class AssetRepository:
             dict[int, PageCursor | None],
         ] = {}
         self._collection_meta_cache: dict[CollectionQuery, tuple[int, int]] = {}
-        self._init_db()
+        if initialize:
+            self._init_db()
 
     def _init_db(self) -> None:
-        """Initialize the database schema."""
+        """Prepare direct opens with the same recovery rules as the startup probe."""
         try:
-            # Use a transient connection for initialization
-            with sqlite3.connect(self.path, timeout=10.0) as conn:
-                SchemaMigrator.initialize_schema(conn)
-        except sqlite3.DatabaseError as exc:
+            _, warnings = SchemaMigrator.prepare_database(self.path)
+        except SchemaPreparationError as exc:
+            if exc.code != "db_corrupt" or (self.path.parent / MIGRATION_STATE_NAME).exists():
+                raise
             logger.warning("Detected index.db corruption at %s: %s", self.path, exc)
             recovery = RecoveryService(
                 self.path,
@@ -195,6 +221,9 @@ class AssetRepository:
                 self._insert_rows,
             )
             recovery.recover()
+        else:
+            for warning in warnings:
+                logger.warning("Library index preparation for %s reported %s", self.path, warning)
 
     def transaction(self, *, begin_mode: str | None = None):
         """Context manager for batching multiple operations.
@@ -261,29 +290,93 @@ class AssetRepository:
             dict.fromkeys(str(row["rel"]) for row in materialized_rows if row.get("rel"))
         )
 
-        with self.transaction(begin_mode="IMMEDIATE") as conn:
-            existing_rows_by_rel: Dict[str, Dict[str, Any]] = {}
-            if unique_rels:
-                conn.row_factory = sqlite3.Row
-                for offset in range(0, len(unique_rels), _SQLITE_PARAM_CHUNK_SIZE):
-                    chunk = unique_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
-                    placeholders = ", ".join(["?"] * len(chunk))
-                    cursor = conn.execute(
-                        f"SELECT * FROM assets WHERE rel IN ({placeholders})",
-                        chunk,
+        validated_versions: dict[str, tuple[str, int]] = {}
+        current_revisions: dict[str, str | None] = {}
+        while True:
+            with self.transaction(begin_mode="IMMEDIATE") as conn:
+                existing_rows = self._scan_merge_existing_rows(conn, unique_rels)
+                conflicts = conflicting_thumbnail_revisions(materialized_rows, existing_rows)
+                to_validate = {
+                    rel: version for rel, version in conflicts.items()
+                    if validated_versions.get(rel) != version
+                }
+                if not to_validate:
+                    merged_rows = merge_scan_rows_payload(
+                        materialized_rows,
+                        existing_rows,
+                        current_thumbnail_revisions=current_revisions,
                     )
-                    for db_row in cursor:
-                        d = self._db_row_to_dict(db_row)
-                        rel_value = d.get("rel")
-                        if rel_value is not None:
-                            existing_rows_by_rel[str(rel_value)] = d
-                conn.row_factory = None
-
-            merged_rows = merge_scan_rows_payload(materialized_rows, existing_rows_by_rel)
-            self._insert_rows(conn, merged_rows)
+                    former_partners = self._clear_replaced_live_partners(merged_rows, existing_rows)
+                    self._insert_rows(conn, merged_rows)
+                    if former_partners:
+                        conn.executemany(
+                            """
+                            UPDATE assets
+                            SET live_role = 0, live_partner_rel = NULL,
+                                index_revision = COALESCE(index_revision, 0) + 1
+                            WHERE rel = ? AND live_partner_rel = ?
+                            """,
+                            former_partners,
+                        )
+                    break
+            # Filesystem reads must release the SQLite write lock. Recheck the
+            # observed thumbnail versions so an edit committed during I/O wins.
+            for rel, version in to_validate.items():
+                current_revisions[rel] = self._current_thumbnail_revision(rel)
+                validated_versions[rel] = version
 
         self._clear_collection_anchor_cache()
         return merged_rows
+
+    @staticmethod
+    def _clear_replaced_live_partners(
+        merged_rows: list[dict[str, Any]], existing_rows: dict[str, dict[str, Any]],
+    ) -> set[tuple[str, str]]:
+        """Clear reciprocal links in the batch and return the old links for SQL cleanup."""
+
+        former_partners: set[tuple[str, str]] = set()
+        for row in merged_rows:
+            rel = row.get("rel")
+            previous = existing_rows.get(rel)
+            if previous is not None:
+                partner = previous.get("live_partner_rel")
+                if partner and partner != row.get("live_partner_rel"):
+                    former_partners.add((partner, rel))
+        if former_partners:
+            # Some partners may already be in the batch that will be published.
+            for row in merged_rows:
+                if (row.get("rel"), row.get("live_partner_rel")) in former_partners:
+                    row.update(live_role=0, live_partner_rel=None)
+        return former_partners
+
+    def _scan_merge_existing_rows(
+        self, conn: sqlite3.Connection, rels: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        previous_factory = conn.row_factory
+        conn.row_factory = sqlite3.Row
+        try:
+            for offset in range(0, len(rels), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join(["?"] * len(chunk))
+                cursor = conn.execute(f"SELECT * FROM assets WHERE rel IN ({placeholders})", chunk)
+                for db_row in cursor:
+                    rows[str(db_row["rel"])] = self._db_row_to_dict(db_row)
+        finally:
+            conn.row_factory = previous_factory
+        return rows
+
+    def _current_thumbnail_revision(self, rel: str) -> str | None:
+        from ...infrastructure.services.thumbnail_artifact import thumbnail_revision
+
+        try:
+            resolved = resolve_library_asset_path(self.library_root, rel)
+            if not resolved.is_file():
+                return None
+            # Keep the lexical path used by the scanner in the revision digest.
+            return thumbnail_revision(self.library_root / rel)
+        except (LibraryAssetPathError, OSError, RuntimeError):
+            return None
 
     def upsert_row(self, rel: str, row: Dict[str, Any]) -> None:
         """Insert or update a single row identified by *rel*."""
@@ -303,15 +396,178 @@ class AssetRepository:
             stamped.append(row_data)
         return stamped
 
-    def remove_rows(self, rels: Iterable[str]) -> None:
+    def remove_rows(self, rels: Iterable[str], *, clear_live_partners: bool = False) -> None:
         """Drop any index rows whose ``rel`` key matches *rels*."""
         removable = list(rels)
         if not removable:
             return
 
-        placeholders = ", ".join(["?"] * len(removable))
-        query = f"DELETE FROM assets WHERE rel IN ({placeholders})"
-        self._db_manager.execute_in_transaction(query, removable)
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            for offset in range(0, len(removable), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = removable[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join(["?"] * len(chunk))
+                if clear_live_partners:
+                    conn.execute(
+                        f"""
+                        UPDATE assets
+                        SET live_role = 0, live_partner_rel = NULL,
+                            index_revision = COALESCE(index_revision, 0) + 1
+                        WHERE rel IN (
+                            SELECT live_partner_rel FROM assets WHERE rel IN ({placeholders})
+                        )
+                          AND live_partner_rel IN ({placeholders})
+                        """,
+                        [*chunk, *chunk],
+                    )
+                conn.execute(f"DELETE FROM assets WHERE rel IN ({placeholders})", chunk)
+        self._clear_collection_anchor_cache()
+
+    def relocate_rows(
+        self,
+        destinations: Mapping[str, str],
+        *,
+        expected_asset_ids: Mapping[str, str],
+    ) -> None:
+        """Move verified scan rows without dropping their durable user choices."""
+
+        if not destinations:
+            return
+        if (
+            set(destinations) & set(destinations.values())
+            or len(set(destinations.values())) != len(destinations)
+        ):
+            raise ValueError("Asset relocation paths must be distinct")
+        now = _utc_ms()
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            sources = {}
+            source_rels = list(destinations)
+            for offset in range(0, len(source_rels), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = source_rels[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join("?" for _ in chunk)
+                for source, asset_id, partner in conn.execute(
+                    f"SELECT rel, id, live_partner_rel FROM assets WHERE rel IN ({placeholders})", chunk
+                ):
+                    if asset_id != expected_asset_ids[source]:
+                        raise ValueError(f"Asset changed during relocation: {source}")
+                    sources[source] = partner
+            for source in sources:
+                destination = destinations[source]
+                parent = Path(destination).parent
+                existing = conn.execute("SELECT id FROM assets WHERE rel = ?", (destination,)).fetchone()
+                if existing is not None and existing[0] != expected_asset_ids[source]:
+                    raise ValueError(f"Destination asset changed during relocation: {destination}")
+                conn.execute("DELETE FROM assets WHERE rel = ?", (destination,))
+                # Update in place so even optional metadata columns survive.
+                # Path-based rendering and recognition facts need a fresh scan.
+                conn.execute(
+                    "UPDATE assets SET rel = ?, parent_album_path = ?, "
+                    "thumbnail_state = 'stale', micro_thumbnail = NULL, "
+                    "thumb_cache_key = NULL, thumb_revision = NULL, "
+                    "face_status = NULL, pet_status = NULL, "
+                    "index_revision = COALESCE(index_revision, 0) + 1, "
+                    "index_updated_at_ms = ? WHERE rel = ?",
+                    (destination, parent.as_posix() if parent != Path(".") else "", now, source),
+                )
+                conn.execute(
+                    "UPDATE metadata_write_jobs SET asset_rel = ?, asset_path = ?, "
+                    "updated_at = ? WHERE asset_rel = ? AND status IN ('queued', 'writing', 'failed')",
+                    (destination, str(self.library_root / destination), now, source),
+                )
+            # Follow the reciprocal pair's primary key, rather than scanning
+            # every library row once for each relocated asset.
+            for source, partner in sources.items():
+                if partner:
+                    conn.execute(
+                        "UPDATE assets SET live_partner_rel = ?, "
+                        "index_revision = COALESCE(index_revision, 0) + 1, "
+                        "index_updated_at_ms = ? WHERE rel = ? AND live_partner_rel = ?",
+                        (destinations[source], now, destinations.get(partner, partner), source),
+                    )
+        self._clear_collection_anchor_cache()
+
+    def remap_album_paths(self, old_root: Path, new_root: Path) -> None:
+        """Retarget a known rename while keeping ready thumbnails and user state."""
+
+        old_rel = old_root.relative_to(self.library_root).as_posix()
+        new_rel = new_root.relative_to(self.library_root).as_posix()
+        if old_rel == "." or new_rel == "." or old_root == new_root:
+            raise ValueError("Album rename requires two distinct library subdirectories")
+        # '/' sorts immediately before '0'. These binary prefix bounds use the
+        # path index and treat case and wildcard characters literally.
+        source_bounds = (old_rel + "/", old_rel + "0")
+        target_bounds = (new_rel + "/", new_rel + "0")
+        suffix_start = len(old_rel) + 1
+        now = _utc_ms()
+        cache_moves: list[tuple[str, str]] = []
+        cache_namespace = uuid.uuid4().hex
+        with self.transaction(begin_mode="IMMEDIATE") as conn:
+            if conn.execute(
+                "SELECT 1 FROM assets WHERE rel >= ? AND rel < ? LIMIT 1",
+                target_bounds,
+            ).fetchone() is not None:
+                raise ValueError(f"Destination album already has indexed assets: {new_root}")
+            cached_rows = conn.execute(
+                "SELECT rel, thumb_cache_key FROM assets WHERE rel >= ? AND rel < ? "
+                "AND thumb_cache_key IS NOT NULL AND thumb_cache_key != ''",
+                source_bounds,
+            ).fetchall()
+            for rel, old_key in cached_rows:
+                destination = new_root / Path(rel).relative_to(old_rel)
+                # Do not adopt a historical destination JPEG when the source
+                # artifact is missing or locked. Each rename owns fresh keys.
+                new_key = f"{thumbnail_cache_key(destination)}-{cache_namespace}"
+                conn.execute("UPDATE assets SET thumb_cache_key = ? WHERE rel = ?", (new_key, rel))
+                cache_moves.append((old_key, new_key))
+            # Revisions include the absolute path. Forget that desired revision
+            # without hiding ready rows; a worker establishes it on cache miss.
+            conn.execute(
+                "UPDATE assets SET rel = ? || substr(rel, ?), "
+                "parent_album_path = ? || substr(parent_album_path, ?), "
+                "thumb_revision = NULL, "
+                "index_revision = COALESCE(index_revision, 0) + 1, index_updated_at_ms = ? "
+                "WHERE rel >= ? AND rel < ?",
+                (new_rel, suffix_start, new_rel, suffix_start, now, *source_bounds),
+            )
+            conn.execute(
+                "UPDATE assets SET live_partner_rel = ? || substr(live_partner_rel, ?), "
+                "index_revision = COALESCE(index_revision, 0) + 1, index_updated_at_ms = ? "
+                "WHERE live_partner_rel >= ? AND live_partner_rel < ?",
+                (new_rel, suffix_start, now, *source_bounds),
+            )
+            jobs = conn.execute(
+                "SELECT job_id, asset_rel FROM metadata_write_jobs "
+                "WHERE asset_rel >= ? AND asset_rel < ? AND status IN ('queued', 'writing', 'failed')",
+                source_bounds,
+            ).fetchall()
+            for job_id, asset_rel in jobs:
+                destination = new_root / Path(asset_rel).relative_to(old_rel)
+                conn.execute(
+                    "UPDATE metadata_write_jobs SET asset_rel = ?, asset_path = ?, "
+                    "updated_at = ? WHERE job_id = ?",
+                    (destination.relative_to(self.library_root).as_posix(),
+                     str(destination), now, job_id),
+                )
+            # Completed album scans remain complete at their new paths. Keep
+            # timestamps intact so the latest-job ordering does not change.
+            old_scan_root = old_root.as_posix()
+            conn.execute(
+                "UPDATE scan_jobs SET root = ? || substr(root, ?) "
+                "WHERE root = ? OR (root >= ? AND root < ?)",
+                (new_root.as_posix(), len(old_scan_root) + 1, old_scan_root,
+                 old_scan_root + "/", old_scan_root + "0"),
+            )
+        # Move only indexed artifacts, without traversing or decoding media.
+        # Old path keys must be free for future files created at those paths.
+        cache_dir = self.path.parent / "cache" / "thumbs"
+        for old_key, new_key in cache_moves:
+            try:
+                thumbnail_cache_file_for_key(cache_dir, old_key).replace(
+                    thumbnail_cache_file_for_key(cache_dir, new_key)
+                )
+            except FileNotFoundError:
+                pass  # Disposable cache misses are repaired by thumbnail workers.
+            except OSError as exc:
+                logger.warning("Failed to retarget renamed thumbnail %s: %s", old_key, exc)
         self._clear_collection_anchor_cache()
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> Dict[str, Dict[str, Any]]:
@@ -342,6 +598,37 @@ class AssetRepository:
                     result[str(rel_value)] = d
             return result
         finally:
+            if should_close:
+                conn.close()
+
+    def get_unpaired_live_candidates(
+        self, content_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        keys = sorted({key for value in content_ids if (key := normalise_content_id(value))})
+        if not keys:
+            return {}
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        previous_factory = conn.row_factory
+        try:
+            conn.row_factory = sqlite3.Row
+            result: dict[str, dict[str, Any]] = {}
+            for offset in range(0, len(keys), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = keys[offset : offset + _SQLITE_PARAM_CHUNK_SIZE]
+                placeholders = ", ".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"""
+                    SELECT * FROM assets WHERE content_id_key IN ({placeholders})
+                        AND is_deleted = 0
+                        AND COALESCE(live_partner_rel, '') = ''
+                    """,
+                    chunk,
+                )
+                for row in cursor:
+                    result[str(row["rel"])] = self._db_row_to_dict(row)
+            return result
+        finally:
+            conn.row_factory = previous_factory
             if should_close:
                 conn.close()
 
@@ -418,17 +705,32 @@ class AssetRepository:
             (normalized, asset_id),
         )
 
-    def update_face_statuses(self, asset_ids: Iterable[str], status: str) -> None:
-        """Update the ``face_status`` for multiple assets."""
+    def update_face_statuses(
+        self,
+        asset_ids: Iterable[str],
+        status: str,
+        *,
+        expected_statuses: tuple[str | None, ...] | None = None,
+    ) -> None:
+        """Update face status for matching assets in the expected state."""
 
         normalized = normalize_face_status(status)
         ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
-        if normalized is None or not ids_list:
+        if normalized is None or not ids_list or expected_statuses == ():
             return
 
-        placeholders = ", ".join(["?"] * len(ids_list))
-        query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders})"
-        self._db_manager.execute_in_transaction(query, [normalized, *ids_list])
+        status_guard = ""
+        if expected_statuses is not None:
+            matches = " OR ".join("face_status IS ?" for _ in expected_statuses)
+            status_guard = f" AND ({matches})"
+        for start in range(0, len(ids_list), 500):
+            chunk = ids_list[start : start + 500]
+            placeholders = ", ".join(["?"] * len(chunk))
+            query = f"UPDATE assets SET face_status = ? WHERE id IN ({placeholders}){status_guard}"
+            self._db_manager.execute_in_transaction(query, [normalized, *chunk, *(expected_statuses or ())])
+
+    def reset_face_statuses_for_pipeline_upgrade(self) -> int:
+        return self._reset_ai_statuses_for_pipeline_upgrade("face_status")
 
     def count_by_face_status(self) -> Dict[str, int]:
         """Return a status-to-count mapping for ``assets.face_status``."""
@@ -443,6 +745,112 @@ class AssetRepository:
             counts: Dict[str, int] = {}
             for status, asset_count in cursor.fetchall():
                 normalized = normalize_face_status(status)
+                if normalized is None:
+                    continue
+                counts[normalized] = int(asset_count or 0)
+            return counts
+        finally:
+            if should_close:
+                conn.close()
+
+    def read_rows_by_pet_status(
+        self,
+        statuses: Iterable[str],
+        *,
+        limit: int | None = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield rows whose ``pet_status`` matches one of *statuses*."""
+
+        normalized_statuses = [
+            status
+            for status in (normalize_pet_status(value) for value in statuses)
+            if status is not None
+        ]
+        if not normalized_statuses:
+            return
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ", ".join(["?"] * len(normalized_statuses))
+            query = f"SELECT * FROM assets WHERE pet_status IN ({placeholders}) ORDER BY dt DESC, id DESC"
+            params: list[Any] = list(normalized_statuses)
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(int(limit))
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            for row in cursor:
+                yield self._db_row_to_dict(row)
+        finally:
+            if should_close:
+                conn.close()
+
+    def update_pet_status(self, asset_id: str, status: str) -> None:
+        """Update the ``pet_status`` for a single asset row."""
+
+        normalized = normalize_pet_status(status)
+        if normalized is None or not asset_id:
+            return
+        self._db_manager.execute_in_transaction(
+            "UPDATE assets SET pet_status = ? WHERE id = ?",
+            (normalized, asset_id),
+        )
+
+    def update_pet_statuses(self, asset_ids: Iterable[str], status: str) -> None:
+        """Update the ``pet_status`` for multiple assets."""
+
+        normalized = normalize_pet_status(status)
+        ids_list = [str(asset_id) for asset_id in asset_ids if asset_id]
+        if normalized is None or not ids_list:
+            return
+
+        for start in range(0, len(ids_list), 500):
+            chunk = ids_list[start : start + 500]
+            placeholders = ", ".join(["?"] * len(chunk))
+            query = f"UPDATE assets SET pet_status = ? WHERE id IN ({placeholders})"
+            self._db_manager.execute_in_transaction(query, [normalized, *chunk])
+
+    def reset_pet_statuses_for_pipeline_upgrade(self) -> int:
+        return self._reset_ai_statuses_for_pipeline_upgrade("pet_status")
+
+    def _reset_ai_statuses_for_pipeline_upgrade(self, column: str) -> int:
+        if column not in {"face_status", "pet_status"}:
+            raise ValueError("Unsupported AI status column")
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+        try:
+            cursor = conn.execute(
+                f"""
+                UPDATE assets
+                SET {column} = 'pending'
+                WHERE {column} = 'done'
+                  AND COALESCE(CAST(media_type AS TEXT), '0') NOT IN ('1', 'video')
+                  AND COALESCE(CAST(live_role AS INTEGER), 0) = 0
+                  AND COALESCE(mime, '') NOT LIKE 'video/%'
+                """
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            if should_close:
+                conn.close()
+
+    def count_by_pet_status(self) -> Dict[str, int]:
+        """Return a status-to-count mapping for ``assets.pet_status``."""
+
+        conn = self._db_manager.get_connection()
+        should_close = conn != self._db_manager._conn
+
+        try:
+            cursor = conn.execute(
+                "SELECT pet_status, COUNT(*) AS asset_count FROM assets GROUP BY pet_status"
+            )
+            counts: Dict[str, int] = {}
+            for status, asset_count in cursor.fetchall():
+                normalized = normalize_pet_status(status)
                 if normalized is None:
                     continue
                 counts[normalized] = int(asset_count or 0)
@@ -503,12 +911,24 @@ class AssetRepository:
                 conn.close()
 
     def read_geotagged(self) -> Iterator[Dict[str, Any]]:
-        """Yield only rows that contain GPS metadata."""
+        """Yield the fields needed to build location assets from GPS rows."""
         conn = self._db_manager.get_connection()
         should_close = (conn != self._db_manager._conn)
 
         try:
-            query = "SELECT * FROM assets WHERE gps IS NOT NULL"
+            # Older indexes can contain optional location/media fields outside
+            # the current schema. Keep those without reading thumbnail blobs.
+            legacy = {"metadata", "live_photo_group_id", "type", "is_image", "is_video"}
+            columns = [
+                "rel", "id", "parent_album_path", "mime", "gps", "location",
+                "live_role", "live_partner_rel", "still_image_time", "dur",
+            ]
+            columns.extend(
+                row[1]
+                for row in conn.execute("PRAGMA table_info(assets)")
+                if row[1] in legacy
+            )
+            query = f"SELECT {', '.join(columns)} FROM assets WHERE gps IS NOT NULL"
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(query)
@@ -607,8 +1027,8 @@ class AssetRepository:
             "dur", "year", "month", "dt", "ts", "sort_ts", "content_id", "bytes",
             "mime", "w", "h", "original_rel_path", "original_album_id",
             "original_album_subpath", "is_favorite", "location", "gps",
-            "face_status", "thumbnail_state", "thumb_cache_key",
-            "index_revision", "micro_thumbnail"
+            "face_status", "thumbnail_state", "thumb_cache_key", "thumb_revision",
+            "index_revision", "micro_thumbnail", "source_mtime_ns", "image_orientation"
         ]
 
         logger.debug(
@@ -876,17 +1296,7 @@ class AssetRepository:
     ) -> Dict[str, Any] | None:
         """Return the newest scan job matching *root* and optional *scope*."""
 
-        where = ["root = ?"]
-        params: list[Any] = [root]
-        if scope is not None:
-            where.append("scope = ?")
-            params.append(scope)
-        sql = (
-            "SELECT * FROM scan_jobs WHERE "
-            + " AND ".join(where)
-            + " ORDER BY COALESCE(updated_at, started_at, 0) DESC, "
-            "COALESCE(finished_at, 0) DESC LIMIT 1"
-        )
+        sql, params = QueryBuilder.build_latest_scan_job(root, scope)
         conn = self._db_manager.get_connection()
         should_close = conn != self._db_manager._conn
         try:
@@ -1007,7 +1417,8 @@ class AssetRepository:
             "w", "h", "gps", "content_id", "still_image_time", "dur", "live_role",
             "live_partner_rel", "aspect_ratio", "media_type", "is_favorite", "is_deleted",
             "has_gps", "thumbnail_state", "location", "micro_thumbnail", "thumb_cache_key",
-            "face_status",
+            "face_status", "video_rotation_cw", "video_linux_180_hint",
+            "source_mtime_ns", "image_orientation", "thumb_revision", "index_revision",
         )
         select_clause = f"SELECT {', '.join(columns)}"
         first = max(0, int(first))
@@ -1060,7 +1471,7 @@ class AssetRepository:
         should_close = conn != self._db_manager._conn
         try:
             conn.row_factory = sqlite3.Row
-            select_clause = "SELECT rel, thumb_cache_key"
+            select_clause = "SELECT rel, thumb_cache_key, thumbnail_state, thumb_revision"
             if first > _DEEP_OFFSET_LIMIT:
                 sql, params = self._build_deep_collection_window_query(
                     conn,
@@ -1363,39 +1774,114 @@ class AssetRepository:
         micro_thumbnail: bytes | None = None,
         thumb_cache_key: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Update thumbnail readiness for a single asset row."""
+        expected_revision: str | None = None,
+        expected_asset_id: str | None = None,
+        expected_index_revision: int | None = None,
+    ) -> bool:
+        """Publish readiness only for the currently desired render revision."""
 
         normalized_rel = unicodedata.normalize("NFC", str(rel))
+        guards: list[str] = []
+        guard_params: list[str | int] = []
+        if expected_revision is not None:
+            guards.append(" AND (thumb_revision = ? OR thumb_revision IS NULL)")
+            guard_params.append(expected_revision)
+        if expected_asset_id is not None:
+            guards.append(" AND COALESCE(id, '') = ?")
+            guard_params.append(expected_asset_id)
+        if expected_index_revision is not None:
+            guards.append(" AND COALESCE(index_revision, 0) = ?")
+            guard_params.append(expected_index_revision)
+        state_guard = "".join(guards)
         if error:
-            self._db_manager.execute_in_transaction(
-                """
+            error_text = str(error)
+            changed = self._db_manager.execute_in_transaction(
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'failed',
                     thumb_error = ?,
+                    thumb_revision = COALESCE(?, thumb_revision),
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{state_guard}
+                    AND COALESCE(TRIM(thumb_cache_key), '') = ''
+                    AND (
+                        thumbnail_state != 'failed'
+                        OR COALESCE(thumb_error, '') != ?
+                    )
                 """,
-                [str(error), _utc_ms(), normalized_rel],
+                [error_text, expected_revision, _utc_ms(), normalized_rel]
+                + guard_params
+                + [error_text],
             )
         else:
             if not str(thumb_cache_key or "").strip():
                 raise ValueError("ready thumbnails require thumb_cache_key")
-            self._db_manager.execute_in_transaction(
-                """
+            change_guards = ["thumbnail_state != 'ready'", "thumb_error IS NOT NULL"]
+            change_params: list[Any] = []
+            if micro_thumbnail is not None:
+                change_guards.append("micro_thumbnail IS NOT ?")
+                change_params.append(micro_thumbnail)
+            if thumb_cache_key is not None:
+                change_guards.append("COALESCE(thumb_cache_key, '') != ?")
+                change_params.append(thumb_cache_key)
+            if expected_revision is not None:
+                change_guards.append("thumb_revision IS NOT ?")
+                change_params.append(expected_revision)
+            changed = self._db_manager.execute_in_transaction(
+                f"""
                 UPDATE assets
                 SET thumbnail_state = 'ready',
                     micro_thumbnail = COALESCE(?, micro_thumbnail),
                     thumb_cache_key = COALESCE(?, thumb_cache_key),
+                    thumb_revision = COALESCE(?, thumb_revision),
                     thumb_error = NULL,
                     thumb_updated_at = ?,
                     index_revision = COALESCE(index_revision, 0) + 1
-                WHERE rel = ?
+                WHERE rel = ?{state_guard}
+                    AND ({' OR '.join(change_guards)})
                 """,
-                [micro_thumbnail, thumb_cache_key, _utc_ms(), normalized_rel],
+                [
+                    micro_thumbnail,
+                    thumb_cache_key,
+                    expected_revision,
+                    _utc_ms(),
+                    normalized_rel,
+                ]
+                + guard_params
+                + change_params,
             )
-        self._clear_collection_anchor_cache()
+        if changed:
+            self._clear_collection_anchor_cache()
+        return bool(changed)
+
+    def mark_thumbnail_stale(self, rel: str, *, desired_revision: str) -> bool:
+        """Select a desired revision without deleting the last complete artifact."""
+
+        normalized_rel = unicodedata.normalize("NFC", str(rel))
+        revision = str(desired_revision).strip()
+        if not revision:
+            raise ValueError("stale thumbnails require a desired revision")
+        changed = self._db_manager.execute_in_transaction(
+            """
+            UPDATE assets
+            SET thumbnail_state = 'stale',
+                micro_thumbnail = NULL,
+                thumb_revision = ?,
+                thumb_error = NULL,
+                thumb_updated_at = ?,
+                index_revision = COALESCE(index_revision, 0) + 1
+            WHERE rel = ?
+                AND (
+                    thumbnail_state != 'stale'
+                    OR COALESCE(thumb_revision, '') != ?
+                )
+            """,
+            [revision, _utc_ms(), normalized_rel, revision],
+        )
+        if changed:
+            self._clear_collection_anchor_cache()
+        return bool(changed)
 
     def _cursor_for_collection_offset(
         self,
@@ -1436,54 +1922,73 @@ class AssetRepository:
     def find_row_by_path(self, query: CollectionQuery, path: Path) -> int | None:
         """Return a path's row number within *query* without scanning rows in Python."""
 
-        rel = self._library_relative_path(path)
-        row = self.get_rows_by_rels([rel]).get(rel)
-        if row is None:
-            return None
-        asset_id = str(row.get("id") or "")
-        asset_rel = str(row.get("rel") or "")
-        sort_col = QueryBuilder._collection_sort_column(query)
-        sort_value = row.get(sort_col)
-        if sort_value is None and sort_col == "sort_ts":
-            sort_value = row.get("ts")
-        if not asset_id or not asset_rel or sort_value is None:
-            return None
-
-        match_sql, match_params = QueryBuilder.build_collection_query(
-            query,
-            select_clause="SELECT COUNT(*)",
-            include_order=False,
-        )
-        match_sql += " AND rel = ?" if " WHERE " in match_sql else " WHERE rel = ?"
-        match_params.append(rel)
-
-        conn = self._db_manager.get_connection()
-        should_close = conn != self._db_manager._conn
+        started = monotonic_ms()
+        outcome = "missing"
         try:
-            matched = conn.execute(match_sql, match_params).fetchone()
-            if not matched or int(matched[0] or 0) == 0:
+            rel = self._library_relative_path(path)
+            row = self.get_rows_by_rels([rel]).get(rel)
+            if row is None:
+                return None
+            asset_id = str(row.get("id") or "")
+            asset_rel = str(row.get("rel") or "")
+            sort_col = QueryBuilder._collection_sort_column(query)
+            sort_value = row.get(sort_col)
+            if sort_value is None and sort_col == "sort_ts":
+                sort_value = row.get("ts")
+            if not asset_id or not asset_rel or sort_value is None:
                 return None
 
-            before_where, before_params = QueryBuilder.build_collection_where(query)
-            if query.sort_direction.value == "ASC":
-                before_where.append(
-                    f"({sort_col} < ? OR ({sort_col} = ? AND "
-                    "(id < ? OR (id = ? AND rel < ?))))"
-                )
-            else:
-                before_where.append(
-                    f"({sort_col} > ? OR ({sort_col} = ? AND "
-                    "(id > ? OR (id = ? AND rel > ?))))"
-                )
-            before_params.extend(
-                [sort_value, sort_value, asset_id, asset_id, asset_rel]
+            match_sql, match_params = QueryBuilder.build_collection_query(
+                query,
+                select_clause="SELECT COUNT(*)",
+                include_order=False,
             )
-            before_sql = "SELECT COUNT(*) FROM assets WHERE " + " AND ".join(before_where)
-            before = conn.execute(before_sql, before_params).fetchone()
-            return int(before[0] if before else 0)
+            match_sql += " AND rel = ?" if " WHERE " in match_sql else " WHERE rel = ?"
+            match_params.append(rel)
+
+            conn = self._db_manager.get_connection()
+            should_close = conn != self._db_manager._conn
+            try:
+                matched = conn.execute(match_sql, match_params).fetchone()
+                if not matched or int(matched[0] or 0) == 0:
+                    return None
+
+                before_where, before_params = QueryBuilder.build_collection_where(query)
+                if query.sort_direction.value == "ASC":
+                    before_where.append(
+                        f"({sort_col} < ? OR ({sort_col} = ? AND "
+                        "(id < ? OR (id = ? AND rel < ?))))"
+                    )
+                else:
+                    before_where.append(
+                        f"({sort_col} > ? OR ({sort_col} = ? AND "
+                        "(id > ? OR (id = ? AND rel > ?))))"
+                    )
+                before_params.extend(
+                    [sort_value, sort_value, asset_id, asset_id, asset_rel]
+                )
+                before_sql = "SELECT COUNT(*) FROM assets WHERE " + " AND ".join(before_where)
+                before = conn.execute(before_sql, before_params).fetchone()
+                resolved_row = int(before[0] if before else 0)
+                outcome = "resolved"
+                return resolved_row
+            finally:
+                if should_close:
+                    conn.close()
+        except sqlite3.Error:
+            outcome = "sqlite_error"
+            raise
+        except Exception:
+            outcome = "error"
+            raise
         finally:
-            if should_close:
-                conn.close()
+            emit_perf_event(
+                "find_row_by_path_finished",
+                elapsed_ms=round(monotonic_ms() - started, 3),
+                outcome=outcome,
+                on_main_thread=threading.current_thread() is threading.main_thread(),
+                thread=threading.current_thread().name,
+            )
 
     def find_live_partner(self, asset_id: str) -> Dict[str, Any] | None:
         """Return the row for an asset's Live Photo partner, if indexed."""
@@ -1678,6 +2183,25 @@ class AssetRepository:
             params = [(role, partner, rel) for rel, role, partner in updates]
             conn.executemany(query, params)
         self._clear_collection_anchor_cache()
+
+    def update_live_roles(self, updates: Iterable[tuple[str, int, str | None]]) -> None:
+        """Update specific pairs and clear affected former partners."""
+
+        params = [(role, partner, rel, role, partner) for rel, role, partner in updates]
+        if not params:
+            return
+        with self.transaction() as conn:
+            cursor = conn.executemany(
+                """
+                UPDATE assets
+                SET live_role = ?, live_partner_rel = ?,
+                    index_revision = COALESCE(index_revision, 0) + 1
+                WHERE rel = ? AND (live_role IS NOT ? OR live_partner_rel IS NOT ?)
+                """,
+                params,
+            )
+        if cursor.rowcount:
+            self._clear_collection_anchor_cache()
 
     def list_albums(self) -> List[str]:
         """Return a list of distinct album paths in the index."""

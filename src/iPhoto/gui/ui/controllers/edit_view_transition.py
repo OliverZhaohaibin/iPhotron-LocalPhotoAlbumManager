@@ -72,6 +72,11 @@ class EditViewTransitionManager(QObject):
         self._detail_header_opacity = QGraphicsOpacityEffect(ui.detail_chrome_container)
         self._detail_header_opacity.setOpacity(1.0)
         ui.detail_chrome_container.setGraphicsEffect(self._detail_header_opacity)
+        detail_page = getattr(ui, "detail_page", None)
+        detail_header_shadow = getattr(detail_page, "detail_header_shadow", None)
+        bind_shadow_opacity = getattr(detail_header_shadow, "bind_opacity_effect", None)
+        if callable(bind_shadow_opacity):
+            bind_shadow_opacity(self._detail_header_opacity)
 
     # ------------------------------------------------------------------
     # Public API

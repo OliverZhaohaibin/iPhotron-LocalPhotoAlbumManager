@@ -8,7 +8,7 @@ sync.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtGui import QColor
 
@@ -36,6 +36,7 @@ class FullscreenHandler:
     ) -> None:
         self._default_surface_color: QColor = QColor(default_color)
         self._surface_override: QColor | None = None
+        self._immersive_active = False
         self._backdrop_color: QColor = QColor(default_color)
         self._set_stylesheet = set_stylesheet
         self._request_update = request_update
@@ -59,7 +60,8 @@ class FullscreenHandler:
 
     def set_immersive_background(self, immersive: bool) -> None:
         """Toggle the pure-black immersive backdrop used in fullscreen mode."""
-        self.set_surface_color_override("#000000" if immersive else None)
+        self._immersive_active = bool(immersive)
+        self._apply()
 
     # ------------------------------------------------------------------
     # Internal
@@ -67,7 +69,11 @@ class FullscreenHandler:
 
     def _apply(self) -> None:
         """Synchronise the widget stylesheet and GL clear colour backdrop."""
-        target = self._surface_override or self._default_surface_color
+        target = (
+            QColor("#000000")
+            if self._immersive_active
+            else self._surface_override or self._default_surface_color
+        )
         self._set_stylesheet(f"background-color: {target.name()}; border: none;")
         self._backdrop_color = QColor(target)
         self._request_update()

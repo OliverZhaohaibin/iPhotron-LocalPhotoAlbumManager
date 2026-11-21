@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.bootstrap.library_probe import PreparedAlbum, PreparedLibrary
 from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 @pytest.fixture(scope="module")
@@ -81,6 +82,35 @@ def test_bind_path_emits_tree_updated_for_empty_library(tmp_path, qapp):
     spy = QSignalSpy(manager.treeUpdated)
     manager.bind_path(root)
     assert spy.count() >= 1, "treeUpdated must be emitted when binding an empty library"
+
+
+@pytest.mark.parametrize("storage_kind", ["local", "slow", "network"])
+def test_bind_prepared_library_configures_background_watch_service(
+    tmp_path,
+    qapp,
+    storage_kind,
+):
+    root = tmp_path / storage_kind
+    album = root / "Album"
+    album.mkdir(parents=True)
+    prepared = PreparedLibrary(
+        request_id="request",
+        root=root,
+        database_path=root / ".iPhoto" / "global_index.db",
+        schema_version=1,
+        albums=(PreparedAlbum(str(album), 1, "Album", False),),
+        storage_kind=storage_kind,
+        scan_complete=True,
+    )
+
+    manager = LibraryRuntimeController()
+    manager.bind_prepared_library(prepared)
+
+    configured = set(manager._watch_service.configured_paths)
+    assert root in configured
+    assert album in configured
+    assert manager._background_watch_generation == manager._watch_service.generation
+    manager.shutdown()
 
 
 def test_watcher_debounce_scans_changed_scope_through_session_service(

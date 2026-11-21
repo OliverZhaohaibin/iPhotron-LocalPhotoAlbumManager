@@ -533,7 +533,7 @@ def test_pet_card_delete_targets_only_the_confirmed_key_detection(
     confirm.assert_called_once()
     assert confirm.call_args.kwargs["item_count"] == 1
     if confirmed:
-        delete.assert_called_once_with("det-a")
+        delete.assert_called_once_with("det-a", expected_pet_id="pet-a")
         reload.assert_called_once_with(preserve_content=True)
     else:
         delete.assert_not_called()

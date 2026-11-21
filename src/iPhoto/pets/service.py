@@ -307,11 +307,11 @@ class PetService:
         coordinator = self.coordinator
         return bool(coordinator and coordinator.set_pet_cover(pet_id, detection_id))
 
-    def delete_detection(self, detection_id: str) -> bool:
+    def delete_detection(self, detection_id: str, *, expected_pet_id: str | None = None) -> bool:
         coordinator = self.coordinator
         if coordinator is None:
             return False
-        return coordinator.delete_detection(detection_id) is not None
+        return coordinator.delete_detection(detection_id, expected_pet_id=expected_pet_id) is not None
 
     def move_detection_to_pet(self, detection_id: str, target_pet_id: str) -> bool:
         return bool(self.move_detection_to_pet_with_outcome(detection_id, target_pet_id))

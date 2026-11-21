@@ -997,7 +997,9 @@ class PeopleDashboardWidget(QWidget):
             confirm_text=tr("PeopleDashboard", "Delete Detection"),
         ):
             return
-        if self._pet_service.delete_detection(summary.key_detection_id):
+        if self._pet_service.delete_detection(
+            summary.key_detection_id, expected_pet_id=summary.pet_id
+        ):
             self._reload_after_mutation(
                 preserve_content=bool(self._summaries or self._pet_summaries)
             )

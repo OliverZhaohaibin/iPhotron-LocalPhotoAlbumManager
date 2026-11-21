@@ -1113,34 +1113,67 @@ def test_pet_cover_from_gallery_photo_survives_reopening_and_rescan(tmp_path: Pa
         reopened.shutdown()
 
 
-def test_pet_cover_rejects_a_crop_reassigned_to_a_person(tmp_path: Path) -> None:
-    pets_root = tmp_path / "pets"
-    repository = PetRepository(pets_root / "pet_index.db", pets_root / "pet_state.db")
-    detection = _detection(
-        detection_id="det-a", pet_id="pet-a", thumbnail_path="thumbnails/det-a.png"
-    )
-    pet = PetRecord(
-        pet_id="pet-a",
-        name=None,
-        key_detection_id=detection.detection_id,
-        detection_count=1,
-        center_embedding=detection.embedding,
-        embedding_dim=detection.embedding_dim,
-        created_at=detection.detected_at,
-        updated_at=detection.detected_at,
-    )
-    repository.replace_all([detection], [pet])
-    assert repository.resolve_pet_cover_detection("pet-a", "asset-a") == "det-a"
+@pytest.mark.parametrize("custom_cover", [False, True], ids=["automatic", "custom"])
+def test_reassigned_pet_cover_cannot_be_deleted_from_pet_card(
+    tmp_path: Path, qapp, custom_cover: bool
+) -> None:
+    session = create_headless_library_session(tmp_path)
+    try:
+        service = session.pets
+        assert service is not None
+        repository = service.repository()
+        assert repository is not None and repository.state_repository is not None
+        cover = _detection(
+            detection_id="cover",
+            pet_id="pet-a",
+            pet_key="v2:cover",
+            thumbnail_path="thumbnails/cover.png",
+        )
+        other = _detection(detection_id="other", asset_id="asset-b", pet_id="pet-a")
+        pet = PetRecord(
+            pet_id="pet-a",
+            name="Miso",
+            key_detection_id=other.detection_id if custom_cover else cover.detection_id,
+            detection_count=2,
+            center_embedding=cover.embedding,
+            embedding_dim=cover.embedding_dim,
+            created_at=cover.detected_at,
+            updated_at=cover.detected_at,
+        )
+        repository.replace_all([cover, other], [pet])
+        if custom_cover:
+            assert service.set_pet_cover("pet-a", "cover")
+        assert repository.resolve_pet_cover_detection("pet-a", "asset-a") == "cover"
+        (stale_summary,) = repository.get_pet_summaries()
+        assert stale_summary.key_detection_id == "cover"
+        assert stale_summary.thumbnail_path is not None
 
-    identity_state = FaceStateRepository(tmp_path / "faces" / "face_state.db")
-    assert identity_state.set_annotation_identity_assignment(
-        source_kind="pet",
-        source_annotation_id="det-a",
-        target_kind="person",
-        target_id="person-a",
-    )
-    assert repository.resolve_pet_cover_detection("pet-a", "asset-a") is None
-    assert not repository.set_pet_cover("pet-a", "det-a")
+        identity_state = FaceStateRepository(tmp_path / ".iPhoto" / "faces" / "face_state.db")
+        assert identity_state.set_annotation_identity_assignment(
+            source_kind="pet",
+            source_annotation_id="cover",
+            target_kind="person",
+            target_id="person-a",
+        )
+
+        (summary,) = repository.get_pet_summaries()
+        assert summary.thumbnail_path == stale_summary.thumbnail_path
+        assert summary.key_detection_id == ""
+        assert repository.resolve_pet_cover_detection("pet-a", "asset-a") is None
+        assert not service.set_pet_cover("pet-a", "cover")
+        assert not service.delete_detection(
+            stale_summary.key_detection_id, expected_pet_id=stale_summary.pet_id
+        )
+        assert repository.get_detection("cover") is not None
+        assert not repository.state_repository.get_rejected_pet_keys([cover.pet_key])
+        assert identity_state.get_annotation_identity_assignments([("pet", "cover")]) == {
+            ("pet", "cover"): ("person", "person-a")
+        }
+        assert identity_state.clear_annotation_identity_assignment("pet", "cover")
+        assert service.delete_detection("cover", expected_pet_id="pet-a")
+        assert repository.get_detection("cover") is None
+    finally:
+        session.shutdown()
 
 
 def test_delete_detection_replaces_custom_cover_and_removes_thumbnail(tmp_path: Path) -> None:

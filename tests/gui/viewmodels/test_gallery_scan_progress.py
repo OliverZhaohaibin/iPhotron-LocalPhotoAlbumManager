@@ -4,13 +4,12 @@ from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from threading import Event
-from time import monotonic
+from time import monotonic, sleep
 from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
 from PySide6.QtCore import QPersistentModelIndex
-from PySide6.QtTest import QTest
 
 from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
@@ -29,7 +28,8 @@ def _wait_for(qapp, condition) -> None:
     deadline = monotonic() + 5
     while not condition() and monotonic() < deadline:
         qapp.processEvents()
-        QTest.qWait(1)
+        # Release the GIL so the Python QRunnable can produce its result.
+        sleep(0.001)
     assert condition()
 
 
@@ -127,7 +127,7 @@ def test_scan_batches_and_finish_survive_an_active_old_window(
     try:
         commit(0, 1)
         model._flush_pending_scan_batches()
-        _wait_for(qapp, read_done.is_set)
+        assert read_done.wait(5)
         commit(1, 101)
         commit(101, 201)
         assert service.count_query_assets(query) == 201
@@ -200,7 +200,7 @@ def test_ready_and_backfill_bursts_leave_one_followup(gallery, make_rows, qapp, 
     model._scan_batch_timer.setInterval(60_000)
     try:
         store.load_selection(root, query=query)
-        _wait_for(qapp, read_done.is_set)
+        assert read_done.wait(5)
         for start in (1, 4, 7):
             for row in rows[start:start + 3]:
                 assert service.publish_thumbnail_ready(

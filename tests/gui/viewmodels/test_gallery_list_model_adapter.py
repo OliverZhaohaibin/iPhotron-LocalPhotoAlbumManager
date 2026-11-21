@@ -1078,8 +1078,12 @@ def test_startup_gallery_warmup_keeps_guard_thumbnail_demand(
     )
 
     adapter.begin_startup_gallery_warmup()
-    with patch.object(adapter, "_request_thumbnail_hints") as request_hints:
-        adapter.update_viewport(demand)
+    try:
+        with patch.object(adapter, "_request_thumbnail_hints") as request_hints:
+            adapter.update_viewport(demand)
+    finally:
+        adapter._startup_gallery_timeout_timer.stop()
+        adapter._startup_gallery_heartbeat_timer.stop()
 
     mock_store.reconcile_viewport_demand.assert_called_once()
     request_hints.assert_called_once()
@@ -1226,6 +1230,7 @@ def test_startup_gallery_warmup_restores_full_prefetch_after_ready(
     adapter,
     mock_store,
     mock_thumb_service,
+    qapp,
 ):
     visible = _make_dto(abs_path=Path("/library/visible.jpg"))
     guard = _make_dto(abs_path=Path("/library/guard.jpg"))
@@ -1249,7 +1254,7 @@ def test_startup_gallery_warmup_restores_full_prefetch_after_ready(
     adapter.begin_startup_gallery_warmup()
     adapter._reconcile_full_thumbnail_demand()
     adapter._finish_startup_gallery_warmup("ready")
-    adapter._reconcile_full_thumbnail_demand()
+    qapp.processEvents()
 
     startup_snapshot = mock_thumb_service.reconcile_demand.call_args_list[0].args[0]
     restored = mock_thumb_service.reconcile_demand.call_args_list[-1].args[0]

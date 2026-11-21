@@ -43,6 +43,7 @@ from iPhoto.gui.viewmodels.gallery_window_loader import (
     GallerySelectionAnchorRetryTicket,
     GalleryWindowRequest,
     GalleryWindowResult,
+    raw_offset_for_view_offset,
 )
 from iPhoto.gui.viewmodels.path_cache import PathExistsCache
 from iPhoto.gui.viewmodels.pending_move_buffer import (
@@ -1428,12 +1429,6 @@ class GalleryCollectionStore:
             if self._pending_moves
             else ()
         )
-        raw_first = view_first
-        for source_row in pending_source_rows:
-            if source_row <= raw_first:
-                raw_first += 1
-                continue
-            break
         pending_sources = tuple(
             pending
             for pending in self._pending_moves
@@ -1449,7 +1444,7 @@ class GalleryCollectionStore:
                 query=self._clone_query(self._current_query),
                 query_service=self._asset_query_service,
                 view_first=view_first,
-                raw_first=raw_first,
+                raw_first=raw_offset_for_view_offset(view_first, pending_source_rows),
                 limit=limit,
                 pending_source_ids=frozenset(
                     str(pending.source_id)
@@ -1458,6 +1453,11 @@ class GalleryCollectionStore:
                 ),
                 pending_source_count=len(pending_sources),
                 pending_source_rows=pending_source_rows,
+                pending_source_assets=tuple(
+                    (pending.source_abs, pending.source_id)
+                    for pending in pending_sources
+                    if pending.source_id is not None
+                ),
                 pending_insertions=pending_insertions,
                 selection_anchor=self._selection_anchor,
                 request_backfill=bool(request_backfill),
@@ -2225,13 +2225,9 @@ class GalleryCollectionStore:
         query: AssetQuery,
         view_offset: int,
     ) -> int:
-        raw_offset = max(0, int(view_offset))
-        for source_row in self._pending_source_rows_for_query(query):
-            if source_row <= raw_offset:
-                raw_offset += 1
-                continue
-            break
-        return raw_offset
+        return raw_offset_for_view_offset(
+            max(0, int(view_offset)), tuple(self._pending_source_rows_for_query(query)),
+        )
 
     def _pending_adjusted_view_row_for_raw_row(
         self,

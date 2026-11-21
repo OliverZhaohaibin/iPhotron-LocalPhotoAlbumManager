@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QPushButton
 from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store.repository import AssetRepository
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.domain.models.scan import ScanBatchCommitted
 from iPhoto.gui.gallery_demand import build_viewport_demand
@@ -634,6 +635,52 @@ def test_scan_does_not_extend_a_large_select_all_to_replacement_assets(
     finally:
         grid.setModel(None)
         grid.deleteLater()
+
+
+@pytest.mark.parametrize("deep_viewport", [False, True])
+def test_pending_move_offsets_follow_the_window_order(gallery, make_rows, qapp, monkeypatch, deep_viewport) -> None:
+    root, repository, service, model = gallery
+    store, loader = model.store, model._window_loader
+    rows = make_rows(0, 900)
+    repository.write_rows(rows)
+    store.load_selection(root, query=AssetQuery())
+    _wait_for(qapp, lambda: model.rowCount() == 900 and loader._active_request is None)
+    store._request_async_chunk(480, 680, demand_generation=0, priority=0)
+    _wait_for(qapp, lambda: loader._active_request is None)
+
+    pending_source = rows[399]
+    target_id = rows[249]["id"]
+    tracked = QPersistentModelIndex(model.index(650, 0))
+    assert tracked.data(Roles.ASSET_ID) == target_id
+    assert model.optimistic_move_paths(
+        [root / pending_source["rel"]], root / RECENTLY_DELETED_DIR_NAME, is_delete=True,
+    )
+    assert tracked.row() == 649
+    if deep_viewport:
+        store.prioritize_rows(640, 660)
+        _wait_for(qapp, lambda: loader._active_request is None)
+
+    read_started, release = Event(), Event()
+    read_window = service.read_gallery_asset_window
+
+    def read_after_source_moves(*args):
+        read_started.set()
+        assert release.wait(5)
+        return read_window(*args)
+
+    monkeypatch.setattr(service, "read_gallery_asset_window", read_after_source_moves)
+    store.handle_scan_finished(root, True)
+    try:
+        assert read_started.wait(5)
+        repository.merge_scan_rows([{**pending_source, "sort_ts": -1}])
+    finally:
+        release.set()
+    _wait_for(qapp, lambda: loader._active_request is None)
+
+    store.ensure_row_loaded(649)
+    _wait_for(qapp, lambda: loader._active_request is None)
+    assert store.asset_at(649).id == target_id
+    assert (tracked.row(), tracked.data(Roles.ASSET_ID)) == (649, target_id)
 
 
 @pytest.mark.parametrize("inserted", [20, 450])

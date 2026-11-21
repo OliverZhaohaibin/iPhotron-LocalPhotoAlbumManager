@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.domain.models.query import AssetQuery
+from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.infrastructure.services.performance_events import emit_perf_event
 
@@ -76,6 +76,7 @@ class GalleryWindowRequest:
     extra_ranges: tuple[tuple[int, int], ...] = ()
     previous_order_revision: int | None = None
     tracked_assets: frozenset[AssetIdentity] = frozenset()
+    pending_source_assets: tuple[AssetIdentity, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +118,65 @@ def _dto_identity_keys(dto: AssetDTO) -> set[str]:
 
 def _normalized_path(path: Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def raw_offset_for_view_offset(view_offset: int, pending_source_rows: tuple[int, ...]) -> int:
+    raw_offset = view_offset
+    for row in pending_source_rows:
+        if row > raw_offset:
+            break
+        raw_offset += 1
+    return raw_offset
+
+
+def _raw_window_ranges(request: GalleryWindowRequest) -> tuple[tuple[int, int], ...]:
+    return (
+        (request.raw_first, request.limit + request.pending_source_count),
+        *(
+            (raw_offset_for_view_offset(first, request.pending_source_rows), limit + request.pending_source_count)
+            for first, limit in request.extra_ranges
+        ),
+    )
+
+
+def _read_window_snapshot(
+    request: GalleryWindowRequest, reader: Any,
+) -> tuple[GalleryWindowRequest, tuple[tuple[int, int], ...], tuple[WindowResult, ...]]:
+    read_windows = getattr(request.query_service, "read_gallery_asset_windows", None)
+    find_positions = getattr(request.query_service, "find_gallery_asset_positions", None)
+    source_paths = tuple(path for path, _asset_id in request.pending_source_assets)
+    verified_order = None
+    for _attempt in range(3):
+        raw_ranges = _raw_window_ranges(request)
+        if len(raw_ranges) > 1 and callable(read_windows):
+            windows = read_windows(request.root, request.query, raw_ranges)
+        else:
+            windows = tuple(reader(request.root, request.query, *bounds) for bounds in raw_ranges)
+
+        order = windows[0].order_revision
+        if order is None or order == verified_order or not source_paths or not callable(find_positions):
+            return request, raw_ranges, windows
+
+        positions = find_positions(request.query, source_paths, order)
+        if positions is None:
+            continue
+        pending_rows = tuple(sorted({
+            position[1]
+            for path, asset_id in request.pending_source_assets
+            if (position := positions.get(path)) is not None and position[0] == asset_id
+        }))
+        verified_order = order
+        request = replace(
+            request,
+            raw_first=raw_offset_for_view_offset(request.view_first, pending_rows),
+            pending_source_rows=pending_rows,
+        )
+        # If the SQL bounds match, the existing windows can be reused with the
+        # verified offsets for anchor and tracked-row lookups.
+        if _raw_window_ranges(request) == raw_ranges:
+            return request, raw_ranges, windows
+
+    raise RuntimeError("collection changed during pending move lookup")
 
 
 def _resolve_selection_anchor(
@@ -251,19 +311,7 @@ class _GalleryWindowWorker(QRunnable):
             if not callable(reader):
                 reader = request.query_service.read_query_asset_window
             ranges = ((request.view_first, request.limit), *request.extra_ranges)
-            raw_ranges = [(request.raw_first, request.limit + request.pending_source_count)]
-            for first, limit in request.extra_ranges:
-                raw_first = first
-                for source_row in request.pending_source_rows:
-                    if source_row > raw_first:
-                        break
-                    raw_first += 1
-                raw_ranges.append((raw_first, limit + request.pending_source_count))
-            read_windows = getattr(request.query_service, "read_gallery_asset_windows", None)
-            if len(raw_ranges) > 1 and callable(read_windows):
-                windows = read_windows(request.root, request.query, tuple(raw_ranges))
-            else:
-                windows = tuple(reader(request.root, request.query, *bounds) for bounds in raw_ranges)
+            request, raw_ranges, windows = _read_window_snapshot(request, reader)
             window = windows[0]
 
             rows: dict[int, AssetDTO] = {}
@@ -566,6 +614,7 @@ class GalleryWindowLoader(QObject):
             request.extra_ranges,
             request.previous_order_revision,
             request.tracked_assets,
+            request.pending_source_assets,
         )
 
 

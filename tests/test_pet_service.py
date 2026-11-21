@@ -53,6 +53,7 @@ from iPhoto.pets.repository import PetRepository
 from iPhoto.pets.repository_utils import normalize_vector, utc_now_iso
 from iPhoto.pets.scan_session import PetScanSession
 from iPhoto.pets.state_repository import PetStateRepository
+from iPhoto.pets.status import PetScanMessage, PetScanStatus, PetScanStatusCode
 from iPhoto.recognition.mutation_coordinator import RecognitionMutationCoordinator
 
 
@@ -3034,7 +3035,7 @@ def test_pet_scan_worker_missing_runtime_keeps_pending(tmp_path: Path, monkeypat
 @pytest.mark.parametrize(
     ("error", "expected_message"),
     [
-        (RuntimeError("program bug"), "Pet scanning paused: program bug"),
+        (RuntimeError("program bug"), PetScanStatus(PetScanStatusCode.PAUSED, "program bug")),
         (PetRuntimeUnavailableError("missing dependency"), "missing dependency"),
         (PetModelUnavailableError("missing model"), "missing model"),
         (PetModelUnavailableError("download failed", reason="download_failed"), "download failed"),
@@ -3044,7 +3045,7 @@ def test_pet_scan_worker_only_typed_availability_errors_use_unavailable_path(
     tmp_path: Path,
     monkeypatch,
     error: RuntimeError,
-    expected_message: str,
+    expected_message: PetScanMessage,
 ) -> None:
     repo = get_global_repository(tmp_path)
     repo.write_rows(
@@ -3058,7 +3059,7 @@ def test_pet_scan_worker_only_typed_availability_errors_use_unavailable_path(
         PET_CLUSTERING_PIPELINE_VERSION,
     )
     worker = PetScanWorker(tmp_path, pet_service=service)
-    messages: list[str] = []
+    messages: list[PetScanMessage] = []
     failures: list[str] = []
     worker.statusChanged.connect(messages.append)
     worker.modelUnavailable.connect(failures.append)

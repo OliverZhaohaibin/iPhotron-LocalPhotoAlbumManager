@@ -32,6 +32,7 @@ from iPhoto.gui.i18n import tr
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.pets.records import PetSummary
+from iPhoto.pets.status import PetScanMessage, PetScanStatus, PetScanStatusCode
 
 from ..menus.core import MenuActionSpec, MenuContext, populate_menu
 from ..menus.style import apply_menu_style
@@ -64,6 +65,31 @@ def _pet_service(library_root: Path | None = None) -> PetService:
     return PetService(library_root)
 
 
+def _pet_scan_status_text(message: PetScanMessage | None) -> str | None:
+    if not isinstance(message, PetScanStatus):
+        return message
+    match message.code:
+        case PetScanStatusCode.DISABLED:
+            return tr("PeopleDashboard", "Pet scanning is disabled.")
+        case PetScanStatusCode.UNAVAILABLE:
+            return tr("PeopleDashboard", "Pet scanning is unavailable for this library.")
+        case PetScanStatusCode.CONSOLIDATION_PAUSED:
+            return tr("PeopleDashboard", "Pet scan consolidation paused: {reason}").format(
+                reason=message.reason
+            )
+        case PetScanStatusCode.PAUSED:
+            return tr("PeopleDashboard", "Pet scanning paused: {reason}").format(
+                reason=message.reason
+            )
+        case PetScanStatusCode.ASSET_RETRY:
+            return tr("PeopleDashboard", "Some assets need a pet-scan retry.")
+        case PetScanStatusCode.ASSET_FAILED:
+            return tr(
+                "PeopleDashboard", "Some assets could not be pet scanned and were marked failed."
+            )
+    return None
+
+
 @dataclass(frozen=True)
 class _IdentityChoice:
     person_id: str
@@ -74,7 +100,7 @@ class _IdentityChoice:
 
 
 class _PeopleDashboardLoaderSignals(QObject):
-    loaded = Signal(int, int, bool, list, list, list, int, int, object, object)
+    loaded = Signal(int, int, bool, list, list, list, int, int, object)
     failed = Signal(int, int, object, bool)
 
 
@@ -88,7 +114,6 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         pet_service: PetService,
         query_service: object | None = None,
         status_message: str | None,
-        pet_status_message: str | None,
         show_hidden_people: bool,
         signals: _PeopleDashboardLoaderSignals,
     ) -> None:
@@ -99,7 +124,6 @@ class _PeopleDashboardLoaderWorker(QRunnable):
         self._pet_service = pet_service
         self._query_service = query_service
         self._status_message = status_message
-        self._pet_status_message = pet_status_message
         self._show_hidden_people = bool(show_hidden_people)
         self._signals = signals
 
@@ -129,7 +153,6 @@ class _PeopleDashboardLoaderWorker(QRunnable):
                 0,
                 0,
                 self._status_message,
-                self._pet_status_message,
             )
             return
         if self._query_service is not None:
@@ -156,7 +179,6 @@ class _PeopleDashboardLoaderWorker(QRunnable):
             pending,
             pet_pending,
             self._status_message,
-            self._pet_status_message,
         )
 
 
@@ -184,7 +206,7 @@ class PeopleDashboardWidget(QWidget):
         self._query_service: object | None = None
         self._pinned_service: PinnedItemsService | None = None
         self._status_message: str | None = None
-        self._pet_status_message: str | None = None
+        self._pet_status_message: PetScanMessage | None = None
         self._summaries: list[PersonSummary] = []
         self._groups: list[PeopleGroupSummary] = []
         self._pet_summaries: list[PetSummary] = []
@@ -365,7 +387,6 @@ class PeopleDashboardWidget(QWidget):
         pending: int,
         pet_pending: int,
         status_message: str | None = None,
-        pet_status_message: str | None = None,
         index_version: int = 0,
     ) -> bool:
         """Apply a generation-checked immutable dashboard warmup result."""
@@ -384,7 +405,6 @@ class PeopleDashboardWidget(QWidget):
             int(pending),
             int(pet_pending),
             status_message,
-            pet_status_message,
         )
         return True
 
@@ -429,7 +449,7 @@ class PeopleDashboardWidget(QWidget):
         self._status_message = message or None
         self._update_status_labels()
 
-    def set_pet_status_message(self, message: str | None) -> None:
+    def set_pet_status_message(self, message: PetScanMessage | None) -> None:
         self._pet_status_message = message or None
         self._update_status_labels()
 
@@ -478,7 +498,6 @@ class PeopleDashboardWidget(QWidget):
             pet_service=self._pet_service,
             query_service=self._query_service,
             status_message=self._status_message,
-            pet_status_message=self._pet_status_message,
             show_hidden_people=self._show_hidden_people,
             signals=self._load_signals,
         )
@@ -504,7 +523,6 @@ class PeopleDashboardWidget(QWidget):
         pending: int,
         pet_pending: int,
         status_message: str | None,
-        pet_status_message: str | None,
     ) -> None:
         if generation != self._load_generation:
             return
@@ -538,8 +556,6 @@ class PeopleDashboardWidget(QWidget):
         self._last_pending_pets = int(pet_pending)
         self._loaded_index_version = index_version
         self._pending_index_refresh = False
-        status_text = status_message if status_message else self._status_message
-        pet_status_text = pet_status_message if pet_status_message else self._pet_status_message
 
         if self._summaries or self._pet_summaries:
             self._set_populated_message()
@@ -551,14 +567,8 @@ class PeopleDashboardWidget(QWidget):
                 self._emit_first_viewport_ready()
             return
 
-        if status_text or pet_status_text:
-            body = "\n".join(text for text in (status_text, pet_status_text) if text)
-        elif pending > 0 or pet_pending > 0:
-            body = self._scanning_message()
-        else:
-            body = self._empty_clusters_message()
-        self._message.setText(body)
-        self._empty.setText(body)
+        # Pet scan status arrives independently and may change while cards load.
+        self._set_empty_status_labels(status_message or self._status_message)
         self._empty.show()
         self._scroll.hide()
         self._clear_group_cards()
@@ -1543,20 +1553,19 @@ class PeopleDashboardWidget(QWidget):
         if self._summaries or self._pet_summaries:
             self._set_populated_message()
             return
-        if self._status_message or self._pet_status_message:
-            text = "\n".join(
-                item for item in (self._status_message, self._pet_status_message) if item
+        self._set_empty_status_labels(self._status_message)
+
+    def _set_empty_status_labels(self, face_status: str | None) -> None:
+        pet_status = _pet_scan_status_text(self._pet_status_message)
+        text = "\n".join(message for message in (face_status, pet_status) if message)
+        if not text:
+            text = (
+                self._scanning_message()
+                if self._last_pending_faces > 0 or self._last_pending_pets > 0
+                else self._empty_clusters_message()
             )
-            self._message.setText(text)
-            self._empty.setText(text)
-            return
-        body = (
-            self._scanning_message()
-            if self._last_pending_faces > 0 or self._last_pending_pets > 0
-            else self._empty_clusters_message()
-        )
-        self._message.setText(body)
-        self._empty.setText(body)
+        self._message.setText(text)
+        self._empty.setText(text)
 
     def _set_unbound_message(self) -> None:
         self._message.setText(

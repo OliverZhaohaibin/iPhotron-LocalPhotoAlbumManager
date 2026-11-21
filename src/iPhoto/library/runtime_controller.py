@@ -66,6 +66,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..people.service import PeopleService
     from ..pets.index_coordinator import PetIndexCoordinator
     from ..pets.service import PetService
+    from ..pets.status import PetScanMessage
     from .workers.face_scan_worker import FaceScanWorker
     from .workers.pet_scan_worker import PetScanWorker
     from .workers.scanner_worker import ScannerWorker
@@ -95,7 +96,7 @@ class LibraryRuntimeController(
     faceScanStatusChanged = Signal(str)
     petIndexUpdated = Signal()
     petSnapshotCommitted = Signal(object)
-    petScanStatusChanged = Signal(str)
+    petScanStatusChanged = Signal(object)
     recognitionModelUnavailable = Signal(object)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -140,7 +141,7 @@ class LibraryRuntimeController(
         self._geotagged_assets_cache: Optional[List[GeotaggedAsset]] = None
         self._geotagged_assets_cache_root: Optional[Path] = None
         self._face_scan_status_message: Optional[str] = None
-        self._pet_scan_status_message: Optional[str] = None
+        self._pet_scan_status_message: PetScanMessage | None = None
         self._people_index_coordinator: PeopleIndexCoordinator | None = None
         self._pet_index_coordinator: PetIndexCoordinator | None = None
         self._recognition_services_root: Path | None = None
@@ -441,7 +442,7 @@ class LibraryRuntimeController(
     def face_scan_status_message(self) -> str | None:
         return self._face_scan_status_message
 
-    def pet_scan_status_message(self) -> str | None:
+    def pet_scan_status_message(self) -> PetScanMessage | None:
         return self._pet_scan_status_message
 
     def bind_library_session(

@@ -298,7 +298,6 @@ def test_recognition_shutdown_rejects_queued_warmup_result() -> None:
         pending=0,
         pet_pending=0,
         status_message=None,
-        pet_status_message=None,
     )
 
     coordinator.shutdown()

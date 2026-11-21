@@ -37,11 +37,13 @@ from iPhoto.gui.ui.widgets.people_dashboard import (
     PeopleDashboardWidget,
 )
 from iPhoto.gui.ui.widgets.people_dashboard_shared import CANVAS_MARGIN
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 from iPhoto.library.workers.pet_scan_worker import PetScanWorker
 from iPhoto.people.repository import PeopleGroupSummary, PersonSummary
 from iPhoto.people.service import PeopleService
 from iPhoto.pets.records import PetSummary
 from iPhoto.pets.service import PetService
+from iPhoto.pets.status import PetScanStatus, PetScanStatusCode
 from iPhoto.settings.manager import SettingsManager
 
 
@@ -1245,7 +1247,6 @@ def test_people_dashboard_loader_reports_locked_database_without_raising(
         people_service=_LockedPeopleService(),
         pet_service=_PetService(),
         status_message=None,
-        pet_status_message=None,
         show_hidden_people=False,
         signals=signals,
     )
@@ -1311,34 +1312,58 @@ def test_people_pets_load_failure_message_survives_retranslation(
         assert widget._message.text() == expected
         assert widget._empty.text() == expected
 
-    widget._on_load_completed(0, 0, True, [], [], [], 0, 0, None, None)
+    widget._on_load_completed(0, 0, True, [], [], [], 0, 0, None)
     assert widget._empty.text() == (
         "Noch keine Personen- oder Haustiercluster. Starten Sie einen Scan, um Gruppen zu erstellen."
     )
 
 
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [("zh-CN", "宠物扫描已禁用。"), ("de", "Der Haustierscan ist deaktiviert.")],
-)
-def test_pet_scan_status_uses_compiled_translation(
+def test_pet_scan_status_retranslates_without_another_scan(
     monkeypatch,
     tmp_path: Path,
     dashboard_translations: TranslationManager,
-    language: str,
-    expected: str,
 ) -> None:
     monkeypatch.setenv("IPHOTO_PET_SCAN_DISABLED", "1")
-    dashboard_translations.set_language(language)
     widget = PeopleDashboardWidget()
     widget._service.set_library_root(tmp_path)
+    dashboard_translations.languageChanged.connect(widget.retranslate_ui)
+    reload = Mock()
+    monkeypatch.setattr(widget, "reload", reload)
     worker = PetScanWorker(tmp_path, pet_service=widget._pet_service)
-    worker.statusChanged.connect(widget.set_pet_status_message)
+    manager = LibraryRuntimeController()
+    manager._connect_recognition_worker(worker, "pet")
+    manager.petScanStatusChanged.connect(widget.set_pet_status_message)
+    try:
+        dashboard_translations.set_language("de")
+        worker.run()
+        assert manager.pet_scan_status_message() == PetScanStatus(PetScanStatusCode.DISABLED)
+        for language, expected in (
+            ("de", "Der Haustierscan ist deaktiviert."),
+            ("zh-CN", "宠物扫描已禁用。"),
+            ("system", "Pet scanning is disabled."),
+        ):
+            dashboard_translations.set_language(language)
+            assert widget._message.text() == expected
+            assert widget._empty.text() == expected
+        reload.assert_not_called()
+    finally:
+        widget.shutdown()
+        manager.shutdown()
 
-    worker.run()
 
-    assert widget._message.text() == expected
-    assert widget._empty.text() == expected
+def test_pet_scan_pause_retranslates_and_preserves_reason(
+    tmp_path: Path, dashboard_translations: TranslationManager
+) -> None:
+    widget = PeopleDashboardWidget()
+    widget._service.set_library_root(tmp_path)
+    dashboard_translations.languageChanged.connect(widget.retranslate_ui)
+    reason = "Could not read {asset}.jpg"
+    dashboard_translations.set_language("de")
+    widget.set_pet_status_message(PetScanStatus(PetScanStatusCode.PAUSED, reason))
+    assert widget._empty.text() == f"Der Haustierscan wurde angehalten: {reason}"
+
+    dashboard_translations.set_language("zh-CN")
+    assert widget._empty.text() == f"宠物扫描已暂停：{reason}"
 
 
 def test_person_menu_shows_pin_action_when_pinned_service_is_available(

@@ -25,7 +25,6 @@ class _DashboardSnapshot:
     pending: int
     pet_pending: int
     status_message: str | None
-    pet_status_message: str | None
 
 
 class _DashboardWarmupSignals(QObject):
@@ -45,7 +44,6 @@ class _DashboardWarmupWorker(QRunnable):
         pet_service: object,
         query_service: object | None,
         status_message: str | None,
-        pet_status_message: str | None,
         signals: _DashboardWarmupSignals,
     ) -> None:
         super().__init__()
@@ -57,7 +55,6 @@ class _DashboardWarmupWorker(QRunnable):
         self._pet_service = pet_service
         self._query_service = query_service
         self._status_message = status_message
-        self._pet_status_message = pet_status_message
         self._signals = signals
 
     def run(self) -> None:  # pragma: no cover - worker thread
@@ -89,7 +86,6 @@ class _DashboardWarmupWorker(QRunnable):
                     int(pending),
                     int(pet_pending),
                     self._status_message,
-                    self._pet_status_message,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - normal async failure boundary
@@ -289,7 +285,6 @@ class RecognitionCoordinator(QObject):
                 pet_service=pet_service,
                 query_service=query_service,
                 status_message=library.face_scan_status_message(),
-                pet_status_message=library.pet_scan_status_message(),
                 signals=self._warmup_signals,
             )
         )
@@ -349,7 +344,6 @@ class RecognitionCoordinator(QObject):
                 pending=snapshot.pending,
                 pet_pending=snapshot.pet_pending,
                 status_message=snapshot.status_message,
-                pet_status_message=snapshot.pet_status_message,
                 index_version=snapshot.index_version,
             )
         )

@@ -1424,11 +1424,6 @@ class GalleryCollectionStore:
         self._pending_window_generations.add(generation)
         if refresh_after_commit:
             self._latest_commit_refresh = generation, ((view_first, limit), *extra_ranges)
-        pending_source_rows = tuple(
-            self._pending_source_rows_for_query(self._current_query)
-            if self._pending_moves
-            else ()
-        )
         pending_sources = tuple(
             pending
             for pending in self._pending_moves
@@ -1444,7 +1439,7 @@ class GalleryCollectionStore:
                 query=self._clone_query(self._current_query),
                 query_service=self._asset_query_service,
                 view_first=view_first,
-                raw_first=raw_offset_for_view_offset(view_first, pending_source_rows),
+                raw_first=view_first,
                 limit=limit,
                 pending_source_ids=frozenset(
                     str(pending.source_id)
@@ -1452,7 +1447,6 @@ class GalleryCollectionStore:
                     if pending.source_id is not None
                 ),
                 pending_source_count=len(pending_sources),
-                pending_source_rows=pending_source_rows,
                 pending_source_assets=tuple(
                     (pending.source_abs, pending.source_id)
                     for pending in pending_sources

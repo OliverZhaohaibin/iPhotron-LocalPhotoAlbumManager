@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
-from threading import Event
+from threading import Event, current_thread, main_thread
 from time import monotonic, sleep
 from unittest.mock import MagicMock
 
@@ -662,13 +662,19 @@ def test_pending_move_offsets_follow_the_window_order(gallery, make_rows, qapp, 
 
     read_started, release = Event(), Event()
     read_window = service.read_gallery_asset_window
+    find_row_by_path = service.find_row_by_path
 
     def read_after_source_moves(*args):
         read_started.set()
         assert release.wait(5)
         return read_window(*args)
 
+    def find_row_off_gui_thread(*args):
+        assert current_thread() is not main_thread()
+        return find_row_by_path(*args)
+
     monkeypatch.setattr(service, "read_gallery_asset_window", read_after_source_moves)
+    monkeypatch.setattr(service, "find_row_by_path", find_row_off_gui_thread)
     store.handle_scan_finished(root, True)
     try:
         assert read_started.wait(5)

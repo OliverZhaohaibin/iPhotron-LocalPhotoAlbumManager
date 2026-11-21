@@ -145,7 +145,7 @@ def _read_window_snapshot(
     read_windows = getattr(request.query_service, "read_gallery_asset_windows", None)
     find_positions = getattr(request.query_service, "find_gallery_asset_positions", None)
     source_paths = tuple(path for path, _asset_id in request.pending_source_assets)
-    verified_order = None
+    verified_order = object()
     for _attempt in range(3):
         raw_ranges = _raw_window_ranges(request)
         if len(raw_ranges) > 1 and callable(read_windows):
@@ -154,17 +154,28 @@ def _read_window_snapshot(
             windows = tuple(reader(request.root, request.query, *bounds) for bounds in raw_ranges)
 
         order = windows[0].order_revision
-        if order is None or order == verified_order or not source_paths or not callable(find_positions):
+        if not source_paths or order == verified_order:
             return request, raw_ranges, windows
 
-        positions = find_positions(request.query, source_paths, order)
-        if positions is None:
-            continue
-        pending_rows = tuple(sorted({
-            position[1]
-            for path, asset_id in request.pending_source_assets
-            if (position := positions.get(path)) is not None and position[0] == asset_id
-        }))
+        if order is not None and callable(find_positions):
+            positions = find_positions(request.query, source_paths, order)
+            if positions is None:
+                continue
+            source_rows = {
+                position[1]
+                for path, asset_id in request.pending_source_assets
+                if (position := positions.get(path)) is not None and position[0] == asset_id
+            }
+        else:
+            find_row_by_path = getattr(request.query_service, "find_row_by_path", None)
+            if not callable(find_row_by_path):
+                return request, raw_ranges, windows
+            source_rows = {
+                int(row)
+                for path in source_paths
+                if (row := find_row_by_path(request.query, path)) is not None
+            }
+        pending_rows = tuple(sorted(source_rows))
         verified_order = order
         request = replace(
             request,

@@ -494,6 +494,17 @@ class PeopleIndexCoordinator(QObject):
                 return None
             return self._emit_snapshot(changed_person_ids=ordered_ids)
 
+    def set_identity_card_order(self, identity_keys: tuple[str, ...]) -> tuple[str, ...] | None:
+        with self._journal.try_mutation_scope() as acquired:
+            if not acquired or self._shutdown_requested or not self._recover_operations_locked():
+                return None
+            state = self._repository().state_repository
+            if state is None:
+                return None
+            order = state.set_identity_card_order(identity_keys)
+            self._emit_snapshot()
+            return order
+
     def set_group_order(self, group_ids: Iterable[str]) -> PeopleSnapshotEvent | None:
         ordered_ids = tuple(str(group_id) for group_id in group_ids if group_id)
         with self._journal.try_mutation_scope() as acquired:

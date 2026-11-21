@@ -25,6 +25,7 @@ class _DashboardSnapshot:
     pending: int
     pet_pending: int
     status_message: str | None
+    identity_order: tuple[str, ...] = ()
 
 
 class _DashboardWarmupSignals(QObject):
@@ -66,6 +67,7 @@ class _DashboardWarmupWorker(QRunnable):
                 pet_summaries = result.pets
                 pending = result.pending_people
                 pet_pending = result.pending_pets
+                identity_order = result.identity_order
             else:
                 pet_summaries, pet_pending = self._pet_service.load_dashboard(
                     include_hidden=self._include_hidden
@@ -74,6 +76,7 @@ class _DashboardWarmupWorker(QRunnable):
                     include_hidden=self._include_hidden,
                     pet_summaries=pet_summaries,
                 )
+                identity_order = self._people_service.get_identity_card_order()
             self._signals.ready.emit(
                 _DashboardSnapshot(
                     self._root,
@@ -86,6 +89,7 @@ class _DashboardWarmupWorker(QRunnable):
                     int(pending),
                     int(pet_pending),
                     self._status_message,
+                    identity_order,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - normal async failure boundary
@@ -345,6 +349,7 @@ class RecognitionCoordinator(QObject):
                 pet_pending=snapshot.pet_pending,
                 status_message=snapshot.status_message,
                 index_version=snapshot.index_version,
+                identity_order=snapshot.identity_order,
             )
         )
 

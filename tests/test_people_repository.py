@@ -329,6 +329,38 @@ def test_person_card_order_persists_across_reload(tmp_path: Path) -> None:
     assert [summary.person_id for summary in persisted] == ["person-b", "person-a"]
 
 
+def test_identity_card_order_keeps_omitted_slots_and_survives_a_rebuild(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_person_order(["alice", "bob"])
+    assert state.get_identity_card_order() == ()
+    state.set_identity_card_order(("person:alice", "pet:hidden", "pet:alice", "person:bob"))
+
+    reordered = ("person:bob", "pet:hidden", "pet:alice", "person:alice")
+    assert state.set_identity_card_order(("person:bob", "pet:alice", "person:alice")) == reordered
+    assert state.get_person_order_map(["alice", "bob"]) == {"bob": 0, "alice": 1}
+
+    state.sync_scan_results([], [])
+    reopened = FaceStateRepository(state.db_path)
+    assert reopened.get_identity_card_order() == reordered
+
+    reopened.set_person_order(["alice", "bob"])
+    assert reopened.get_identity_card_order() == ("person:alice", "pet:hidden", "pet:alice", "person:bob")
+
+
+def test_identity_card_order_follows_pet_and_cross_kind_merges(tmp_path: Path) -> None:
+    state = FaceStateRepository(tmp_path / "face_state.db")
+    state.set_identity_card_order(("pet:source", "person:anchor", "pet:target"))
+
+    state.remap_pet_in_groups("source", "target")
+    assert state.get_identity_card_order() == ("person:anchor", "pet:target")
+
+    result = state.merge_identity_redirect_and_groups(
+        source_kind="pet", source_id="target", target_kind="person", target_id="new"
+    )
+    assert result.succeeded
+    assert state.get_identity_card_order() == ("person:anchor", "person:new")
+
+
 def test_person_hidden_state_filters_summaries_and_persists_across_reload(tmp_path: Path) -> None:
     repository = FaceRepository(tmp_path / "face_index.db", tmp_path / "face_state.db")
     faces = [

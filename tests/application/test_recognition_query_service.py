@@ -35,6 +35,7 @@ def test_dashboard_cache_reuses_single_pet_summary_read() -> None:
     pet_service.load_dashboard.return_value = ([visible_pet, hidden_pet], 2)
     people_service = Mock()
     people_service.load_dashboard.return_value = ([_person("person-a")], [object()], 1)
+    people_service.get_identity_card_order.return_value = ("pet:pet-visible", "person:person-a")
     service = RecognitionQueryService(
         root,
         people_service=people_service,
@@ -46,6 +47,7 @@ def test_dashboard_cache_reuses_single_pet_summary_read() -> None:
 
     assert second is first
     assert first.pets == (visible_pet,)
+    assert first.identity_order == ("pet:pet-visible", "person:person-a")
     pet_service.load_dashboard.assert_called_once_with(include_hidden=True)
     people_service.load_dashboard.assert_called_once_with(
         include_hidden=False,

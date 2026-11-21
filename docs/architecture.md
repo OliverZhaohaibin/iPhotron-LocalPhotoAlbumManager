@@ -350,6 +350,13 @@ coordination state in the People state repository, not shared detection tables.
 People, Pets, and cross-kind merge/redirect services must reject identities
 whose hidden states differ, even when a caller bypasses the UI guard.
 
+The dashboard stores one shared card order in `face_state.db`, keyed by identity
+kind and ID. The default layout interleaves cards by photo count while preserving
+the relative People order from existing libraries. A drag updates the visible
+order atomically and retains saved slots for identities outside the current view.
+An identity merge keeps the target's saved slot or transfers the source's slot
+when the target has no saved position.
+
 Recognition writes use the session's shared `recognition_mutations` coordinator.
 Its library-wide mutation lease covers admission through apply/finalize; existing
 state guards and recovery handlers must not be bypassed. The coordinator owns

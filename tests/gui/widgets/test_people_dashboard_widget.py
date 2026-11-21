@@ -24,6 +24,7 @@ from iPhoto.application.services.recognition_merge_service import (
     IdentityMergeRefreshPolicy,
     IdentityRef,
 )
+from iPhoto.application.services.recognition_query_service import RecognitionQueryService
 from iPhoto.gui.i18n import TranslationManager
 from iPhoto.gui.services.pinned_items_service import PinnedItemsService
 from iPhoto.gui.ui.widgets import (
@@ -152,8 +153,11 @@ def test_real_card_positions_merge_once_in_all_directions(
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
     source.begin_drag()
-    source.move(target.pos())
-    widget._board.update_drag(source)
+    start = source.pos()
+    distance = target.x() - source.x()
+    for step in range(1, 21):
+        source.move(start + QPoint(round(distance * step / 20), 0))
+        widget._board.update_drag(source)
 
     assert widget._board.top_cards == [source, target]
     assert widget._board.proximity_pair == (source, target)
@@ -219,7 +223,7 @@ def test_set_services_binds_people_and_pets_with_one_reload(
     assert reloads == [False]
 
 
-def test_snapshot_advances_dashboard_index_version(
+def test_warm_snapshot_applies_card_order_and_advances_index_version(
     qapp: QApplication,
     tmp_path: Path,
 ) -> None:
@@ -232,17 +236,19 @@ def test_snapshot_advances_dashboard_index_version(
 
     applied = widget.apply_snapshot(
         library_root=tmp_path,
-        summaries=[],
+        summaries=[PersonSummary("alice", "Alice", "face-a", 1, None, "2024-01-01")],
         groups=[],
-        pet_summaries=[],
+        pet_summaries=[PetSummary("miso", "Miso", "det-a", 1, None, "2024-01-02")],
         pending=0,
         pet_pending=0,
         index_version=4,
+        identity_order=("pet:miso", "person:alice"),
     )
 
     assert applied is True
     assert widget._index_version == 4
     assert widget._loaded_index_version == 4
+    assert [card.identity_key for card in widget._board.visible_cards()] == ["pet:miso", "person:alice"]
 
 
 def test_incremental_population_commits_first_viewport_before_remaining_cards(
@@ -320,27 +326,72 @@ def test_drag_merge_removes_source_card_immediately(monkeypatch, qapp: QApplicat
     assert [card.person_id for card in widget._board.visible_cards()] == ["person-b"]
 
 
-def test_drag_reorder_persists_cluster_order(monkeypatch, qapp: QApplication) -> None:
-    widget = PeopleDashboardWidget()
-    widget._summaries = [
-        PersonSummary("person-a", "Alice", "face-a", 3, None, "2024-01-01T00:00:00Z"),
-        PersonSummary("person-b", "Bob", "face-b", 2, None, "2024-01-01T00:00:01Z"),
+@pytest.mark.parametrize("dragged_key", ["pet:shared", "person:shared"])
+def test_drag_reorder_persists_mixed_order_through_reload(
+    dragged_key: str, monkeypatch, qapp: QApplication, tmp_path: Path
+) -> None:
+    people = [
+        PersonSummary("shared", "Alice", "face-a", 1, None, "2024-01-01", asset_count=1),
+        PersonSummary("bob", "Bob", "face-b", 3, None, "2024-01-02", asset_count=3),
     ]
-    widget._populate_cards()
+    pets = [
+        PetSummary("shared", "Miso", "det-a", 2, None, "2024-01-03", asset_count=2),
+    ]
 
-    persisted: list[list[str]] = []
-    monkeypatch.setattr(
-        widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids))
-    )
-    monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
-    monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
+    def bind(widget: PeopleDashboardWidget) -> PeopleService:
+        people_service = PeopleService(tmp_path)
+        pet_service = PetService(tmp_path)
+        monkeypatch.setattr(people_service, "load_dashboard", lambda **_kwargs: (people, [], 0))
+        monkeypatch.setattr(pet_service, "load_dashboard", lambda **_kwargs: (pets, 0))
+        query = RecognitionQueryService(tmp_path, people_service=people_service, pet_service=pet_service)
+        widget.set_services(people_service, pet_service, query_service=query)
+        return people_service
 
-    cards = widget._board.visible_cards()
-    widget._board.top_cards = [cards[1], cards[0]]
-    widget._board._drag_start_order = ("person:person-a", "person:person-b")
-    widget._board.finish_drag(cards[1])
+    def loaded_order(widget: PeopleDashboardWidget) -> tuple[str, ...]:
+        assert widget._load_pool.waitForDone(3000)
+        qapp.processEvents()
+        return tuple(card.identity_key for card in widget._board.visible_cards())
 
-    assert persisted == [["person-b", "person-a"]]
+    widget = PeopleDashboardWidget()
+    service = bind(widget)
+    try:
+        assert loaded_order(widget) == ("person:shared", "pet:shared", "person:bob")
+        board = widget._board
+        board.resize(800, 500)
+        first, second, _ = board.visible_cards()
+        dragged, target = (first, second) if first.identity_key == dragged_key else (second, first)
+        start = dragged.pos()
+        distance = target.x() - dragged.x()
+        merged = Mock()
+        board.mergeRequested.connect(merged)
+
+        dragged.begin_drag()
+        for step in range(1, 21):
+            dragged.move(start + QPoint(round(distance * step / 20), 48))
+            board.update_drag(dragged)
+        dragged.move(start + QPoint(distance, 0))
+        board.update_drag(dragged)
+        board.finish_drag(dragged)
+        dragged.end_drag()
+
+        expected = ("pet:shared", "person:shared", "person:bob")
+        merged.assert_not_called()
+        assert service.get_identity_card_order() == expected
+        widget.reload(preserve_content=True)
+        assert loaded_order(widget) == expected
+    finally:
+        widget.shutdown()
+        widget.close()
+        service.shutdown()
+
+    reopened = PeopleDashboardWidget()
+    service = bind(reopened)
+    try:
+        assert loaded_order(reopened) == expected
+    finally:
+        reopened.shutdown()
+        reopened.close()
+        service.shutdown()
 
 
 def test_drag_reorder_skips_persist_when_order_is_unchanged(
@@ -353,10 +404,8 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(
     ]
     widget._populate_cards()
 
-    persisted: list[list[str]] = []
-    monkeypatch.setattr(
-        widget._service, "set_cluster_order", lambda person_ids: persisted.append(list(person_ids))
-    )
+    persist = Mock()
+    monkeypatch.setattr(widget._service, "set_identity_card_order", persist)
     monkeypatch.setattr(widget._board, "check_card_proximity", lambda _card: None)
     monkeypatch.setattr(widget._board, "animate_to_layout", lambda: None)
 
@@ -364,7 +413,7 @@ def test_drag_reorder_skips_persist_when_order_is_unchanged(
     widget._board._drag_start_order = ("person:person-a", "person:person-b")
     widget._board.finish_drag(cards[0])
 
-    assert persisted == []
+    persist.assert_not_called()
 
 
 def test_drag_reorder_persists_group_order(monkeypatch, qapp: QApplication) -> None:
@@ -791,9 +840,11 @@ def test_people_and_pet_card_badges_use_asset_count(qapp: QApplication) -> None:
 
     widget._populate_cards()
 
-    people_card, pet_card = widget._board.visible_cards()
-    assert people_card._badge_count() == 2
-    assert pet_card._badge_count() == 3
+    cards = widget._board.visible_cards()
+    assert {card.identity_key: card._badge_count() for card in cards} == {
+        "person:person-a": 2,
+        "pet:pet-a": 3,
+    }
 
 
 def test_people_card_badge_falls_back_for_legacy_summary_object(qapp: QApplication) -> None:

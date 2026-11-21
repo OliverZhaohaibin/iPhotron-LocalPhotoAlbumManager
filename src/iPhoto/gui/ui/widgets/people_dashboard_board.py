@@ -58,6 +58,8 @@ class IdentityBoard(QWidget):
         if not cards:
             return
         self.top_cards.extend(cards)
+        if self._drag_start_order is not None:
+            self._drag_start_order += tuple(card.identity_key for card in cards)
         for card in cards:
             card.setParent(self)
             card.show()
@@ -73,12 +75,17 @@ class IdentityBoard(QWidget):
             card.hide()
             card.deleteLater()
         self.top_cards = []
+        self._drag_start_order = None
         self.merge_frame.hide()
         self.proximity_pair = None
         self.setMinimumHeight(260)
 
     def visible_cards(self) -> list[IdentityCard]:
         return list(self.top_cards)
+
+    @property
+    def is_dragging(self) -> bool:
+        return self._drag_start_order is not None
 
     def calculate_positions(self, cards: list[IdentityCard] | None = None) -> list[QPoint]:
         visible = list(cards) if cards is not None else self.visible_cards()
@@ -126,15 +133,19 @@ class IdentityBoard(QWidget):
         if self.proximity_pair is not None:
             source, target = self.proximity_pair
             self.mergeRequested.emit(source.identity_key, target.identity_key)
+            if self._drag_start_order is not None:
+                positions = {key: index for index, key in enumerate(self._drag_start_order)}
+                self.top_cards.sort(key=lambda item: positions[item.identity_key])
 
         self.hide_merge_frame()
         self.proximity_pair = None
         self.animate_to_layout()
+        start_order = self._drag_start_order
+        self._drag_start_order = None
         if should_persist_order:
             current_order = tuple(item.identity_key for item in self.visible_cards())
-            if current_order != (self._drag_start_order or current_order):
+            if start_order is not None and current_order != start_order:
                 self.orderChanged.emit(list(current_order))
-        self._drag_start_order = None
 
     def animate_to_layout(self) -> None:
         if (

@@ -181,6 +181,7 @@ class EditSidebar(QWidget):
         crop_scroll = QScrollArea(self._stack)
         crop_scroll.setWidgetResizable(True)
         crop_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        crop_scroll.setPalette(scroll_palette)
         crop_container = QWidget()
         crop_palette = crop_container.palette()
         crop_palette.setColor(QPalette.ColorRole.Window, SIDEBAR_BACKGROUND_COLOR)

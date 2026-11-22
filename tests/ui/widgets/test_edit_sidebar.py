@@ -1,4 +1,4 @@
-"""Tests for video-specific edit sidebar layout changes."""
+"""Tests for Edit sidebar styling and layout."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from iPhoto.gui.ui.models.edit_session import EditSession
 from iPhoto.gui.ui.widgets.edit_bw_section import EditBWSection
@@ -27,6 +28,26 @@ def qapp():
     if app is None:
         app = QApplication([])
     yield app
+
+
+def test_crop_scroll_uses_the_adjust_scroll_palette(qtbot) -> None:
+    sidebar = EditSidebar()
+    qtbot.addWidget(sidebar)
+    adjust_scroll = sidebar._stack.currentWidget().findChild(QScrollArea)
+    sidebar.set_mode("crop")
+    crop_scroll = sidebar._stack.currentWidget()
+
+    assert crop_scroll.testAttribute(Qt.WidgetAttribute.WA_SetPalette)
+    for role in (QPalette.ColorRole.Base, QPalette.ColorRole.Window):
+        color = adjust_scroll.palette().color(role)
+        assert crop_scroll.palette().color(role) == color
+        assert crop_scroll.viewport().palette().color(role) == color
+        assert crop_scroll.widget().palette().color(role) == color
+        # The global style can give the scrollbar track its own translucent color.
+        assert (
+            crop_scroll.verticalScrollBar().palette().color(role)
+            == adjust_scroll.verticalScrollBar().palette().color(role)
+        )
 
 
 def test_crop_controls_can_scroll_in_a_short_sidebar(qapp, qtbot) -> None:

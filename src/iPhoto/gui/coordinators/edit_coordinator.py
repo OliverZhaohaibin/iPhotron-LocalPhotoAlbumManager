@@ -550,7 +550,8 @@ class EditCoordinator(QObject):
         if self._fullscreen_manager.is_in_fullscreen():
             self._fullscreen_manager.exit_fullscreen_preview()
         if self._session is not None:
-            self._active_edit_viewport().setCropMode(False, self._session.values())
+            crop_values = self._session.values() if self._edit_viewport_is_current() else None
+            self._active_edit_viewport().setCropMode(False, crop_values)
         self._active_edit_viewport().set_eyedropper_mode(False)
         self._current_source = None
         self._session = None
@@ -631,10 +632,12 @@ class EditCoordinator(QObject):
             return
 
         source = self._current_source
-        self._session.set_values(
-            self._active_edit_viewport().crop_values(),
-            emit_individual=False,
-        )
+        # The draft belongs to the original source even if its preview was replaced.
+        if self._edit_viewport_is_current():
+            self._session.set_values(
+                self._active_edit_viewport().crop_values(),
+                emit_individual=False,
+            )
         self._flush_render_session_state()
         if self._adjustment_committer is None:
             navigation = self._navigation
@@ -706,6 +709,14 @@ class EditCoordinator(QObject):
         self._history_manager.redo()
 
     # --- Helpers ---
+
+    def _edit_viewport_is_current(self) -> bool:
+        handle = getattr(self, "_render_session_handle", None)
+        if handle is None:
+            return True
+        controller = self._render_session_controller
+        is_current = getattr(controller, "is_current_edit_render_session", None)
+        return not callable(is_current) or bool(is_current(handle))
 
     def _edit_service(self) -> EditServicePort | None:
         if self._edit_service_getter is None:
@@ -1680,4 +1691,4 @@ class EditCoordinator(QObject):
     def shutdown(self):
         """Cleanup resources on app exit."""
         if self._session:
-            self.leave_edit_mode()
+            self.leave_edit_mode(restore_detail=False)

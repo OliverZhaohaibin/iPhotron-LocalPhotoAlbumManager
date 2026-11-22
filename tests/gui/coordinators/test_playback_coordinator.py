@@ -125,6 +125,57 @@ def test_execute_pending_play_flushes_row_and_restarts_cooldown() -> None:
     coordinator._play_debounce.start.assert_called_once_with()
 
 
+def test_still_edit_drops_new_and_pending_navigation() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    coordinator._player_view = SimpleNamespace(still_edit_active=True)
+    coordinator._router = Mock(is_edit_view_active=Mock(return_value=True))
+    coordinator._asset_model = Mock(rowCount=Mock(return_value=3))
+    coordinator._detail_vm = Mock(
+        selection_state=SimpleNamespace(value=MediaSelectionState.ANCHOR_RESOLVING),
+    )
+    coordinator._pending_play_row = 2
+    coordinator._play_debounce = Mock(isActive=Mock(return_value=False))
+    coordinator._dispatch_play_row = Mock()
+
+    coordinator.select_next()
+    coordinator.play_asset(1)
+    coordinator._execute_pending_play()
+
+    assert coordinator._pending_play_row is None
+    coordinator._detail_vm.next.assert_not_called()
+    coordinator._dispatch_play_row.assert_not_called()
+
+    coordinator._router.is_edit_view_active.return_value = False
+    coordinator.play_asset(1)
+
+    coordinator._dispatch_play_row.assert_called_once_with(1, reason="immediate")
+
+
+def test_still_edit_defers_a_new_render_until_done() -> None:
+    coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
+    initial = _make_presentation(path="/fake/photo.jpg", is_video=False)
+    updated = replace(initial, request_generation=2, reload_token=1)
+    coordinator._current_presentation = initial
+    coordinator._router = Mock(
+        is_detail_view_active=Mock(return_value=True),
+        is_edit_view_active=Mock(return_value=True),
+    )
+    coordinator._player_view = SimpleNamespace(still_edit_active=True)
+    coordinator._detail_vm = SimpleNamespace(presentation=SimpleNamespace(value=updated))
+    coordinator._asset_model = Mock()
+
+    coordinator._handle_presentation_changed(updated)
+
+    assert coordinator._current_presentation is initial
+    coordinator._asset_model.set_current_asset.assert_not_called()
+
+    coordinator._player_view.still_edit_active = False
+    with patch.object(coordinator, "_handle_presentation_changed") as apply:
+        coordinator.handle_still_edit_finished(initial.path, "edit_done")
+
+    apply.assert_called_once_with(updated)
+
+
 def test_relative_navigation_accumulates_from_pending_target() -> None:
     coordinator = PlaybackCoordinator.__new__(PlaybackCoordinator)
     coordinator._asset_model = Mock(rowCount=Mock(return_value=8))

@@ -2197,10 +2197,37 @@ class PlayerViewController(QObject):
             return False
         return True
 
+    @property
+    def still_edit_active(self) -> bool:
+        """Return whether the shared still viewport is owned by Edit."""
+
+        session = self._current_render_session
+        return (
+            session is not None
+            and session.edit_references > 0
+            and self._player_stack.currentWidget() is self._image_viewer
+        )
+
+    def is_current_edit_render_session(self, handle: PhotoRenderSessionHandle) -> bool:
+        """Return whether this edit can still update the shared photo viewport."""
+
+        pending = self._pending_present_session
+        return (
+            handle is self._current_render_session
+            and self.still_edit_active
+            and not self._preparation_shutting_down
+            and (pending is None or pending[1] is handle)
+        )
+
     def acquire_render_session(self, source: Path) -> PhotoRenderSessionHandle | None:
         """Acquire the current still session without reading or decoding the source."""
 
-        if not self.has_current_render_session(source):
+        if (
+            self._preparation_shutting_down
+            or self._player_stack.currentWidget() is not self._image_viewer
+            or self._pending_image_generation is not None
+            or not self.has_current_render_session(source)
+        ):
             return None
         session = self._current_render_session
         if session is None:  # Defensive narrowing for static type checkers.
@@ -2220,13 +2247,18 @@ class PlayerViewController(QObject):
         handle: PhotoRenderSessionHandle,
         raw_adjustments: dict,
     ) -> EditRenderState:
-        """Replace one session's immutable edit state and update GPU uniforms."""
+        """Store the edit state and publish it only to the viewport that owns it."""
 
-        self._require_current_session(handle)
-        previous_geometry = DetailGeometryState.from_adjustments(
-            handle.edit_state.raw_adjustments
-        )
+        if handle.edit_references <= 0:
+            return handle.edit_state
+        previous = handle.edit_state
         state = handle.next_state(raw_adjustments)
+        if not self.is_current_edit_render_session(handle):
+            return state
+
+        previous_geometry = DetailGeometryState.from_adjustments(
+            previous.raw_adjustments
+        )
         self._active_adjustments = dict(state.raw_adjustments)
         self._image_viewer.set_adjustments(handle.presentation_adjustments)
         emit_detail_event(
@@ -2248,9 +2280,11 @@ class PlayerViewController(QObject):
     ) -> None:
         """Keep original-image comparison active across asynchronous LOD draws."""
 
-        self._require_current_session(handle)
+        if handle.edit_references <= 0:
+            return
         handle.compare_active = bool(active)
-        self._image_viewer.set_adjustments(handle.presentation_adjustments)
+        if self.is_current_edit_render_session(handle):
+            self._image_viewer.set_adjustments(handle.presentation_adjustments)
 
     def apply_committed_adjustments(
         self,
@@ -2322,7 +2356,8 @@ class PlayerViewController(QObject):
     ) -> None:
         """Defer LOD replacement while an edit gesture is in progress."""
 
-        self._require_current_session(handle)
+        if not self.is_current_edit_render_session(handle):
+            return
         session_id = handle.session_id
         depth = self._render_session_interaction_depth.get(session_id, 0)
         self._render_session_interaction_depth[session_id] = depth + 1
@@ -2337,7 +2372,8 @@ class PlayerViewController(QObject):
     ) -> None:
         """Finish an edit gesture and evaluate its final geometry once."""
 
-        self._require_current_session(handle)
+        if not self.is_current_edit_render_session(handle):
+            return
         session_id = handle.session_id
         depth = self._render_session_interaction_depth.get(session_id, 0)
         if depth > 1:
@@ -2387,9 +2423,11 @@ class PlayerViewController(QObject):
         *,
         committed: bool,
     ) -> EditRenderState:
-        """Commit or discard live edits without replacing the resident texture."""
+        """Release Edit's reference and publish the final state if it is still visible."""
 
-        self._require_current_session(handle)
+        if handle.edit_references <= 0:
+            return handle.edit_state
+        update_viewport = self.is_current_edit_render_session(handle)
         lod_pending = handle.session_id in self._render_session_lod_pending
         pending_surface = self._render_session_pending_surfaces.pop(
             handle.session_id,
@@ -2399,16 +2437,18 @@ class PlayerViewController(QObject):
         self._render_session_lod_pending.discard(handle.session_id)
         handle.compare_active = False
         state = handle.commit_current_state() if committed else handle.restore_baseline()
-        handle.edit_references = max(0, handle.edit_references - 1)
-        self._active_adjustments = dict(state.raw_adjustments)
-        self._image_viewer.set_adjustments(state.shader_adjustments)
+        handle.edit_references -= 1
         emit_detail_event(
             "render_session_released",
-            generation=self._request_generation,
+            generation=self._request_generation if update_viewport else 0,
             asset_id=handle.asset_id,
             session_id=handle.session_id,
             committed=bool(committed),
         )
+        if not update_viewport:
+            return state
+        self._active_adjustments = dict(state.raw_adjustments)
+        self._image_viewer.set_adjustments(state.shader_adjustments)
         if pending_surface is not None:
             generation, surface = pending_surface
             self._present_scheduled_image(generation, surface)
@@ -2422,12 +2462,7 @@ class PlayerViewController(QObject):
     ) -> tuple[QImage, object]:
         """Return a shared neutral snapshot and its precomputed statistics."""
 
-        self._require_current_session(handle)
         return QImage(handle.current_surface.image), handle.edit_state.color_stats
-
-    def _require_current_session(self, handle: PhotoRenderSessionHandle) -> None:
-        if handle is not self._current_render_session:
-            raise RuntimeError("Photo render session is no longer current")
 
     @staticmethod
     def _render_session_key_for_surface(surface: DecodedSurface) -> tuple:

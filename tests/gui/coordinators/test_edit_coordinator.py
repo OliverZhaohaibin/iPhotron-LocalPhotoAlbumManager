@@ -87,6 +87,32 @@ def test_handle_done_clicked_flushes_latest_values_to_render_session() -> None:
     throttler.stop.assert_called_once_with()
 
 
+def test_done_saves_original_draft_when_the_viewport_has_switched() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    source = Path("/fake/photo.jpg")
+    values = {"Crop_W": 0.8, "Exposure": 0.9}
+    viewport = Mock()
+    coordinator._session = Mock(values=Mock(return_value=values))
+    coordinator._current_source = source
+    coordinator._render_session_handle = object()
+    coordinator._render_session_controller = Mock(
+        is_current_edit_render_session=Mock(return_value=False),
+        update_render_session=Mock(return_value=SimpleNamespace(shader_adjustments=values)),
+    )
+    coordinator._active_edit_viewport = Mock(return_value=viewport)
+    coordinator._adjustment_committer = Mock(commit=Mock(return_value=True))
+    coordinator.leave_edit_mode = Mock()
+
+    coordinator._handle_done_clicked()
+
+    viewport.crop_values.assert_not_called()
+    coordinator._session.set_values.assert_not_called()
+    coordinator._adjustment_committer.commit.assert_called_once_with(
+        source, values, reason="edit_done"
+    )
+    coordinator.leave_edit_mode.assert_called_once_with(restore_reason="edit_done")
+
+
 def test_crop_interaction_flushes_final_state_before_ending_render_interaction() -> None:
     coordinator = EditCoordinator.__new__(EditCoordinator)
     final_values = {
@@ -272,6 +298,16 @@ def test_unexpected_library_rebind_safely_leaves_active_edit() -> None:
         restore_reason="library_invalidated",
         restore_detail=False,
     )
+
+
+def test_shutdown_leaves_edit_without_requesting_a_detail_restore() -> None:
+    coordinator = EditCoordinator.__new__(EditCoordinator)
+    coordinator._session = object()
+    coordinator.leave_edit_mode = Mock()
+
+    coordinator.shutdown()
+
+    coordinator.leave_edit_mode.assert_called_once_with(restore_detail=False)
 
 
 def test_still_edit_without_presented_render_session_is_not_silent(qapp) -> None:

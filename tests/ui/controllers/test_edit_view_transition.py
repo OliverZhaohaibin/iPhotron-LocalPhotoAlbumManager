@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from importlib.resources import as_file, files
 from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for transition tests", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QObject
+from PySide6.QtCore import QEvent, QObject, QTranslator
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 
+from iPhoto.gui.ui.controllers import edit_fullscreen_manager
 from iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
+from iPhoto.gui.ui.controllers.header_controller import HeaderController
 from iPhoto.gui.ui.main_window import MainWindow
 from iPhoto.gui.ui.ui_main_window import FeatureKind
 from iPhoto.library.runtime_controller import LibraryRuntimeController
@@ -161,6 +164,70 @@ def _settle_transition(qapp, manager: EditViewTransitionManager) -> None:
     if manager.is_transition_active():
         assert QSignalSpy(manager.transition_finished).wait(2000)
     qapp.processEvents()
+
+
+@pytest.fixture
+def german_ui(qapp):
+    translator = QTranslator()
+    with as_file(files("iPhoto.resources.i18n") / "iPhoto_de.qm") as path:
+        assert translator.load(str(path))
+        qapp.installTranslator(translator)
+        try:
+            yield
+        finally:
+            qapp.removeTranslator(translator)
+
+
+@pytest.mark.parametrize("animate", [False, True], ids=["immediate", "animated"])
+def test_edit_in_german_preserves_narrow_window_width(
+    qapp, german_ui, detail_window, animate
+) -> None:
+    window = detail_window
+    ui = window.ui
+    ui.ensure_detail_edit_bundle()
+    ui.zoom_widget.show()
+    window.resize(900, 640)
+    qapp.processEvents()
+    assert ui.edit_button.text() == "Bearbeiten"
+    assert window.width() == 900
+    baseline = window.geometry()
+    resizes = _ResizeRecorder(window)
+    header = HeaderController(ui.location_label, ui.timestamp_label, ui)
+    manager = EditViewTransitionManager(ui, window)
+
+    header.switch_to_edit_mode()
+    manager.enter_edit_mode(animate=animate)
+    _settle_transition(qapp, manager)
+    assert window.geometry() == baseline
+
+    header.restore_detail_mode()
+    manager.leave_edit_mode(animate=animate)
+    _settle_transition(qapp, manager)
+    assert window.geometry() == baseline
+    assert not resizes.sizes
+
+
+def test_edit_fullscreen_keeps_navigation_relaxed_until_edit_exits(
+    detail_window, monkeypatch
+) -> None:
+    window = detail_window
+    ui = window.ui
+    ui.ensure_detail_edit_bundle()
+    manager = EditViewTransitionManager(ui, window)
+    fullscreen = edit_fullscreen_manager.EditFullscreenManager(ui, window)
+    monkeypatch.setattr(edit_fullscreen_manager, "enter_media_fullscreen", lambda _: None)
+    monkeypatch.setattr(edit_fullscreen_manager, "exit_media_fullscreen", lambda _: None)
+
+    original_minimum = ui.sidebar.minimumWidth()
+    manager.enter_edit_mode(animate=False)
+    assert ui.sidebar.minimumWidth() == 0
+
+    assert fullscreen.enter_fullscreen_preview()
+    assert fullscreen.exit_fullscreen_preview()
+    assert ui.sidebar.minimumWidth() == 0
+
+    manager.leave_edit_mode(animate=False)
+    assert ui.sidebar.minimumWidth() == original_minimum
 
 
 @pytest.mark.parametrize("video", [False, True], ids=["photo", "video"])

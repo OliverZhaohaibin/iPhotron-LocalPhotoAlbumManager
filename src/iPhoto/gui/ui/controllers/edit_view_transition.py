@@ -100,15 +100,16 @@ class EditViewTransitionManager(QObject):
         if self._transition_direction == "enter":
             return
 
+        splitter_sizes = self._sanitise_splitter_sizes(self._ui.splitter.sizes())
+        self._splitter_sizes_before_edit = list(splitter_sizes)
+        self._relax_navigation_sidebar()
+
         self._ui.filmstrip_view.hide()
         self._detail_header_opacity.setOpacity(1.0)
         self._ui.detail_chrome_container.hide()
         self._ui.edit_header_container.show()
         self._edit_header_opacity.setOpacity(1.0)
 
-        splitter_sizes = self._sanitise_splitter_sizes(self._ui.splitter.sizes())
-        self._splitter_sizes_before_edit = list(splitter_sizes)
-        self._prepare_navigation_sidebar_for_entry()
         self._prepare_edit_sidebar_for_entry()
         self._start_transition_animation(
             entering=True,
@@ -133,7 +134,7 @@ class EditViewTransitionManager(QObject):
         if self._transition_direction == "exit":
             return
 
-        self._prepare_navigation_sidebar_for_exit()
+        self._relax_navigation_sidebar()
         self._prepare_edit_sidebar_for_exit()
 
         self._show_filmstrip_on_exit = bool(show_filmstrip)
@@ -156,7 +157,7 @@ class EditViewTransitionManager(QObject):
         sidebar.setMaximumWidth(0)
         sidebar.updateGeometry()
 
-    def _prepare_navigation_sidebar_for_entry(self) -> None:
+    def _relax_navigation_sidebar(self) -> None:
         sidebar = self._ui.sidebar
         sidebar.relax_minimum_width_for_animation()
         sidebar.updateGeometry()
@@ -167,11 +168,6 @@ class EditViewTransitionManager(QObject):
         starting_width = sidebar.width()
         sidebar.setMinimumWidth(int(starting_width))
         sidebar.setMaximumWidth(int(starting_width))
-        sidebar.updateGeometry()
-
-    def _prepare_navigation_sidebar_for_exit(self) -> None:
-        sidebar = self._ui.sidebar
-        sidebar.relax_minimum_width_for_animation()
         sidebar.updateGeometry()
 
     def _start_transition_animation(
@@ -366,15 +362,17 @@ class EditViewTransitionManager(QObject):
                 total=total_width,
             )
 
-        navigation_sidebar = self._ui.sidebar
-        navigation_sidebar.restore_minimum_width_after_animation()
-        navigation_sidebar.updateGeometry()
-
         sidebar = self._ui.edit_sidebar
         sidebar.hide()
         sidebar.setMinimumWidth(0)
         sidebar.setMaximumWidth(0)
         sidebar.updateGeometry()
+
+        # The navigation pane can enforce its minimum again once the Edit header is hidden.
+        self._show_detail_header()
+        navigation_sidebar = self._ui.sidebar
+        navigation_sidebar.restore_minimum_width_after_animation()
+        navigation_sidebar.updateGeometry()
 
         if target_sizes:
             current_sizes = [int(value) for value in splitter.sizes()]
@@ -383,7 +381,6 @@ class EditViewTransitionManager(QObject):
             ):
                 splitter.setSizes(target_sizes)
 
-        self._show_detail_header()
         self._detail_header_opacity.setOpacity(1.0)
         self._edit_header_opacity.setOpacity(1.0)
         self._ui.filmstrip_view.setVisible(self._show_filmstrip_on_exit)

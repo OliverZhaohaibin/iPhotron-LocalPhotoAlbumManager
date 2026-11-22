@@ -174,6 +174,7 @@ class AlbumSidebar(QWidget):
     def __init__(self, library: LibraryRuntimeController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._updating_style = False
+        self._minimum_width_relaxed = False
         self._library = library
         self._model = AlbumTreeModel(library, self)
         self._pending_selection: Path | None = None
@@ -241,7 +242,6 @@ class AlbumSidebar(QWidget):
             self._title.sizeHint().width(),
         )
         self._default_sidebar_maximum_width = super().maximumWidth()
-        self._minimum_width_relaxed = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(*SIDEBAR_LAYOUT_MARGIN)
@@ -287,6 +287,13 @@ class AlbumSidebar(QWidget):
     # ------------------------------------------------------------------
     # Animation helpers
     # ------------------------------------------------------------------
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        hint = super().minimumSizeHint()
+        if self._minimum_width_relaxed:
+            # The splitter still consults the hint when minimumWidth() is zero.
+            hint.setWidth(0)
+        return hint
+
     def relax_minimum_width_for_animation(self) -> None:
         """Temporarily relax the sidebar so splitter animations can collapse it to zero."""
 

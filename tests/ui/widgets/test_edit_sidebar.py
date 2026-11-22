@@ -7,8 +7,11 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for GUI tests")
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
+from PySide6.QtCore import QPoint
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from iPhoto.gui.ui.models.edit_session import EditSession
 from iPhoto.gui.ui.widgets.edit_bw_section import EditBWSection
 from iPhoto.gui.ui.widgets.edit_sharpen_section import EditSharpenSection
 from iPhoto.gui.ui.widgets.edit_sidebar import EditSidebar
@@ -40,6 +43,38 @@ def test_crop_controls_can_scroll_in_a_short_sidebar(qapp, qtbot) -> None:
     assert scrollbar.maximum() > 0
     scrollbar.setValue(scrollbar.maximum())
     assert crop_scroll.widget().geometry().bottom() == crop_scroll.viewport().rect().bottom()
+
+
+def test_crop_wheel_scrolls_over_slider_until_it_has_focus(qapp, qtbot) -> None:
+    sidebar = EditSidebar()
+    qtbot.addWidget(sidebar)
+    session = EditSession(sidebar)
+    sidebar.set_session(session)
+    sidebar.set_mode("crop")
+    sidebar.resize(sidebar.sizeHint().width(), 220)
+    sidebar.show()
+    sidebar.activateWindow()
+    qapp.processEvents()
+
+    crop_scroll = sidebar._stack.currentWidget()
+    scrollbar = crop_scroll.verticalScrollBar()
+    slider = sidebar._perspective_controls._straighten_row._slider
+    crop_scroll.setFocus()
+    assert not slider.hasFocus()
+    position = slider.mapTo(sidebar, slider.rect().center())
+    angle_delta = QPoint(0, -120)
+
+    QTest.wheelEvent(sidebar.windowHandle(), position, angle_delta)
+    assert scrollbar.value() > 0
+    assert session.value("Crop_Straighten") == 0.0
+
+    scrollbar.setValue(0)
+    slider.setFocus()
+    assert slider.hasFocus()
+
+    QTest.wheelEvent(sidebar.windowHandle(), position, angle_delta)
+    assert scrollbar.value() == 0
+    assert session.value("Crop_Straighten") == pytest.approx(-0.9)
 
 
 def test_video_edit_mode_flattens_first_three_sections(qapp) -> None:

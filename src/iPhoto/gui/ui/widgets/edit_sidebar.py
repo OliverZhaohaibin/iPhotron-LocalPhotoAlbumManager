@@ -176,7 +176,12 @@ class EditSidebar(QWidget):
         self._stack.addWidget(adjust_container)
 
         # Crop page -----------------------------------------------------
-        crop_container = QWidget(self)
+        # The crop controls can scroll in short windows. Their full height would
+        # otherwise set the minimum of the stack even on the Adjust page.
+        crop_scroll = QScrollArea(self._stack)
+        crop_scroll.setWidgetResizable(True)
+        crop_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        crop_container = QWidget()
         crop_palette = crop_container.palette()
         crop_palette.setColor(QPalette.ColorRole.Window, SIDEBAR_BACKGROUND_COLOR)
         crop_palette.setColor(QPalette.ColorRole.Base, SIDEBAR_BACKGROUND_COLOR)
@@ -187,8 +192,8 @@ class EditSidebar(QWidget):
         self._perspective_controls = PerspectiveControls(crop_container)
         crop_layout.addWidget(self._perspective_controls)
         crop_layout.addStretch(1)
-        crop_container.setLayout(crop_layout)
-        self._stack.addWidget(crop_container)
+        crop_scroll.setWidget(crop_container)
+        self._stack.addWidget(crop_scroll)
 
         # Wire relay signals and create the session coordinator.
         EditSignalRouter.connect_section_signals(

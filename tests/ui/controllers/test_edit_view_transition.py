@@ -6,9 +6,14 @@ import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for transition tests", exc_type=ImportError)
 
+from PySide6.QtCore import QEvent, QObject
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 
 from iPhoto.gui.ui.controllers.edit_view_transition import EditViewTransitionManager
+from iPhoto.gui.ui.main_window import MainWindow
+from iPhoto.gui.ui.ui_main_window import FeatureKind
+from iPhoto.library.runtime_controller import LibraryRuntimeController
 
 
 class _SidebarWidget(QWidget):
@@ -111,4 +116,127 @@ def test_leave_edit_mode_restores_splitter_and_viewport_height(qapp) -> None:
 
     assert abs(ui.viewport.height() - baseline_viewport_height) <= 2
     assert ui.filmstrip_view.isVisible() is True
+
+
+class _PlayerBarStub(QWidget):
+    def retranslate_ui(self) -> None:
+        pass
+
+
+class _ResizeRecorder(QObject):
+    def __init__(self, window: MainWindow) -> None:
+        super().__init__(window)
+        self.sizes = []
+        window.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Resize:
+            self.sizes.append(event.size())
+        return False
+
+
+@pytest.fixture
+def detail_window(qapp, qtbot, monkeypatch):
+    window = MainWindow(SimpleNamespace(library=LibraryRuntimeController()))
+    qtbot.addWidget(window)
+    ui = window.ui
+    detail = ui.prepare_detail_native_hierarchy()
+    # Exercise the real widget layouts without starting the multimedia runtime.
+    monkeypatch.setattr(detail.image_viewer, "complete_runtime", lambda: None)
+    monkeypatch.setattr(detail.video_area, "complete_runtime", lambda: None)
+    detail.video_area._player_bar = _PlayerBarStub(detail.video_area)
+
+    window.show()
+    qapp.processEvents()
+    ui.ensure_feature(FeatureKind.DETAIL)
+    ui.view_stack.setCurrentWidget(detail)
+    window.resize(window.width(), 640)
+    qapp.processEvents()
+    return window
+
+
+def _settle_transition(qapp, manager: EditViewTransitionManager) -> None:
+    if manager.is_transition_active():
+        assert QSignalSpy(manager.transition_finished).wait(2000)
+    qapp.processEvents()
+
+
+@pytest.mark.parametrize("video", [False, True], ids=["photo", "video"])
+@pytest.mark.parametrize("filmstrip", [False, True], ids=["filmstrip-off", "filmstrip-on"])
+@pytest.mark.parametrize("animate, cycles", [(True, 1), (False, 20)], ids=["animated", "immediate"])
+def test_edit_done_preserves_main_window_geometry(
+    qapp, detail_window, video, filmstrip, animate, cycles
+) -> None:
+    window = detail_window
+    ui = window.ui
+    ui.player_stack.setCurrentWidget(ui.video_area if video else ui.image_viewer)
+    ui.filmstrip_view.setVisible(filmstrip)
+    qapp.processEvents()
+    baseline = window.geometry()
+    resizes = _ResizeRecorder(window)
+
+    assert not hasattr(ui, "edit_header_container")
+    ui.ensure_detail_edit_bundle()
+    qapp.processEvents()
+    assert window.geometry() == baseline
+    manager = EditViewTransitionManager(ui, window)
+
+    for _ in range(cycles):
+        ui.edit_sidebar.set_video_edit_mode(video)
+        ui.video_trim_bar.setVisible(video)
+        manager.enter_edit_mode(animate=animate)
+        _settle_transition(qapp, manager)
+        assert window.geometry() == baseline
+        assert ui.edit_header_container.isVisible()
+
+        ui.video_trim_bar.hide()
+        ui.edit_sidebar.set_video_edit_mode(False)
+        manager.leave_edit_mode(animate=animate, show_filmstrip=filmstrip)
+        _settle_transition(qapp, manager)
+        assert window.geometry() == baseline
+        assert ui.detail_chrome_container.isVisible()
+        assert ui.filmstrip_view.isVisible() == filmstrip
+        assert not ui.edit_header_container.isVisible()
+        assert not ui.edit_sidebar.isVisible()
+
+    assert not resizes.sizes
+
+
+def test_edit_done_preserves_maximized_main_window(qapp, detail_window) -> None:
+    window = detail_window
+    ui = window.ui
+    window.showMaximized()
+    qapp.processEvents()
+    baseline = window.geometry()
+
+    ui.ensure_detail_edit_bundle()
+    manager = EditViewTransitionManager(ui, window)
+    manager.enter_edit_mode()
+    _settle_transition(qapp, manager)
+    assert window.isMaximized()
+    assert window.geometry() == baseline
+
+    manager.leave_edit_mode()
+    _settle_transition(qapp, manager)
+    assert window.isMaximized()
+    assert window.geometry() == baseline
+
+
+def test_edit_done_keeps_geometry_after_resize_in_edit(qapp, detail_window) -> None:
+    window = detail_window
+    ui = window.ui
+    ui.ensure_detail_edit_bundle()
+    manager = EditViewTransitionManager(ui, window)
+    manager.enter_edit_mode(animate=False)
+    _settle_transition(qapp, manager)
+
+    target_height = window.height() + 40
+    window.resize(window.width(), target_height)
+    qapp.processEvents()
+    assert window.height() == target_height
+    resized = window.geometry()
+
+    manager.leave_edit_mode()
+    _settle_transition(qapp, manager)
+    assert window.geometry() == resized
 

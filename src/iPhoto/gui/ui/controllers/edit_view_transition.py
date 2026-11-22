@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
     QPropertyAnimation,
+    QSequentialAnimationGroup,
     QVariantAnimation,
     Signal,
 )
@@ -99,11 +100,11 @@ class EditViewTransitionManager(QObject):
         if self._transition_direction == "enter":
             return
 
+        self._ui.filmstrip_view.hide()
         self._detail_header_opacity.setOpacity(1.0)
         self._ui.detail_chrome_container.hide()
         self._ui.edit_header_container.show()
         self._edit_header_opacity.setOpacity(1.0)
-        self._ui.filmstrip_view.hide()
 
         splitter_sizes = self._sanitise_splitter_sizes(self._ui.splitter.sizes())
         self._splitter_sizes_before_edit = list(splitter_sizes)
@@ -136,15 +137,12 @@ class EditViewTransitionManager(QObject):
         self._prepare_edit_sidebar_for_exit()
 
         self._show_filmstrip_on_exit = bool(show_filmstrip)
-        self._ui.detail_chrome_container.show()
-        self._ui.edit_header_container.show()
         self._ui.filmstrip_view.hide()
         if animate:
+            self._ui.detail_chrome_container.hide()
             self._detail_header_opacity.setOpacity(0.0)
             self._edit_header_opacity.setOpacity(1.0)
-        else:
-            self._detail_header_opacity.setOpacity(1.0)
-            self._edit_header_opacity.setOpacity(0.0)
+            self._ui.edit_header_container.show()
 
         self._start_transition_animation(entering=False, animate=animate)
 
@@ -289,28 +287,32 @@ class EditViewTransitionManager(QObject):
             shell_animation.setEndValue(shell_end_color)
             animation_group.addAnimation(shell_animation)
 
-        if not entering:
+        if not entering and animate:
+            # Swap the headers between fades so the layout only reserves one row.
+            header_animation = QSequentialAnimationGroup(animation_group)
             edit_header_fade = QPropertyAnimation(
                 self._edit_header_opacity,
                 b"opacity",
-                animation_group,
+                header_animation,
             )
-            edit_header_fade.setDuration(duration)
+            edit_header_fade.setDuration(duration // 2)
             edit_header_fade.setEasingCurve(QEasingCurve.Type.InOutQuad)
             edit_header_fade.setStartValue(self._edit_header_opacity.opacity())
             edit_header_fade.setEndValue(0.0)
-            animation_group.addAnimation(edit_header_fade)
+            edit_header_fade.finished.connect(self._show_detail_header)
+            header_animation.addAnimation(edit_header_fade)
 
             detail_header_fade = QPropertyAnimation(
                 self._detail_header_opacity,
                 b"opacity",
-                animation_group,
+                header_animation,
             )
-            detail_header_fade.setDuration(duration)
+            detail_header_fade.setDuration(duration - edit_header_fade.duration())
             detail_header_fade.setEasingCurve(QEasingCurve.Type.InOutQuad)
-            detail_header_fade.setStartValue(self._detail_header_opacity.opacity())
+            detail_header_fade.setStartValue(0.0)
             detail_header_fade.setEndValue(1.0)
-            animation_group.addAnimation(detail_header_fade)
+            header_animation.addAnimation(detail_header_fade)
+            animation_group.addAnimation(header_animation)
 
         animation_group.finished.connect(self._on_transition_finished)
 
@@ -322,9 +324,6 @@ class EditViewTransitionManager(QObject):
             self._ui.edit_sidebar.setMaximumWidth(sidebar_end)
             if entering:
                 self._ui.edit_sidebar.updateGeometry()
-            else:
-                self._edit_header_opacity.setOpacity(0.0)
-                self._detail_header_opacity.setOpacity(1.0)
             if shell is not None and shell_end_color is not None:
                 shell.set_override_color(shell_end_color)
             self._on_transition_finished()
@@ -353,6 +352,10 @@ class EditViewTransitionManager(QObject):
         sidebar.setMaximumWidth(self._edit_sidebar_maximum_width)
         sidebar.updateGeometry()
 
+    def _show_detail_header(self) -> None:
+        self._ui.edit_header_container.hide()
+        self._ui.detail_chrome_container.show()
+
     def _finalise_exit_transition(self) -> None:
         splitter = self._ui.splitter
         target_sizes: list[int] | None = None
@@ -380,13 +383,10 @@ class EditViewTransitionManager(QObject):
             ):
                 splitter.setSizes(target_sizes)
 
-        self._ui.detail_chrome_container.show()
+        self._show_detail_header()
         self._detail_header_opacity.setOpacity(1.0)
-
-        self._ui.filmstrip_view.setVisible(self._show_filmstrip_on_exit)
-
-        self._ui.edit_header_container.hide()
         self._edit_header_opacity.setOpacity(1.0)
+        self._ui.filmstrip_view.setVisible(self._show_filmstrip_on_exit)
 
         self._splitter_sizes_before_edit = None
         self._show_filmstrip_on_exit = True

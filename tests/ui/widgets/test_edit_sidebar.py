@@ -26,6 +26,22 @@ def qapp():
     yield app
 
 
+def test_crop_controls_can_scroll_in_a_short_sidebar(qapp, qtbot) -> None:
+    sidebar = EditSidebar()
+    qtbot.addWidget(sidebar)
+    sidebar.set_mode("crop")
+    sidebar.resize(sidebar.sizeHint().width(), 220)
+    sidebar.show()
+    qapp.processEvents()
+
+    assert sidebar.height() == 220
+    crop_scroll = sidebar._stack.currentWidget()
+    scrollbar = crop_scroll.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    scrollbar.setValue(scrollbar.maximum())
+    assert crop_scroll.widget().geometry().bottom() == crop_scroll.viewport().rect().bottom()
+
+
 def test_video_edit_mode_flattens_first_three_sections(qapp) -> None:
     """Video editing should collapse the first three sections and hide their masters."""
 

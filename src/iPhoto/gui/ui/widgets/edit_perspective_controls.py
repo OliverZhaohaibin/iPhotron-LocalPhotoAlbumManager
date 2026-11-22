@@ -64,7 +64,14 @@ class _PerspectiveSliderRow(QWidget):
         maximum: float = 1.0,
     ) -> None:
         super().__init__(parent)
-        self._slider = BWSlider(label, self, minimum=minimum, maximum=maximum, initial=0.0)
+        self._slider = BWSlider(
+            label,
+            self,
+            minimum=minimum,
+            maximum=maximum,
+            initial=0.0,
+            wheel_requires_focus=True,
+        )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)

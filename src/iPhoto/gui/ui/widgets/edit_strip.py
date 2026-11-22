@@ -34,6 +34,7 @@ class BWSlider(QWidget):
         minimum: float = 0.0,
         maximum: float = 1.0,
         initial: Optional[float] = None,
+        wheel_requires_focus: bool = False,
     ) -> None:
         super().__init__(parent)
         self._name = name
@@ -45,6 +46,7 @@ class BWSlider(QWidget):
         self._value = self._clamp(self._value)
         self._dragging = False
         self._hover = False
+        self._wheel_requires_focus = wheel_requires_focus
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -125,6 +127,10 @@ class BWSlider(QWidget):
             self.interactionFinished.emit()
 
     def wheelEvent(self, event):  # type: ignore[override]
+        if self._wheel_requires_focus and not self.hasFocus():
+            event.ignore()
+            return
+
         self.interactionStarted.emit()
         step = (self._maximum - self._minimum) * 0.01
         delta = event.angleDelta().y() / 120.0

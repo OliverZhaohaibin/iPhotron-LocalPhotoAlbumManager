@@ -764,12 +764,15 @@ fixed-width Windows ABI types. RAW uses rawpy and its embedded, half-size, then
 full fallback sequence. All stale generations are rejected at
 thread/render boundaries. Static Edit no longer creates a second full-image
 loader or CPU preview session; Done/Cancel and fullscreen retain the same render
-session. LOD upgrades preserve the editing baseline until Done commits it;
-Cancel restores that baseline even when an upgrade completes later. Original
-comparison is transient presentation state on the shared session, so resident
-activation and asynchronous surface delivery preserve it without changing edit
-values or source texture identity. Export remains an independent full-resolution
-path.
+session. While Edit owns the still viewport, Playback suppresses media
+navigation and defers new Detail render requests. If the preview is invalidated,
+Done saves the draft to its bound source and releases the old session. Viewport
+updates require the current session. LOD upgrades preserve the editing baseline until
+Done commits it. Cancel restores that baseline even when an upgrade completes
+later. Original comparison is transient presentation state on the shared
+session, so resident activation and asynchronous surface delivery preserve it
+without changing edit values or source texture identity. Export remains an
+independent full-resolution path.
 
 Windows OpenGL defaults to windowed fullscreen on the existing native window,
 covering the screen plus one logical pixel of height. This strategy is shared

@@ -117,15 +117,6 @@ class EditFullscreenManager(QObject):
         edit_sidebar.setMaximumWidth(0)
         edit_sidebar.updateGeometry()
 
-        navigation_sidebar = self._ui.sidebar
-        relax_navigation = getattr(
-            navigation_sidebar,
-            "relax_minimum_width_for_animation",
-            None,
-        )
-        if callable(relax_navigation):
-            relax_navigation()
-
         splitter = self._ui.splitter
         self._fullscreen_splitter_sizes = self._sanitise_splitter_sizes(splitter.sizes())
         total = sum(self._fullscreen_splitter_sizes or [])
@@ -170,15 +161,6 @@ class EditFullscreenManager(QObject):
         for widget, was_visible in self._fullscreen_hidden_widgets:
             widget.setVisible(was_visible)
         self._fullscreen_hidden_widgets = []
-
-        navigation_sidebar = self._ui.sidebar
-        restore_navigation = getattr(
-            navigation_sidebar,
-            "restore_minimum_width_after_animation",
-            None,
-        )
-        if callable(restore_navigation):
-            restore_navigation()
 
         if self._fullscreen_edit_sidebar_constraints is not None:
             min_width, max_width = self._fullscreen_edit_sidebar_constraints

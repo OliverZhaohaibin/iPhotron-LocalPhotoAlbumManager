@@ -92,15 +92,17 @@ def _build_test_ui() -> tuple[QWidget, SimpleNamespace]:
     return window, ui
 
 
-def test_leave_edit_mode_restores_splitter_and_viewport_height(qapp) -> None:
+@pytest.mark.parametrize("edit_width", [1200, 1280], ids=["same-width", "resized"])
+def test_leave_edit_mode_restores_splitter_and_viewport_height(qapp, qtbot, edit_width) -> None:
     window, ui = _build_test_ui()
+    qtbot.addWidget(window)
     window.resize(1200, 800)
     window.show()
     qapp.processEvents()
 
     ui.splitter.setSizes([260, 940])
     qapp.processEvents()
-    baseline_splitter_sizes = [int(v) for v in ui.splitter.sizes()]
+    baseline_splitter_sizes = ui.splitter.sizes()
     baseline_viewport_height = ui.viewport.height()
 
     manager = EditViewTransitionManager(ui, window)
@@ -110,13 +112,16 @@ def test_leave_edit_mode_restores_splitter_and_viewport_height(qapp) -> None:
     edit_mode_viewport_height = ui.viewport.height()
     assert edit_mode_viewport_height > baseline_viewport_height
 
+    window.resize(edit_width, window.height())
+    qapp.processEvents()
+    assert window.width() == edit_width
+    pane_width = sum(ui.splitter.sizes())
+    expected_left = round(baseline_splitter_sizes[0] * pane_width / sum(baseline_splitter_sizes))
+
     manager.leave_edit_mode(animate=False, show_filmstrip=True)
     qapp.processEvents()
 
-    restored_sizes = [int(v) for v in ui.splitter.sizes()]
-    for restored, baseline in zip(restored_sizes, baseline_splitter_sizes):
-        assert abs(restored - baseline) <= 1
-
+    assert ui.splitter.sizes() == [expected_left, pane_width - expected_left]
     assert abs(ui.viewport.height() - baseline_viewport_height) <= 2
     assert ui.filmstrip_view.isVisible() is True
 
@@ -230,6 +235,37 @@ def test_edit_fullscreen_keeps_navigation_relaxed_until_edit_exits(
     assert ui.sidebar.minimumWidth() == original_minimum
 
 
+def test_reentering_edit_during_exit_preserves_original_splitter_sizes(qapp, detail_window) -> None:
+    window = detail_window
+    ui = window.ui
+    ui.ensure_detail_edit_bundle()
+    ui.splitter.setSizes([370, ui.splitter.width() - 370])
+    qapp.processEvents()
+    baseline = ui.splitter.sizes()
+    manager = EditViewTransitionManager(ui, window)
+    manager.enter_edit_mode(animate=False)
+    qapp.processEvents()
+
+    completed = []
+    manager.transition_finished.connect(completed.append)
+    manager.leave_edit_mode()
+    exit_animation = manager._transition_group
+    assert exit_animation is not None
+    exit_animation.pause()
+    exit_animation.setCurrentTime(exit_animation.duration() * 3 // 4)
+    qapp.processEvents()
+    assert ui.detail_chrome_container.isVisible()
+    assert 0 < ui.splitter.sizes()[0] < baseline[0]
+
+    manager.enter_edit_mode()
+    _settle_transition(qapp, manager)
+    manager.leave_edit_mode()
+    _settle_transition(qapp, manager)
+
+    assert completed == ["enter", "exit"]
+    assert ui.splitter.sizes() == baseline
+
+
 @pytest.mark.parametrize("video", [False, True], ids=["photo", "video"])
 @pytest.mark.parametrize("filmstrip", [False, True], ids=["filmstrip-off", "filmstrip-on"])
 @pytest.mark.parametrize("animate, cycles", [(True, 1), (False, 20)], ids=["animated", "immediate"])
@@ -242,6 +278,7 @@ def test_edit_done_preserves_main_window_geometry(
     ui.filmstrip_view.setVisible(filmstrip)
     qapp.processEvents()
     baseline = window.geometry()
+    baseline_splitter_sizes = ui.splitter.sizes()
     resizes = _ResizeRecorder(window)
 
     assert not hasattr(ui, "edit_header_container")
@@ -263,6 +300,7 @@ def test_edit_done_preserves_main_window_geometry(
         manager.leave_edit_mode(animate=animate, show_filmstrip=filmstrip)
         _settle_transition(qapp, manager)
         assert window.geometry() == baseline
+        assert ui.splitter.sizes() == baseline_splitter_sizes
         assert ui.detail_chrome_container.isVisible()
         assert ui.filmstrip_view.isVisible() == filmstrip
         assert not ui.edit_header_container.isVisible()

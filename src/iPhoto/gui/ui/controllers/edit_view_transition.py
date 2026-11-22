@@ -101,7 +101,9 @@ class EditViewTransitionManager(QObject):
             return
 
         splitter_sizes = self._sanitise_splitter_sizes(self._ui.splitter.sizes())
-        self._splitter_sizes_before_edit = list(splitter_sizes)
+        # A new entry can interrupt an exit before the splitter has been restored.
+        if self._splitter_sizes_before_edit is None:
+            self._splitter_sizes_before_edit = list(splitter_sizes)
         self._relax_navigation_sidebar()
 
         self._ui.filmstrip_view.hide()
@@ -353,15 +355,6 @@ class EditViewTransitionManager(QObject):
         self._ui.detail_chrome_container.show()
 
     def _finalise_exit_transition(self) -> None:
-        splitter = self._ui.splitter
-        target_sizes: list[int] | None = None
-        if self._splitter_sizes_before_edit:
-            total_width = max(1, splitter.width())
-            target_sizes = self._sanitise_splitter_sizes(
-                self._splitter_sizes_before_edit,
-                total=total_width,
-            )
-
         sidebar = self._ui.edit_sidebar
         sidebar.hide()
         sidebar.setMinimumWidth(0)
@@ -374,11 +367,14 @@ class EditViewTransitionManager(QObject):
         navigation_sidebar.restore_minimum_width_after_animation()
         navigation_sidebar.updateGeometry()
 
-        if target_sizes:
-            current_sizes = [int(value) for value in splitter.sizes()]
-            if len(current_sizes) != len(target_sizes) or any(
-                abs(current - expected) > 1 for current, expected in zip(current_sizes, target_sizes)
-            ):
+        if self._splitter_sizes_before_edit is not None:
+            splitter = self._ui.splitter
+            current_sizes = splitter.sizes()
+            target_sizes = self._sanitise_splitter_sizes(
+                self._splitter_sizes_before_edit,
+                total=sum(current_sizes),
+            )
+            if current_sizes != target_sizes:
                 splitter.setSizes(target_sizes)
 
         self._detail_header_opacity.setOpacity(1.0)

@@ -113,6 +113,16 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
   `render_session_released(committed=false)`；区间内 `decode_started/backend_selected/gpu_upload` 增量均为 0。
 - Detail → Edit → Detail Done：写入 sidecar 后应出现 `render_session_released(committed=true)`，不得通过
   `MediaRestoreRequest` 重放静态 Detail；同 source texture key 保持不变。
+- 编辑期间触发 Gallery 刷新，或让静态预览失效后点击 Done。核对草稿写入进入 Edit 时绑定的媒体，
+  并且旧 session 的调整、比较和裁剪值不会应用到接管 viewport 的其他媒体。
+- 视频 Done 返回 Detail 时保留本次 Edit 获得的时长。测试在恢复过程中同时刷新 Gallery
+  的索引元数据，核对裁剪区间和调整结果都按同一视频的恢复时长解析。覆盖有明确出点与
+  出点使用视频结尾两种情况。
+- 分别在普通、窄窗口、最大化窗口中反复执行照片和视频的 Edit → Done，覆盖 Filmstrip
+  开关、Edit 内手动调整窗口尺寸及退出 Edit 全屏。窗口几何应保留用户最后选择的大小和位置，
+  splitter 恢复进入 Edit 前的分栏尺寸并适应当前可用宽度。确认 Edit 与 Detail 标题栏只占一行，
+  Filmstrip 在退出动画结束后恢复。缩短窗口后，Crop 可在未聚焦的透视滑块上滚动，
+  滑块聚焦后滚轮才调整其值。
 - Edit fullscreen enter/exit：只允许 viewport/LOD 事件；不得出现同步 source load、CPU preview session 或
   以 `Path` 为 key 的新 GPU upload。
 - Windows 裁剪＋拉直全屏检查：使用采集器 `-Scenario Fullscreen`（固定 OpenGL），保留
@@ -139,6 +149,8 @@ Phase 4 增加共享 render session 采样。每张静态照片在已完成首�
 同时保留 `render_session_created/acquired/released`、`edit_state_updated` 和 `surface_owner_*` 诊断事件。ColorStats 从 surface cache v3 header
 复用；同 source revision 跨 LOD 的统计计算次数必须为 1。packaged 日志只能证明实际运行结果，不能以
 session 单测或 shader compile 代替三平台数据。
+Edit 转场和 Done 的离屏回归命令见
+[Detail 与 Edit 测试](../architecture.md#detail-rendering-decoders-caches-and-edit)。
 
 JPEG、PNG、HEIC、RAW 每种格式、每个平台至少采集 30 次。汇总表至少包含样本数、level 分布、backend
 分布、fallback 次数/比例、surface 尺寸和 click-to-present P50/P95。插件或系统能力不同导致的 backend

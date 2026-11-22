@@ -110,7 +110,7 @@ LibraryRoot/                          # User-selected photo library folder
 ├── Album1/
 │   ├── .iphoto.album.json            # Album manifest
 │   ├── photo.jpg                     # Original photo (edits are sidecar-only)
-│   └── photo.jpg.ipo                 # Edit sidecar (if edited)
+│   └── photo.ipo                     # Edit sidecar (if edited)
 └── Album2/
     └── ...
 ```

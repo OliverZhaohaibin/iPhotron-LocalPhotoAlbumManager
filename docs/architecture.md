@@ -399,13 +399,19 @@ future side design. The active query path is SQL-first and windowed:
   `read_gallery_asset_window()`; direct row lookup uses `find_row_by_path()`
   rather than scanning the model. Loaded chunks are merged into a bounded
   sparse cache, and stale generation/revision results are discarded.
-- SQL windows read rows, count, and revisions from one snapshot. The collection
-  revision orders asynchronous results. The order revision versions counts,
-  cursors, and numeric row positions so thumbnail-only updates can keep them.
+- SQL windows read rows, count, and both revisions from one SQLite read
+  transaction. `collection_revision` orders asynchronous results.
+  `order_revision` tracks changes that can affect membership, ordering, or
+  identity. Counts and keyset anchors can be reused across content-only writes.
 - Gallery SQL has two narrow projections in addition to the general collection
-  window: `read_gallery_collection_window()` returns tile-rendering fields, and
-  `read_thumbnail_hint_window()` returns only paths and existing full-thumbnail
-  keys without repeating the collection count.
+  window. `read_gallery_collection_windows()` returns tile-rendering fields
+  for disjoint ranges in one snapshot. The count-free
+  `read_thumbnail_hint_window()` returns paths, existing full-thumbnail keys,
+  and thumbnail readiness and revision fields.
+- The loader resolves offscreen asset positions and pending move offsets
+  against the window's order revision on a worker. Position lookups return
+  identities for requested paths. A revision mismatch requires a fresh
+  snapshot before those positions can be applied.
 - `AssetViewportDemand` is the per-surface contract between scrolling, sparse row
   loading, and thumbnail scheduling. Gallery and Filmstrip keep independent
   generations, visible rows, full-thumbnail guards, speculative work, display
@@ -699,7 +705,7 @@ sequenceDiagram
     Store->>Loader: bounded async requests
     Loader->>Query: gallery window / thumbnail hints
     Query->>Repo: narrow SQL projections
-    Repo-->>Loader: rows + revision
+    Repo-->>Loader: rows + count + collection/order revisions
     Loader-->>Store: generation-tagged results
     Store-->>Grid: merged snapshots + local row updates
 ```
@@ -774,6 +780,19 @@ session, so resident activation and asynchronous surface delivery preserve it
 without changing edit values or source texture identity. Export remains an
 independent full-resolution path.
 
+Edit entry and exit preserve the top-level window geometry. The transition
+relaxes the navigation sidebar's minimum width and size hint so the
+splitter can collapse it in a narrow window. Exit swaps the Edit and Detail
+headers between fades, then restores the saved splitter sizes within the
+available pane width and shows the Filmstrip according to the user's setting.
+Crop controls scroll in short windows. The wheel scrolls the panel over an
+unfocused perspective slider and adjusts the slider once it has focus.
+
+Video Edit returns through a source-bound `MediaRestoreRequest`. A refresh of
+indexed Gallery metadata during restore must retain the restore's duration
+hint for the same video. Playback re-resolves sidecar adjustments and trim
+against that duration.
+
 Windows OpenGL defaults to windowed fullscreen on the existing native window,
 covering the screen plus one logical pixel of height. This strategy is shared
 by ordinary IDE/terminal/packaged entry points and retains the QRhi session;
@@ -788,37 +807,69 @@ maximization. Native fallback retains the existing HWND and render session.
 
 ```mermaid
 sequenceDiagram
-    participant Trigger as GUI/CLI/Watcher
+    participant Trigger as Desktop or CLI
     participant Session as LibrarySession
+    participant Service as LibraryScanService
     participant Scan as ScanLibraryUseCase
-    participant Scanner as MediaScannerPort
+    participant Scanner as FilesystemMediaScanner
     participant Repo as AssetRepositoryPort
-    participant Pairing as Live Photo Pairing
+    participant Gallery as Gallery and Filmstrip
 
-    Trigger->>Session: scan(scope, filters)
-    Session->>Scan: execute
-    Scan->>Scanner: discover media
-    Scanner-->>Scan: scan chunks
-    Scan->>Repo: merge scan rows
-    Scan->>Repo: append scan job/event records
-    Scan->>Repo: update Face/Pet eligibility and status
-    Scan->>Pairing: refresh roles/materialization
-    Scan-->>Trigger: progress/result + ScanBatchCommitted
+    Trigger->>Session: scan library, album, or root media
+    Session->>Service: scans.scan_album with scoped filters
+    Service->>Repo: open job and load incremental facts
+    Service->>Scan: request with cached rows
+    Scan->>Scanner: discover and inspect media
+    loop Desktop progressive scan
+        Scanner-->>Scan: reusable or newly prepared asset rows
+        Scan->>Repo: commit row merge
+        Scan-->>Gallery: ScanBatchCommitted via Qt
+        Gallery->>Repo: refresh bounded windows via session queries
+    end
+    Scan-->>Service: scan result
+    opt Successful desktop finalization
+        Service->>Repo: reconcile scope and persist Live Photo roles
+        Service-->>Trigger: finalized result
+        Trigger-->>Gallery: scan completion
+    end
 ```
 
-Scanning has one application use case. Qt workers adapt threading/progress, and
-CLI uses the same session surface without Qt. UI scan batches are ready-only and
-carry full thumbnail cache keys so visible media rows are immediately drawable.
-Replacing an asset invalidates both ends of its old Live Photo pair in the same
-transaction as the metadata merge. Favorites, trash state, and restore metadata
-remain durable. Scans that skip pairing keep unaffected pairs and leave the
-compatibility links snapshot to the next pairing pass.
-Desktop scan finalization commits Live Photo roles before recording completion
-and notifying Gallery of the finished scan.
-Metadata commits may create or update Face/Pet `pending`, `retry`, `done`, and
-`skipped` bookkeeping, but scanning does not itself activate model workers.
-Application startup, metadata-scan completion, persisted `pending`/`retry` rows,
-and an interactive rescan must not bypass the recognition feature gate.
+1. **Choose the scope.** Desktop scans use the active session, including work
+   queued by the watcher. A library or album scan can recurse. A root-media
+   scan covers files directly under the library root and leaves child album
+   rows in place. The CLI opens a headless session and uses the same scan use
+   case, then persists and reconciles the result without a Qt publish loop.
+   Imports with known paths use the same service's `scan_specific_files()`
+   entry point and reuse media row preparation.
+2. **Find and prepare rows.** `FilesystemMediaScanner` implements
+   `MediaScannerPort` through `io/scanner_adapter.py`. A discovery thread
+   applies the scope's include/exclude filters and feeds paths into a bounded
+   queue. The scanner processes paths in batches and reuses indexed facts when
+   file size and source mtime still match, with targeted backfill for missing
+   metadata or thumbnail data. New or changed media goes through metadata
+   extraction, content identification, and full and micro thumbnail
+   preparation before the use case receives the row.
+3. **Commit and publish.** The desktop `ScannerWorker` flushes at 100 rows, when
+   a row arrives at least 250 ms after the previous flush, or at the end of
+   the scan. Commit and publication are guarded against cancellation and
+   album path changes. The repository transaction merges facts with persisted
+   choices and clears both ends of an old Live Photo pair if the indexed
+   asset is replaced.
+   After the commit, `ScanBatchCommitted` carries only ready rows with a full
+   thumbnail key. The batch prompts a fresh query for the relevant Gallery
+   windows. `scan_jobs` and `scan_events` record progress, commit counts, and
+   timing.
+4. **Finalize the scope.** Desktop finalization reconciles missing rows within
+   the requested scope. It protects newer writes from other jobs, preserves
+   Recently Deleted restore metadata, and leaves missing watched albums for
+   relocation reconciliation. Live Photo roles and the derived `links.json`
+   are refreshed before the job is marked complete and Gallery requests its
+   final snapshot. Scans that skip pairing retain unaffected pairs and leave
+   the compatibility snapshot to the next pairing pass.
+
+Scan commits maintain Face and Pet eligibility and status. Model activation
+follows the desktop recognition gate, including for rows that are already
+pending or scheduled for retry.
 
 The desktop recognition activation contract is:
 
@@ -842,6 +893,9 @@ Model availability failures preserve pending work and use the shared
 installation workflow below. Context-specific loading and status rules live in
 the [People](misc/PEOPLE_RECOGNITION_RUNTIME.md) and
 [Pets](misc/PETS_RECOGNITION_RUNTIME.md) runtime references.
+
+See the [scan publishing guardrails](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md)
+for batch coalescing, viewport refresh, and selection behavior.
 
 ### Recognition Extension Installation
 
@@ -964,6 +1018,14 @@ size-qualified key remains available to other future surfaces. Disk access
 and image decoding stay off the GUI thread; only bounded `QPixmap` publication
 runs there. Thumbnail infrastructure may apply edit state, but edit persistence
 remains behind session/edit sidecar services.
+
+Thumbnail refreshes can keep a verified, ready artifact drawable under its
+existing cache key. `thumb_refresh_pending` records that the indexed
+`thumb_revision` describes the desired render while the current artifact is
+still available. The renderer captures the requested sidecar inputs and checks
+the revision again before atomic replacement. Index publication also checks
+the expected revision so a late scan or backfill cannot overwrite a newer
+result. Rows without a usable ready artifact enter the repair path.
 
 ## Removed Legacy Application Tree
 
@@ -1109,7 +1171,11 @@ decode, graphics, or compositor evidence.
 ### Runtime, Session, And Scan
 
 ```bash
-.venv/bin/python -m pytest tests/application/test_runtime_context.py tests/application/test_library_session.py tests/application/test_library_probe.py tests/application/test_scan_library_use_case.py -q
+.venv/bin/python -m pytest -q tests/application/test_runtime_context.py \
+  tests/application/test_library_session.py tests/application/test_library_probe.py
+.venv/bin/python -m pytest -q tests/application/test_scan_library_use_case.py \
+  tests/application/test_library_scan_service.py tests/application/test_cli_session_scan.py \
+  tests/test_scanner_adapter.py tests/test_library_watch_service.py
 ```
 
 Scan publishing and query changes also follow the
@@ -1132,6 +1198,10 @@ Select additional UI regressions from the
 
 ```bash
 .venv/bin/python -m pytest -q tests/gui/test_detail_pipeline.py tests/gui/test_detail_render_coordinator.py tests/gui/test_detail_decode_backend.py tests/gui/test_detail_request_scheduler.py tests/gui/test_detail_surface_cache.py tests/gui/test_detail_render_session.py tests/ui/controllers/test_player_view_controller_adjustments.py tests/ui/widgets/test_still_texture_residency.py tests/test_detail_benchmark.py
+.venv/bin/python -m pytest -q tests/gui/coordinators/test_edit_coordinator.py \
+  tests/gui/coordinators/test_playback_coordinator.py tests/ui/controllers/test_edit_done_integration.py \
+  tests/ui/controllers/test_edit_view_transition.py tests/ui/controllers/test_player_view_init_cover.py \
+  tests/ui/widgets/test_edit_sidebar.py
 .venv/bin/python tools/check_architecture.py
 .venv/bin/python -m compileall -q src tools
 ```

@@ -13,8 +13,19 @@ small convenience fallbacks can reintroduce full-library work.
   synchronously fetch arbitrary rows.
 - `row_for_path()` and live partner lookup must use repository/query-service
   lookup helpers, not full model scans.
-- Snapshot/change detection must use count, window range, and collection
-  revision. Do not restore full-row snapshot hashing.
+- Read rows, count, and both collection revisions in one SQLite snapshot.
+  Read disjoint Gallery and Filmstrip ranges together when staging a new
+  order. The lightweight thumbnail-hint query omits the count.
+- Use `collection_revision` to reject older asynchronous results and
+  `order_revision` to version counts, keyset anchors, and numeric positions.
+  A thumbnail update that preserves membership and ordering can advance
+  the collection revision while keeping the order revision. Use bounded
+  snapshot metadata for change detection.
+- Resolve requested offscreen identities and pending move ranks on the
+  window worker at the window's order revision. For a small set of paths,
+  count disjoint indexed ranges and tie-breakers. For larger sets, rank the
+  collection once for all requested paths. If the order revision changes
+  during lookup, retry with a fresh window.
 - Visible collection queries default to ready-only rows with non-empty
   `thumb_cache_key`.
 - Stale thumbnail repair must be visible-window/backfill oriented. Do not run a
@@ -43,5 +54,5 @@ of these flags, update both row writes and schema migration:
 
 ```bash
 .venv/bin/python -m pytest tests/application/test_library_asset_query_service.py tests/cache/test_index_store_features.py tests/performance/test_refactor_performance_baseline.py -q
-.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/test_asset_grid_scroll.py -q
+.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_scan_progress.py tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/test_asset_grid_scroll.py -q
 ```

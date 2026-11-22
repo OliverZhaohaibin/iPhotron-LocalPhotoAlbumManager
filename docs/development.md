@@ -71,7 +71,7 @@ The completed vNext migration is [historical material](finished/refactor/vnext-2
 | --- | --- |
 | Runtime, library preparation, and state | [Architecture](architecture.md#runtime-contract) |
 | Album naming and compatibility | [Album names](architecture.md#album-names-and-compatibility) |
-| Scan UI publishing and recognition activation | [Scan guardrails](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) |
+| Scan scopes, index merges, Gallery publishing, and recognition activation | [Scan architecture](architecture.md#scan-and-index), [scan guardrails](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) |
 | Collection SQL and visibility flag migration | [Large-library queries](misc/LARGE_LIBRARY_QUERY_GUARDRAILS.md) |
 | Gallery/Filmstrip scrolling and thumbnails | [Gallery guardrails](misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) |
 | Move/delete/restore planning and UI | [Move/restore](misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md), [trash state](misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |
@@ -83,6 +83,18 @@ The completed vNext migration is [historical material](finished/refactor/vnext-2
 | Windows graphics support and D3D11 experiment | [Windows QRhi matrix](misc/WINDOWS_D3D11_QRHI_STATUS.md) |
 | macOS legacy map composition | [macOS map notes](misc/MACOS_MAP_GL_TRANSPARENCY_NOTES.md) |
 | Text, popups, menus, and People pickers | [i18n](misc/I18N_UI_TEXT_GUARDRAILS.md), [popup/menu guardrails](misc/PROJECT_POPUP_GUARDRAILS.md) |
+
+For scan progress, start with `scan_jobs` and `scan_events` in a temporary
+library's index. Correlate the `batch_committed` events with
+`gallery_scan_batch_received`, `gallery_scan_batches_flushed`, and
+`gallery_window_result_applied` when diagnosing what appears on screen.
+The recorded `metadata_extraction` time covers the scan loop, including
+discovery, thumbnail preparation, and incremental commits. Profile those
+stages separately on the target platform before choosing a scan optimization.
+Use the focused JPEG regression in the scan guardrails for reproducible
+batch timing and the collector for native Windows playback failures.
+[Scan regressions](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md#focused-checks) ·
+[Windows diagnostics](WINDOWS_SCAN_PLAYBACK_DIAGNOSTICS.md)
 
 ## Internationalization Workflow
 

@@ -11,9 +11,10 @@ repaint work.
   memory-only. Never add SQLite queries, `Path.exists()`, L2 reads, image decode,
   blocking waits, synchronous layout, or `repaint()` to these paths.
 - Window rows and thumbnail hints are loaded by `GalleryWindowLoader` and
-  `GalleryThumbnailHintLoader`. Results carry collection revision, surface id,
-  and that surface's demand generation. A newer Filmstrip request must not
-  invalidate still-relevant Gallery work, or vice versa.
+  `GalleryThumbnailHintLoader`. Results carry revision and surface demand
+  metadata. Each surface accepts still-relevant results independently. For
+  changes to the collection's order, stage both active visible ranges before
+  publishing the new layout.
 - Workers decode to `QImage`. `QPixmap` creation remains on the GUI thread and
   is drained through the bounded item/time publish budget.
 - Thumbnail-ready updates are coalesced into exact row ranges and roles. Do not
@@ -57,17 +58,20 @@ repaint work.
   bounded by the root source model's asset count; spacer rows never enter guard,
   prefetch, or micro-warm ranges.
 - Gallery SQL projections stay narrow: tile windows omit wide metadata, while
-  hint windows return only paths and existing full-thumbnail keys and do not
-  repeat collection counts.
+  hint windows return paths, existing full-thumbnail keys, and readiness and
+  revision fields without repeating collection counts.
 - Explicit detail-row loads survive viewport generation changes. Optimistic move
   overlays, pinned rows, collection revisions, and selection snapshots must also
-  survive sparse-window merges.
+  survive sparse-window merges. For scan-driven order changes, preserve the
+  visible asset and pixel offset and remap selections by identity. See the
+  [scan publishing guardrails](SCAN_VISIBLE_PUBLISH_GUARDRAILS.md#applying-window-results).
 
 ## Focused Checks
 
 ```bash
 .venv/bin/python -m pytest tests/test_gallery_demand.py tests/test_asset_grid_scroll.py tests/ui/test_gallery_grid_view.py -q
 .venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_list_model_adapter.py tests/gui/viewmodels/test_gallery_demand_coordinator.py tests/gui/viewmodels/test_gallery_thumbnail_hint_loader.py -q
+.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_scan_progress.py tests/ui/widgets/test_filmstrip_view.py -q
 .venv/bin/python -m pytest tests/test_thumbnail_cache_service.py tests/test_thumbnail_runtime_policy.py tests/cache/test_index_store_features.py tests/application/test_library_asset_query_service.py -q
 ```
 

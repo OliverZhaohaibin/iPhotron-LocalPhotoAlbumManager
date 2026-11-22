@@ -50,6 +50,14 @@ powershell -ExecutionPolicy Bypass -File .\tools\collect_windows_scan_playback_d
    collector window to stop it.
 5. Send back the single ZIP path printed in green. By default it is created on the Desktop.
 
+For a Gallery update that stalls during scanning, compare
+`gallery_scan_batch_received`, `gallery_scan_batches_flushed`,
+`gallery_window_result_applied`, and `gallery_window_model_update` in
+`stderr.log`. Note whether ready thumbnails appear during the scan, whether
+selection or scroll position changes, and whether the final window catches up
+after completion. Use an isolated copy of the library for repeatable runs.
+[Scan publishing guardrails](misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md)
+
 ## Fullscreen crop/straighten offset and flicker (OpenGL only)
 
 This scenario keeps Windows on QRhi/OpenGL. It does not run the experimental

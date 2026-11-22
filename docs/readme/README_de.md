@@ -219,11 +219,13 @@ vorgemerkt und die übrige Anwendung bleibt nutzbar.
 
 ### ⚡ Gallery für große Bibliotheken
 Die Gallery verwendet dünn besetzte asynchrone SQL-Fenster, statt beim Öffnen
-einer Sammlung die gesamte Bibliothek zu materialisieren. Die Scroll-Absicht
-steuert getrennte Warteschlangen für sichtbare, nahe Guard- und spekulative
-Thumbnails. Schnelle Scroll-Bursts halten die Eingabe reaktionsfähig und nutzen
-vorgewärmte Micro-Thumbnails, während Full-Thumbnails außerhalb des GUI-Threads
-dekodiert werden. Speicher- und Worker-Budgets passen sich Plattform und RAM an;
+einer Sammlung die gesamte Bibliothek zu materialisieren. Fotos und Videos
+können bereits während des Scans erscheinen, sobald ihre Vorschaubilder bereit
+sind. Die Scroll-Absicht steuert getrennte Warteschlangen für sichtbare,
+nahe Guard- und spekulative Thumbnails. Schnelle Scroll-Bursts halten die
+Eingabe reaktionsfähig und nutzen vorgewärmte Micro-Thumbnails, während
+Full-Thumbnails außerhalb des GUI-Threads dekodiert werden. Speicher- und
+Worker-Budgets passen sich Plattform und RAM an;
 generation-basierte Stornierung verhindert Updates aus veralteten Viewports.
 
 ### 🖼 Immersive Detailansicht

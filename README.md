@@ -220,7 +220,8 @@ usable.
 
 ### ⚡ Large-Library Gallery
 Gallery browsing uses sparse asynchronous SQL windows instead of materializing
-an entire collection. Scroll intent drives separate visible, nearby guard, and
+an entire collection. Photos and videos can appear as their thumbnails become
+ready during a scan. Scroll intent drives separate visible, nearby guard, and
 speculative thumbnail lanes; fast bursts keep input responsive and use warmed
 micro thumbnails while full thumbnails are decoded away from the GUI thread.
 Memory and worker budgets adapt to the host platform and physical RAM, with

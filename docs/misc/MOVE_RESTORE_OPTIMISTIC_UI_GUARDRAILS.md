@@ -22,7 +22,10 @@ restore operations.
   destination rows must appear in destination/aggregate queries when they match
   the active filter.
 - Deep-window offsets and `row_for_path()` must account for pending source rows
-  before the requested raw row.
+  before the requested raw row. Window loads resolve pending source path and
+  asset ID on the worker at the window's order revision. Re-read the window if
+  the verified ranks shift the required range, and discard offsets whose
+  revision cannot be verified.
 - Successful `moveCompletedDetailed` must clear both source and destination
   pending paths.
 - Failed, partially failed, or destination-update-failed operations must roll
@@ -34,7 +37,7 @@ restore operations.
 ## Focused Checks
 
 ```bash
-.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/coordinators/test_main_coordinator_pending_moves.py -q
+.venv/bin/python -m pytest tests/gui/viewmodels/test_gallery_collection_store.py tests/gui/viewmodels/test_gallery_scan_progress.py tests/gui/coordinators/test_main_coordinator_pending_moves.py -q
 .venv/bin/python -m pytest tests/services/test_asset_move_service.py tests/services/test_restoration_service.py -q
 .venv/bin/python -m pytest tests/application/test_library_asset_operation_service.py -q
 .venv/bin/python -m pytest tests/ui/controllers/test_context_menu_operations.py -q

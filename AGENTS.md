@@ -189,7 +189,7 @@ matrices remain owned by these documents.
 | Change | Read first |
 | --- | --- |
 | Runtime/session boundaries or service composition | [Architecture](docs/architecture.md#runtime-contract) and [verification groups](docs/architecture.md#verification-by-change-type) |
-| Scan visibility or ready-row publishing | [Scan publishing guardrails](docs/misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) |
+| Scan scopes, incremental indexing, or ready-row publishing | [Scan architecture](docs/architecture.md#scan-and-index) and [scan publishing guardrails](docs/misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md) |
 | Collection SQL, pagination, or large-library queries | [Large-library query guardrails](docs/misc/LARGE_LIBRARY_QUERY_GUARDRAILS.md) |
 | Gallery/Filmstrip demand, thumbnails, or album-rename cache rekeying | [Gallery scroll guardrails](docs/misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md) |
 | Move/delete/restore planning, trash state, or optimistic UI | [Move/restore guardrails](docs/misc/MOVE_RESTORE_OPTIMISTIC_UI_GUARDRAILS.md) and [trash state guardrails](docs/misc/TRASH_RESTORE_STATE_GUARDRAILS.md) |

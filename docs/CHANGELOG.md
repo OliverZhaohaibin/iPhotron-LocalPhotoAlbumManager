@@ -11,6 +11,15 @@ All notable changes to **iPhotron** are documented in this file.
   the top-level window is shown. Detail chrome and multimedia runtime continue
   after first paint without post-show surface creation or reparenting.
 
+## Unreleased — Gallery Scanning and Navigation
+
+- Photos and videos appear as scan batches with ready thumbnails are committed.
+  Gallery and Filmstrip refresh together as the collection order changes.
+  Selection and scroll position follow the existing assets as rows move.
+- Editing a photo keeps its previous thumbnail drawable while the new one is
+  being prepared. Interrupted refreshes can recover on a later scan or backfill.
+- Added a pin icon to the Pinned sidebar header.
+
 ## Unreleased — Gallery Detail GPU-first Rendering
 
 ### Rendering pipeline
@@ -37,6 +46,11 @@ All notable changes to **iPhotron** are documented in this file.
 - Removed the still Edit full-image loader, CPU realtime preview chain, repeated
   color-stat calculation, and static Done/Cancel media replay. Export and video
   editing retain their independent quality/lifecycle paths.
+- Kept still-photo edits bound to their original source if the preview is
+  invalidated, and preserved video trim across Gallery refreshes when
+  returning to Detail.
+- Preserved main-window geometry and sidebar widths through Edit transitions.
+  Crop now scrolls in short windows, including over unfocused perspective sliders.
 - Removed the legacy Detail v2/frame-cache flags, old full-frame cache coupling,
   diagnostic duplicate scheduler path, and synchronous video compatibility
   entry point. GPU-first is the sole production Detail path.

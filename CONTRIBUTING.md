@@ -77,7 +77,7 @@ removed legacy application tree must not be restored. See
 *   `pets/`: Pet detection/clustering pipeline, rebuildable Pets snapshot, durable Pets decisions, and the session-bound service API.
 *   `maps/`: Offline map sources, runtime discovery, map widgets, native OsmAnd bridge, and standalone map preview entry point.
 *   `utils/`: General utilities and wrappers for `ExifTool` and `FFmpeg`.
-*   `gui/coordinators/`: MVVM coordinators managing view navigation and business flow.
+*   `gui/coordinators/`: MVVM coordinators managing view navigation and routing commands to session services.
 *   `gui/viewmodels/`: View models for data binding and presentation logic.
 
 ## 5. Coding Standards
@@ -116,6 +116,7 @@ Performance is critical for handling large photo libraries.
 ### Benchmarks
 *   Always measure performance before and after optimization to ensure your changes actually provide a benefit.
 *   Gallery paint, model access, and thumbnail peek paths must remain memory-only.
+*   Changes to scan persistence or progressive display follow the current [scan architecture](docs/architecture.md#scan-and-index) and [scan publishing checks](docs/misc/SCAN_VISIBLE_PUBLISH_GUARDRAILS.md#focused-checks).
 *   Changes to Gallery demand, sparse windows, thumbnail workers, or publish budgets must run the focused checks in `docs/misc/GALLERY_SCROLL_PIPELINE_GUARDRAILS.md` and the opt-in real Qt benchmark on the affected platform.
 
 ## 7. Graphics Guidelines

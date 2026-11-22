@@ -16,8 +16,10 @@ architecture.
 Current entries:
 
 - [`UPSTREAM_GALLERY_PERFORMANCE_PORTING_PLAN.md`](UPSTREAM_GALLERY_PERFORMANCE_PORTING_PLAN.md)
-  covers the parallel project's Gallery patches and their integration with the
-  local sparse-window, viewport-demand, and scan-refresh paths.
+  tracks remaining Gallery notification and native timing validation after
+  progressive scan publishing landed.
+- [`MAP_EXTENSION_INSTALL_VALIDATION.md`](MAP_EXTENSION_INSTALL_VALIDATION.md):
+  packaged validation for Map runtime installation and recovery.
 - [`PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md`](PEOPLE_PETS_EXTENSION_INSTALL_VALIDATION.md):
   packaged validation for first-use recovery and offline recognition model installation.
 - [`ocr/OCR_REQUIREMENTS.md`](ocr/OCR_REQUIREMENTS.md): future, product-level
@@ -30,6 +32,3 @@ Current entries:
   performance and regression protocol.
 - [`STARTUP_MANUAL_VALIDATION_MATRIX.md`](STARTUP_MANUAL_VALIDATION_MATRIX.md):
   current cross-platform packaged startup evidence matrix.
-- [`scan_c_hotspot_optimization.md`](scan_c_hotspot_optimization.md): future
-  optimization hypotheses based on historical profiling; re-measurement is a
-  mandatory implementation gate.

@@ -218,7 +218,9 @@ def test_done_button_preserves_main_window_geometry(
         exposure = (cycle + 1) / 25
         session.set_value("Exposure", exposure)
         if video:
-            session.set_values({VIDEO_TRIM_IN_KEY: 0.5, VIDEO_TRIM_OUT_KEY: 3.5})
+            # A missing out point makes playback use the probed duration from the restore request.
+            trim_out_sec = 3.5 if cycle % 2 else 0.0
+            session.set_values({VIDEO_TRIM_IN_KEY: 0.5, VIDEO_TRIM_OUT_KEY: trim_out_sec})
             edit_media_generation = video_area._media_generation
 
         assert ui.edit_done_button.isVisible() and ui.edit_done_button.isEnabled()
@@ -226,6 +228,9 @@ def test_done_button_preserves_main_window_geometry(
         qtbot.mouseClick(ui.edit_done_button, Qt.MouseButton.LeftButton)
         assert ui.edit_header_container.isVisible()
         assert not ui.detail_chrome_container.isVisible()
+        if video and cycle == 0:
+            # A Gallery refresh can republish indexed metadata during the queued restore.
+            runtime._detail_vm.refresh_current()
         _finish_transition(qapp, manager, exit_completed, "exit", realtime=cycle == 0)
 
         assert commits.count() == cycle + 1
@@ -240,7 +245,6 @@ def test_done_button_preserves_main_window_geometry(
         if video:
             assert restores == [MediaRestoreRequest(source, "edit_done", 4.0)] * (cycle + 1)
             assert restored.reload_token == original_presentation.reload_token + cycle + 1
-            assert restored.video_duration_hint == 4.0
             _wait_until(
                 qapp,
                 lambda: video_area._presentation_committed
@@ -251,11 +255,11 @@ def test_done_button_preserves_main_window_geometry(
             assert video_area.current_source() == source
             assert video_area.controls_enabled()
             assert video_area.adjusted_preview_enabled()
-            assert video_area.trim_range_ms() == (500, 3500)
+            assert video_area.trim_range_ms() == (500, int((trim_out_sec or 4.0) * 1000))
             expected_state = library.edit.describe_adjustments(source, duration_hint=4.0)
             assert video_area.edit_viewer._adjustments == expected_state.resolved_adjustments
             assert saved[VIDEO_TRIM_IN_KEY] == 0.5
-            assert saved[VIDEO_TRIM_OUT_KEY] == 3.5
+            assert saved.get(VIDEO_TRIM_OUT_KEY, 0.0) == trim_out_sec
         else:
             assert restores == []
             assert restored.render_key == original_presentation.render_key

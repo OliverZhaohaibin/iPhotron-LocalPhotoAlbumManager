@@ -136,7 +136,9 @@ class _ResizeRecorder(QObject):
 
 
 @pytest.fixture
-def detail_window(qapp, qtbot, monkeypatch):
+def detail_window(qapp, qtbot, monkeypatch, request):
+    stylesheet = qapp.styleSheet()
+    request.addfinalizer(lambda: qapp.setStyleSheet(stylesheet))
     window = MainWindow(SimpleNamespace(library=LibraryRuntimeController()))
     qtbot.addWidget(window)
     ui = window.ui

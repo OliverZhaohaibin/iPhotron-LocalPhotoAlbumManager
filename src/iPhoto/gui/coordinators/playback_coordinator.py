@@ -898,7 +898,16 @@ class PlaybackCoordinator(QObject):
             return
         self._player_bar.set_position(max(0, position_ms - self._trim_in_ms))
 
+    def _still_edit_active(self) -> bool:
+        player = getattr(self, "_player_view", None)
+        return (
+            getattr(player, "still_edit_active", False) is True
+            and self._router.is_edit_view_active()
+        )
+
     def play_asset(self, row: int) -> None:
+        if self._still_edit_active():
+            return
         if row < 0 or row >= self._asset_model.rowCount():
             return
         self._requested_play_row = row
@@ -933,6 +942,9 @@ class PlaybackCoordinator(QObject):
         return bool(self._player_view.prefetch_image(descriptor))
 
     def _execute_pending_play(self) -> None:
+        if self._still_edit_active():
+            self._clear_play_request_state()
+            return
         row = self._pending_play_row
         self._pending_play_row = None
         if row is None:
@@ -978,14 +990,28 @@ class PlaybackCoordinator(QObject):
             self._router.show_gallery()
 
     @Slot(object)
-    def _handle_edit_requested(self, _path: object) -> None:
+    def _handle_edit_requested(self, path: object) -> None:
+        presentation = self._current_presentation
+        if (
+            presentation is not None
+            and presentation.path == path
+            and not presentation.is_video
+        ):
+            self._clear_play_request_state()
         self._hide_face_name_overlay(clear_annotations=False)
 
     def handle_still_edit_finished(self, path: Path, _reason: str) -> None:
-        """Restore Detail-only overlays without replaying the shared still session."""
+        """Resume deferred Detail presentation updates after Edit releases the still."""
 
         presentation = self._current_presentation
         if presentation is None or presentation.path != Path(path):
+            return
+        latest = self._detail_vm.presentation.value
+        if (
+            isinstance(latest, DetailPresentation)
+            and latest.request_generation > presentation.request_generation
+        ):
+            self._handle_presentation_changed(latest)
             return
         self._refresh_face_name_overlay_for_current_presentation()
 
@@ -1028,6 +1054,15 @@ class PlaybackCoordinator(QObject):
         if not self._router.is_detail_view_active():
             self._clear_play_profile(presentation.row)
             return
+        same_render_request = (
+            previous is not None
+            and previous.render_key == presentation.render_key
+            and previous.request_generation == presentation.request_generation
+        )
+        if not same_render_request and self._still_edit_active():
+            # DetailViewModel retains the latest presentation while Edit owns the still.
+            self._clear_play_profile(presentation.row)
+            return
         self._current_presentation = presentation
         self._detail_request_generation = int(presentation.request_generation)
         row = presentation.row
@@ -1043,11 +1078,6 @@ class PlaybackCoordinator(QObject):
         self._update_header(presentation)
         if visual_row is not None:
             self._select_filmstrip_row(visual_row)
-        same_render_request = (
-            previous is not None
-            and previous.render_key == presentation.render_key
-            and previous.request_generation == presentation.request_generation
-        )
         if same_render_request:
             emit_detail_event(
                 "render_transaction_reused",
@@ -2312,6 +2342,8 @@ class PlaybackCoordinator(QObject):
     def _request_relative_asset(self, delta: int) -> None:
         """Coalesce relative navigation without losing individual steps."""
 
+        if self._still_edit_active():
+            return
         row_count = self._asset_model.rowCount()
         if row_count <= 0 or delta == 0:
             return
@@ -2348,7 +2380,7 @@ class PlaybackCoordinator(QObject):
 
     def replay_live_photo(self) -> None:
         presentation = self._current_presentation
-        if presentation is None or not presentation.is_live:
+        if presentation is None or not presentation.is_live or self._still_edit_active():
             return
         self._autoplay_live_motion(presentation)
 

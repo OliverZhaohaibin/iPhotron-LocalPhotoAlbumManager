@@ -285,6 +285,7 @@ def editable_still(controller, tmp_path):
     )
     controller._upsert_render_session(initial, {"Exposure": 0.2})
     controller._image_viewer._current_source = initial.decode_key
+    controller.show_image_surface()
     controller._image_viewer.resize(800, 600)
     controller._current_decode_level = 1024
     return controller.acquire_render_session(path)
@@ -1257,6 +1258,7 @@ class TestInitCoverTracking:
         )
         handle = controller._upsert_render_session(surface, {"Exposure": 0.2})
         controller._image_viewer._current_source = surface.decode_key
+        controller.show_image_surface()
         set_image = mocker.patch.object(controller._image_viewer, "set_image")
 
         acquired = controller.acquire_render_session(path)
@@ -1269,6 +1271,66 @@ class TestInitCoverTracking:
         assert state.raw_adjustments["Exposure"] == 0.7
         assert restored.raw_adjustments["Exposure"] == 0.2
         set_image.assert_not_called()
+
+    @pytest.mark.parametrize("show_loading_surface", [False, True])
+    def test_edit_waits_for_the_pending_photo_to_be_presented(
+        self, controller, editable_still, show_loading_surface
+    ):
+        handle = editable_still
+        controller.finish_render_session(handle, committed=False)
+        if show_loading_surface:
+            controller._begin_image_transition(controller._request_generation + 1)
+        else:
+            controller.show_placeholder("")
+
+        assert controller.acquire_render_session(handle.source) is None
+        assert handle.edit_references == 0
+
+    def test_hidden_still_edit_yields_the_viewport(self, controller, editable_still):
+        assert controller.still_edit_active
+
+        controller.show_placeholder("")
+
+        assert not controller.still_edit_active
+        assert not controller.is_current_edit_render_session(editable_still)
+
+    @pytest.mark.parametrize("committed", [False, True])
+    def test_finish_detached_edit_leaves_the_current_photo_alone(
+        self, controller, editable_still, mocker, tmp_path, committed
+    ):
+        handle = editable_still
+        controller.begin_render_session_interaction(handle)
+        controller.update_render_session(handle, {"Crop_W": 0.8})
+        controller.set_render_session_compare(handle, True)
+        controller._render_session_pending_surfaces[handle.session_id] = (
+            controller._request_generation,
+            handle.current_surface,
+        )
+        second = _surface(
+            tmp_path / "other.jpg",
+            QImage(8, 6, QImage.Format.Format_RGBA8888),
+        )
+        current = controller._upsert_render_session(second, {"Exposure": 0.5})
+        set_adjustments = mocker.patch.object(controller._image_viewer, "set_adjustments")
+        present = mocker.patch.object(controller, "_present_scheduled_image")
+
+        final_values = {"Crop_W": 0.8, "Exposure": 0.9}
+        state = controller.update_render_session(handle, final_values)
+        controller.end_render_session_interaction(handle)
+        result = controller.finish_render_session(handle, committed=committed)
+
+        assert state.raw_adjustments == final_values
+        assert result.raw_adjustments == (final_values if committed else {"Exposure": 0.2})
+        assert not handle.compare_active
+        assert handle.edit_references == 0
+        assert handle.session_id not in controller._render_session_interaction_depth
+        assert handle.session_id not in controller._render_session_pending_surfaces
+        assert handle.session_id not in controller._render_session_lod_pending
+        assert controller._current_render_session is current
+        assert current.edit_state.raw_adjustments == {"Exposure": 0.5}
+        set_adjustments.assert_not_called()
+        present.assert_not_called()
+        assert not controller._lod_timer.isActive()
 
     @pytest.mark.parametrize("committed", [False, True])
     @pytest.mark.parametrize("deliver_before_finish", [False, True])
@@ -1415,6 +1477,7 @@ class TestInitCoverTracking:
         )
         controller._upsert_render_session(surface, {"Crop_W": 1.0})
         controller._image_viewer._current_source = surface.decode_key
+        controller.show_image_surface()
         acquired = controller.acquire_render_session(path)
 
         controller.begin_render_session_interaction(acquired)
@@ -1456,6 +1519,7 @@ class TestInitCoverTracking:
         )
         handle = controller._upsert_render_session(initial, {"Crop_W": 1.0})
         controller._image_viewer._current_source = initial.decode_key
+        controller.show_image_surface()
         acquired = controller.acquire_render_session(path)
         present = mocker.patch.object(controller, "_on_adjusted_image_ready")
         controller._request_generation = 7

@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("PySide6", reason="PySide6 is required for tree tests", exc_type=ImportError)
 pytest.importorskip("PySide6.QtWidgets", reason="Qt widgets not available", exc_type=ImportError)
 
-from PySide6.QtCore import QLocale, QModelIndex
+from PySide6.QtCore import QLocale, QModelIndex, Qt
 from PySide6.QtWidgets import QApplication
 
 from iPhoto.gui.i18n import TranslationManager
@@ -167,6 +167,14 @@ def test_model_inserts_pinned_section_between_library_and_albums(tmp_path: Path,
     assert albums_index is not None
     assert pinned_index.row() < albums_index.row()
     assert model.data(pinned_index, AlbumTreeRole.NODE_TYPE) == NodeType.HEADER
+    pinned_header = model.item_from_index(pinned_index)
+    assert pinned_header is not None
+    assert pinned_header.icon_name == "pin.svg"
+
+    icon = model.data(pinned_index, Qt.ItemDataRole.DecorationRole)
+    image = icon.pixmap(60).toImage()
+    assert image.pixelColor(30, 50).alpha() > 0
+    assert image.pixelColor(0, 0).alpha() == 0
 
     alice_index = _find_child(model, pinned_index, "Alice")
     trips_index = _find_child(model, pinned_index, "Trips")

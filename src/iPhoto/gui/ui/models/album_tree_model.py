@@ -236,7 +236,11 @@ class AlbumTreeModel(QAbstractItemModel):
         # the visual grouping intact regardless of how many custom albums exist.
         self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
 
-        pinned_header = AlbumTreeItem("Pinned", NodeType.HEADER)
+        pinned_header = AlbumTreeItem(
+            "Pinned",
+            NodeType.HEADER,
+            icon_name="pin.svg",
+        )
         self._add_pinned_nodes(pinned_header, library_root)
         if pinned_header.children:
             self._root_item.add_child(pinned_header)
@@ -541,8 +545,6 @@ class AlbumTreeModel(QAbstractItemModel):
         if pinned_icon is not None:
             return load_icon(f"{pinned_icon}.svg", stroke_width=stroke_width, color=color)
         if item.node_type == NodeType.HEADER:
-            if item.title == "Pinned":
-                return QIcon()
             return load_icon(
                 "photo.on.rectangle",
                 stroke_width=stroke_width,

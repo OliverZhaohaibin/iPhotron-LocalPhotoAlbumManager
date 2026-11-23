@@ -4,13 +4,16 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 def _executable(path: Path, contents: str) -> None:
     path.write_text(contents, encoding="utf-8")
     path.chmod(0o755)
 
 
-def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path) -> None:
+@pytest.mark.parametrize("override_icon", [False, True], ids=["default-icon", "custom-icon"])
+def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path, override_icon) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     standalone = tmp_path / "entrypoint.dist"
     (standalone / "iPhoto/gui/ui/widgets").mkdir(parents=True)
@@ -23,8 +26,12 @@ def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path) -> None
         "#!/bin/sh\nexit 0\n",
     )
     (standalone / "PySide6/Qt/plugins/platforms/libqxcb.so").write_bytes(b"qt")
-    icon = tmp_path / "iphoto.png"
-    icon.write_bytes(b"png")
+    icon = repo_root / "logo.png"
+    icon_args = []
+    if override_icon:
+        icon = tmp_path / "custom icon.png"
+        icon.write_bytes(b"png")
+        icon_args = ["--icon", str(icon)]
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -43,8 +50,7 @@ def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path) -> None
             str(repo_root / "scripts/build_appimage.sh"),
             "--standalone-dir",
             str(standalone),
-            "--icon",
-            str(icon),
+            *icon_args,
             "--output",
             str(output),
         ],
@@ -59,6 +65,7 @@ def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path) -> None
     assert output.exists()
     assert Path(f"{output}.build-manifest.json").is_file()
     appdir = tmp_path / "iPhotron.AppDir"
+    assert (appdir / "iphoto.png").read_bytes() == icon.read_bytes()
     assert (appdir / "AppRun").stat().st_mode & 0o111
     assert (appdir / "usr/bin/entrypoint.bin").stat().st_mode & 0o111
     assert (appdir / "maps").exists() is False

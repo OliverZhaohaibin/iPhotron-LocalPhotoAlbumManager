@@ -14,7 +14,7 @@ Options:
   --low-memory                  Use one compiler job, disable LTO, and enable Nuitka low-memory mode.
   --sdk-root DIR                PySide6-OsmAnd-SDK checkout. Defaults to ../PySide6-OsmAnd-SDK.
   --qt-root DIR                 Qt root passed to the SDK build. Defaults to /opt/homebrew/opt/qt.
-  --icon PATH                   App icon (.icns or convertible image). Defaults to docs/picture/logo_new.ico.
+  --icon PATH                   App icon (.icns or convertible image). Defaults to the repository logo.png.
   --skip-aot                    Skip Numba AOT filter compilation.
   --skip-sdk-runtime-build      Do not run the SDK macOS native runtime build.
   --skip-map-runtime-sync       Do not run scripts/sync_macos_map_extension.py.
@@ -186,7 +186,7 @@ DEFAULT_JOBS=$(( (DEFAULT_JOBS + 1) / 2 ))
 JOBS="${JOBS:-$DEFAULT_JOBS}"
 SDK_ROOT="${SDK_ROOT:-$ROOT_DIR/../PySide6-OsmAnd-SDK}"
 QT_ROOT="${QT_ROOT:-/opt/homebrew/opt/qt}"
-ICON_PATH="${ICON_PATH:-$ROOT_DIR/docs/picture/logo_new.ico}"
+ICON_PATH="${ICON_PATH:-$ROOT_DIR/logo.png}"
 RUN_AOT=1
 RUN_SDK_RUNTIME_BUILD=1
 RUN_MAP_RUNTIME_SYNC=1

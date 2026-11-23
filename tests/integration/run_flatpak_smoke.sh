@@ -33,29 +33,6 @@ printf '#!/bin/sh\nexit 0\n' > "$STANDALONE_DIR/maps/tiles/extension/bin/osmand_
 chmod 755 "$STANDALONE_DIR/maps/tiles/extension/bin/osmand_render_helper"
 printf 'qt' > "$STANDALONE_DIR/PySide6/Qt/plugins/platforms/libqxcb.so"
 
-ICON_PATH="$SMOKE_ROOT/iphotron.png"
-python3 - "$ICON_PATH" <<'PY'
-import struct
-import sys
-import zlib
-from pathlib import Path
-
-
-def chunk(kind: bytes, payload: bytes) -> bytes:
-    checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
-    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
-
-
-width = height = 256
-scanlines = b"".join(b"\x00" + (b"\x1f\x6f\xc9\xff" * width) for _ in range(height))
-Path(sys.argv[1]).write_bytes(
-    b"\x89PNG\r\n\x1a\n"
-    + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
-    + chunk(b"IDAT", zlib.compress(scanlines))
-    + chunk(b"IEND", b"")
-)
-PY
-
 STANDALONE_MANIFEST="$SMOKE_ROOT/build-manifest.json"
 VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 python3 "$ROOT_DIR/tools/build_manifest.py" \
@@ -82,7 +59,6 @@ OUTPUT_PATH="$SMOKE_ROOT/${APP_ID}-${VERSION}-x86_64.flatpak"
 bash "$ROOT_DIR/scripts/build_flatpak.sh" \
   --standalone-dir "$STANDALONE_DIR" \
   --standalone-manifest "$STANDALONE_MANIFEST" \
-  --icon "$ICON_PATH" \
   --output "$OUTPUT_PATH"
 
 flatpak install --user --noninteractive "$OUTPUT_PATH"

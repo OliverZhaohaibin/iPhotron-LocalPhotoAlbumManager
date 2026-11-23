@@ -10,6 +10,8 @@ import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 
+import pytest
+
 from tools.build_manifest import _sha256_path
 
 APP_ID = "io.github.oliverzhaohaibin.iPhotron"
@@ -169,7 +171,8 @@ def test_flatpak_manifest_declares_runtime_identity_and_required_permissions() -
     assert '[[ -x "$candidate" ]]' in flatpak_script
 
 
-def test_flatpak_wrapper_orchestrates_staging_and_writes_reports(tmp_path) -> None:
+@pytest.mark.parametrize("override_icon", [False, True], ids=["default-icon", "custom-icon"])
+def test_flatpak_wrapper_orchestrates_staging_and_writes_reports(tmp_path, override_icon) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     standalone = _fake_standalone(tmp_path)
     standalone_manifest = _standalone_manifest(
@@ -177,8 +180,12 @@ def test_flatpak_wrapper_orchestrates_staging_and_writes_reports(tmp_path) -> No
         standalone / "entrypoint.bin",
         repo_root,
     )
-    icon = tmp_path / "iphoto.png"
-    _png(icon)
+    icon = repo_root / "logo.png"
+    icon_args = []
+    if override_icon:
+        icon = tmp_path / "custom icon.png"
+        _png(icon)
+        icon_args = ["--icon", str(icon)]
     output = tmp_path / f"{APP_ID}-6.6.8-x86_64.flatpak"
 
     fake_bin = tmp_path / "bin"
@@ -192,10 +199,11 @@ def test_flatpak_wrapper_orchestrates_staging_and_writes_reports(tmp_path) -> No
     _executable(
         fake_bin / "flatpak-builder",
         """#!/bin/sh
+set -e
 for argument in "$@"; do manifest="$argument"; done
 context="$(dirname "$manifest")"
 test -x "$context/payload/entrypoint.bin"
-test -f "$context/iphotron.png"
+cmp -s "$context/iphotron.png" "$FLATPAK_TEST_ICON"
 test -f "$context/io.github.oliverzhaohaibin.iPhotron.desktop"
 grep -q 'path: payload' "$manifest"
 printf '%s\n' "$@" > "$FLATPAK_TEST_RECORD"
@@ -227,6 +235,7 @@ exit 2
     )
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["FLATPAK_TEST_ICON"] = str(icon)
     environment["FLATPAK_TEST_RECORD"] = str(builder_record)
     environment["FLATPAK_TEST_BUNDLE_RECORD"] = str(bundle_record)
 
@@ -237,8 +246,7 @@ exit 2
         str(standalone),
         "--standalone-manifest",
         str(standalone_manifest),
-        "--icon",
-        str(icon),
+        *icon_args,
         "--output",
         str(output),
     ]

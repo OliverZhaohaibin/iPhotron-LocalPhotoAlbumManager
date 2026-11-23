@@ -8,7 +8,6 @@ standalone into the AppImage used for release and startup validation.
 - Linux x86-64 with the project build environment installed.
 - A synchronized Maps extension under `src/maps/tiles/extension/`.
 - `appimagetool` on `PATH`, or its path supplied with `--appimagetool`.
-- A PNG application icon. The standalone does not embed the repository ICO.
 
 ## Build
 
@@ -24,9 +23,11 @@ The maintained output is `dist/entrypoint.dist`, with `entrypoint.bin` or
 ```bash
 bash scripts/build_appimage.sh \
   --standalone-dir dist/entrypoint.dist \
-  --icon /absolute/path/to/iphotron.png \
   --output dist/iPhotron-x86_64.AppImage
 ```
+
+The builder copies the repository's `logo.png` to `iphoto.png` in the AppDir.
+Pass `--icon <path-to.png>` to use a different PNG.
 
 The builder refuses to continue unless the standalone contains:
 

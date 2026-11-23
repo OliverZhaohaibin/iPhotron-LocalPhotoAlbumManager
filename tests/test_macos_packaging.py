@@ -20,6 +20,7 @@ def test_postbuild_signs_the_entrypoint_bundle_when_main_app_already_exists(tmp_
         source / "scripts/sync_macos_map_extension.py"
     )
     (tmp_path / "tools").symlink_to(source / "tools")
+    (tmp_path / "logo.png").symlink_to(source / "logo.png")
     native = tmp_path / "src/maps/tiles/extension/bin"
     native.mkdir(parents=True)
     for entry in ("iPhoto", "entrypoint.py", "maps/map_widget", "maps/style.json"):
@@ -55,16 +56,15 @@ def test_postbuild_signs_the_entrypoint_bundle_when_main_app_already_exists(tmp_
         )
     )
     python_driver = tmp_path / "build-python"
+    recorded_args = tmp_path / "nuitka-args.txt"
     python_driver.write_text(
         '#!/bin/sh\ncase "$1" in\n'
-        '  -m) test "$2" = nuitka ;;\n'
+        '  -m) test "$2" = nuitka && printf "%s\\n" "$@" > "$PACKAGING_TEST_NUITKA_ARGS" ;;\n'
         '  -c) echo "$0.fixture" ;;\n'
         '  *) exec "$PACKAGING_TEST_PYTHON" "$@" ;;\nesac\n',
         encoding="utf-8",
     )
     python_driver.chmod(0o755)
-    icon = tmp_path / "fixture.icns"
-    icon.touch()
     subprocess.run(
         [
             "bash",
@@ -73,15 +73,19 @@ def test_postbuild_signs_the_entrypoint_bundle_when_main_app_already_exists(tmp_
             str(python_driver),
             "--output-dir",
             str(output),
-            "--icon",
-            str(icon),
             "--skip-aot",
             "--skip-map-runtime-sync",
         ],
-        env={**os.environ, "PACKAGING_TEST_PYTHON": sys.executable},
+        env={
+            **os.environ,
+            "ICON_PATH": "",
+            "PACKAGING_TEST_PYTHON": sys.executable,
+            "PACKAGING_TEST_NUITKA_ARGS": str(recorded_args),
+        },
         check=True,
     )
 
+    assert f"--macos-app-icon={tmp_path / 'logo.png'}" in recorded_args.read_text().splitlines()
     assert list(old_bundle.iterdir()) == []
     assert (bundle / "Contents/Resources/maps/extension.tar").is_file()
     subprocess.run(["codesign", "--verify", "--strict", str(bundle)], check=True)

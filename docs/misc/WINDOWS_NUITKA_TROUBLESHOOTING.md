@@ -1,76 +1,54 @@
 # Windows Nuitka packaging troubleshooting
 
-Use [BUILD_EXE.md](BUILD_EXE.md) for the maintained release procedure. This
-document records the Windows packaging failures resolved on 2026-11-23 and how
-to distinguish source, frozen-module, and data-file problems.
+## Build history
 
-## Select the intended build profile
+The 2026-11-23 incident began in a separate parent-level `build.py` outside
+this repository. It compiled `iPhotos/src/iPhoto/gui/main.py` to
+`iPhotos/build_output_debug/main.dist/main.exe`. The maintained PowerShell
+script builds `src/entrypoint.py`, which dispatches helper commands before Qt
+imports. Check the executable path and timestamp when comparing artifacts.
+[Maintained build procedure](BUILD_EXE.md#recommended-windows-build-script)
 
-From the repository root, the maintained build is:
+Before PR #951, the maintained Windows script already froze `OpenGL` and
+`OpenGL_accelerate` and bundled translations, GLSL and QSB shaders, and the
+Pets model manifest. Those inputs belong to the base package.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 `
-  -PythonExe ..\.venv\Scripts\python.exe -OutputDir build -ConsoleMode force
-```
+PR #951 brought checkout-first source selection and live compiler progress to
+the maintained script. It added preflight checks for required data, language
+catalogs, and the startup profiler import, plus the packaged diagnostic
+launcher and this troubleshooting guide.
 
-The interpreter path above describes a parent-directory venv; choose the venv
-actually used by your checkout. Output is `build/entrypoint.dist/entrypoint.exe`.
-The entry is `src/entrypoint.py`, which also preserves helper dispatch before Qt
-imports. Keep the AOT and optional-runtime prerequisites in the main guide.
+## Fixes made in the custom `build.py` workflow
 
-In the incident workspace, a separate parent-level `build.py` compiled
-`iPhotos/src/iPhoto/gui/main.py` to
-`iPhotos/build_output_debug/main.dist/main.exe`. That custom debug profile was
-fixed and confirmed working by the user. It is outside this Git repository;
-the maintained release script has its own output name, entry point, optional
-asset policy and build manifest. Do not confuse either executable with the
-other when checking timestamps or launching a newly built version.
-
-## Resolved failures and durable fixes
-
-| Symptom | Confirmed cause and fix |
+| Symptom | Cause and fix |
 | --- | --- |
-| `packaging.tags` fails with `extra micro pass` / `loop_analysis` | Nuitka `--debug` enabled compiler self-checks. Remove it and the two dependent `--no-debug-*` options. `--unstripped` may retain native symbols without those self-checks. This avoids the observed assertion; it does not claim to fix Nuitka's optimizer. |
-| No build output for a long time | The custom Python driver used `capture_output=True`, buffering output until completion. Inherit stdout/stderr, flush the parent streams, and use unbuffered Python plus `--show-progress`. |
-| Cannot import `configure` from `startup_profile` | The venv's editable install resolved `iPhoto` to a different, older checkout. Put the intended absolute `src` first on the compiler's `PYTHONPATH` and verify the imported file and export before compiling. |
-| `No module named 'iPhoto.resources'`, then unsupported `zh-CN` | `importlib.resources.files('iPhoto.resources.i18n')` dynamically imports a Python package. Include that package (or all of `iPhoto`) and separately include `languages.json` and the `.qm` catalogs. The directory is named `resources`, plural. |
-| Photos and videos remain blank; Qt `initialize()` reports `__reduce_cython__` | `OpenGL_accelerate.formathandler` was absent from the frozen module table. Include the complete `OpenGL_accelerate` package and rebuild. The first failed accelerator import can produce a misleading secondary Cython error on retry. |
-| Missing shader or pipeline initialization fails | Include both the GLSL sources and the serialized QRhi QSB files at their module-relative paths. Shader families are not interchangeable. |
-| People & Pets dashboard reports invalid model manifest | Include `iPhoto/pets/model_manifest.json` independently of optional downloaded or bundled model weights. |
+| `packaging.tags` fails with `extra micro pass` or `loop_analysis` | Nuitka `--debug` enabled compiler self-checks that raised the assertion. Remove `--debug` and its two dependent `--no-debug-*` options. `--unstripped` retains native symbols when a custom profile needs them. |
+| No build output for a long time | The custom driver used `capture_output=True` and held output until completion. Inherit stdout and stderr, flush the parent streams, and use unbuffered Python with `--show-progress`. Linking can still be quiet. |
+| Cannot import `configure` from `startup_profile` | The venv's editable install pointed at an older checkout. Put the intended absolute `src` first on `PYTHONPATH`, then verify the module's file and callable export. |
+| `No module named 'iPhoto.resources'`, followed by an unsupported `zh-CN` language | `importlib.resources.files('iPhoto.resources.i18n')` needs the frozen Python package and its files. Include the package through `iPhoto` or `iPhoto.resources`, then bundle `languages.json`, `iPhoto_zh_CN.qm`, and `iPhoto_de.qm` under `iPhoto/resources/i18n/`. The directory name is plural. |
+| Photos or videos stay blank and Qt `initialize()` reports `__reduce_cython__` | The frozen module table omitted `OpenGL_accelerate.formathandler`. The first failed accelerator import can produce a secondary Cython error on retry. Include the complete `OpenGL_accelerate` package. |
 
-## Required media and language payload
+## Check frozen modules and data files
 
-The maintained script includes the following, even for the base package:
+In the affected standalone, `main.build/__loader.c` listed
+`OpenGL_accelerate.arraydatatype` and omitted `OpenGL_accelerate.formathandler`.
+Copying `formathandler.pyd` into the standalone package directory left the
+frozen module table unchanged. Use `nuitka-compilation-report.xml` or the
+generated loader to check module inclusion. Changes to Python or native module
+inclusion, compiler flags, or the checkout being compiled require a new artifact.
 
-- Python packages `OpenGL`, `OpenGL_accelerate`, and `iPhoto.resources.i18n`
-  (the latter through `--include-package=iPhoto`).
-- `iPhoto/resources/i18n/languages.json`, `iPhoto_zh_CN.qm`, and `iPhoto_de.qm`.
-- `iPhoto/pets/model_manifest.json`.
-- In `iPhoto/gui/ui/widgets/`, the two `gl_image_viewer.vert` / `.frag` files;
-  the `.vert` / `.frag` sources for `image_viewer_rhi`,
-  `image_viewer_overlay`, and `video_renderer`; and their six `.qsb` files.
+For missing data, check the expected module-relative paths. The raw Windows
+OpenGL viewer loads `gl_image_viewer.vert` and `gl_image_viewer.frag` from
+`iPhoto/gui/ui/widgets/`. The QRhi image, overlay, and video paths load six
+serialized `.qsb` shaders from the same directory. Keep them paired with the
+`image_viewer_rhi`, `image_viewer_overlay`, and `video_renderer` GLSL sources in
+the bundle. The Pets dashboard reads `iPhoto/pets/model_manifest.json` even when
+model weights come from an extension. Use the default Windows OpenGL backend to
+reproduce packaging issues. [Windows graphics support](WINDOWS_D3D11_QRHI_STATUS.md)
 
-Windows production uses the existing OpenGL backend by default. The raw
-OpenGL viewer reads `gl_image_viewer.*`; the QRhi image/overlay/video paths read
-QSB files. Copying only another shader family's `.vert` / `.frag` files does
-not satisfy that requirement. Do not switch to experimental D3D11 as a
-packaging workaround; see [Windows graphics support](WINDOWS_D3D11_QRHI_STATUS.md).
-
-## When a rebuild is required
-
-Rebuild after changing the source checkout, Python modules, native extension
-inclusion or compiler flags. In the affected standalone, copying
-`formathandler.pyd` into the package directory did not register it with
-Nuitka's frozen importer. The old generated `main.build/__loader.c` contained
-`OpenGL_accelerate.arraydatatype` but omitted `OpenGL_accelerate.formathandler`.
-The corrected build must contain both; the compilation report also helps audit
-which files and modules were selected.
-
-Missing plain data files can sometimes be replaced at the exact expected
-relative path and read after restart. That is a diagnostic repair, not a
-release procedure: update the script and rebuild a reproducible distribution.
-A working source import or GLSL compilation test does not prove the frozen
-application can load its native extensions.
+Placing a missing data file at its expected path can isolate the problem after
+an app restart. For release, restore the data inclusion in the build profile
+so it produces a reproducible distribution.
 
 ## Capture startup and playback errors
 
@@ -79,35 +57,64 @@ powershell -ExecutionPolicy Bypass -File scripts\run_packaged_diagnostic.ps1 `
   -Executable .\build\entrypoint.dist\entrypoint.exe
 ```
 
-For a custom output, pass its executable explicitly. The collector redirects
-stdout and stderr to separate files, sets `IPHOTO_LOG_DIR` and
-`PYTHONFAULTHANDLER` for the launched process, waits for exit, records the exit
-code, and restores the caller's environment. Default output is under
-`build/packaged-diagnostics/<timestamp>/`; use `-OutputDir` to change it.
-It uses the application's normal settings/library selection, so prepare a
-dedicated test library. Logs may contain local paths; review before sharing.
+Pass the executable explicitly for custom output paths. The launcher opens the
+packaged app with normal window behavior, including builds with the Windows
+console disabled. Use a dedicated test library because the app uses its
+normal settings and library selection.
 
-Inspect the first exception around opening media, not just the final exit
-code. The failing build returned zero even though a Qt initialization callback
-raised and playback stayed blank. For rendering failures after imports succeed,
-use the [scan/playback collector](../WINDOWS_SCAN_PLAYBACK_DIAGNOSTICS.md).
+The launcher saves `stdout.log`, `stderr.log`, and `exit-code.txt` under
+`build/packaged-diagnostics/<timestamp>/` by default. Set `-OutputDir` to
+change the parent directory. It sets `IPHOTO_LOG_DIR` for the app's
+`iPhoto.log`, enables `PYTHONFAULTHANDLER`, waits for the process to exit, and
+restores the caller's environment. Outside the launcher, the default app log
+is `%LOCALAPPDATA%\iPhoto\iPhoto.log`. Review logs for local paths before
+sharing them.
 
-## Validation recorded for this incident
+An empty `stderr.log` means the launcher captured no stderr output. GUI
+builds can report errors only through `iPhoto.log` or fail before application
+logging starts. Check the app log when present, `stdout.log`, and the exit
+code. In the incident, the app returned zero even though a Qt initialization
+callback failed and playback stayed blank. Look for the first exception
+around opening the media. [Nuitka console diagnostics](https://nuitka.net/user-documentation/common-issue-solutions.html#windows-programs-with-no-console-give-no-errors)
 
-Environment: Windows x86-64, Python 3.12.6, Nuitka 4.1.3, packaging 25.0,
-PyOpenGL-accelerate 3.1.10. These are diagnostic facts, not newly pinned
-dependency requirements.
+For rendering failures after imports succeed, use the
+[scan and playback collector](../WINDOWS_SCAN_PLAYBACK_DIAGNOSTICS.md).
 
-- The optimizer assertion was reproduced with `--debug`; `packaging.tags`
-  optimization and C generation passed without it.
-- The corrected compiler environment resolved `startup_profile` to the intended
+## Completed Windows packaging validation
+
+The modified Windows packaging workflow completed a real Nuitka standalone
+application build. The user launched the packaged executable and confirmed
+normal operation, including photo and video rendering. The packaging and
+rendering failures from this incident were resolved in that tested build.
+
+The incident was tested on Windows x86-64 with Python 3.12.6, Nuitka 4.1.3,
+packaging 25.0, and PyOpenGL-accelerate 3.1.10. The investigation also recorded
+the following checks.
+
+- `packaging.tags` optimization and C generation succeeded after removing
+  the custom profile's `--debug` checks.
+- The compiler environment resolved `startup_profile` to the intended
   checkout and exposed `configure`.
-- Language metadata and both QM catalogs loaded with Qt; six QSB files
-  deserialized successfully. The GLSL viewer shaders compiled and linked using
-  a native OpenGL context.
-- A real Nuitka standalone probe importing `OpenGL.GL`, NumPy and ctypes passed
-  imports of `OpenGL_accelerate.arraydatatype`, `formathandler`, `wrapper`, and
-  `numpy_formathandler` after including the full accelerator package.
-- After rebuilding the application, the user confirmed normal display and
-  operation. This is playback acceptance for that build; it does not establish
-  unrelated People/Pets scanning, offline Maps or cross-platform acceptance.
+- Qt loaded the language metadata and both QM catalogs and deserialized all
+  six QSB shaders. The GLSL viewer shaders compiled and linked in a native
+  OpenGL context.
+- A Nuitka standalone probe importing `OpenGL.GL`, NumPy, and `ctypes` loaded
+  `OpenGL_accelerate.arraydatatype`, `formathandler`, `wrapper`, and
+  `numpy_formathandler` after including the whole accelerator package.
+
+Automated CI exercises the source probe and uses a small Windows GUI fixture
+to check diagnostic log collection. The completed application run supplies the
+evidence for the packaged build and its media rendering. People/Pets scanning,
+offline Maps, and other platforms or deployment profiles have separate
+acceptance checks.
+
+## Earlier Windows packaging issues
+
+| Symptom | Cause and fix |
+| --- | --- |
+| The build exits with code `9009` or opens the Microsoft Store Python prompt | Python resolved to the Windows App Execution Alias. Install the build dependencies into a supported venv or pass its interpreter with `-PythonExe`. The maintained script rejects the Store alias. |
+| Nuitka reports `duplicate locals name` for `insightface.thirdparty.face3d` in both `.venv\insightface` and `.venv\Lib\site-packages\insightface` | The launch directory exposed a shadow InsightFace source tree. The maintained script runs from the checkout root and excludes the unused `insightface.thirdparty.face3d` tree. |
+
+An older installer procedure combined an Inno Setup script with a separate
+map archive. The current repository provides the standalone Nuitka build and
+process-scoped Maps installation. [Maps extension workflow](MAP_EXTENSION_INSTALLATION.md)

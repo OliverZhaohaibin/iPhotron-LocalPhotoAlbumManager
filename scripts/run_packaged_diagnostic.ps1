@@ -19,11 +19,16 @@ try {
     $process = Start-Process -FilePath $executablePath `
         -WorkingDirectory (Split-Path -Parent $executablePath) `
         -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog `
-        -WindowStyle Hidden -PassThru -Wait
+        -PassThru -Wait
     $exitCode = $process.ExitCode
     "Exit code: $exitCode" | Set-Content -LiteralPath (Join-Path $logDirectory 'exit-code.txt')
     Write-Host "Exit code: $exitCode"
-    Get-Content -LiteralPath $stderrLog -Tail 80
+    $stderrFile = Get-Item -LiteralPath $stderrLog -ErrorAction SilentlyContinue
+    if ($stderrFile -and $stderrFile.Length -gt 0) {
+        Get-Content -LiteralPath $stderrLog -Tail 80
+    } else {
+        Write-Host 'No stderr output was captured. Check iPhoto.log if present, stdout.log, and exit-code.txt for errors.'
+    }
 } finally {
     $env:IPHOTO_LOG_DIR = $previousLogDirectory
     $env:PYTHONFAULTHANDLER = $previousFaultHandler

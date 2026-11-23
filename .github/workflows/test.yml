@@ -252,6 +252,7 @@ jobs:
           tests/gui/test_startup_shutdown_smoke.py
           tests/test_library_bind_double_scan.py
           tests/test_startup_benchmark.py
+          tests/test_windows_packaging.py
 
   detail-gpu-first-contracts:
     strategy:

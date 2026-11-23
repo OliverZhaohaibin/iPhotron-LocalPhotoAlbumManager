@@ -340,10 +340,26 @@ try {
         $env:PYTHONPATH += [IO.Path]::PathSeparator + $previousPythonPath
     }
     $env:PYTHONUNBUFFERED = '1'
-    $sourceProbe = "import pathlib,sys; import iPhoto.bootstrap.startup_profile as p; expected=pathlib.Path(sys.argv[1]).resolve(); actual=pathlib.Path(p.__file__).resolve(); print('Startup profile source: '+str(actual)); assert actual == expected, 'Build imported a different iPhoto checkout'; assert callable(p.configure)"
+    # Keep Python strings single-quoted for Windows PowerShell's native argument parsing.
+    $sourceProbe = @'
+import sys
+from pathlib import Path
+
+import iPhoto.bootstrap.startup_profile as startup_profile
+
+expected = Path(sys.argv[1]).resolve()
+actual = Path(startup_profile.__file__).resolve()
+print(f'Startup profile source: {actual}')
+if actual != expected:
+    print(f'Build imported a different iPhoto checkout. Expected: {expected}', file=sys.stderr)
+    sys.exit(1)
+if not callable(getattr(startup_profile, 'configure', None)):
+    print('Startup profile has no callable configure export.', file=sys.stderr)
+    sys.exit(1)
+'@
     & $PythonExe @pythonPrefixArgs -B -c $sourceProbe (Join-Path $srcRoot 'iPhoto\bootstrap\startup_profile.py')
     if ($LASTEXITCODE -ne 0) {
-        throw 'Build source preflight failed; check the selected interpreter and editable installs.'
+        throw "Build source preflight failed with exit code $LASTEXITCODE. Check the selected interpreter and editable installs."
     }
     # Inherit stdout/stderr so Nuitka progress is visible throughout the build.
     & $PythonExe @pythonArguments

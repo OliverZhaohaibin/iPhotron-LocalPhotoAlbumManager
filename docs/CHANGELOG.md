@@ -4,6 +4,18 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — Windows Packaging Diagnostics
+
+- Put the selected checkout's `src` first for Windows Nuitka compilation and
+  verify the startup profiler's file and callable `configure` export, including
+  under Python optimization.
+- Check required data paths and language catalogs before compilation and
+  stream unbuffered compiler progress.
+- Add a diagnostic launcher that opens the packaged app with normal window
+  behavior and saves logs and the process exit code.
+- Record the separate custom `build.py` fixes and the successful Windows
+  Nuitka build and packaged application validation.
+
 ## Unreleased — Cross-Platform QRhi Startup Lifecycle
 
 - Unified Windows, macOS, and Linux startup so the hidden Detail surface shell

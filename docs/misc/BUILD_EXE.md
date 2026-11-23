@@ -200,21 +200,17 @@ AOT module at import time and will never attempt to load Numba.
 
 ### Recommended Windows build script
 
-For real Windows release builds, prefer:
+Run the maintained script from the repository root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -OutputDir build
 ```
 
-The default is a fast-starting base package: it omits the map extension's
-roughly 45,000 files and optional staged People/Pets models. The runtime uses
-its platform-specific search roots and can install both model sets through the
-combined People & Pets extension. This still requires the corresponding Python
-AI runtimes in the frozen app. Pass
-`-IncludeOptionalAssets` when a controlled deployment requires a completely
-offline bundle. Every build writes `nuitka-compilation-report.xml` below the
-output directory for import auditing. The executable icon defaults to
-`docs/picture/logo_new.ico`; pass `-IconPath <path-to.ico>` to override it.
+The script builds `src/entrypoint.py` and writes `entrypoint.dist\entrypoint.exe`
+and `nuitka-compilation-report.xml` under the output directory. The default base
+package leaves the Maps runtime and People/Pets model weights to extension
+installation. Use `-IncludeOptionalAssets` to bundle staged assets for offline
+deployments and verify the Python runtimes required by the enabled features.
 
 When `-PythonExe` is omitted, the script selects the first Python 3.12 or newer
 interpreter that has Nuitka, PyExifTool, `pillow_heif`, and `_pillow_heif`
@@ -243,6 +239,16 @@ Python/native modules because Nuitka cannot reliably infer these indirect and
 lazy imports. The script does not search for, validate, or copy an
 `exiftool.exe`; it includes the Python files installed by `PyExifTool`.
 
+The script checks required data paths and language catalog files before
+compilation. It puts this checkout's `src` first on `PYTHONPATH` and verifies
+the startup profiler's source file and callable `configure` export, including
+under Python optimization. Nuitka streams unbuffered progress to the terminal.
+The script restores the caller's Python environment after the build attempt.
+
+The maintained base profile already includes `--include-package=OpenGL`,
+`--include-package=OpenGL_accelerate`, translation resources, GLSL and QRhi QSB
+shaders, and `iPhoto/pets/model_manifest.json`.
+
 With `-IncludeOptionalAssets`, the script performs these map-specific jobs
 before invoking Nuitka:
 
@@ -254,9 +260,6 @@ before invoking Nuitka:
    `src/maps/tiles/extension/bin`
 3. it includes `src/maps/tiles` in the standalone bundle so the packaged app
    ships with the extension
-
-QRhi shaders and translation resources are included independently of the
-optional-assets switch; the base package still needs them for media and UI.
 
 The sync step currently requires these files to exist in
 `tools\osmand_render_helper_native\dist-msvc`:
@@ -279,7 +282,7 @@ Useful flags:
 - `-IncludeOptionalAssets`
   Bundle the staged map extension and recognition models; verify the required AI runtime and complete models before claiming offline support.
 - `-ConsoleMode disable|attach|force`
-  Control the Windows console mode.
+  Select the Windows console mode. `disable` is the default for the packaged GUI.
 - `-Jobs <n>`
   Set the parallel build job count.
 - `-PythonExe <path>`
@@ -379,19 +382,23 @@ standalone icons are supplied at the AppImage/Flatpak stage.
 
 ## Step 3: Verify the Distribution
 
-After building, confirm that:
+For startup failures or blank playback on Windows, use the
+[packaged diagnostic launcher](WINDOWS_NUITKA_TROUBLESHOOTING.md#capture-startup-and-playback-errors).
 
-1. The `_jit_compiled` extension exists inside the packaged
-   `iPhoto/core/filters/` directory:
+Verify the distribution on the target OS. The Windows commands below use the
+default output directory.
+
+1. Verify the `_jit_compiled` extension in the packaged `iPhoto/core/filters/`
+   directory.
 
    ```bash
    # Linux / macOS
    find dist/ -name "_jit_compiled*"
    # Windows (PowerShell)
-   Get-ChildItem -Recurse dist/ -Filter "_jit_compiled*"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "_jit_compiled*"
    ```
 
-2. Neither `numba` nor `llvmlite` are present in the distribution:
+2. Check that the distribution omits `numba` and `llvmlite`.
 
    ```bash
    # Should produce no output
@@ -399,14 +406,15 @@ After building, confirm that:
    find dist/ -type d -name "llvmlite"
    ```
 
-3. The application starts and image adjustments work correctly.
+3. With a dedicated test library, launch the packaged application and verify
+   photos, videos, Live Photos, and image adjustments in Edit.
 
-4. The packaged output includes the maps extension:
+4. For a build with bundled Maps, verify the map data and native runtime.
 
    ```powershell
-   Get-ChildItem -Recurse dist\ -Filter "World_basemap_2.obf"
-   Get-ChildItem -Recurse dist\ -Filter "osmand_render_helper.exe"
-   Get-ChildItem -Recurse dist\ -Filter "osmand_native_widget.dll"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "World_basemap_2.obf"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "osmand_render_helper.exe"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "osmand_native_widget.dll"
    ```
 
    ```bash
@@ -416,10 +424,8 @@ After building, confirm that:
    find dist/ -name "osmand_native_widget.dylib"
    ```
 
-5. The packaged application can launch the map preview and the main GUI without
-   map-runtime errors.
-
-   Also verify the offline search database and QRhi shaders are present:
+5. For a build with bundled Maps, launch the map preview and verify the offline
+   search database. Verify the QRhi shaders in every build.
 
    ```bash
    find dist/ -path "*/maps/tiles/extension/search/geonames.sqlite3"
@@ -428,15 +434,15 @@ After building, confirm that:
    find dist/ -name "video_renderer.frag.qsb"
    ```
 
-6. Verify both supported Linux packaging postures. A clean checkout without
-   `src/extension/models` must build without an `extension/models` payload. An
-   offline-recognition build must include every explicitly staged artifact:
+6. Verify every explicitly staged model in an offline recognition build. A
+   clean Linux checkout without `src/extension/models` should produce a build
+   without an `extension/models` payload.
 
    ```powershell
-   Get-ChildItem -Recurse dist\ -Filter "det_500m.onnx"
-   Get-ChildItem -Recurse dist\ -Filter "w600k_mbf.onnx"
-   Get-ChildItem -Recurse dist\ -Filter "yolox_nano_coco.onnx"
-   Get-ChildItem -Recurse dist\ -Filter "dinov2_vits14.pt"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "det_500m.onnx"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "w600k_mbf.onnx"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "yolox_nano_coco.onnx"
+   Get-ChildItem -Recurse .\build\entrypoint.dist -Filter "dinov2_vits14.pt"
    ```
 
 7. The People & Pets page can scan a small image folder and create the enabled
@@ -446,22 +452,10 @@ After building, confirm that:
    `%LOCALAPPDATA%\iPhoto\iPhoto.log` for messages such as `Face detection
    failed for ...` or `Face scan failed for asset ...`.
 
-## Historical Windows Installer Notes
-
-An older release procedure used an Inno Setup script and a separately
-downloaded map archive. That script is no longer present in this checkout, so
-those instructions are not an executable release path. The maintained entry
-point here is the Windows Nuitka standalone script; the current app installs
-maps through the process-scoped [extension workflow](MAP_EXTENSION_INSTALLATION.md).
-Record a separate build driver and acceptance evidence if a future installer is
-introduced.
-
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Windows build exits with code `9009` or opens the Microsoft Store Python prompt | No usable repository/parent virtual environment was found and `python.exe` resolved to the Windows App Execution Alias | Install Nuitka into `.venv`, or pass `-PythonExe "D:\path\to\.venv\Scripts\python.exe"`; the maintained script rejects the Store alias before invoking Nuitka |
-| Nuitka reports `duplicate locals name` for `insightface.thirdparty.face3d` from both `.venv\insightface` and `.venv\Lib\site-packages\insightface` | An unpredictable launch working directory exposed a shadow InsightFace source tree, and the broad package inclusion traversed unused Face3D code | Use the maintained scripts, which build from the repository root and exclude the unused `insightface.thirdparty.face3d` package |
 | Packaged HEIC/HEIF files cannot be opened | The lazy `pillow_heif` import or its `_pillow_heif` native extension was omitted | Use the maintained Nuitka scripts, which explicitly include both modules, and install `pillow-heif` into the selected build interpreter |
 | `AOT compiled module not found` in logs | `_jit_compiled` extension missing from distribution | Re-run Step 1 and rebuild; verify the `.so`/`.pyd` file is in `iPhoto/core/filters/` |
 | `ImportError` referencing `numba` at runtime | A code path still has an unconditional numba import | All numba imports must use `try/except ImportError` guards |

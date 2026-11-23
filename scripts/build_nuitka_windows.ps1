@@ -221,8 +221,9 @@ if ($IncludeOptionalAssets -and -not $SkipNativeRuntimeSync) {
 }
 
 $arguments = @(
-    '-m', 'nuitka',
+    '-u', '-m', 'nuitka',
     '--standalone',
+    '--show-progress',
     "--jobs=$Jobs",
     '--msvc=latest',
     '--lto=yes',
@@ -251,6 +252,8 @@ $arguments = @(
     '--include-package=iPhoto',
     '--include-package=maps',
     '--include-package=OpenGL',
+    # Cython imports between extensions are not all visible to static analysis.
+    # In particular, arraydatatype needs formathandler in the frozen module table.
     '--include-package=OpenGL_accelerate',
     '--include-package=cv2',
     '--include-package=reverse_geocoder',
@@ -295,10 +298,40 @@ $arguments += "--windows-icon-from-ico=$IconPath"
 
 $arguments += $mainScript
 
+# Fail before compilation when required application data has not been staged.
+foreach ($argument in $arguments) {
+    if ($argument -match '^--include-data-(?:file|dir)=(.+)=[^=]+$') {
+        Assert-Exists $Matches[1]
+    }
+}
+foreach ($fileName in @('languages.json', 'iPhoto_zh_CN.qm', 'iPhoto_de.qm')) {
+    Assert-Exists (Join-Path $srcRoot "iPhoto\resources\i18n\$fileName")
+}
+
 $pythonArguments = @($pythonPrefixArgs) + $arguments
-& $PythonExe @pythonArguments
-if ($LASTEXITCODE -ne 0) {
-    throw "Nuitka build failed with exit code $LASTEXITCODE"
+$previousPythonPath = $env:PYTHONPATH
+$previousUnbuffered = $env:PYTHONUNBUFFERED
+try {
+    # A shared venv may have an editable install pointing to another checkout.
+    $env:PYTHONPATH = $srcRoot
+    if ($previousPythonPath) {
+        $env:PYTHONPATH += [IO.Path]::PathSeparator + $previousPythonPath
+    }
+    $env:PYTHONUNBUFFERED = '1'
+    $sourceProbe = "import pathlib,sys; import iPhoto.bootstrap.startup_profile as p; expected=pathlib.Path(sys.argv[1]).resolve(); actual=pathlib.Path(p.__file__).resolve(); print('Startup profile source: '+str(actual)); assert actual == expected, 'Build imported a different iPhoto checkout'; assert callable(p.configure)"
+    & $PythonExe @pythonPrefixArgs -B -c $sourceProbe (Join-Path $srcRoot 'iPhoto\bootstrap\startup_profile.py')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Build source preflight failed; check the selected interpreter and editable installs.'
+    }
+    # Inherit stdout/stderr so Nuitka progress is visible throughout the build.
+    & $PythonExe @pythonArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Nuitka build failed with exit code $LASTEXITCODE"
+    }
+}
+finally {
+    $env:PYTHONPATH = $previousPythonPath
+    $env:PYTHONUNBUFFERED = $previousUnbuffered
 }
 
 $builtExecutable = Join-Path $OutputDir 'entrypoint.dist\entrypoint.exe'

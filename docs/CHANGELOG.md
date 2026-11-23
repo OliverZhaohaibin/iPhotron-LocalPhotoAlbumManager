@@ -4,6 +4,15 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — Windows Packaging Diagnostics
+
+- Pin Windows Nuitka compilation to the selected checkout's `src` and verify
+  the startup profiler import before building, preventing mixed editable installs.
+- Validate required data paths and language catalogs before compilation and
+  stream unbuffered compiler progress to the console.
+- Add a file-backed packaged diagnostic launcher and document the resolved
+  optimizer self-check, translation-resource and frozen OpenGL dependency errors.
+
 ## Unreleased — Cross-Platform QRhi Startup Lifecycle
 
 - Unified Windows, macOS, and Linux startup so the hidden Detail surface shell

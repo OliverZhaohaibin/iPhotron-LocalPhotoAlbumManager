@@ -243,6 +243,20 @@ Python/native modules because Nuitka cannot reliably infer these indirect and
 lazy imports. The script does not search for, validate, or copy an
 `exiftool.exe`; it includes the Python files installed by `PyExifTool`.
 
+The compiler runs with this checkout's `src` first on `PYTHONPATH`. A preflight
+prints and verifies `iPhoto.bootstrap.startup_profile.__file__` and its
+`configure` export before compilation. This prevents a shared virtual
+environment's editable install from silently freezing an older checkout.
+The script restores the inherited Python environment after compilation.
+Nuitka output streams directly to the terminal with unbuffered Python output
+and `--show-progress`; a quiet linking stage alone does not prove a hang.
+
+Use `-ConsoleMode force` for a troubleshooting build. Ordinary builds must not
+enable Nuitka's `--debug` compiler self-checks; `--unstripped` can retain native
+debug symbols in a custom diagnostic profile without enabling those checks.
+See [Windows Nuitka packaging troubleshooting](WINDOWS_NUITKA_TROUBLESHOOTING.md)
+for the resolved `packaging.tags`, language-resource, and blank-playback cases.
+
 With `-IncludeOptionalAssets`, the script performs these map-specific jobs
 before invoking Nuitka:
 
@@ -257,6 +271,15 @@ before invoking Nuitka:
 
 QRhi shaders and translation resources are included independently of the
 optional-assets switch; the base package still needs them for media and UI.
+This also applies to `iPhoto/pets/model_manifest.json`, which is application
+metadata rather than an optional model weight. Required data paths and language
+catalogs are checked before Nuitka runs.
+
+Keep both `--include-package=OpenGL` and
+`--include-package=OpenGL_accelerate`. The latter must register all native
+extensions, including `OpenGL_accelerate.formathandler`, in the frozen module
+table. Copying a missing `.pyd` next to an existing executable did not repair
+the affected build; rebuild after changing module inclusion.
 
 The sync step currently requires these files to exist in
 `tools\osmand_render_helper_native\dist-msvc`:
@@ -371,13 +394,33 @@ standalone icons are supplied at the AppImage/Flatpak stage.
 | `--nofollow-import-to=pytest` | Prevents Nuitka from bundling `pytest` (only needed for development) |
 | `--nofollow-import-to=iPhoto.tests` | Excludes the in-tree test sub-package from the build |
 | `--include-package=iPhoto` | Ensures all iPhoto sub-packages (including the AOT `.so`/`.pyd`) are included |
+| `--include-package=iPhoto.resources` | Required in a narrower custom profile; the maintained script includes it through the whole `iPhoto` package |
+| `--include-package=OpenGL_accelerate` | Includes Cython dependencies such as `formathandler`; required alongside `OpenGL` for accelerated Windows rendering |
+| `--include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n` | Bundles language metadata and `.qm` catalogs; Python package inclusion alone does not supply these files |
+| `--include-data-file=src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json` | Bundles mandatory Pets metadata even when optional models are omitted |
 | `--include-package=insightface` | Bundles the InsightFace runtime used by People scanning |
 | `--include-package=onnxruntime` | Bundles the ONNX runtime used by InsightFace models |
 | `--include-data-dir=src/extension/models=extension/models` | Optional: bundles ignored, explicitly staged People/Pets models for an offline build |
 | `--nofollow-import-to=albumentations` and related pydantic packages | Avoids unused InsightFace mask-rendering dependencies that are not needed for People clustering |
 | QRhi `.qsb` data files | Required for macOS/Metal and OpenGL QRhi media previews; include `image_viewer_rhi.*`, `image_viewer_overlay.*`, and `video_renderer.*` |
+| `gl_image_viewer.vert` and `gl_image_viewer.frag` data files | Required by the Windows raw OpenGL viewer; place beside the widget modules at `iPhoto/gui/ui/widgets/` |
 
 ## Step 3: Verify the Distribution
+
+For a Windows build that exits or shows blank playback, capture file-backed
+diagnostics instead of relying on an attached console:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_packaged_diagnostic.ps1 `
+  -Executable .\build\entrypoint.dist\entrypoint.exe
+```
+
+The collector prints its output directory under `build/packaged-diagnostics/`
+and waits until the application exits. Inspect `stderr.log`, `stdout.log`,
+`iPhoto.log` when emitted, and `exit-code.txt`. The original application log is
+normally `%LOCALAPPDATA%\iPhoto\iPhoto.log`. An exit code of zero does not mean
+that Qt event handlers or media rendering succeeded. Use a dedicated test
+library and test photos, videos, Live Photos and Edit in the actual packaged app.
 
 After building, confirm that:
 

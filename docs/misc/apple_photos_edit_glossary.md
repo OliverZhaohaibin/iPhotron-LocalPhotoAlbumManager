@@ -1,5 +1,9 @@
 # Apple Photos edit terminology glossary
 
+This is the current edit terminology reference linked by the
+[i18n guardrail](I18N_UI_TEXT_GUARDRAILS.md). The copy under
+`docs/finished/requirements/i18n/` is retained only as a historical snapshot.
+
 > Date: 2026-06-08
 > Scope: iPhotron edit sidebar terms that intentionally mirror macOS Photos edit controls.
 > Rule: when a project edit control maps to Apple Photos, use the Apple Support zh-CN and de-DE terms below.

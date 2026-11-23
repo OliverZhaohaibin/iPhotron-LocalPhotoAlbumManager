@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from ...utils.geocoding import resolve_location_name
 def geotagged_asset_from_row(
     root: Path,
     row: object,
+    *,
+    resolve_path: Callable[[Path], Path] = Path.resolve,
 ) -> GeotaggedAsset | None:
     """Return a geotagged asset converted from one index-store row."""
 
@@ -36,7 +39,7 @@ def geotagged_asset_from_row(
         return None
 
     library_root = Path(root)
-    abs_path = (library_root / rel).resolve()
+    abs_path = resolve_path(library_root / rel)
     location_raw: Any = row.get("location")
     if not isinstance(location_raw, str) or not location_raw.strip():
         metadata = row.get("metadata")

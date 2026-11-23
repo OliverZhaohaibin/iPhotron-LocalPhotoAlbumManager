@@ -67,6 +67,23 @@ class AssetMoveService(QObject):
         while delete jobs must do the opposite.
         """
 
+        return self.move_assets_with_plan(
+            sources,
+            destination,
+            operation=operation,
+            metadata_lookup=metadata_lookup,
+        ) is not None
+
+    def move_assets_with_plan(
+        self,
+        sources: Iterable[Path],
+        destination: Path,
+        *,
+        operation: str = "move",
+        metadata_lookup: MetadataLookup | None = None,
+    ) -> AssetMovePlan | None:
+        """Return the submitted plan, or ``None`` when no move was queued."""
+
         album = self._current_album_getter()
         library_manager = self._library_manager_getter()
         try:
@@ -78,7 +95,7 @@ class AssetMoveService(QObject):
             )
         except RuntimeError as exc:
             self.errorRaised.emit(str(exc))
-            return False
+            return None
         plan = operation_service.plan_move_request(
             sources,
             destination,
@@ -87,7 +104,7 @@ class AssetMoveService(QObject):
             trash_root=self._deleted_directory(library_manager),
             metadata_lookup=metadata_lookup,
         )
-        return self.submit_plan(plan)
+        return plan if self.submit_plan(plan) else None
 
     def submit_plan(self, plan: AssetMovePlan) -> bool:
         """Queue a prevalidated file-operation plan."""

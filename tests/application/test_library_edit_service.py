@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock
 
 from iPhoto.bootstrap.library_edit_service import LibraryEditService
 
@@ -16,6 +17,27 @@ def test_library_edit_service_round_trips_adjustments(tmp_path: Path) -> None:
 
     assert service.sidecar_exists(asset) is True
     assert service.read_adjustments(asset)["Crop_W"] == 0.8
+
+
+def test_edit_commit_marks_new_revision_stale_after_atomic_sidecar_write(
+    tmp_path: Path,
+) -> None:
+    asset = tmp_path / "photo.jpg"
+    asset.write_bytes(b"image")
+    thumbnail_state = Mock()
+    service = LibraryEditService(
+        tmp_path,
+        thumbnail_state_service=thumbnail_state,
+    )
+
+    first = service.write_adjustments(asset, {"Crop_Rotate90": 1.0})
+    second = service.write_adjustments(asset, {"Crop_Rotate90": 2.0})
+
+    assert first.thumbnail_revision != second.thumbnail_revision
+    assert thumbnail_state.mark_thumbnail_stale.call_args_list == [
+        ((asset.resolve(), first.thumbnail_revision), {}),
+        ((asset.resolve(), second.thumbnail_revision), {}),
+    ]
 
 
 def test_library_edit_service_describes_video_adjustments(tmp_path: Path) -> None:

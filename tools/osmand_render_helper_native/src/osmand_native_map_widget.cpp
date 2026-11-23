@@ -367,6 +367,13 @@ OsmAndNativeMapWidget* OsmAndNativeMapWidget::create(
     return widget;
 }
 
+OsmAndNativeMapWidget* OsmAndNativeMapWidget::createDeferred(
+    const Configuration& configuration,
+    QWidget* parent)
+{
+    return new OsmAndNativeMapWidget(configuration, parent);
+}
+
 OsmAndNativeMapWidget::OsmAndNativeMapWidget(const Configuration& configuration, QWidget* parent)
     : QOpenGLWidget(parent)
     , _configuration(configuration)
@@ -484,6 +491,11 @@ bool OsmAndNativeMapWidget::projectLonLat(double longitude, double latitude, QPo
     return true;
 }
 
+bool OsmAndNativeMapWidget::hasPresentedFrame() const
+{
+    return _firstFramePresented;
+}
+
 void OsmAndNativeMapWidget::initializeGL()
 {
     QElapsedTimer stageTimer;
@@ -530,6 +542,7 @@ void OsmAndNativeMapWidget::paintGL()
     if (prepared)
     {
         _mapRenderer->renderFrame();
+        _firstFramePresented = true;
         if (_coldStartBootstrapPending)
         {
             _coldStartBootstrapPending = false;
@@ -650,6 +663,8 @@ void OsmAndNativeMapWidget::wheelEvent(QWheelEvent* event)
 
 bool OsmAndNativeMapWidget::initializeResources(QString& errorMessage)
 {
+    if (_resourcesReady)
+        return true;
     if (!QFileInfo::exists(_configuration.obfPath))
     {
         errorMessage = QStringLiteral("OBF file does not exist: %1").arg(_configuration.obfPath);

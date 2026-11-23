@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from iPhoto.gui.coordinators import navigation_coordinator as navigation_module
 from iPhoto.gui.coordinators.navigation_coordinator import NavigationCoordinator
 
 
@@ -68,6 +69,56 @@ def test_open_all_photos_delegates_to_gallery_vm() -> None:
     coord.open_all_photos()
 
     coord._gallery_vm.open_all_photos.assert_called_once_with()
+
+
+def test_sidebar_all_photos_navigation_is_queued(monkeypatch) -> None:
+    callbacks = []
+
+    class FakeTimer:
+        @staticmethod
+        def singleShot(interval, callback):
+            callbacks.append((interval, callback))
+
+    monkeypatch.setattr(navigation_module, "QTimer", FakeTimer)
+    coord = _make_coordinator()
+    handler = coord._sidebar.allPhotosSelected.connect.call_args.args[0]
+
+    handler()
+
+    coord._gallery_vm.open_all_photos.assert_not_called()
+    assert [interval for interval, _callback in callbacks] == [0]
+
+    callbacks[0][1]()
+
+    coord._gallery_vm.open_all_photos.assert_called_once_with()
+
+
+def test_sidebar_navigation_requests_are_coalesced(monkeypatch, tmp_path: Path) -> None:
+    callbacks = []
+
+    class FakeTimer:
+        @staticmethod
+        def singleShot(interval, callback):
+            callbacks.append((interval, callback))
+
+    monkeypatch.setattr(navigation_module, "QTimer", FakeTimer)
+    coord = _make_coordinator(current_album_root=None)
+    all_photos_handler = coord._sidebar.allPhotosSelected.connect.call_args.args[0]
+    album_handler = coord._sidebar.albumSelected.connect.call_args.args[0]
+    album = tmp_path / "Paris"
+    album.mkdir()
+
+    all_photos_handler()
+    album_handler(album)
+
+    assert len(callbacks) == 1
+    coord._gallery_vm.open_all_photos.assert_not_called()
+    coord._gallery_vm.open_album.assert_not_called()
+
+    callbacks[0][1]()
+
+    coord._gallery_vm.open_all_photos.assert_not_called()
+    coord._gallery_vm.open_album.assert_called_once_with(album)
 
 
 def test_open_recently_deleted_delegates_to_gallery_vm() -> None:

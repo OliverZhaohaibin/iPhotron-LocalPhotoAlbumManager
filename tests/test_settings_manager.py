@@ -79,20 +79,31 @@ def test_pinned_items_roundtrip_is_scoped_by_library(tmp_path: Path, qapp: QAppl
 
     service.pin_album(library_a / "Trips", "Trips", library_root=library_a)
     service.pin_person("person-a", "Alice", library_root=library_a)
+    service.pin_pet("pet-a", "Miso", library_root=library_a)
     service.pin_group("group-a", "Group 1", library_root=library_b)
     qapp.processEvents()
 
-    assert spy.count() == 3
-    assert [(item.kind, item.label) for item in service.items_for_library(library_a)] == [
+    assert spy.count() == 4
+    expected_a = [
+        ("pet", "Miso"),
         ("person", "Alice"),
         ("album", "Trips"),
     ]
-    assert [(item.kind, item.label) for item in service.items_for_library(library_b)] == [
-        ("group", "Group 1"),
-    ]
+    expected_b = [("group", "Group 1")]
+    assert [(item.kind, item.label) for item in service.items_for_library(library_a)] == expected_a
+    assert [(item.kind, item.label) for item in service.items_for_library(library_b)] == expected_b
 
-    stored = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert "pinned_items_by_library" in stored
+    reloaded_settings = SettingsManager(path=settings_path)
+    reloaded_settings.load()
+    reloaded_service = PinnedItemsService(reloaded_settings)
+    assert [
+        (item.kind, item.label) for item in reloaded_service.items_for_library(library_a)
+    ] == expected_a
+    assert [
+        (item.kind, item.label) for item in reloaded_service.items_for_library(library_b)
+    ] == expected_b
+    assert reloaded_service.is_pinned(kind="pet", item_id="pet-a", library_root=library_a)
+    assert not reloaded_service.is_pinned(kind="pet", item_id="pet-a", library_root=library_b)
 
 
 def test_pinned_item_rename_persists_custom_label_flag(tmp_path: Path) -> None:

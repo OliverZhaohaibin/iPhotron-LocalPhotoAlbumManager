@@ -1,21 +1,31 @@
+import logging
 import mimetypes
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-import logging
+from typing import Any, Dict, List
 
 from iPhoto.application.interfaces import IMetadataProvider
-from iPhoto.utils.exiftool import get_metadata_batch
+from iPhoto.core.raw_processor import RAW_EXTENSIONS
 from iPhoto.io.metadata import read_image_meta_with_exiftool, read_video_meta
 from iPhoto.people import initial_face_status
+from iPhoto.utils.exiftool import get_metadata_batch
 from iPhoto.utils.hashutils import compute_file_id
-from iPhoto.domain.models import MediaType
 
 logger = logging.getLogger(__name__)
 
+
 class ExifToolMetadataProvider(IMetadataProvider):
-    _IMAGE_EXTENSIONS = {".heic", ".heif", ".heifs", ".heicf", ".jpg", ".jpeg", ".png", ".webp"}
+    _IMAGE_EXTENSIONS = {
+        ".heic",
+        ".heif",
+        ".heifs",
+        ".heicf",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        *RAW_EXTENSIONS,
+    }
     _VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".qt", ".avi", ".mkv"}
 
     def get_metadata_batch(self, paths: List[Path]) -> List[Dict[str, Any]]:
@@ -25,7 +35,12 @@ class ExifToolMetadataProvider(IMetadataProvider):
             logger.error(f"Failed to get metadata batch: {e}")
             return []
 
-    def normalize_metadata(self, root: Path, file_path: Path, raw_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def normalize_metadata(
+        self,
+        root: Path,
+        file_path: Path,
+        raw_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
         """
         Normalize raw metadata using logic similar to the legacy scanner.
         """
@@ -36,7 +51,11 @@ class ExifToolMetadataProvider(IMetadataProvider):
         row = {
             "rel": rel,
             "bytes": stat.st_size,
-            "dt": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "source_mtime_ns": int(stat.st_mtime_ns),
+            "image_orientation": 1,
+            "dt": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "ts": int(stat.st_mtime * 1_000_000),
             "id": f"as_{compute_file_id(file_path)}",
             "mime": mimetypes.guess_type(file_path.name)[0],

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from iPhoto.bootstrap.library_asset_operation_service import (
     LibraryAssetOperationService,
 )
@@ -168,8 +170,10 @@ def test_move_plan_skips_sources_already_in_destination_album(
     ]
 
 
+@pytest.mark.parametrize("current_album_rel", [None, "Album", "Album/Subalbum"])
 def test_move_plan_allows_child_album_source_to_move_to_parent_album(
     tmp_path: Path,
+    current_album_rel: str | None,
 ) -> None:
     library_root = tmp_path / "Library"
     destination_root = library_root / "Album"
@@ -185,14 +189,42 @@ def test_move_plan_allows_child_album_source_to_move_to_parent_album(
     plan = service.plan_move_request(
         [asset],
         destination_root,
-        current_album_root=None,
+        current_album_root=(
+            library_root / current_album_rel if current_album_rel else None
+        ),
     )
 
     assert plan.accepted is True
-    assert plan.source_root == library_root.resolve()
+    assert plan.source_root == (
+        library_root / current_album_rel if current_album_rel else library_root
+    ).resolve()
     assert plan.destination_root == destination_root.resolve()
     assert plan.sources == [asset.resolve()]
     assert plan.errors == []
+
+
+def test_move_plan_to_current_parent_skips_only_direct_children(tmp_path: Path) -> None:
+    parent = tmp_path / "Album"
+    child = parent / "Child"
+    child.mkdir(parents=True)
+    already_there = parent / "already.jpg"
+    movable = child / "move.jpg"
+    already_there.write_bytes(b"already")
+    movable.write_bytes(b"move")
+    service = LibraryAssetOperationService(
+        tmp_path,
+        lifecycle_service=_FakeLifecycleService(),  # type: ignore[arg-type]
+    )
+
+    plan = service.plan_move_request(
+        [already_there, movable], parent, current_album_root=parent
+    )
+
+    assert plan.accepted is True
+    assert plan.sources == [movable.resolve()]
+    assert plan.errors == [
+        f"Skipping item already in destination album: {already_there.name}"
+    ]
 
 
 def test_delete_plan_skips_missing_sources_and_adds_live_companion(

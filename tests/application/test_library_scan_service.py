@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import time
+from unittest.mock import patch
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ import pytest
 import iPhoto.bootstrap.library_scan_service as scan_service_module
 from iPhoto.bootstrap.library_scan_service import LibraryScanService
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
+from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.utils.hashutils import compute_file_id
 
 
 class _Scanner:
@@ -85,6 +88,269 @@ def clean_global_repository():
     reset_global_repository()
 
 
+@pytest.mark.parametrize("replacement", [False, True], ids=["missing", "replaced-by-file"])
+def test_missing_album_reconciliation_clears_peers_and_preserves_other_state(
+    tmp_path: Path, replacement: bool
+) -> None:
+    if replacement:
+        (tmp_path / "Gone").write_bytes(b"an album is now a file")
+    trash_rel = f"{RECENTLY_DELETED_DIR_NAME}/kept.jpg"
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": "Gone/motion.mov", "id": "motion", "live_role": 1,
+         "live_partner_rel": "photo.jpg"},
+        {"rel": "photo.jpg", "id": "still", "live_partner_rel": "Gone/motion.mov",
+         "is_favorite": True},
+        {"rel": trash_rel, "id": "trashed", "is_deleted": True,
+         "original_rel_path": "Original/kept.jpg", "is_favorite": True},
+    ])
+    trashed = store.get_rows_by_rels([trash_rel])
+
+    assert LibraryScanService(tmp_path).reconcile_missing_album_scope(tmp_path / "Gone")
+
+    rows = store.get_rows_by_rels(["Gone/motion.mov", "photo.jpg"])
+    assert set(rows) == {"photo.jpg"}
+    assert rows["photo.jpg"]["live_partner_rel"] is None
+    assert rows["photo.jpg"]["is_favorite"]
+    assert store.get_rows_by_rels([trash_rel]) == trashed
+
+
+@pytest.mark.parametrize("change", ["recreated", "inaccessible", "cancelled", "disconnected"])
+def test_missing_album_reconciliation_rechecks_before_removing_rows(
+    tmp_path: Path, change: str
+) -> None:
+    album = tmp_path / "Gone"
+    store = get_global_repository(tmp_path)
+    store.write_rows([{"rel": "Gone/photo.jpg", "id": "kept", "is_favorite": True}])
+    before = store.get_rows_by_rels(["Gone/photo.jpg"])
+    service = LibraryScanService(tmp_path)
+    real_stat = Path.stat
+    stat_calls = 0
+
+    def changed_stat(path: Path, *args, **kwargs):
+        nonlocal stat_calls
+        if change == "disconnected" and path == tmp_path and stat_calls > 1:
+            raise FileNotFoundError(2, "library disconnected during reconciliation", str(path))
+        if path == album:
+            stat_calls += 1
+            if stat_calls > 1:
+                if change == "inaccessible":
+                    raise PermissionError("temporarily inaccessible")
+                if change == "recreated":
+                    album.mkdir()
+        return real_stat(path, *args, **kwargs)
+
+    with patch.object(Path, "stat", changed_stat):
+        if change in {"inaccessible", "disconnected"}:
+            error = PermissionError if change == "inaccessible" else scan_service_module.AlbumNotFoundError
+            with pytest.raises(error):
+                service.reconcile_missing_album_scope(album)
+        else:
+            assert service.reconcile_missing_album_scope(
+                album, is_cancelled=lambda: change == "cancelled"
+            ) is (change == "cancelled")
+
+    assert store.get_rows_by_rels(["Gone/photo.jpg"]) == before
+
+
+@pytest.mark.parametrize("matching_content", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_missing_album_reconciliation_only_relocates_matching_assets(
+    tmp_path: Path, matching_content: bool, nested: bool
+) -> None:
+    parent = tmp_path / "Parent" if nested else tmp_path
+    old = parent / "Old"
+    old.mkdir(parents=True)
+    source = old / "photo.jpg"
+    source.write_bytes(b"original media")
+    source_rel = source.relative_to(tmp_path).as_posix()
+    destination_rel = (parent / "New" / "photo.jpg").relative_to(tmp_path).as_posix()
+    asset_id = f"as_{compute_file_id(source)}"
+    store = get_global_repository(tmp_path)
+    gps = {"lat": 52.5, "lon": 13.4}
+    store.write_rows([{
+        "rel": source_rel, "id": asset_id, "is_favorite": True,
+        "gps": gps, "location": "Local place", "thumbnail_state": "ready",
+        "thumb_cache_key": "old-path", "face_status": "done", "pet_status": "done",
+    }])
+    source.unlink()
+    old.rmdir()
+    new = parent / "New"
+    new.mkdir()
+    (new / "photo.jpg").write_bytes(b"original media" if matching_content else b"different media")
+
+    assert LibraryScanService(tmp_path).reconcile_missing_album_scope(
+        old, relocation_roots=(new,)
+    )
+
+    assert not store.get_rows_by_rels([source_rel])
+    relocated = store.get_rows_by_rels([destination_rel])
+    if matching_content:
+        row = relocated[destination_rel]
+        assert row["is_favorite"]
+        assert row["gps"] == gps
+        assert row["location"] == "Local place"
+        assert row["thumbnail_state"] == "stale"
+        assert row["thumb_cache_key"] is None
+        assert row["face_status"] is None
+        assert row["pet_status"] is None
+        # The state has already been committed even if destination scanning is
+        # interrupted or the process closes before it starts.
+        reset_global_repository()
+        assert get_global_repository(tmp_path).get_rows_by_rels([destination_rel]) == relocated
+    else:
+        assert not relocated
+
+
+@pytest.mark.parametrize("move_during_verification", [False, True])
+def test_missing_album_reconciliation_defers_when_a_destination_disappears(
+    tmp_path: Path, move_during_verification: bool
+) -> None:
+    old = tmp_path / "Old"
+    old.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        (old / name).write_bytes(name.encode())
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": f"Old/{name}", "id": f"as_{compute_file_id(old / name)}",
+         "is_favorite": True, "location": "Manual location"}
+        for name in ("a.jpg", "b.jpg")
+    ])
+    before = store.get_rows_by_rels(["Old/a.jpg", "Old/b.jpg"])
+    temporary = tmp_path / "Temporary"
+    final = tmp_path / "Final"
+    old.rename(temporary)
+    if not move_during_verification:
+        temporary.rename(final)
+
+    def move_after_hash(path: Path) -> str:
+        asset_id = compute_file_id(path)
+        temporary.rename(final)
+        return asset_id
+
+    service = LibraryScanService(tmp_path)
+    with patch.object(
+        scan_service_module, "compute_file_id",
+        side_effect=move_after_hash if move_during_verification else compute_file_id,
+    ):
+        assert service.reconcile_missing_album_scope(
+            old, relocation_roots=(temporary,)
+        ) is None
+
+    assert store.get_rows_by_rels(before) == before
+    assert not store.get_rows_by_rels([
+        "Temporary/a.jpg", "Temporary/b.jpg", "Final/a.jpg", "Final/b.jpg",
+    ])
+    assert service.reconcile_missing_album_scope(old, relocation_roots=(final,))
+    assert not store.get_rows_by_rels(before)
+    for row in store.get_rows_by_rels(["Final/a.jpg", "Final/b.jpg"]).values():
+        assert row["is_favorite"]
+        assert row["location"] == "Manual location"
+
+
+def test_ambiguous_album_relocation_does_not_discard_user_state(tmp_path: Path) -> None:
+    candidates = [tmp_path / name for name in ("New", "Copy")]
+    for candidate in candidates:
+        candidate.mkdir()
+        (candidate / "photo.jpg").write_bytes(b"same media")
+    store = get_global_repository(tmp_path)
+    store.write_rows([{
+        "rel": "Old/photo.jpg", "id": f"as_{compute_file_id(candidates[0] / 'photo.jpg')}",
+        "is_favorite": True, "location": "Local place",
+    }])
+    before = store.get_rows_by_rels(["Old/photo.jpg"])
+
+    with pytest.raises(ValueError, match="Ambiguous relocated asset"):
+        LibraryScanService(tmp_path).reconcile_missing_album_scope(
+            tmp_path / "Old", relocation_roots=candidates
+        )
+
+    assert store.get_rows_by_rels(["Old/photo.jpg"]) == before
+
+
+@pytest.mark.parametrize("source_has_nested_photo", [False, True])
+def test_nested_relocation_candidates_require_stronger_subtree_evidence(
+    tmp_path: Path, source_has_nested_photo: bool
+) -> None:
+    destination = tmp_path / "New"
+    nested = destination / "Nested"
+    nested.mkdir(parents=True)
+    for directory in (destination, nested):
+        (directory / "photo.jpg").write_bytes(b"identical media in separate albums")
+    asset_id = f"as_{compute_file_id(destination / 'photo.jpg')}"
+    source_rels = ["Old/photo.jpg"]
+    if source_has_nested_photo:
+        source_rels.append("Old/Nested/photo.jpg")
+    store = get_global_repository(tmp_path)
+    store.write_rows([
+        {"rel": rel, "id": asset_id, "is_favorite": True, "location": rel}
+        for rel in source_rels
+    ])
+    before = store.get_rows_by_rels(source_rels)
+    service = LibraryScanService(tmp_path)
+
+    if source_has_nested_photo:
+        assert service.reconcile_missing_album_scope(
+            tmp_path / "Old", relocation_roots=(nested, destination)
+        )
+        assert not store.get_rows_by_rels(source_rels)
+        for rel in source_rels:
+            destination_rel = rel.replace("Old/", "New/", 1)
+            row = store.get_rows_by_rels([destination_rel])[destination_rel]
+            assert row["is_favorite"]
+            assert row["location"] == rel
+    else:
+        # The parent and child both match the only source photo; hierarchy alone
+        # cannot distinguish the actual moved album from a separate copy.
+        with pytest.raises(ValueError, match="Ambiguous relocated asset"):
+            service.reconcile_missing_album_scope(
+                tmp_path / "Old", relocation_roots=(nested, destination)
+            )
+        assert store.get_rows_by_rels(source_rels) == before
+        assert not store.get_rows_by_rels(["New/photo.jpg", "New/Nested/photo.jpg"])
+
+
+def test_queued_scan_side_effects_cannot_recreate_a_renamed_album(tmp_path: Path) -> None:
+    old = tmp_path / "Old"
+    old.mkdir()
+    service = LibraryScanService(tmp_path)
+    new = tmp_path / "New"
+    service.rename_album(old, new)
+
+    assert service.pair_album(old) == []
+    assert service.ensure_links_for_rows(old, []) == []
+    with pytest.raises(scan_service_module.AlbumNotFoundError):
+        service.finalize_scan(old, [{"rel": "Old/photo.jpg", "id": "photo"}])
+
+    assert not old.exists()
+    assert new.is_dir()
+    assert not get_global_repository(tmp_path).get_rows_by_rels(["Old/photo.jpg"])
+
+
+def test_nested_source_relocation_retains_state_when_parent_and_child_matches_tie(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "New"
+    nested = destination / "Nested"
+    nested.mkdir(parents=True)
+    for directory in (destination, nested):
+        (directory / "photo.jpg").write_bytes(b"identical media in separate albums")
+    store = get_global_repository(tmp_path)
+    store.write_rows([{
+        "rel": "Old/Nested/photo.jpg", "id": f"as_{compute_file_id(nested / 'photo.jpg')}",
+        "is_favorite": True, "location": "Manual location",
+    }])
+    before = store.get_rows_by_rels(["Old/Nested/photo.jpg"])
+
+    with pytest.raises(ValueError, match="Ambiguous relocated asset"):
+        LibraryScanService(tmp_path).reconcile_missing_album_scope(
+            tmp_path / "Old", relocation_roots=(destination, nested)
+        )
+
+    assert store.get_rows_by_rels(before) == before
+    assert not store.get_rows_by_rels(["New/photo.jpg", "New/Nested/photo.jpg"])
+
+
 def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:
     library_root = tmp_path / "library"
     library_root.mkdir()
@@ -101,6 +367,87 @@ def test_scan_album_is_atomic_until_finalize(tmp_path: Path) -> None:
     assert {row["rel"] for row in store.read_all(filter_hidden=False)} == {
         "existing.jpg"
     }
+
+
+def test_root_media_pairing_updates_only_affected_roles_and_links(tmp_path: Path) -> None:
+    root = tmp_path
+    service = LibraryScanService(root)
+    store = get_global_repository(root)
+    nested = ("Album/image.jpg", "Album/motion.mov")
+    cross = ("cross.jpg", "Album/cross.mov")
+    direct = ("new.jpg", "new.mov")
+
+    def pair_rows(paths: tuple[str, str], content_id: str) -> list[dict[str, Any]]:
+        return [
+            {"rel": paths[0], "mime": "image/jpeg", "content_id": content_id},
+            {"rel": paths[1], "mime": "video/quicktime", "content_id": content_id},
+        ]
+
+    (root / "Album").mkdir()
+    for rel in (*nested, *cross, *direct):
+        (root / rel).touch()
+    store.write_rows([*pair_rows(nested, "nested"), *pair_rows(cross, "cross")])
+    service.pair_album(root)
+    old_roles = store.get_rows_by_rels(nested)
+
+    service.finalize_scan_result(root, pair_rows(direct, "direct"), root_only=True)
+    roles = store.get_rows_by_rels((*nested, *cross, *direct))
+    assert all(roles[rel] == old_roles[rel] for rel in nested)
+    assert roles[direct[1]]["live_partner_rel"] == direct[0]
+    assert roles[cross[1]]["live_partner_rel"] == cross[0]
+
+    (root / cross[0]).unlink()
+    service.finalize_scan_result(root, pair_rows(direct, "direct"), root_only=True)
+    [former_motion] = store.get_rows_by_rels([cross[1]]).values()
+    assert former_motion["live_role"] == 0
+    assert former_motion["live_partner_rel"] is None
+    links = json.loads((root / ".iPhoto" / "links.json").read_text(encoding="utf-8"))
+    assert {(group["still"], group["motion"]) for group in links["live_groups"]} == {
+        nested, direct,
+    }
+
+
+@pytest.mark.parametrize("root_is_still", [False, True])
+def test_root_scan_discovers_unpaired_cross_album_content_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_is_still: bool
+) -> None:
+    service = LibraryScanService(tmp_path)
+    store = get_global_repository(tmp_path)
+    (tmp_path / "Album").mkdir()
+    root_rel = "new.jpg" if root_is_still else "new.mov"
+    peer_rel = "Album/motion.mov" if root_is_still else "Album/still.jpg"
+    root_mime = "image/jpeg" if root_is_still else "video/quicktime"
+    peer_mime = "video/quicktime" if root_is_still else "image/jpeg"
+    for rel in (root_rel, peer_rel, "Album/saved.jpg", "Album/saved.mov"):
+        (tmp_path / rel).touch()
+    store.write_rows([
+        {"rel": peer_rel, "mime": peer_mime, "content_id": "  ABc-ß\t"},
+        {"rel": "Album/saved.jpg", "mime": "image/jpeg", "content_id": "abc-ss",
+         "live_partner_rel": "Album/saved.mov"},
+        {"rel": "Album/saved.mov", "mime": "video/quicktime", "content_id": "abc-ss",
+         "live_role": 1, "live_partner_rel": "Album/saved.jpg"},
+    ])
+    saved = store.get_rows_by_rels(["Album/saved.jpg", "Album/saved.mov"])
+    # Start with a complete snapshot so its root-only refresh is also exercised.
+    links = tmp_path / ".iPhoto" / "links.json"
+    links.write_text(json.dumps({"schema": "iPhoto/links@1", "live_groups": []}))
+    monkeypatch.setattr(store, "read_all", lambda **_kw: pytest.fail("full library read"))
+
+    service.finalize_scan_result(
+        tmp_path,
+        [{"rel": root_rel, "mime": root_mime, "content_id": "abc-ss"}],
+        root_only=True,
+    )
+
+    rows = store.get_rows_by_rels([root_rel, peer_rel])
+    assert rows[root_rel]["live_partner_rel"] == peer_rel
+    assert rows[peer_rel]["live_partner_rel"] == root_rel
+    assert rows[root_rel]["live_role"] == int(not root_is_still)
+    assert rows[peer_rel]["live_role"] == int(root_is_still)
+    assert store.get_rows_by_rels(saved) == saved
+    groups = json.loads(links.read_text())["live_groups"]
+    assert len(groups) == 1
+    assert {groups[0]["still"], groups[0]["motion"]} == {root_rel, peer_rel}
 
 
 def test_subalbum_scan_prefixes_library_relative_rows(tmp_path: Path) -> None:
@@ -237,6 +584,48 @@ def test_finalize_scan_result_failure_keeps_scope_incomplete(
     assert job is not None
     assert job["status"] == "failed"
     assert service.is_scan_scope_complete(library_root) is False
+
+
+@pytest.mark.parametrize("finish_scan", [False, True], ids=["interrupted", "pairing-disabled"])
+def test_replaced_live_still_releases_motion_without_pairing(
+    tmp_path: Path, finish_scan: bool,
+) -> None:
+    still, motion = "photo.jpg", "photo.mov"
+    (tmp_path / still).write_bytes(b"original photo")
+    (tmp_path / motion).write_bytes(b"original video")
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([
+        {"rel": still, "id": compute_file_id(tmp_path / still), "mime": "image/jpeg",
+         "content_id": "paired", "is_favorite": 1},
+        {"rel": motion, "id": compute_file_id(tmp_path / motion), "mime": "video/quicktime",
+         "content_id": "paired"},
+        {"rel": "other.jpg", "id": "other-still", "content_id": "other-pair",
+         "mime": "image/jpeg"},
+        {"rel": "other.mov", "id": "other-motion", "content_id": "other-pair",
+         "mime": "video/quicktime"},
+    ])
+    for rel in ("other.jpg", "other.mov"):
+        (tmp_path / rel).touch()
+    (tmp_path / still).write_bytes(b"replacement photo")
+    replacement = {"rel": still, "id": compute_file_id(tmp_path / still), "mime": "image/jpeg"}
+    scan_rows = [replacement, *repo.get_rows_by_rels([motion, "other.jpg", "other.mov"]).values()]
+    service = LibraryScanService(tmp_path, scanner=_Scanner(scan_rows))
+    service.pair_album(tmp_path)
+    assert repo.find_live_partner("other-still")["rel"] == "other.mov"
+    assert repo.get_rows_by_rels([motion])[motion]["live_role"] == 1
+    with patch.object(service, "ensure_links_for_rows", wraps=service.ensure_links_for_rows) as pair:
+        result = service.scan_album(tmp_path, persist_chunks=True, chunk_size=1)
+        if finish_scan:
+            service.finalize_scan_result(tmp_path, result.rows, pair_live=False)
+        pair.assert_not_called()
+
+    assert repo.find_live_partner(replacement["id"]) is None
+    assert repo.find_live_partner("other-still")["rel"] == "other.mov"
+    rows = repo.get_rows_by_rels([still, motion])
+    assert rows[still]["is_favorite"] == 1
+    assert rows[motion]["live_role"] == 0
+    assert rows[motion]["live_partner_rel"] is None
+    assert (tmp_path / motion).read_bytes() == b"original video"
 
 
 def test_finalize_scan_result_preserves_move_written_rows_during_scan(

@@ -11,8 +11,31 @@ from iPhoto.cache.index_store import (
     reset_global_repository,
     GLOBAL_INDEX_DB_NAME,
 )
+from iPhoto.cache.index_store.repository import AssetRepository
 from iPhoto.config import RECENTLY_DELETED_DIR_NAME, WORK_DIR_NAME
 from iPhoto.domain.models.query import CollectionQuery, CollectionType
+
+
+def test_current_schema_reopen_skips_historical_full_table_repairs(tmp_path: Path) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    repository = AssetRepository(library_root)
+    repository.write_rows(
+        [{"rel": "photo.jpg", "id": "photo", "gps": '{"lat": 1}', "has_gps": 1}]
+    )
+    repository.close()
+    database = library_root / ".iPhoto" / "global_index.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE assets SET has_gps = 0 WHERE rel = 'photo.jpg'")
+
+    reopened = AssetRepository(library_root)
+    try:
+        row = reopened.get_rows_by_rels(["photo.jpg"])["photo.jpg"]
+        assert row["has_gps"] == 0
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] >= 1
+    finally:
+        reopened.close()
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +44,166 @@ def clean_global_state():
     reset_global_repository()
     yield
     reset_global_repository()
+
+
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.parametrize("move_partner", [False, True])
+def test_relocate_rows_preserves_state_pairing_and_pending_location_jobs(
+    tmp_path: Path, with_metadata: bool, move_partner: bool
+) -> None:
+    import json
+    from iPhoto.infrastructure.repositories.location_assignment_repository import (
+        IndexStoreLocationAssignmentRepository,
+    )
+
+    repo = get_global_repository(tmp_path)
+    if with_metadata:
+        with repo.transaction() as conn:
+            conn.execute("ALTER TABLE assets ADD COLUMN metadata TEXT")
+    motion_rel = "Old/motion.mov" if move_partner else "motion.mov"
+    destination_motion = "New/motion.mov" if move_partner else "motion.mov"
+    repo.write_rows([
+        {"rel": "Old/photo.jpg", "id": "photo", "is_favorite": True,
+         "live_partner_rel": motion_rel},
+        {"rel": motion_rel, "id": "motion", "live_role": 1,
+         "live_partner_rel": "Old/photo.jpg"},
+    ])
+    gps = {"lat": 52.5, "lon": 13.4}
+    job = IndexStoreLocationAssignmentRepository(tmp_path).assign_location(
+        asset_rel="Old/photo.jpg", asset_path=tmp_path / "Old" / "photo.jpg",
+        gps=gps, location="Local place", is_video=False,
+        metadata_updates={"location_name": "Local place", "custom_note": "Keep me"},
+    )
+
+    destinations = {"Old/photo.jpg": "New/photo.jpg"}
+    expected_ids = {"Old/photo.jpg": "photo"}
+    if move_partner:
+        destinations[motion_rel] = destination_motion
+        expected_ids[motion_rel] = "motion"
+    repo.relocate_rows(destinations, expected_asset_ids=expected_ids)
+
+    rows = repo.get_rows_by_rels(["Old/photo.jpg", "New/photo.jpg", destination_motion])
+    assert set(rows) == {"New/photo.jpg", destination_motion}
+    assert rows["New/photo.jpg"]["is_favorite"]
+    assert rows["New/photo.jpg"]["location"] == "Local place"
+    assert rows["New/photo.jpg"]["gps"] == gps
+    assert rows["New/photo.jpg"]["live_partner_rel"] == destination_motion
+    assert rows[destination_motion]["live_partner_rel"] == "New/photo.jpg"
+    assert rows[destination_motion]["live_role"] == 1
+    if with_metadata:
+        assert json.loads(rows["New/photo.jpg"]["metadata"])["custom_note"] == "Keep me"
+    with sqlite3.connect(repo.path) as conn:
+        assert conn.execute(
+            "SELECT asset_rel, asset_path, status FROM metadata_write_jobs WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone() == ("New/photo.jpg", str(tmp_path / "New" / "photo.jpg"), "queued")
+
+
+@pytest.mark.parametrize("album_name", ["Trip", "Trip_%", "旅行_50%"])
+def test_known_album_rename_keeps_ready_facts_pairing_and_location_jobs(
+    tmp_path: Path, album_name: str
+) -> None:
+    from iPhoto.infrastructure.repositories.location_assignment_repository import (
+        IndexStoreLocationAssignmentRepository,
+    )
+
+    repo = get_global_repository(tmp_path)
+    photo = f"{album_name}/photo.jpg"
+    motion = f"{album_name}/Nested/motion.mov"
+    other_case = album_name.lower() if album_name.lower() != album_name else "Other"
+    untouched = [f"{album_name}-copy/photo.jpg", f"{other_case}/other.jpg", "Trip_X/photo.jpg"]
+    repo.write_rows([
+        {"rel": photo, "id": "photo", "is_favorite": True,
+         "live_partner_rel": motion, "thumbnail_state": "ready", "thumb_cache_key": "old-key",
+         "thumb_revision": "old-revision", "micro_thumbnail": b"preview"},
+        {"rel": motion, "id": "motion", "live_role": 1, "live_partner_rel": photo},
+        *({"rel": rel, "id": rel, "is_favorite": True} for rel in untouched),
+    ])
+    preserved = repo.get_rows_by_rels(untouched)
+    job = IndexStoreLocationAssignmentRepository(tmp_path).assign_location(
+        asset_rel=photo, asset_path=tmp_path / photo, gps={"lat": 52.5, "lon": 13.4},
+        location="Manual place", is_video=False, metadata_updates={},
+    )
+    before = repo.get_rows_by_rels([photo, motion])
+
+    repo.remap_album_paths(tmp_path / album_name, tmp_path / "New")
+
+    renamed = repo.get_rows_by_rels(["New/photo.jpg", "New/Nested/motion.mov"])
+    assert not repo.get_rows_by_rels([photo, motion])
+    assert renamed["New/photo.jpg"]["live_partner_rel"] == "New/Nested/motion.mov"
+    assert renamed["New/Nested/motion.mov"]["live_partner_rel"] == "New/photo.jpg"
+    assert renamed["New/Nested/motion.mov"]["parent_album_path"] == "New/Nested"
+    for key in ("thumbnail_state", "micro_thumbnail",
+                "is_favorite", "gps", "location"):
+        assert renamed["New/photo.jpg"][key] == before[photo][key]
+    from iPhoto.infrastructure.services.thumbnail_cache_keys import thumbnail_cache_key
+
+    assert renamed["New/photo.jpg"]["thumb_cache_key"].startswith(
+        f"{thumbnail_cache_key(tmp_path / 'New/photo.jpg')}-"
+    )
+    assert renamed["New/photo.jpg"]["thumb_revision"] is None
+    assert repo.get_rows_by_rels(untouched) == preserved
+    with sqlite3.connect(repo.path) as connection:
+        assert connection.execute(
+            "SELECT asset_rel, asset_path, status FROM metadata_write_jobs WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone() == ("New/photo.jpg", str(tmp_path / "New" / "photo.jpg"), "queued")
+
+
+def test_ready_thumbnail_can_publish_only_a_previously_unknown_revision(tmp_path: Path) -> None:
+    repository = get_global_repository(tmp_path)
+    repository.write_rows([{
+        "rel": "photo.jpg", "id": "photo", "thumbnail_state": "ready",
+        "thumb_cache_key": "cached", "micro_thumbnail": b"preview",
+    }])
+
+    def publish():
+        return repository.update_thumbnail_ready(
+            "photo.jpg", thumb_cache_key="cached", micro_thumbnail=b"preview",
+            expected_revision="current",
+        )
+
+    assert publish()
+    assert repository.get_rows_by_rels(["photo.jpg"])["photo.jpg"]["thumb_revision"] == "current"
+    assert not publish()
+
+
+def test_relocate_rows_rejects_changed_source_identity_without_losing_state(tmp_path: Path) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([
+        {"rel": "Old/a.jpg", "id": "a", "is_favorite": True},
+        {"rel": "Old/b.jpg", "id": "b-changed", "location": "Local place"},
+    ])
+    sources = ["Old/a.jpg", "Old/b.jpg"]
+    before = repo.get_rows_by_rels(sources)
+
+    with pytest.raises(ValueError, match="Asset changed during relocation"):
+        repo.relocate_rows(
+            {"Old/a.jpg": "New/a.jpg", "Old/b.jpg": "New/b.jpg"},
+            expected_asset_ids={"Old/a.jpg": "a", "Old/b.jpg": "b"},
+        )
+
+    assert repo.get_rows_by_rels(sources) == before
+    assert not repo.get_rows_by_rels(["New/a.jpg", "New/b.jpg"])
+
+
+def test_relocate_rows_rolls_back_when_a_destination_was_replaced(tmp_path: Path) -> None:
+    repo = get_global_repository(tmp_path)
+    repo.write_rows([
+        {"rel": "Old/a.jpg", "id": "a", "is_favorite": True},
+        {"rel": "Old/b.jpg", "id": "b", "location": "Local place"},
+        {"rel": "New/b.jpg", "id": "another-asset", "is_favorite": True},
+    ])
+    before = repo.get_rows_by_rels(["Old/a.jpg", "Old/b.jpg", "New/b.jpg"])
+
+    with pytest.raises(ValueError, match="Destination asset changed during relocation"):
+        repo.relocate_rows(
+            {"Old/a.jpg": "New/a.jpg", "Old/b.jpg": "New/b.jpg"},
+            expected_asset_ids={"Old/a.jpg": "a", "Old/b.jpg": "b"},
+        )
+
+    assert repo.get_rows_by_rels(before) == before
+    assert not repo.get_rows_by_rels(["New/a.jpg"])
 
 
 class TestGlobalRepositorySingleton:
@@ -374,36 +557,51 @@ class TestGlobalRepositorySingleton:
         row = repo.get_rows_by_ids(["asset-photo"])["asset-photo"]
         assert row["face_status"] == "pending"
 
-    def test_merge_scan_rows_preserves_live_role_and_partner_rel_for_changed_asset_id(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("include_partner", [False, True])
+    def test_merge_scan_rows_clears_both_live_roles_for_replaced_asset(
+        self, tmp_path: Path, include_partner: bool,
     ) -> None:
         repo = get_global_repository(tmp_path)
-        repo.write_rows(
-            [
-                {
-                    "rel": "album/photo.jpg",
-                    "id": "asset-old",
-                    "media_type": 0,
-                    "face_status": "skipped",
-                    "live_role": 1,
-                    "live_partner_rel": "album/photo.mov",
-                }
-            ]
-        )
+        still, motion = "photo.jpg", "album/photo.mov"
+        repo.write_rows([
+            {"rel": still, "id": "asset-old", "media_type": 0, "face_status": "done",
+             "pet_status": "done", "is_favorite": 1, "live_partner_rel": motion},
+            {"rel": motion, "id": "motion", "media_type": 1, "live_role": 1,
+             "live_partner_rel": still},
+        ])
+        before = repo.get_rows_by_rels([still, motion])
 
-        merged_rows = repo.merge_scan_rows(
-            [
-                {
-                    "rel": "album/photo.jpg",
-                    "id": "asset-new",
-                    "media_type": 0,
-                }
-            ]
-        )
+        scanned = [{**before[still], "id": "asset-new", "is_favorite": 0}]
+        if include_partner:
+            scanned.insert(0, before[motion])
+        merged = repo.merge_scan_rows(scanned)
+        indexed = repo.get_rows_by_rels([still, motion])
 
-        assert merged_rows[0]["live_role"] == 1
-        assert merged_rows[0]["live_partner_rel"] == "album/photo.mov"
-        assert merged_rows[0]["face_status"] == "pending"
+        for row in [*merged, *indexed.values()]:
+            assert row["live_role"] == 0
+            assert row["live_partner_rel"] is None
+        assert indexed[still]["face_status"] == "pending"
+        assert indexed[still]["pet_status"] == "pending"
+        assert indexed[still]["is_favorite"] == 1
+
+    def test_merge_scan_rows_preserves_trash_state_after_replacement(self, tmp_path: Path) -> None:
+        repo = get_global_repository(tmp_path)
+        rel = f"{RECENTLY_DELETED_DIR_NAME}/photo.jpg"
+        repo.write_rows([{
+            "rel": rel, "id": "old", "is_deleted": 1,
+            "original_rel_path": "Album/photo.jpg", "original_album_id": "album-id",
+        }])
+
+        repo.merge_scan_rows([{
+            "rel": rel, "id": "new", "is_deleted": 0,
+            "original_rel_path": None, "original_album_id": None,
+        }])
+
+        row = repo.get_rows_by_rels([rel])[rel]
+        assert row["id"] == "new"
+        assert row["is_deleted"] == 1
+        assert row["original_rel_path"] == "Album/photo.jpg"
+        assert row["original_album_id"] == "album-id"
 
     def test_merge_scan_rows_blocks_competing_writer_until_commit(self, tmp_path: Path) -> None:
         repo = get_global_repository(tmp_path)

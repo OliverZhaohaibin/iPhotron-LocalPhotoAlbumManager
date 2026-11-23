@@ -1,5 +1,19 @@
 # macOS Map GL Transparency Notes
 
+## 当前维护边界
+
+当前 legacy Python/OpenGL 地图在 macOS 使用 `MapGLWindowWidget` 包装
+`QOpenGLWindow`；保留 opaque clear、surface format 与 overlay 回归要求。
+这不代表所有地图后端都必须采用相同 surface。后端选择与 SDK 操作以
+[地图开发指南](MAP_EXTENSION_DEVELOPMENT.md)为准，原生生命周期以
+[架构契约](../architecture.md#runtime-contract)为准。
+
+下文保留当时的现象、失败尝试与根因推断，供排障参考；它们不是对所有
+Qt/macOS 版本的根因证明，也不是当前 revision 的实机验收记录。
+“维护 OsmAnd GL 后端的建议”属于验证方向，不能据此绕过统一启动约束。
+
+## 历史排查记录
+
 这份文档记录 Location map 在 macOS 下出现“legacy tile 区域整体透明”的排查经验。
 问题发生在透明/无边框主窗口中，地图 marker 或其他 QWidget overlay 可能正常显示，
 但底层 `QOpenGLWidget` 渲染出的 map tile 区域会透出后方窗口。

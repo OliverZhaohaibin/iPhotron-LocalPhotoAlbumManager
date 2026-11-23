@@ -962,4 +962,4 @@ CREATE TABLE IF NOT EXISTS schema_version (
 - `docs/finished/requirements/large_library_performance/REARCHITECTURE.md`
 - `docs/finished/refactor/vnext-2026-06/01-target-architecture-vnext.md`
 - `docs/finished/refactor/vnext-2026-06/28-performance-baseline.md`
-- `docs/requirements/scan_c_hotspot_optimization.md`
+- [扫描阶段 C 语言热点代码优化分析](scan_c_hotspot_optimization.md)

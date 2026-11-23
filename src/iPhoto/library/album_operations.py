@@ -68,17 +68,33 @@ class AlbumOperationsMixin:
         stop_scanning = getattr(self, "stop_scanning", None)
         if callable(stop_scanning):
             stop_scanning()
+        scan_service = self.scan_service
+        if scan_service is None:
+            raise AlbumOperationError("Active library session is unavailable.")
+        had_background_watch = bool(self._background_watch_generation)
+        self.pause_watcher()
+        self._clear_watches_for_rebind()
         try:
-            original_path.rename(target)
+            scan_service.rename_album(original_path, target)
+            # Pinned-state signals must rebuild from the new tree snapshot.
+            self._refresh_tree(notify=False)
         except FileExistsError as exc:
             raise AlbumNameConflictError(f"An album named '{new_name}' already exists.") from exc
-        except OSError as exc:  # pragma: no cover - defensive guard
+        except (OSError, ValueError) as exc:
             raise AlbumOperationError(str(exc)) from exc
-        # ``Album.open`` now normalises and persists manifest updates so the
-        # metadata stays aligned with the renamed directory immediately.
-        Album.open(target)
+        finally:
+            self._rebuild_watches()
+            if had_background_watch:
+                self._background_watch_generation = self._watch_service.configure(
+                    self._root,
+                    (self._root, *self._nodes),
+                    polling=self._background_watch_polling,
+                    scan_filters=scan_service.scan_filters,
+                )
+            self.resume_watcher()
+        # Retarget the active Gallery before the general tree refresh arrives.
         self.albumRenamed.emit(original_path, target)
-        self._refresh_tree()
+        self.treeUpdated.emit()
 
     def ensure_manifest(self, node: AlbumNode) -> Path:
         Album.open(node.path)

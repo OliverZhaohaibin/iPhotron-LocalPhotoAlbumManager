@@ -20,7 +20,7 @@ MenuSurface = Literal[
     "info_panel",
 ]
 SelectionKind = Literal["empty", "assets"]
-EntityKind = Literal["album", "person", "group", None]
+EntityKind = Literal["album", "person", "group", "pet", None]
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,7 @@ class MenuActionSpec:
     is_enabled: _ContextPredicate = lambda _context: True
     children: tuple["MenuActionSpec", ...] = field(default_factory=tuple)
     separator_before: bool = False
+    scrollable: bool = False
 
 
 def populate_menu(
@@ -97,7 +98,7 @@ def populate_menu(
         if spec.children:
             submenu = menu.addMenu(spec.label)
             submenu.menuAction().setData(spec.action_id)
-            apply_menu_style(submenu, anchor)
+            apply_menu_style(submenu, anchor, scrollable=spec.scrollable)
             child_count = populate_menu(
                 submenu,
                 context=context,

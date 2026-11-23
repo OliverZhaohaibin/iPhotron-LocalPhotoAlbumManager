@@ -10,13 +10,16 @@ Treat these as regression rules when adding or changing user-visible UI.
 - Keep source strings in English. German and Simplified Chinese translations
   live in `src/iPhoto/resources/i18n/iPhoto_de.ts` and
   `src/iPhoto/resources/i18n/iPhoto_zh_CN.ts`.
-- Do not translate user data or raw technical values: file names, paths, people
+- Do not translate user data or raw technical values: file names, paths, people/pet
   names, place-search results, camera/lens/codec values, backend names,
   environment variables, and exception details should remain original data.
 - Insert dynamic values with named placeholders such as `{filename}` or
   `{count}`. Do not build translation source strings with f-strings.
 - Use `iPhoto.gui.i18n.formatters` for UI-facing dates, numbers, decimals, and
   file sizes so formatting follows the effective UI locale.
+- Edit controls that match Apple Photos use the current
+  [edit terminology glossary](apple_photos_edit_glossary.md). The archived i18n
+  glossary is a historical snapshot, not a competing terminology source.
 
 ## Runtime refresh contract
 

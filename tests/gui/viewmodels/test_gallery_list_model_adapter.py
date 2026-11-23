@@ -1,26 +1,40 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtCore import QModelIndex, QSize, Qt, QTimer
 from PySide6.QtGui import QImage
 
 from iPhoto.application.dtos import AssetDTO
-from iPhoto.domain.models.query import AssetQuery
+from iPhoto.bootstrap.library_asset_query_service import LibraryAssetQueryService
+from iPhoto.cache.index_store.repository import AssetRepository
+from iPhoto.domain.models.query import AssetQuery, WindowResult
 from iPhoto.gui.gallery_demand import build_viewport_demand
 from iPhoto.gui.ui.models.roles import Roles
+from iPhoto.gui.viewmodels import gallery_list_model_adapter as adapter_module
+from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_collection_store import GalleryCollectionStore
 from iPhoto.gui.viewmodels.gallery_list_model_adapter import GalleryListModelAdapter
-from iPhoto.gui.viewmodels.asset_dto_converter import scan_row_to_dto
 from iPhoto.gui.viewmodels.gallery_thumbnail_hint_loader import (
     GalleryThumbnailCandidate,
     GalleryThumbnailHintResult,
 )
 from iPhoto.gui.viewmodels.gallery_tile import GalleryTileSnapshot
-from iPhoto.infrastructure.services.thumbnail_cache_service import ThumbnailCacheService
+from iPhoto.gui.viewmodels.gallery_window_loader import (
+    GallerySelectionAnchor,
+    GallerySelectionAnchorRetryTicket,
+    GalleryWindowResult,
+)
+from iPhoto.infrastructure.services.thumbnail_cache_service import (
+    ThumbnailCacheService,
+    ThumbnailLoadResult,
+    ThumbnailRequestKind,
+)
 
 
 class _Signal:
@@ -41,8 +55,40 @@ class _Signal:
 
 class _BackfillService:
     def __init__(self) -> None:
+        self.thumbnail_ready_committed = _Signal()
         self.thumbnail_backfill_completed = _Signal()
+        self.thumbnail_backfill_failed = _Signal()
         self.thumbnail_backfill_progress = _Signal()
+
+
+class _StartupStressQueryService(_BackfillService):
+    def __init__(self, library_root: Path, rows: list[dict]) -> None:
+        super().__init__()
+        self.library_root = library_root
+        self._rows = rows
+
+    def read_gallery_asset_window(
+        self,
+        _root: Path,
+        _query: AssetQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        return WindowResult(
+            first=first,
+            rows=self._rows[first : first + limit],
+            total_count=len(self._rows),
+            collection_revision=1,
+        )
+
+    def request_thumbnail_backfill(
+        self,
+        _root: Path,
+        _query: AssetQuery,
+        _first: int,
+        _limit: int,
+    ) -> int:
+        return 0
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +111,7 @@ def mock_store():
 def mock_thumb_service():
     service = MagicMock(spec=ThumbnailCacheService)
     service.peek_full_thumbnail.return_value = None
+    service.demand_status.return_value = SimpleNamespace(is_terminal=False)
     return service
 
 
@@ -91,8 +138,144 @@ def _make_dto(**overrides) -> AssetDTO:
     return AssetDTO(**defaults)
 
 
+def test_detail_prefetch_descriptor_carries_indexed_source_identity(
+    adapter,
+    mock_store,
+) -> None:
+    asset = _make_dto(
+        abs_path=Path("/library/photo.jpg"),
+        width=6000,
+        height=4000,
+        size_bytes=123,
+        metadata={"source_mtime_ns": 456, "index_revision": 7},
+    )
+    mock_store.asset_at.return_value = asset
+
+    descriptor = adapter.detail_prefetch_descriptor(3)
+
+    assert descriptor is not None
+    assert descriptor.source_identity is not None
+    assert descriptor.source_identity.revision == ("mtime", 123, 456)
+    assert (descriptor.source_identity.width, descriptor.source_identity.height) == (
+        6000,
+        4000,
+    )
+
+
 def test_adapter_init(adapter):
     assert adapter.rowCount() == 0
+
+
+def test_adapter_schedules_and_cancels_anchor_retry_on_gui_timer(
+    mock_thumb_service,
+    qapp,
+) -> None:
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = _Signal()
+    store.window_changed = _Signal()
+    store.row_changed = _Signal()
+    store.selection_anchor_retry_requested = _Signal()
+    store.count.return_value = 0
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    anchor = GallerySelectionAnchor(
+        path=Path("/library/current.jpg"),
+        asset_id="current",
+        previous_row=12,
+        selection_version=3,
+    )
+    immediate = GallerySelectionAnchorRetryTicket(
+        anchor=anchor,
+        collection_revision=8,
+        attempt=1,
+        delay_ms=0,
+    )
+
+    store.selection_anchor_retry_requested.emit(immediate)
+    qapp.processEvents()
+
+    store.retry_selection_anchor.assert_called_once_with(immediate)
+    delayed = GallerySelectionAnchorRetryTicket(
+        anchor=anchor,
+        collection_revision=8,
+        attempt=2,
+        delay_ms=500,
+    )
+    store.selection_anchor_retry_requested.emit(delayed)
+    assert adapter._selection_anchor_retry_timer.isActive()
+
+    store.selection_anchor_retry_requested.emit(None)
+
+    assert not adapter._selection_anchor_retry_timer.isActive()
+    assert adapter._pending_selection_anchor_retry is None
+    store.retry_selection_anchor.assert_called_once()
+
+
+def test_rebind_leaves_anchor_retry_cancellation_to_store(
+    mock_thumb_service,
+) -> None:
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = _Signal()
+    store.window_changed = _Signal()
+    store.row_changed = _Signal()
+    store.selection_anchor_retry_requested = _Signal()
+    store.count.return_value = 0
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    ticket = GallerySelectionAnchorRetryTicket(
+        anchor=GallerySelectionAnchor(
+            path=Path("/library/current.jpg"),
+            asset_id="current",
+            previous_row=12,
+            selection_version=3,
+        ),
+        collection_revision=8,
+        attempt=2,
+        delay_ms=500,
+    )
+    store.selection_anchor_retry_requested.emit(ticket)
+    assert adapter._selection_anchor_retry_timer.isActive()
+
+    adapter.rebind_asset_query_service(_BackfillService(), Path("/library"))
+
+    assert adapter._selection_anchor_retry_timer.isActive()
+    assert adapter._pending_selection_anchor_retry == ticket
+    adapter._selection_anchor_retry_timer.stop()
+
+
+def test_runtime_diagnostic_heartbeat_reports_privacy_safe_store_state(
+    adapter,
+    mock_store,
+    monkeypatch,
+) -> None:
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setenv("IPHOTO_RUNTIME_DIAG", "1")
+    monkeypatch.setattr(
+        adapter_module,
+        "emit_perf_event",
+        lambda name, **payload: emitted.append((name, payload)),
+    )
+    mock_store.diagnostic_snapshot.return_value = {
+        "row_count": 501,
+        "collection_revision": 12,
+        "anchor_status": "retry",
+    }
+    adapter._current_row = 7
+
+    adapter._log_runtime_diag_heartbeat()
+
+    assert emitted == [
+        (
+            "runtime_gui_heartbeat",
+            {
+                "heartbeat": 1,
+                "model_current_row": 7,
+                "viewport_generation": 0,
+                "pending_scan_batches": 0,
+                "row_count": 501,
+                "collection_revision": 12,
+                "anchor_status": "retry",
+            },
+        )
+    ]
 
 
 def test_info_role_contains_required_keys(adapter, mock_store):
@@ -128,6 +311,91 @@ def test_row_for_path_delegates_to_store(adapter, mock_store):
 
     assert adapter.row_for_path(path) == 7
     mock_store.row_for_path.assert_called_once_with(path)
+
+
+def test_cached_row_for_path_never_uses_synchronous_lookup(adapter, mock_store):
+    path = Path("/library/photo.jpg")
+    mock_store.cached_row_for_path.return_value = 9
+
+    assert adapter.cached_row_for_path(path) == 9
+    mock_store.cached_row_for_path.assert_called_once_with(path)
+    mock_store.row_for_path.assert_not_called()
+
+
+def test_setting_current_asset_does_not_resolve_its_path(adapter, mock_store):
+    path = Path("/library/photo.jpg")
+
+    visual_row = adapter.set_current_asset(3, path)
+
+    assert visual_row == 3
+    assert adapter._current_row == 3
+    assert adapter._current_path == path
+    mock_store.cached_row_for_path.assert_not_called()
+    mock_store.row_for_path.assert_not_called()
+    mock_store.pin_row.assert_not_called()
+
+
+def test_pending_selection_keeps_cached_visual_row_without_geometry_change(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    mock_store.count.return_value = 10
+    assert adapter.set_current_asset(4, path) == 4
+    changed: list[tuple] = []
+    adapter.dataChanged.connect(lambda *args: changed.append(args))
+    mock_store.cached_row_for_path.return_value = 4
+
+    visual_row = adapter.set_current_asset(None, path)
+
+    assert visual_row == 4
+    assert adapter._current_row == 4
+    assert adapter.data(adapter.index(4, 0), Roles.IS_CURRENT) is True
+    assert changed == []
+    mock_store.row_for_path.assert_not_called()
+    mock_store.pin_row.assert_not_called()
+
+
+def test_scan_reset_reanchors_visual_current_asset_by_cached_path(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    adapter.set_current_asset(4, path)
+    adapter._last_snapshot = (10, (0, 9), 1)
+    adapter._last_selection_signature = ("", "", "")
+    adapter._last_window_identity_signature = ()
+    mock_store.count.return_value = 11
+    mock_store.snapshot_signature.return_value = (11, (0, 10), 2)
+    mock_store.cached_row_for_path.return_value = 7
+    mock_store.cached_rows.return_value = []
+
+    adapter._on_source_changed()
+
+    assert adapter._current_row == 7
+    assert adapter._current_path == path
+    mock_store.row_for_path.assert_not_called()
+
+
+def test_scan_retry_clears_only_visual_row_and_retains_stable_path(
+    adapter,
+    mock_store,
+) -> None:
+    path = Path("/library/current.jpg")
+    adapter.set_current_asset(4, path)
+    adapter._last_snapshot = (10, (0, 9), 1)
+    adapter._last_selection_signature = ("", "", "")
+    adapter._last_window_identity_signature = ()
+    mock_store.count.return_value = 10
+    mock_store.snapshot_signature.return_value = (10, (0, 9), 2)
+    mock_store.cached_row_for_path.return_value = None
+    mock_store.cached_rows.return_value = []
+
+    adapter._on_source_changed()
+
+    assert adapter._current_row == -1
+    assert adapter._current_path == path
+    mock_store.row_for_path.assert_not_called()
 
 
 def test_prioritize_rows_delegates_to_store(adapter, mock_store):
@@ -167,13 +435,213 @@ def test_backfill_completion_event_queues_scan_batch(mock_thumb_service):
     store.asset_query_service = service
     store.record_scan_batch.return_value = True
     adapter = GalleryListModelAdapter(store, mock_thumb_service)
-    batch = SimpleNamespace(rows=[{"rel": "ready.jpg"}])
+    batch = SimpleNamespace(root=Path("/library"), rows=[{"rel": "ready.jpg"}])
+    completed: list[Path] = []
+    adapter.thumbnailBackfillCompleted.connect(completed.append)
 
     service.thumbnail_backfill_completed.emit(batch)
+    assert completed == []
+
     adapter._flush_pending_scan_batches()
 
     store.record_scan_batch.assert_called_once_with(batch)
     store.flush_pending_scan_refresh.assert_called_once_with()
+    assert completed == [Path("/library")]
+
+
+def test_worker_backfill_completion_waits_for_ui_refresh(qapp, mock_thumb_service):
+    service = _BackfillService()
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = MagicMock()
+    store.window_changed = MagicMock()
+    store.row_changed = MagicMock()
+    store.count.return_value = 0
+    store.asset_query_service = service
+    store.record_scan_batch.return_value = True
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    adapter._scan_batch_timer.setInterval(60_000)
+    batch = SimpleNamespace(root=Path("/library"), rows=[{"rel": "ready.jpg"}])
+    completed: list[Path] = []
+    adapter.thumbnailBackfillCompleted.connect(completed.append)
+
+    worker = threading.Thread(
+        target=service.thumbnail_backfill_completed.emit,
+        args=(batch,),
+    )
+    worker.start()
+    worker.join()
+
+    store.record_scan_batch.assert_not_called()
+    assert completed == []
+
+    qapp.processEvents()
+    store.record_scan_batch.assert_called_once_with(batch)
+    assert completed == []
+
+    adapter._flush_pending_scan_batches()
+    store.flush_pending_scan_refresh.assert_called_once_with()
+    assert completed == [Path("/library")]
+
+
+def test_startup_window_backfill_and_thumbnail_publish_keep_event_loop_responsive(
+    tmp_path: Path,
+    qapp,
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    micro = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+    micro.fill(0xFF112233)
+    rows = [
+        {
+            "id": f"asset-{index}",
+            "rel": f"photo-{index}.jpg",
+            "media_type": "image",
+            "w": 64,
+            "h": 64,
+            "bytes": 1024,
+            "micro_thumbnail": micro,
+        }
+        for index in range(3)
+    ]
+    query_service = _StartupStressQueryService(library_root, rows)
+    thumbnails = ThumbnailCacheService(tmp_path / "thumbs")
+    adapter = GalleryListModelAdapter.create(
+        asset_query_service=query_service,
+        thumbnail_service=thumbnails,
+        library_root=library_root,
+    )
+    heartbeat = {"count": 0}
+    timer = QTimer()
+    timer.setInterval(0)
+    timer.timeout.connect(lambda: heartbeat.__setitem__("count", heartbeat["count"] + 1))
+    timer.start()
+
+    try:
+        adapter.store.load_selection(library_root, query=AssetQuery())
+        deadline = time.monotonic() + 2.0
+        while adapter.rowCount() < 3 and time.monotonic() < deadline:
+            qapp.processEvents()
+
+        assert adapter.rowCount() == 3
+        assert heartbeat["count"] > 0
+
+        demand = build_viewport_demand(
+            generation=1,
+            row_count=adapter.rowCount(),
+            visible_first=0,
+            visible_last=2,
+            direction=0,
+            screens_per_second=0.0,
+            actively_scrolling=False,
+            display_bucket=64,
+        )
+        adapter.update_viewport(demand)
+        query_service.thumbnail_backfill_completed.emit(
+            SimpleNamespace(
+                rows=[
+                    {
+                        "id": "asset-0",
+                        "rel": "photo-0.jpg",
+                        "media_type": "image",
+                        "w": 64,
+                        "h": 64,
+                        "bytes": 1024,
+                        "micro_thumbnail": micro,
+                    }
+                ],
+                root=library_root,
+            )
+        )
+        full = QImage(64, 64, QImage.Format.Format_ARGB32_Premultiplied)
+        full.fill(0xFF3366CC)
+        thumbnails._stage_result(
+            ThumbnailLoadResult(
+                path=library_root / "photo-0.jpg",
+                size=adapter._thumb_size,
+                image=full,
+                generation=adapter._viewport_generation,
+                kind=ThumbnailRequestKind.VISIBLE,
+            )
+        )
+
+        deadline = time.monotonic() + 2.0
+        while (
+            thumbnails.peek_full_thumbnail(library_root / "photo-0.jpg", adapter._thumb_size)
+            is None
+            and time.monotonic() < deadline
+        ):
+            qapp.processEvents()
+
+        assert thumbnails.peek_full_thumbnail(library_root / "photo-0.jpg", adapter._thumb_size)
+        assert heartbeat["count"] > 1
+        assert adapter.data(adapter.index(0, 0), Roles.TILE_SNAPSHOT).full_pixmap is not None
+    finally:
+        timer.stop()
+        thumbnails.shutdown()
+
+
+@pytest.mark.parametrize("ready_before_window_result", [False, True])
+def test_gallery_refreshes_when_an_independent_worker_makes_a_thumbnail_ready(
+    tmp_path: Path, mock_thumb_service, ready_before_window_result: bool,
+) -> None:
+    root = tmp_path.resolve()
+    path = root / "edited.jpg"
+    path.touch()
+    repository = AssetRepository(root)
+    repository.write_rows([{
+        "rel": path.name, "id": "edited", "media_type": 0, "w": 16, "h": 16,
+        "thumbnail_state": "stale", "thumb_cache_key": "existing-key", "thumb_revision": "edit",
+    }])
+    service = LibraryAssetQueryService(root, repository_factory=lambda _root: repository)
+    adapter = GalleryListModelAdapter.create(
+        asset_query_service=service, thumbnail_service=mock_thumb_service, library_root=root,
+    )
+    requests = []
+    adapter.store.set_window_request_handler(requests.append)
+
+    def publish() -> None:
+        assert service.publish_thumbnail_ready(
+            path, revision="edit", cache_key="existing-key", micro_thumbnail=b"micro",
+        )
+
+    try:
+        adapter.store.load_selection(root, query=AssetQuery())
+        previous = requests.pop(0)
+        empty = service.read_gallery_asset_window(root, previous.query, 0, previous.limit)
+        assert empty.total_count == 0
+
+        if ready_before_window_result:
+            publish()
+        adapter.store.apply_window_result(GalleryWindowResult(
+            generation=previous.generation, first=0, last=0, rows={},
+            total_count=empty.total_count, collection_revision=empty.collection_revision,
+            requested_revision=previous.collection_revision,
+        ))
+        if not ready_before_window_result:
+            publish()
+        assert adapter.rowCount() == 0
+
+        service.thumbnail_backfill_completed.emit(SimpleNamespace(
+            job_id="thumbnail-backfill:test", root=root, rows=[],
+        ))
+        adapter._flush_pending_scan_batches()
+        refresh = requests.pop(0)
+        assert refresh.refresh_after_commit
+        assert requests == []
+        window = service.read_gallery_asset_window(root, refresh.query, 0, refresh.limit)
+        row = window.rows[0]
+        adapter.store.apply_window_result(GalleryWindowResult(
+            generation=refresh.generation, first=0, last=0,
+            rows={0: scan_row_to_dto(root, row["rel"], row)},
+            total_count=window.total_count, collection_revision=window.collection_revision,
+            requested_revision=refresh.collection_revision,
+        ))
+        assert adapter.rowCount() == 1
+        assert adapter.store.asset_at(0).abs_path == path
+    finally:
+        adapter.rebind_asset_query_service(None, None)
+        service.shutdown()
+        repository.close()
 
 
 def test_rebind_asset_query_service_moves_backfill_completion_signal(
@@ -187,20 +655,61 @@ def test_rebind_asset_query_service_moves_backfill_completion_signal(
 
     adapter.rebind_asset_query_service(new_service, Path("/library"))
 
-    assert adapter.handle_scan_batch not in old_service.thumbnail_backfill_completed.handlers
-    assert adapter.handle_scan_batch in new_service.thumbnail_backfill_completed.handlers
-    assert (
-        adapter._handle_thumbnail_backfill_progress
-        not in old_service.thumbnail_backfill_progress.handlers
-    )
-    assert (
-        adapter._handle_thumbnail_backfill_progress
-        in new_service.thumbnail_backfill_progress.handlers
-    )
+    for name in ("thumbnail_backfill_completed", "thumbnail_backfill_progress", "thumbnail_backfill_failed"):
+        assert not getattr(old_service, name).handlers
+        assert len(getattr(new_service, name).handlers) == 1
     mock_store.rebind_asset_query_service.assert_called_once_with(
         new_service,
         Path("/library"),
     )
+
+
+def test_library_rebind_discards_queued_backfill_events_for_same_path(
+    mock_store, mock_thumb_service, qapp,
+):
+    old_service = _BackfillService()
+    new_service = _BackfillService()
+    mock_store.asset_query_service = old_service
+    mock_store.record_scan_batch.return_value = True
+    adapter = GalleryListModelAdapter(mock_store, mock_thumb_service)
+    adapter._scan_batch_timer.setInterval(60_000)
+    root = Path("/library")
+    progress, completed, failures, resets = [], [], [], []
+    adapter.thumbnailBackfillProgress.connect(lambda *args: progress.append(args))
+    adapter.thumbnailBackfillCompleted.connect(completed.append)
+    adapter.thumbnailBackfillFailed.connect(lambda *args: failures.append(args))
+    adapter.thumbnailBackfillReset.connect(lambda: resets.append(True))
+    batch = SimpleNamespace(root=root, rows=[{"rel": "old.jpg"}])
+
+    # One completion has reached the model but is waiting for the refresh timer.
+    old_service.thumbnail_backfill_completed.emit(batch)
+    mock_store.record_scan_batch.assert_called_once_with(batch)
+    mock_store.record_scan_batch.reset_mock()
+
+    def emit_old_events():
+        old_service.thumbnail_ready_committed.emit(batch)
+        old_service.thumbnail_backfill_progress.emit(root, 0, 1)
+        old_service.thumbnail_backfill_completed.emit(batch)
+        old_service.thumbnail_backfill_failed.emit(root, "old decode error")
+
+    worker = threading.Thread(target=emit_old_events)
+    worker.start()
+    worker.join()
+    adapter.rebind_asset_query_service(new_service, root)
+    qapp.processEvents()
+    adapter._flush_pending_scan_batches()
+
+    mock_store.record_scan_batch.assert_not_called()
+    mock_store.flush_pending_scan_refresh.assert_not_called()
+    mock_store.finish_thumbnail_backfill.assert_not_called()
+    assert (progress, completed, failures) == ([], [], [])
+    assert resets == [True]
+
+    new_service.thumbnail_backfill_progress.emit(root, 0, 1)
+    new_service.thumbnail_backfill_failed.emit(root, "current decode error")
+    assert progress == [(root, 0, 1)]
+    assert failures == [(root, "current decode error")]
+    mock_store.finish_thumbnail_backfill.assert_called_once_with(root)
 
 
 def test_backfill_progress_is_relayed_from_query_service(mock_thumb_service):
@@ -220,6 +729,25 @@ def test_backfill_progress_is_relayed_from_query_service(mock_thumb_service):
     service.thumbnail_backfill_progress.emit(Path("/library"), 2, 5)
 
     assert progress == [(Path("/library"), 2, 5)]
+
+
+def test_backfill_failure_is_relayed_from_query_service(mock_thumb_service):
+    service = _BackfillService()
+    store = MagicMock(spec=GalleryCollectionStore)
+    store.data_changed = MagicMock()
+    store.window_changed = MagicMock()
+    store.row_changed = MagicMock()
+    store.count.return_value = 0
+    store.asset_query_service = service
+    adapter = GalleryListModelAdapter(store, mock_thumb_service)
+    failures: list[tuple[Path, str]] = []
+    adapter.thumbnailBackfillFailed.connect(
+        lambda root, error: failures.append((root, error))
+    )
+
+    service.thumbnail_backfill_failed.emit(Path("/library"), "decode crashed")
+
+    assert failures == [(Path("/library"), "decode crashed")]
 
 
 def test_decoration_role_uses_full_size_thumbnail_even_with_micro_fallback(
@@ -290,6 +818,119 @@ def test_tile_snapshot_is_micro_first_and_memory_only(adapter, mock_store, mock_
     assert snapshot.full_pixmap is None
     mock_store.ensure_row_loaded.assert_not_called()
     mock_thumb_service.request_many.assert_not_called()
+
+
+def test_surface_snapshots_peek_their_own_bucket(adapter, mock_store, mock_thumb_service):
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.asset_at.return_value = _make_dto(micro_thumbnail=micro)
+    adapter._surface_sizes = {
+        "gallery": QSize(512, 512),
+        "filmstrip": QSize(512, 512),
+    }
+
+    adapter.tile_snapshot(0, "gallery")
+    adapter.tile_snapshot(0, "filmstrip")
+
+    sizes = [call.args[1] for call in mock_thumb_service.peek_full_thumbnail.call_args_list]
+    assert sizes == [QSize(512, 512), QSize(512, 512)]
+
+
+def test_album_rename_keeps_gallery_and_filmstrip_tiles_full_before_reload(
+    tmp_path: Path, mock_store,
+) -> None:
+    from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinatorRuntime
+
+    thumbnails = ThumbnailCacheService(tmp_path / "thumbs")
+    old, new = tmp_path / "Old", tmp_path / "New"
+    size = QSize(512, 512)
+    image = QImage(size, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.blue)
+    micro = image.scaled(QSize(16, 16))
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=old / "photo.jpg", micro_thumbnail=micro,
+    )
+    adapter = GalleryListModelAdapter(mock_store, thumbnails)
+    runtime = DesktopCoordinatorRuntime.__new__(DesktopCoordinatorRuntime)
+    runtime._thumbnail_service = thumbnails
+    runtime._context = MagicMock()
+    runtime._context.library.root.return_value = tmp_path
+    runtime._pinned_items_service = MagicMock()
+    runtime._gallery_vm = MagicMock()
+    try:
+        thumbnails._stage_result(ThumbnailLoadResult(
+            old / "photo.jpg", size, image, 0, ThumbnailRequestKind.VISIBLE,
+        ))
+        thumbnails._drain_publish_queue()
+        original = adapter.tile_snapshot(0).full_pixmap
+        assert original is not None
+
+        def check_pinned_refresh(*_args, **_kwargs):
+            assert thumbnails.peek_full_thumbnail(new / "photo.jpg", size) is original
+
+        def reopen_gallery(*_args):
+            mock_store.asset_at.return_value = _make_dto(
+                abs_path=new / "photo.jpg", micro_thumbnail=micro,
+                thumb_cache_key="renamed-disk-artifact", thumb_revision=None,
+            )
+            for surface_id in ("gallery", "filmstrip"):
+                snapshot = adapter.tile_snapshot(0, surface_id)
+                assert snapshot.loading_state == "full"
+                assert snapshot.full_pixmap is original
+                assert snapshot.full_pixmap.size() == size
+
+        runtime._pinned_items_service.remap_album_path.side_effect = check_pinned_refresh
+        runtime._gallery_vm.handle_album_renamed.side_effect = reopen_gallery
+        with patch.object(
+            thumbnails, "_load_or_render_thumbnail",
+            side_effect=AssertionError("a painted tile must not reload after rename"),
+        ):
+            runtime._on_album_renamed(old, new)
+        runtime._gallery_vm.handle_album_renamed.assert_called_once_with(old, new)
+    finally:
+        thumbnails.shutdown()
+
+
+def test_release_surface_discards_queued_window_and_hint_work(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    with (
+        patch.object(adapter._window_loader, "discard_queued") as discard_windows,
+        patch.object(adapter._thumbnail_hint_loader, "discard_queued") as discard_hints,
+    ):
+        adapter.release_viewport_surface("filmstrip")
+
+    discard_windows.assert_called_once_with("filmstrip")
+    discard_hints.assert_called_once_with("filmstrip")
+    mock_store.release_viewport_demand.assert_called_once_with("filmstrip")
+    mock_thumb_service.release_surface_demand.assert_called_once_with("filmstrip")
+
+
+def test_stale_tile_never_exposes_old_full_or_micro_thumbnail(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        micro_thumbnail=micro,
+        thumbnail_state="stale",
+        thumb_revision="revision-2",
+    )
+    mock_thumb_service.peek_full_thumbnail.return_value = object()
+
+    index = adapter.index(0, 0)
+    snapshot = adapter.data(index, Roles.TILE_SNAPSHOT)
+
+    assert snapshot.loading_state == "placeholder"
+    assert snapshot.micro_image is None
+    assert snapshot.full_pixmap is None
+    assert adapter.data(index, Qt.DecorationRole) is None
+    assert adapter.data(index, Roles.MICRO_THUMBNAIL) is None
+    mock_thumb_service.peek_full_thumbnail.assert_not_called()
 
 
 def test_tile_snapshot_miss_does_not_synchronously_load(adapter, mock_store):
@@ -414,6 +1055,269 @@ def test_settled_viewport_requests_visible_and_ordered_prefetch_full(
     assert demand.full_prefetch_last > demand.visible_last
 
 
+def test_startup_gallery_warmup_keeps_guard_thumbnail_demand(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    visible = _make_dto(abs_path=Path("/library/visible.jpg"))
+    guard = _make_dto(abs_path=Path("/library/guard.jpg"))
+    mock_store.cached_rows.side_effect = [
+        [(0, visible)],
+        [(16, guard)],
+        [(0, visible)],
+    ]
+    demand = build_viewport_demand(
+        generation=1,
+        row_count=100,
+        visible_first=0,
+        visible_last=15,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+
+    adapter.begin_startup_gallery_warmup()
+    try:
+        with patch.object(adapter, "_request_thumbnail_hints") as request_hints:
+            adapter.update_viewport(demand)
+    finally:
+        adapter._startup_gallery_timeout_timer.stop()
+        adapter._startup_gallery_heartbeat_timer.stop()
+
+    mock_store.reconcile_viewport_demand.assert_called_once()
+    request_hints.assert_called_once()
+    assert request_hints.call_args.kwargs == {"guard_only": True}
+    snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
+    assert snapshot.visible_paths == (Path("/library/visible.jpg"),)
+    assert snapshot.guard_paths == (Path("/library/guard.jpg"),)
+    assert snapshot.speculative_paths == ()
+
+
+def test_startup_gallery_heartbeat_is_diag_gated(adapter, monkeypatch) -> None:
+    monkeypatch.delenv("IPHOTO_STARTUP_HANG_DIAG", raising=False)
+
+    adapter.begin_startup_gallery_warmup()
+
+    assert not adapter._startup_gallery_heartbeat_timer.isActive()
+
+    adapter._finish_startup_gallery_warmup("test")
+    monkeypatch.setenv("IPHOTO_STARTUP_HANG_DIAG", "1")
+
+    adapter.begin_startup_gallery_warmup()
+
+    assert adapter._startup_gallery_heartbeat_timer.isActive()
+    adapter._finish_startup_gallery_warmup("test")
+
+
+def test_startup_gallery_ready_after_visible_thumbnail_terminal(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+) -> None:
+    emitted: list[None] = []
+    adapter.startupGalleryReady.connect(lambda: emitted.append(None))
+    mock_store.cached_row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.cached_rows.return_value = [
+        (0, _make_dto(abs_path=Path("/library/visible.jpg")))
+    ]
+    mock_thumb_service.demand_status.return_value = SimpleNamespace(is_terminal=True)
+    demand = build_viewport_demand(
+        generation=1,
+        row_count=1,
+        visible_first=0,
+        visible_last=0,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter._viewport_demand = demand
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
+
+    adapter.begin_startup_gallery_warmup()
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
+    adapter._on_thumbnail_ready(Path("/library/visible.jpg"))
+    adapter._flush_thumbnail_updates()
+
+    assert emitted == [None]
+    assert adapter._startup_gallery_warmup_active is False
+
+
+def test_startup_thumbnail_milestone_requires_visible_active_warmup(
+    adapter,
+    mock_store,
+    monkeypatch,
+) -> None:
+    marks: list[str] = []
+    monkeypatch.setattr(adapter_module, "mark", lambda stage, **_details: marks.append(stage))
+    mock_store.count.return_value = 2
+    adapter._viewport_demand = build_viewport_demand(
+        generation=1,
+        row_count=2,
+        visible_first=0,
+        visible_last=0,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter.begin_startup_gallery_warmup()
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
+
+    adapter._pending_thumbnail_rows.add(1)
+    adapter._flush_thumbnail_updates()
+
+    assert "startup.first_usable_thumbnail" not in marks
+
+    adapter._pending_thumbnail_rows.add(0)
+    adapter._flush_thumbnail_updates()
+
+    assert marks.count("startup.first_usable_thumbnail") == 1
+
+    adapter._finish_startup_gallery_warmup("test")
+    adapter._startup_usable_thumbnail_logged = False
+    adapter._pending_thumbnail_rows.add(0)
+    adapter._flush_thumbnail_updates()
+
+    assert marks.count("startup.first_usable_thumbnail") == 1
+
+
+def test_startup_gallery_timeout_emits_ready_when_thumbnail_never_terminal(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+) -> None:
+    emitted: list[None] = []
+    adapter.startupGalleryReady.connect(lambda: emitted.append(None))
+    mock_store.count.return_value = 1
+    mock_store.cached_rows.return_value = [
+        (0, _make_dto(abs_path=Path("/library/visible.jpg")))
+    ]
+    mock_thumb_service.demand_status.return_value = SimpleNamespace(
+        is_terminal=False,
+        resident=0,
+        queued=1,
+        active=0,
+        staged=0,
+        failed=0,
+        missing=0,
+    )
+    adapter._viewport_demand = build_viewport_demand(
+        generation=1,
+        row_count=1,
+        visible_first=0,
+        visible_last=0,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+
+    adapter.begin_startup_gallery_warmup()
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
+    adapter._on_startup_gallery_warmup_timeout()
+
+    assert emitted == [None]
+    assert adapter._startup_gallery_warmup_active is False
+    assert adapter._startup_gallery_ready_emitted is True
+    assert not adapter._startup_gallery_timeout_timer.isActive()
+
+
+def test_startup_gallery_warmup_restores_full_prefetch_after_ready(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+    qapp,
+):
+    visible = _make_dto(abs_path=Path("/library/visible.jpg"))
+    guard = _make_dto(abs_path=Path("/library/guard.jpg"))
+    mock_store.cached_rows.side_effect = [
+        [(0, visible)],
+        [],
+        [(0, visible)],
+        [(0, visible), (16, guard)],
+    ]
+    demand = build_viewport_demand(
+        generation=2,
+        row_count=100,
+        visible_first=0,
+        visible_last=15,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter._viewport_demand = demand
+
+    adapter.begin_startup_gallery_warmup()
+    adapter._reconcile_full_thumbnail_demand()
+    adapter._finish_startup_gallery_warmup("ready")
+    qapp.processEvents()
+
+    startup_snapshot = mock_thumb_service.reconcile_demand.call_args_list[0].args[0]
+    restored = mock_thumb_service.reconcile_demand.call_args_list[-1].args[0]
+    assert startup_snapshot.guard_paths == ()
+    assert restored.guard_paths == (Path("/library/guard.jpg"),)
+
+
+def test_startup_gallery_timeout_restores_full_prefetch_on_next_tick(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+    qapp,
+):
+    visible = _make_dto(abs_path=Path("/library/visible.jpg"))
+    guard = _make_dto(abs_path=Path("/library/guard.jpg"))
+    speculative = _make_dto(abs_path=Path("/library/speculative.jpg"))
+
+    def cached_rows(first: int, last: int):
+        rows = []
+        for row, dto in ((0, visible), (16, guard), (64, speculative)):
+            if first <= row <= last:
+                rows.append((row, dto))
+        return rows
+
+    mock_store.cached_rows.side_effect = cached_rows
+    mock_store.count.return_value = 100
+    mock_thumb_service.demand_status.return_value = SimpleNamespace(
+        is_terminal=False,
+        resident=0,
+        queued=1,
+        active=0,
+        staged=0,
+        failed=0,
+        missing=0,
+    )
+    demand = build_viewport_demand(
+        generation=2,
+        row_count=100,
+        visible_first=0,
+        visible_last=15,
+        direction=0,
+        screens_per_second=0.0,
+        actively_scrolling=False,
+    )
+    adapter._viewport_demand = demand
+
+    adapter.begin_startup_gallery_warmup()
+    adapter._startup_gallery_window_seen = True
+    adapter._startup_gallery_viewport_seen = True
+    adapter._reconcile_full_thumbnail_demand()
+    startup_snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
+
+    adapter._on_startup_gallery_warmup_timeout()
+    qapp.processEvents()
+
+    restored = mock_thumb_service.reconcile_demand.call_args.args[0]
+    assert startup_snapshot.visible_paths == (Path("/library/visible.jpg"),)
+    assert startup_snapshot.guard_paths == (Path("/library/guard.jpg"),)
+    assert startup_snapshot.speculative_paths == ()
+    assert restored.guard_paths == (Path("/library/guard.jpg"),)
+    assert restored.speculative_paths == (Path("/library/speculative.jpg"),)
+
+
 def test_cached_thumb_cache_key_becomes_prefetch_candidate(
     adapter,
     mock_store,
@@ -443,9 +1347,12 @@ def test_cached_thumb_cache_key_becomes_prefetch_candidate(
 
     snapshot = mock_thumb_service.reconcile_demand.call_args.args[0]
     candidates = snapshot.candidates
-    assert len(candidates) == 1
-    assert candidates[0].path == Path("/library/prefetch.jpg")
-    assert candidates[0].l2_cache_key == "l2-prefetch"
+    prefetch_candidate = next(
+        candidate
+        for candidate in candidates
+        if candidate.path == Path("/library/prefetch.jpg")
+    )
+    assert prefetch_candidate.l2_cache_key == "l2-prefetch"
     assert candidates[0].kind == "guard"
 
 
@@ -680,7 +1587,7 @@ def test_continuous_burst_discards_queued_thumbnail_hint(adapter):
     with patch.object(adapter._thumbnail_hint_loader, "discard_queued") as discard:
         adapter._request_thumbnail_hints(demand)
 
-    discard.assert_called_once_with()
+    discard.assert_called_once_with("gallery")
 
 
 def test_rebind_asset_query_service_updates_store(adapter, mock_store):
@@ -883,7 +1790,11 @@ def test_old_thumbnail_hint_request_id_with_matching_selection_is_merged(
     assert any(candidate.path == Path("/library/late.jpg") for candidate in candidates)
 
 
-def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter, mock_store):
+def test_invalidate_thumbnail_queues_refresh_and_emits_tile_roles(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
     path = Path("/videos/clip.mp4")
     adapter._duration_cache[path] = 8.0
     mock_store.row_for_path.return_value = 0
@@ -896,7 +1807,62 @@ def test_invalidate_thumbnail_clears_duration_cache_and_emits_size_role(adapter,
         adapter.invalidate_thumbnail(str(path))
 
     assert path not in adapter._duration_cache
+    mock_thumb_service.get_thumbnail.assert_called_once_with(
+        path,
+        adapter._thumb_size,
+        priority="high",
+    )
+    assert Qt.DecorationRole in emitted_roles
+    assert Roles.TILE_SNAPSHOT in emitted_roles
     assert Roles.SIZE in emitted_roles
+
+
+def test_revisioned_invalidation_queues_stale_target_and_hides_local_micro(
+    adapter,
+    mock_store,
+    mock_thumb_service,
+):
+    path = Path("/photos/edited.jpg")
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=path,
+        micro_thumbnail=micro,
+        thumbnail_state="ready",
+    )
+
+    adapter.invalidate_thumbnail(str(path), desired_revision="revision-2")
+
+    mock_thumb_service.invalidate.assert_called_once_with(
+        path,
+        size=adapter._thumb_size,
+        desired_revision="revision-2",
+    )
+    mock_thumb_service.get_thumbnail.assert_called_once_with(
+        path,
+        adapter._thumb_size,
+        priority="high",
+        thumbnail_state="stale",
+        thumb_revision="revision-2",
+    )
+    assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is None
+
+
+def test_retained_edit_keeps_last_drawable_preview(adapter, mock_store, mock_thumb_service):
+    path = Path("/photos/edited.jpg")
+    micro = QImage(2, 2, QImage.Format.Format_RGB32)
+    mock_store.row_for_path.return_value = 0
+    mock_store.count.return_value = 1
+    mock_store.asset_at.return_value = _make_dto(
+        abs_path=path, micro_thumbnail=micro, thumbnail_state="ready",
+    )
+
+    adapter.invalidate_thumbnail(str(path), desired_revision="revision-2", retained_thumbnail=True)
+
+    mock_thumb_service.invalidate.assert_not_called()
+    mock_thumb_service.get_thumbnail.assert_not_called()
+    assert adapter.data(adapter.index(0, 0), Roles.MICRO_THUMBNAIL) is micro
 
 
 def test_size_role_returns_trimmed_duration_for_video(adapter, mock_store):
@@ -1038,7 +2004,7 @@ def test_source_revision_change_republishes_static_viewport_demand(
 
     assert adapter._demand_coordinator.collection_revision == 2
     assert adapter._viewport_demand.generation > previous_generation
-    request_hints.assert_called_once_with(adapter._viewport_demand)
+    request_hints.assert_called_once_with(adapter._viewport_demand, guard_only=False)
     reconcile_full.assert_called_once_with()
 
 

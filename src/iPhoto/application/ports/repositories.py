@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from dataclasses import dataclass
@@ -64,11 +64,27 @@ class AssetRepositoryPort(Protocol):
     def append_rows(self, rows: Iterable[dict[str, Any]]) -> None:
         """Append or replace already-materialized asset rows."""
 
-    def remove_rows(self, rels: Iterable[str]) -> None:
+    def remove_rows(self, rels: Iterable[str], *, clear_live_partners: bool = False) -> None:
         """Remove rows identified by library-relative paths."""
+
+    def relocate_rows(
+        self,
+        destinations: Mapping[str, str],
+        *,
+        expected_asset_ids: Mapping[str, str],
+    ) -> None:
+        """Atomically relocate verified assets and their pending metadata writes."""
 
     def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
         """Return existing rows keyed by library-relative path."""
+
+    def remap_album_paths(self, old_root: Path, new_root: Path) -> None:
+        """Retarget indexed media and cached pixels, dropping path-based revisions."""
+
+    def get_unpaired_live_candidates(
+        self, content_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Find active, unpaired rows sharing the supplied Live Photo identifiers."""
 
     def read_all(
         self,
@@ -112,6 +128,9 @@ class AssetRepositoryPort(Protocol):
     def count_collection(self, query: CollectionQuery) -> int:
         """Return the number of rows matching a collection query."""
 
+    def collection_revision(self) -> int:
+        """Return the committed asset snapshot revision."""
+
     def read_collection_page(
         self,
         query: CollectionQuery,
@@ -136,6 +155,18 @@ class AssetRepositoryPort(Protocol):
     ) -> WindowResult:
         """Return a lightweight collection window for Gallery rendering."""
 
+    def read_gallery_collection_windows(
+        self,
+        query: CollectionQuery,
+        ranges: tuple[tuple[int, int], ...],
+    ) -> tuple[WindowResult, ...]:
+        """Read lightweight windows from one snapshot."""
+
+    def find_collection_positions(
+        self, query: CollectionQuery, paths: tuple[Path, ...], order_revision: int,
+    ) -> dict[Path, tuple[str, int]] | None:
+        """Resolve asset identities and positions at the requested order revision."""
+
     def read_thumbnail_hint_window(
         self,
         query: CollectionQuery,
@@ -159,8 +190,25 @@ class AssetRepositoryPort(Protocol):
         micro_thumbnail: bytes | None = None,
         thumb_cache_key: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Update thumbnail readiness for one row."""
+        expected_revision: str | None = None,
+        expected_asset_id: str | None = None,
+        expected_index_revision: int | None = None,
+    ) -> bool:
+        """Conditionally publish thumbnail readiness for one row."""
+
+    def mark_thumbnail_stale(self, rel: str, *, desired_revision: str) -> bool:
+        """Select a desired thumbnail revision and suppress the old micro layer."""
+
+    def mark_thumbnail_refresh_pending(
+        self,
+        rel: str,
+        *,
+        desired_revision: str,
+        cache_key: str,
+        expected_asset_id: str,
+        expected_index_revision: int,
+    ) -> bool:
+        """Queue replacement inputs for an asset with a verified drawable artifact."""
 
     def create_scan_job(
         self,
@@ -221,6 +269,9 @@ class AssetRepositoryPort(Protocol):
         updates: Iterable[tuple[str, int, str | None]],
     ) -> None:
         """Replace Live Photo role state only inside a library-relative prefix."""
+
+    def update_live_roles(self, updates: Iterable[tuple[str, int, str | None]]) -> None:
+        """Update the Live Photo roles of the supplied rows."""
 
 
 class AlbumRepositoryPort(Protocol):

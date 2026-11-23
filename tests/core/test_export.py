@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QColor, QImage
 
 from iPhoto.core.export import (
     export_asset,
@@ -14,6 +14,7 @@ from iPhoto.core.export import (
     _parse_hhmmss_duration,
     probe_duration_seconds,
 )
+from iPhoto.core.geometry import apply_geometry_and_crop
 
 
 def test_get_unique_destination(tmp_path: Path) -> None:
@@ -59,8 +60,9 @@ def test_resolve_export_path() -> None:
 
 @patch("iPhoto.core.export.sidecar")
 @patch("iPhoto.core.export.image_loader")
+@patch("iPhoto.core.export.apply_geometry_and_crop")
 @patch("iPhoto.core.export.apply_adjustments")
-def test_render_image(mock_apply, mock_loader, mock_sidecar) -> None:
+def test_render_image(mock_apply, mock_geometry, mock_loader, mock_sidecar) -> None:
     path = Path("/path/to/image.jpg")
 
     # Setup mocks
@@ -74,6 +76,7 @@ def test_render_image(mock_apply, mock_loader, mock_sidecar) -> None:
     mock_loader.load_qimage.return_value = mock_image
 
     mock_apply.return_value = mock_image
+    mock_geometry.return_value = mock_image
 
     # Test
     result = render_image(path)
@@ -82,6 +85,49 @@ def test_render_image(mock_apply, mock_loader, mock_sidecar) -> None:
     mock_sidecar.load_adjustments.assert_called_with(path)
     mock_loader.load_qimage.assert_called_with(path)
     mock_apply.assert_called()
+    mock_geometry.assert_called_once_with(mock_image, {"Crop_CX": 0.5})
+
+
+def test_geometry_export_keeps_extended_crop_inside_perspective_image() -> None:
+    image = QImage(300, 200, QImage.Format.Format_ARGB32)
+    image.fill(QColor(255, 0, 0, 255))
+
+    rendered = apply_geometry_and_crop(
+        image,
+        {
+            "Perspective_Vertical": 1.0,
+            "Crop_CX": 0.5,
+            "Crop_CY": 0.75,
+            "Crop_W": 0.2,
+            "Crop_H": 0.7,
+        },
+    )
+
+    assert rendered is not None
+    assert rendered.size().width() == 60
+    assert rendered.size().height() == 140
+    corners = (
+        (0, 0),
+        (rendered.width() - 1, 0),
+        (0, rendered.height() - 1),
+        (rendered.width() - 1, rendered.height() - 1),
+    )
+    assert all(rendered.pixelColor(x, y).alpha() == 255 for x, y in corners)
+
+
+def test_geometry_export_rejects_disproportionate_crop_dimensions() -> None:
+    image = QImage(10, 10, QImage.Format.Format_ARGB32)
+
+    rendered = apply_geometry_and_crop(
+        image,
+        {
+            "Perspective_Vertical": 0.1,
+            "Crop_W": 1e308,
+            "Crop_H": 1.0,
+        },
+    )
+
+    assert rendered is None
 
 
 @patch("iPhoto.core.export.render_video")

@@ -275,6 +275,8 @@ class LibraryAssetLifecycleService:
         exclude_globs: Iterable[str] | None = None,
         preserve_modified_after_ms: int | None = None,
         current_scan_job_id: str | None = None,
+        root_only: bool = False,
+        watched_albums: frozenset[Path] = frozenset(),
     ) -> int:
         """Explicitly prune stale scan rows for a completed scan scope."""
 
@@ -289,6 +291,8 @@ class LibraryAssetLifecycleService:
             exclude_globs=exclude_globs,
             preserve_modified_after_ms=preserve_modified_after_ms,
             current_scan_job_id=current_scan_job_id,
+            root_only=root_only,
+            watched_albums=watched_albums,
         )
 
     def _remove_source_rows(

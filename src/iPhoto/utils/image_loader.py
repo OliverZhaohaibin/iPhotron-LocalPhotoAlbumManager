@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
-import logging
+from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
-from .deps import load_pillow
 from ..core.raw_processor import is_raw_extension, load_raw_to_pil
+from .deps import load_pillow
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 _PILLOW = load_pillow()
 if _PILLOW is not None:  # pragma: no branch - import guard
@@ -23,12 +26,27 @@ else:  # pragma: no cover - executed when Pillow is unavailable
     _ImageOps = None  # type: ignore[assignment]
     _ImageQt = None  # type: ignore[assignment]
 
-# Type checking import
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from PIL import Image
-
 _LOGGER = logging.getLogger(__name__)
+
+# Qt image plugins execute native code before Python can recover from decoder
+# failures.  In particular, querying a JPEG reader's size has crashed headless
+# Linux processes after other Qt plugins were exercised.  Pillow is already a
+# required runtime dependency and gives us a Python-level failure boundary for
+# the formats it decodes natively.  Keep Qt for formats where its platform
+# plugins add compatibility (for example HEIC on some installations).
+_PILLOW_NATIVE_EXTENSIONS = frozenset(
+    {
+        ".bmp",
+        ".gif",
+        ".jfif",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+)
 
 
 def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
@@ -45,11 +63,25 @@ def load_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
     if is_raw_extension(source.suffix):
         return _load_raw_qimage(source, target)
 
+    # Do not hand malformed files in Pillow-native formats to Qt as a fallback:
+    # native image plugins can terminate the process instead of returning a
+    # null QImage.  If Pillow itself is unavailable, retain the Qt compatibility
+    # path so installations with a partially broken optional Pillow stack can
+    # still display images.
+    pillow_qimage_available = _Image is not None and _ImageOps is not None and _ImageQt is not None
+    if source.suffix.casefold() in _PILLOW_NATIVE_EXTENSIONS and pillow_qimage_available:
+        return _load_with_pillow(source, target)
+
+    return _load_with_qt(source, target)
+
+
+def _load_with_qt(source: Path, target: QSize | None = None) -> Optional[QImage]:
+    """Decode formats that require Qt platform image plugins."""
+
     # ``QImageReader`` is most efficient when it can stream directly from the
-    # filename because many formats (JPEG, HEIC, etc.) expose fast-paths for
+    # filename because platform formats such as HEIC expose fast-paths for
     # downscaling during decode.  Reading the bytes eagerly would defeat those
-    # optimisations, so we prefer to hand the path to Qt and only fall back to
-    # Pillow if decoding fails entirely.
+    # optimisations, so this compatibility path hands the path directly to Qt.
     reader = QImageReader(str(source))
     # Qt maintains a process-wide image cache that is enabled by default.
     # Large libraries can end up decoding hundreds of images during a single
@@ -112,22 +144,34 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
 
     # Avoid handing arbitrary/corrupt index BLOBs to platform image plugins.
     # Some Qt/PySide builds can crash natively instead of returning a null image.
-    if not (
-        data.startswith(b"\xff\xd8\xff")
-        or data.startswith(b"\x89PNG\r\n\x1a\n")
-        or (len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP")
-    ):
+    if data.startswith(b"\xff\xd8\xff"):
+        image_format = "JPEG"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        image_format = "PNG"
+    elif len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        image_format = "WEBP"
+    else:
         return None
 
-    if _Image is not None and _ImageOps is not None and _ImageQt is not None:
+    pillow_owns_format = (
+        _Image is not None
+        and _ImageOps is not None
+        and _ImageQt is not None
+        and _pillow_supports_format(image_format)
+    )
+    if pillow_owns_format:
         try:
             with _Image.open(BytesIO(data)) as img:  # type: ignore[union-attr]
                 img = _ImageOps.exif_transpose(img)
                 qt_image = _ImageQt(img.convert("RGBA"))
-            return QImage(qt_image)
+                return QImage(qt_image).copy()
         except Exception:
             _LOGGER.debug("Pillow failed to decode image bytes in qimage_from_bytes")
+            return None
 
+    # Qt remains a compatibility decoder only when the Pillow-to-QImage bridge
+    # is unavailable.  Once Pillow has accepted responsibility for these native
+    # formats, a decode failure must not be retried inside a native Qt plugin.
     image = QImage()
     if image.loadFromData(data):
         return image
@@ -140,13 +184,25 @@ def qimage_from_bytes(data: bytes) -> Optional[QImage]:
     return None
 
 
+def _pillow_supports_format(image_format: str) -> bool:
+    if _Image is None:
+        return False
+    try:
+        initialize = getattr(_Image, "init", None)
+        if callable(initialize):
+            initialize()
+        return str(image_format).upper() in getattr(_Image, "OPEN", {})
+    except Exception:
+        return False
+
+
 def qimage_from_pil(image: "Image.Image") -> Optional[QImage]:
     """Return a :class:`QImage` from a PIL Image."""
     if _ImageQt is None:
         return None
     try:
         qt_image = _ImageQt(image.convert("RGBA"))
-        return QImage(qt_image)
+        return QImage(qt_image).copy()
     except Exception:
         _LOGGER.exception("Failed to convert PIL image to QImage")
         return None
@@ -163,10 +219,10 @@ def _load_with_pillow(source: Path, target: QSize | None = None) -> Optional[QIm
                 resample_filter = getattr(resample, "LANCZOS", _Image.BICUBIC)
                 img.thumbnail((target.width(), target.height()), resample_filter)
             qt_image = _ImageQt(img.convert("RGBA"))  # type: ignore[attr-defined]
+            return QImage(qt_image).copy()
     except Exception:
         _LOGGER.exception("Pillow failed to load image from %s", source)
         return None
-    return QImage(qt_image)
 
 
 def _load_raw_qimage(source: Path, target: QSize | None = None) -> Optional[QImage]:
@@ -195,10 +251,10 @@ def _load_raw_qimage(source: Path, target: QSize | None = None) -> Optional[QIma
 
     try:
         qt_image = _ImageQt(pil_img.convert("RGBA"))
+        return QImage(qt_image).copy()
     except Exception:
         _LOGGER.exception("Failed to convert RAW PIL image to QImage for %s", source)
         return None
-    return QImage(qt_image)
 
 
 def generate_micro_thumbnail(source: Path) -> Optional[bytes]:

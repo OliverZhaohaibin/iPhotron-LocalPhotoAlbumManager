@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, Iterable, Optional, cast
+from typing import Iterable, Optional, cast
 
 from PySide6.QtCore import QObject, QRectF, Qt, QEvent, Signal, Slot
 from PySide6.QtGui import (
@@ -18,7 +19,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPalette,
 )
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QStackedLayout, QWidget
 
 from ....application.ports import MapInteractionServicePort, MapRuntimePort
 from ....application.services.map_interaction_service import LibraryMapInteractionService
@@ -74,6 +75,7 @@ def _configure_opaque_map_container(
 class _MarkerLayer(QWidget):
     """Transparent overlay that paints thumbnail clusters with callout arrows."""
 
+    MAX_PIXMAPS = 512
     MARKER_SIZE = 72
     THUMBNAIL_NATIVE_SIZE = 192
     THUMBNAIL_DISPLAY_SIZE = 56
@@ -88,7 +90,8 @@ class _MarkerLayer(QWidget):
         # events which are handled by :class:`PhotoMapView` and the map widget.
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._clusters: list[_MarkerCluster] = []
-        self._pixmaps: Dict[str, QPixmap] = {}
+        self._visible_rels: set[str] = set()
+        self._pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
         self._placeholder = self._create_placeholder()
         self._badge_font = QFont()
         self._badge_font.setBold(True)
@@ -118,6 +121,11 @@ class _MarkerLayer(QWidget):
         """Replace the rendered clusters and schedule a repaint."""
 
         self._clusters = list(items)
+        self._visible_rels = {
+            cluster.representative.library_relative
+            for cluster in self._clusters
+        }
+        self._trim_pixmaps()
         self.update()
 
     def set_thumbnail(self, rel: str, pixmap: QPixmap) -> None:
@@ -126,7 +134,31 @@ class _MarkerLayer(QWidget):
         if pixmap.isNull():
             return
         self._pixmaps[rel] = pixmap
+        self._pixmaps.move_to_end(rel)
+        self._trim_pixmaps()
         self.update()
+
+    def _trim_pixmaps(self) -> None:
+        """Bound history entries without evicting currently visible markers."""
+
+        while len(self._pixmaps) > self.MAX_PIXMAPS:
+            eviction_rel = next(
+                (
+                    cached_rel
+                    for cached_rel in self._pixmaps
+                    if cached_rel not in self._visible_rels
+                ),
+                None,
+            )
+            if eviction_rel is None:
+                return
+            self._pixmaps.pop(eviction_rel, None)
+
+    def remove_thumbnail(self, rel: str) -> None:
+        """Remove one obsolete marker thumbnail without disturbing the rest."""
+
+        if self._pixmaps.pop(rel, None) is not None:
+            self.update()
 
     def clear_pixmaps(self) -> None:
         """Drop cached pixmaps so outdated thumbnails are not reused."""
@@ -175,6 +207,8 @@ class _MarkerLayer(QWidget):
         thumbnail = self._pixmaps.get(cluster.representative.library_relative)
         if thumbnail is None:
             thumbnail = self._placeholder
+        else:
+            self._pixmaps.move_to_end(cluster.representative.library_relative)
         if not thumbnail.isNull():
             thumb_rect = QRectF(
                 rect.left() + border,
@@ -270,19 +304,22 @@ class PhotoMapView(QWidget):
     This enables O(1) gallery opening without additional database lookups.
     """
 
+    backendChanged = Signal()
+
     def __init__(
         self,
         parent: Optional[QWidget] = None,
         *,
         map_source: MapSourceSpec | None = None,
         map_runtime: MapRuntimePort | None = None,
+        defer_runtime: bool = False,
         map_interaction_service: MapInteractionServicePort | None = None,
     ) -> None:
         super().__init__(parent)
         _configure_opaque_map_container(self)
-        layout = QVBoxLayout(self)
+        layout = QStackedLayout(self)
+        layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
         self._layout = layout
         self._requested_map_source = map_source
         self._map_runtime = map_runtime
@@ -302,6 +339,10 @@ class PhotoMapView(QWidget):
         self._marker_paint_callback = None
         self._assets: list[GeotaggedAsset] = []
         self._assets_library_root: Path | None = None
+        self._is_shutting_down = False
+        self._shutdown_complete = False
+        self._map_widget_teardown_complete = True
+        self._tooltip_teardown_complete = False
 
         # ``FloatingToolTip`` replicates ``QToolTip`` using a styled ``QFrame``
         # instead of a custom paint routine.  The standard tooltip inherits the
@@ -323,7 +364,8 @@ class PhotoMapView(QWidget):
                 filter_candidate.ignore_object(self._tooltip)
         self._last_tooltip_text = ""
         self._thumbnail_loader = ThumbnailLoader(self)
-        self._build_map_widget()
+        if not defer_runtime:
+            self._build_map_widget()
 
     def set_map_interaction_service(
         self,
@@ -353,6 +395,8 @@ class PhotoMapView(QWidget):
     def set_map_runtime(self, map_runtime: MapRuntimePort | None) -> None:
         """Bind the session-owned map runtime snapshot for later refreshes."""
 
+        if self._shutdown_complete:
+            return
         previous_capabilities = self._map_runtime_capabilities
         previous_package_root = self._map_package_root
         self._map_runtime = map_runtime
@@ -361,15 +405,17 @@ class PhotoMapView(QWidget):
         )
         self._map_package_root = resolve_map_package_root(map_runtime)
         if (
-            self._map_runtime_capabilities != previous_capabilities
+            not hasattr(self, "_map_widget")
+            or self._map_runtime_capabilities != previous_capabilities
             or self._map_package_root != previous_package_root
         ):
             self._rebuild_map_widget()
+            self.backendChanged.emit()
 
     def uses_native_osmand_widget(self) -> bool:
         """Return ``True`` when the current backend is the native GL widget."""
 
-        return isinstance(self._map_widget, NativeOsmAndWidget)
+        return hasattr(self, "_map_widget") and isinstance(self._map_widget, NativeOsmAndWidget)
 
     def runtime_diagnostics(self) -> str:
         """Return the last emitted runtime diagnostics line."""
@@ -379,29 +425,32 @@ class PhotoMapView(QWidget):
     def set_assets(self, assets: Iterable[GeotaggedAsset], library_root: Path) -> None:
         """Replace the asset catalogue shown on the map."""
 
+        if self._shutdown_complete:
+            return
         self._assets = list(assets)
         self._assets_library_root = library_root
-        self._marker_controller.set_assets(self._assets, library_root)
+        if hasattr(self, "_marker_controller"):
+            self._marker_controller.set_assets(self._assets, library_root)
 
     def clear(self) -> None:
         """Remove all markers from the map."""
 
+        if self._shutdown_complete:
+            return
         if self._last_tooltip_text:
             self._tooltip.hide_tooltip()
             self._last_tooltip_text = ""
         self._assets = []
         self._assets_library_root = None
-        self._marker_controller.clear()
+        if hasattr(self, "_marker_controller"):
+            self._marker_controller.clear()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        if self._shutdown_complete or self._map_widget_teardown_complete:
+            return
         if self._overlay_attachment.uses_post_render:
             self._overlay.update()
-        else:
-            self._overlay_attachment.sync_widget_overlay(
-                self._overlay,
-                geometry=self._map_widget.geometry(),
-            )
         self._marker_controller.handle_resize()
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
@@ -421,6 +470,8 @@ class PhotoMapView(QWidget):
         super().focusOutEvent(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if self._shutdown_complete or self._map_widget_teardown_complete:
+            return super().eventFilter(watched, event)
         if watched is self._map_event_target:
             if event.type() == QEvent.Type.MouseMove:
                 mouse_event = cast(QMouseEvent, event)
@@ -489,17 +540,33 @@ class PhotoMapView(QWidget):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Ensure background workers shut down before the widget closes."""
 
-        if self._last_tooltip_text:
-            self._tooltip.hide_tooltip()
-            self._last_tooltip_text = ""
-        self._tooltip.hide_tooltip()
-        self._tooltip.deleteLater()
-        self._teardown_map_widget()
+        self.shutdown()
         super().closeEvent(event)
+
+    def shutdown(self) -> None:
+        """Release map workers and child widgets before application teardown."""
+
+        if self._shutdown_complete or self._is_shutting_down:
+            return
+        self._is_shutting_down = True
+        try:
+            if self._last_tooltip_text:
+                self._tooltip.hide_tooltip()
+                self._last_tooltip_text = ""
+            if not self._tooltip_teardown_complete:
+                self._tooltip.hide_tooltip()
+                self._tooltip.deleteLater()
+                self._tooltip_teardown_complete = True
+            self._teardown_map_widget()
+        finally:
+            self._shutdown_complete = True
+            self._is_shutting_down = False
 
     def _handle_city_annotations(self, cities: Iterable[CityAnnotation]) -> None:
         """Forward city annotations to the map widget for background rendering."""
 
+        if self._shutdown_complete or self._map_widget_teardown_complete:
+            return
         self._map_widget.set_city_annotations(list(cities))
 
     def _build_map_widget(self) -> None:
@@ -515,6 +582,7 @@ class PhotoMapView(QWidget):
             raise RuntimeError("Photo map widget backend unavailable")
 
         self._map_widget = result.widget
+        self._map_widget_teardown_complete = False
         self._backend_kind = result.backend_kind
         self._resolved_map_source = result.resolved_map_source
         assert self._resolved_map_source is not None
@@ -548,13 +616,10 @@ class PhotoMapView(QWidget):
             )
         else:
             self._overlay = _MarkerLayer(self)
-            self._overlay_attachment.attach(
-                self._map_widget,
-                callback=None,
-                overlay=self._overlay,
-                overlay_geometry=self._map_widget.geometry(),
-                raise_overlay=True,
-            )
+            # The layout shows and sizes both widgets even when the map is
+            # attached after this page is already visible.
+            self._layout.addWidget(self._overlay)
+            self._layout.setCurrentWidget(self._overlay)
         self._marker_paint_callback = self._overlay_attachment.callback
 
         self._event_bridge.bind(self._map_widget)
@@ -584,11 +649,14 @@ class PhotoMapView(QWidget):
         self._marker_controller.citiesUpdated.connect(self._handle_city_annotations)
         self._marker_controller.markerActivated.connect(self._on_marker_activated)
         self._marker_controller.thumbnailUpdated.connect(self._overlay.set_thumbnail)
+        self._marker_controller.thumbnailInvalidated.connect(self._overlay.remove_thumbnail)
         self._marker_controller.thumbnailsInvalidated.connect(self._overlay.clear_pixmaps)
         if self._assets_library_root is not None:
             self._marker_controller.set_assets(self._assets, self._assets_library_root)
 
     def _teardown_map_widget(self) -> None:
+        if self._map_widget_teardown_complete or not hasattr(self, "_map_widget"):
+            return
         self._event_bridge.unbind()
         self._map_event_target = None
         self._overlay_attachment.detach(self._map_widget)
@@ -598,9 +666,12 @@ class PhotoMapView(QWidget):
             # Explicitly shutting it down prevents the Qt event loop from waiting indefinitely.
             self._marker_controller.shutdown()
             self._marker_controller.deleteLater()
+            del self._marker_controller
         if hasattr(self, "_overlay"):
+            self._layout.removeWidget(self._overlay)
             self._overlay.hide()
             self._overlay.deleteLater()
+            del self._overlay
         # The map widget owns a ``TileManager`` that runs in a separate ``QThread`` to
         # stream map tiles.  If the thread is not told to exit, the application process
         # keeps running after the window closes, so we must always shut it down here.
@@ -609,8 +680,11 @@ class PhotoMapView(QWidget):
         self._map_widget.hide()
         self._map_widget.setParent(None)
         self._map_widget.deleteLater()
+        self._map_widget_teardown_complete = True
 
     def _rebuild_map_widget(self) -> None:
+        if self._shutdown_complete:
+            return
         if self._last_tooltip_text:
             self._tooltip.hide_tooltip()
             self._last_tooltip_text = ""

@@ -174,6 +174,7 @@ class AlbumSidebar(QWidget):
     def __init__(self, library: LibraryRuntimeController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._updating_style = False
+        self._minimum_width_relaxed = False
         self._library = library
         self._model = AlbumTreeModel(library, self)
         self._pending_selection: Path | None = None
@@ -211,6 +212,7 @@ class AlbumSidebar(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         self._tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self._library.albumRenamed.connect(self._on_album_renamed)
         self._tree.doubleClicked.connect(self._on_double_clicked)
         self._tree.clicked.connect(self._on_clicked)
         self._tree.setIndentation(0)
@@ -240,7 +242,6 @@ class AlbumSidebar(QWidget):
             self._title.sizeHint().width(),
         )
         self._default_sidebar_maximum_width = super().maximumWidth()
-        self._minimum_width_relaxed = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(*SIDEBAR_LAYOUT_MARGIN)
@@ -286,6 +287,13 @@ class AlbumSidebar(QWidget):
     # ------------------------------------------------------------------
     # Animation helpers
     # ------------------------------------------------------------------
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        hint = super().minimumSizeHint()
+        if self._minimum_width_relaxed:
+            # The splitter still consults the hint when minimumWidth() is zero.
+            hint.setWidth(0)
+        return hint
+
     def relax_minimum_width_for_animation(self) -> None:
         """Temporarily relax the sidebar so splitter animations can collapse it to zero."""
 
@@ -364,6 +372,22 @@ class AlbumSidebar(QWidget):
                 if child.isValid():
                     self._tree.expand(child)
 
+    def _on_album_renamed(self, old_path: Path, new_path: Path) -> None:
+        def retarget(path: Path | None) -> Path | None:
+            if path is None:
+                return None
+            try:
+                return new_path / path.relative_to(old_path)
+            except ValueError:
+                return path
+
+        self._pending_selection = retarget(self._pending_selection)
+        self._current_selection = retarget(self._current_selection)
+        if self._current_pinned_selection is not None:
+            kind, item_id = self._current_pinned_selection
+            if kind == "album":
+                self._current_pinned_selection = (kind, str(retarget(Path(item_id))))
+
     def _on_model_reset(self) -> None:
         _logger.info(
             "_on_model_reset: pending=%s current=%s static=%s library_root=%s",
@@ -426,7 +450,9 @@ class AlbumSidebar(QWidget):
             return
         if node_type == NodeType.HEADER:
             if item.title == "Albums":
+                self._current_selection = None
                 self._current_pinned_selection = None
+                self._current_static_selection = item.title
                 self.staticNodeSelected.emit("Albums")
             return
         if node_type == NodeType.STATIC:
@@ -437,6 +463,7 @@ class AlbumSidebar(QWidget):
                 self.bindLibraryRequested.emit()
                 return
             self._current_selection = None
+            self._current_pinned_selection = None
             self._current_static_selection = item.title
             if item.title == self.ALL_PHOTOS_TITLE:
                 _logger.info("_on_selection_changed: emitting allPhotosSelected")
@@ -445,10 +472,8 @@ class AlbumSidebar(QWidget):
                 _logger.info("_on_selection_changed: emitting staticNodeSelected(%r)", item.title)
                 self.staticNodeSelected.emit(item.title)
             return
-        if node_type in {NodeType.PINNED_ALBUM, NodeType.PINNED_PERSON, NodeType.PINNED_GROUP}:
-            pinned_item = item.pinned_item
-            if pinned_item is None:
-                return
+        pinned_item = item.pinned_item
+        if pinned_item is not None:
             self._current_selection = None
             self._current_static_selection = None
             self._current_pinned_selection = (pinned_item.kind, pinned_item.item_id)
@@ -632,17 +657,23 @@ class AlbumSidebar(QWidget):
         self._pending_selection = target
 
     def _find_static_index(self, title: str) -> QModelIndex:
-        root_index = self._model.index(0, 0)
-        if not root_index.isValid():
-            return QModelIndex()
-        item = self._model.item_from_index(root_index)
-        if item is None:
-            return QModelIndex()
-        for row in range(self._model.rowCount(root_index)):
-            index = self._model.index(row, 0, root_index)
-            child = self._model.item_from_index(index)
-            if child and child.title == title:
-                return index
+        # Smart collections live under Basic Library; Albums and Recently
+        # Deleted are root rows. Match navigation items, never same-named albums.
+        for row in range(self._model.rowCount()):
+            root_index = self._model.index(row, 0)
+            item = self._model.item_from_index(root_index)
+            if item is None:
+                continue
+            if item.title == title and (
+                item.node_type == NodeType.STATIC
+                or (item.node_type == NodeType.HEADER and title == "Albums")
+            ):
+                return root_index
+            for child_row in range(self._model.rowCount(root_index)):
+                index = self._model.index(child_row, 0, root_index)
+                child = self._model.item_from_index(index)
+                if child and child.node_type == NodeType.STATIC and child.title == title:
+                    return index
         return QModelIndex()
 
     def _on_files_dropped(self, target: Path, paths: list[Path]) -> None:

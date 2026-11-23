@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,8 @@ class ScanLibraryRequest:
     scan_job_id: str | None = None
     scan_started_at_ms: int | None = None
     scan_stage_elapsed_ms: dict[str, float] | None = None
+    recursive: bool = True
+    commit_guard: Callable[[], AbstractContextManager[bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,7 @@ class ScanLibraryUseCase:
         chunk_size = max(1, int(request.chunk_size))
         scan_started = _monotonic_ms()
         last_chunk_flush = scan_started
+        scope_options = {} if request.recursive else {"recursive": False}
 
         for scanned_row in self._scanner.scan(
             request.root,
@@ -69,6 +73,7 @@ class ScanLibraryUseCase:
             request.exclude,
             existing_index=request.existing_index,
             progress_callback=request.progress_callback,
+            **scope_options,
         ):
             if request.is_cancelled is not None and request.is_cancelled():
                 break
@@ -124,6 +129,19 @@ class ScanLibraryUseCase:
         *,
         metadata_elapsed_ms: float | None = None,
     ) -> int:
+        guard = request.commit_guard() if request.commit_guard is not None else nullcontext(True)
+        with guard as can_commit:
+            if not can_commit:
+                return 0
+            return self._commit_chunk(chunk, request, metadata_elapsed_ms=metadata_elapsed_ms)
+
+    def _commit_chunk(
+        self,
+        chunk: list[dict[str, Any]],
+        request: ScanLibraryRequest,
+        *,
+        metadata_elapsed_ms: float | None = None,
+    ) -> int:
         started = _monotonic_ms()
         try:
             emitted_chunk = self._asset_repository.merge_scan_rows(chunk)
@@ -146,7 +164,10 @@ class ScanLibraryUseCase:
         )
         commit_elapsed_ms = round(_monotonic_ms() - started, 3)
         ready_chunk = _ready_visible_rows(emitted_chunk)
-        collection_revision = _collection_revision_from_rows(emitted_chunk)
+        read_revision = getattr(self._asset_repository, "collection_revision", None)
+        collection_revision = (
+            read_revision() if callable(read_revision) else _collection_revision_from_rows(emitted_chunk)
+        )
         stage_elapsed_ms = dict(request.scan_stage_elapsed_ms or {})
         if metadata_elapsed_ms is not None:
             stage_elapsed_ms["metadata_extraction"] = metadata_elapsed_ms

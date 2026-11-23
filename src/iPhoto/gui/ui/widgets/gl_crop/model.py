@@ -56,6 +56,25 @@ class CropSessionModel:
         """Return the current perspective quad."""
         return self._perspective_quad
 
+    def get_crop_bounds(self) -> tuple[float, float, float, float]:
+        """Return the axis-aligned bounds of the transformed source quad."""
+
+        quad = self._perspective_quad or unit_quad()
+        xs = [float(point[0]) for point in quad]
+        ys = [float(point[1]) for point in quad]
+        if not xs or not ys or not all(math.isfinite(value) for value in (*xs, *ys)):
+            return (0.0, 0.0, 1.0, 1.0)
+        left, right = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        if right <= left or bottom <= top:
+            return (0.0, 0.0, 1.0, 1.0)
+        return (left, top, right, bottom)
+
+    def clamp_crop_state(self) -> None:
+        """Clamp scalar state to the transformed source's outer bounds."""
+
+        self._crop_state.clamp(self.get_crop_bounds())
+
     def create_snapshot(self) -> tuple[float, float, float, float]:
         """Return a tuple describing the current crop rectangle."""
         state = self._crop_state
@@ -68,7 +87,7 @@ class CropSessionModel:
         self._crop_state.cy = cy
         self._crop_state.width = width
         self._crop_state.height = height
-        self._crop_state.clamp()
+        self.clamp_crop_state()
 
     def has_changed(self, snapshot: tuple[float, float, float, float]) -> bool:
         """Return True when the current crop differs from snapshot."""
@@ -182,9 +201,9 @@ class CropSessionModel:
         if point_in_convex_polygon(center, quad):
             return False
         centroid = quad_centroid(quad)
-        self._crop_state.cx = max(0.0, min(1.0, centroid[0]))
-        self._crop_state.cy = max(0.0, min(1.0, centroid[1]))
-        self._crop_state.clamp()
+        self._crop_state.cx = float(centroid[0])
+        self._crop_state.cy = float(centroid[1])
+        self.clamp_crop_state()
         return True
 
     def auto_scale_crop_to_quad(self) -> bool:
@@ -195,6 +214,7 @@ class CropSessionModel:
         bool:
             True if the crop was scaled, False otherwise.
         """
+        snapshot = self.create_snapshot()
         quad = self._perspective_quad or unit_quad()
         rect = self._current_normalised_rect()
         scale = calculate_min_zoom_to_fit(rect, quad)
@@ -202,8 +222,11 @@ class CropSessionModel:
             return False
         self._crop_state.width = max(self._crop_state.min_width, self._crop_state.width / scale)
         self._crop_state.height = max(self._crop_state.min_height, self._crop_state.height / scale)
-        self._crop_state.clamp()
-        return True
+        self.clamp_crop_state()
+        if self.is_crop_inside_quad():
+            return self.has_changed(snapshot)
+        self.restore_snapshot(snapshot)
+        return False
 
     def apply_baseline_perspective_fit(self) -> bool:
         """Fit the stored baseline crop into the current perspective quad.
@@ -221,10 +244,7 @@ class CropSessionModel:
         center = (float(base_cx), float(base_cy))
         if not point_in_convex_polygon(center, quad):
             centroid = quad_centroid(quad)
-            center = (
-                max(0.0, min(1.0, float(centroid[0]))),
-                max(0.0, min(1.0, float(centroid[1]))),
-            )
+            center = (float(centroid[0]), float(centroid[1]))
 
         half_w = max(0.0, float(base_width) * 0.5)
         half_h = max(0.0, float(base_height) * 0.5)
@@ -240,11 +260,11 @@ class CropSessionModel:
 
         new_width = max(self._crop_state.min_width, float(base_width) / scale)
         new_height = max(self._crop_state.min_height, float(base_height) / scale)
-        self._crop_state.width = min(1.0, new_width)
-        self._crop_state.height = min(1.0, new_height)
-        self._crop_state.cx = max(0.0, min(1.0, center[0]))
-        self._crop_state.cy = max(0.0, min(1.0, center[1]))
-        self._crop_state.clamp()
+        self._crop_state.width = new_width
+        self._crop_state.height = new_height
+        self._crop_state.cx = center[0]
+        self._crop_state.cy = center[1]
+        self.clamp_crop_state()
         return self.has_changed(snapshot)
 
     def ensure_valid_or_revert(
@@ -270,6 +290,7 @@ class CropSessionModel:
         if self.is_crop_inside_quad():
             return True
         if allow_shrink and self.auto_scale_crop_to_quad():
-            return True
+            if self.is_crop_inside_quad():
+                return True
         self.restore_snapshot(snapshot)
         return False

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ...config import RECENTLY_DELETED_DIR_NAME
+from ...domain.models.core import normalise_content_id
 
 
 def insert_rows(
@@ -22,7 +23,12 @@ def insert_rows(
     columns = _asset_insert_columns(conn)
     data_list = []
     for row in rows:
-        data = row_to_db_params(row, include_metadata="metadata" in columns)
+        data = row_to_db_params(
+            row,
+            include_metadata="metadata" in columns,
+            include_content_id_key="content_id_key" in columns,
+            include_refresh_pending="thumb_refresh_pending" in columns,
+        )
         data_list.append(data)
 
     if not data_list:
@@ -47,16 +53,28 @@ def _asset_insert_columns(conn: sqlite3.Connection) -> list[str]:
         "live_role", "live_partner_rel", "aspect_ratio", "year", "month",
         "media_type", "is_favorite", "is_deleted", "has_gps", "thumbnail_state",
         "location", "micro_thumbnail", "thumb_cache_key", "thumb_updated_at",
-        "thumb_error", "scan_job_id", "index_revision", "index_updated_at_ms",
-        "face_status"
+        "thumb_error", "thumb_revision", "scan_job_id", "index_revision",
+        "index_updated_at_ms",
+        "face_status", "pet_status", "video_rotation_cw", "video_linux_180_hint",
+        "source_mtime_ns", "image_orientation"
     ]
     table_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(assets)")}
     if "metadata" in table_columns:
         columns.append("metadata")
+    if "content_id_key" in table_columns:
+        columns.append("content_id_key")
+    if "thumb_refresh_pending" in table_columns:
+        columns.append("thumb_refresh_pending")
     return columns
 
 
-def row_to_db_params(row: dict[str, Any], *, include_metadata: bool = False) -> list[Any]:
+def row_to_db_params(
+    row: dict[str, Any],
+    *,
+    include_metadata: bool = False,
+    include_content_id_key: bool = False,
+    include_refresh_pending: bool = False,
+) -> list[Any]:
     """Map a dictionary row to a list of values for the DB."""
     gps_val = row.get("gps")
     gps_str = json.dumps(gps_val) if gps_val is not None else None
@@ -126,13 +144,27 @@ def row_to_db_params(row: dict[str, Any], *, include_metadata: bool = False) -> 
         row.get("thumb_cache_key"),
         row.get("thumb_updated_at", 0),
         row.get("thumb_error"),
+        row.get("thumb_revision"),
         row.get("scan_job_id"),
         row.get("index_revision", 0),
         row.get("index_updated_at_ms", 0),
         row.get("face_status"),
+        row.get("pet_status"),
+        row.get("video_rotation_cw"),
+        (
+            None
+            if row.get("video_linux_180_hint") is None
+            else int(bool(row.get("video_linux_180_hint")))
+        ),
+        row.get("source_mtime_ns", 0),
+        row.get("image_orientation", 1),
     ]
     if include_metadata:
         params.append(_metadata_to_json(row.get("metadata")))
+    if include_content_id_key:
+        params.append(normalise_content_id(row.get("content_id")))
+    if include_refresh_pending:
+        params.append(int(thumbnail_state == "ready" and bool(row.get("thumb_refresh_pending"))))
     return params
 
 

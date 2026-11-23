@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -40,6 +43,8 @@ class InformationPopup(QWidget):
     _DEFAULT_WIDTH = 360
     _CORNER_RADIUS = 12.0
 
+    closed = Signal()
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -63,6 +68,7 @@ class InformationPopup(QWidget):
         self._drag_active = False
         self._drag_offset = None
         self._uses_default_title = title == "Information"
+        self._controls_layout: QVBoxLayout | None = None
 
         # -- root layout ---------------------------------------------------
         root_layout = QVBoxLayout(self)
@@ -153,6 +159,46 @@ class InformationPopup(QWidget):
 
         return self._message_label.text()
 
+    def add_action(self, label: str) -> QPushButton:
+        """Add a keyboard-accessible action to the popup."""
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._message_label.setTextFormat(Qt.TextFormat.PlainText)
+        button = QPushButton(label, self)
+        self.add_control(button)
+        return button
+
+    def add_control(self, widget: QWidget) -> None:
+        if self._controls_layout is None:
+            self._controls_layout = QVBoxLayout()
+            self._controls_layout.setContentsMargins(16, 0, 16, 16)
+            self._controls_layout.setSpacing(6)
+            self.layout().addLayout(self._controls_layout)
+        self._controls_layout.addWidget(widget)
+
+    def add_details(self, label: str, text: str) -> None:
+        toggle = QPushButton(label, self, checkable=True)
+        details = QPlainTextEdit(self, readOnly=True)
+        details.setPlainText(text)
+        details.setFixedHeight(90)
+        details.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        details.hide()
+        self.add_control(toggle)
+        self.add_control(details)
+
+        def toggle_details(expanded: bool) -> None:
+            details.setVisible(expanded)
+            self.center_on(self.parentWidget())
+
+        toggle.toggled.connect(toggle_details)
+
+    def keyPressEvent(self, event) -> None:
+        if self._controls_layout is not None and event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def retranslate_ui(self) -> None:
         if self._uses_default_title:
             self._title_label.setText(tr("InformationPopup", "Information"))
@@ -220,6 +266,13 @@ class InformationPopup(QWidget):
             self._apply_content_style()
         super().changeEvent(event)
 
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Notify blocking helpers before the widget is disposed."""
+
+        super().closeEvent(event)
+        if event.isAccepted():
+            self.closed.emit()
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """Draw an anti-aliased rounded rectangle matching the window palette."""
 
@@ -285,3 +338,43 @@ class InformationPopup(QWidget):
 
 
 __all__ = ["InformationPopup"]
+
+
+class ProgressPopup(InformationPopup):
+    """Project-styled progress for a background operation."""
+
+    def __init__(self, parent: QWidget, *, title: str, message: str, dismissible: bool):
+        super().__init__(parent, title=title, message=message)
+        self._dismissible = dismissible
+        self.close_button.setEnabled(dismissible)
+        self._progress_bar = QProgressBar(self)
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(False)
+        self._percent_label = QLabel(self)
+        self._percent_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._percent_label.hide()
+        self.add_control(self._progress_bar)
+        self.add_control(self._percent_label)
+
+    def update_progress(self, current: int, total: int, message: str) -> None:
+        show_percent = total > 0
+        percent_was_shown = not self._percent_label.isHidden()
+        reflow = message != self.message() or show_percent != percent_was_shown
+        self.set_message(message)
+        self._progress_bar.setRange(0, total)
+        self._percent_label.setVisible(show_percent)
+        if show_percent:
+            value = max(0, min(current, total))
+            self._progress_bar.setValue(value)
+            self._percent_label.setText(f"{round(100 * value / total)}%")
+        if reflow:
+            self.center_on(self.parentWidget())
+
+    def allow_close(self) -> None:
+        self._dismissible = True
+
+    def closeEvent(self, event) -> None:
+        if not self._dismissible:
+            event.ignore()
+            return
+        super().closeEvent(event)

@@ -61,6 +61,7 @@ def gallery_action_specs(
             action_id="move_to",
             label=tr("GalleryMenu", "Move to"),
             is_visible=lambda ctx: _has_selection(ctx) and not ctx.is_recently_deleted,
+            scrollable=True,
             children=tuple(
                 MenuActionSpec(
                     action_id=f"move_to:{path}",

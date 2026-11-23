@@ -1,5 +1,6 @@
-import sys
+import gc
 import os
+import sys
 from types import ModuleType
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, Mock, call, patch
@@ -382,29 +383,117 @@ class _SimpleQtBot:
                 delete_later()
 
 
-@pytest.fixture()
-def qapp():
+_TEST_QAPPLICATION = None
+
+
+def _test_qapplication():
+    """Return one strongly-held QApplication for the entire pytest process.
+
+    PySide may destroy the C++ application when the last Python wrapper is
+    collected.  GUI modules retain QIcon/QPixmap objects across function-scoped
+    fixtures, so recreating QApplication later in the same process can leave
+    those native resources attached to a dead application and crash in QtSvg.
+    """
+
+    global _TEST_QAPPLICATION
+
     from PySide6.QtWidgets import QApplication
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    _TEST_QAPPLICATION = app
+    return app
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _keep_test_qapplication_alive():
+    """Keep one QApplication alive for the complete pytest process.
+
+    A number of older GUI test modules still provide local ``qapp`` fixtures.
+    Without an application created at session start, the first such fixture can
+    create Qt's application and then release its final Python reference at
+    module teardown.  Recreating QApplication later leaves cached QIcon and
+    QPixmap instances tied to the destroyed native application and can crash
+    QtSvg on Linux.  Starting the shared application here makes every local
+    fixture reuse the same process-lifetime instance.
+    """
+
+    if not HAS_PYSIDE6 or not HAS_QTWIDGETS:
+        yield
+        return
+
+    global _TEST_QAPPLICATION
+
+    app = _test_qapplication()
+    try:
+        yield
+    finally:
+        # PySide otherwise destroys QApplication from its interpreter-shutdown
+        # hook, after Python-owned Qt callbacks and module globals have already
+        # begun disappearing.  Shut the binding down while pytest's fixture
+        # graph is still intact so native QRhi resources are released in Qt's
+        # normal application teardown order.
+        gc.collect()
+        app.shutdown()
+        _TEST_QAPPLICATION = None
+        gc.collect()
+
+
+@pytest.fixture()
+def qapp():
+    app = _test_qapplication()
     yield app
     app.processEvents()
 
 
 @pytest.fixture()
 def qtbot():
-    from PySide6.QtWidgets import QApplication
-
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
+    app = _test_qapplication()
     helper = _SimpleQtBot()
     try:
         yield helper
     finally:
         helper.close_widgets()
         app.processEvents()
+
+
+@pytest.fixture()
+def map_platform(monkeypatch):
+    """Simulate one maps platform without changing Python/Qt's host platform."""
+    from types import SimpleNamespace
+
+    from maps import map_sources
+
+    def configure(platform):
+        binary_root = Path("tiles") / "extension" / "bin"
+        suffix = ".exe" if platform == "win32" else ""
+        helper = binary_root / f"osmand_render_helper{suffix}"
+        helpers = (helper,)
+        if platform != "darwin":
+            helpers += (binary_root / f"osmand_render_helper_sdk{suffix}",)
+        library_suffix = {"win32": ".dll", "darwin": ".dylib", "linux": ".so"}[platform]
+        widget = binary_root / f"osmand_native_widget{library_suffix}"
+        mingw_widget = binary_root / f"libosmand_native_widget{library_suffix}"
+        sdk_root = Path("tools") / "osmand_render_helper_native" / (
+            "dist-macosx" if platform == "darwin" else "dist-linux"
+        )
+        values = {
+            "sys": SimpleNamespace(platform=platform),
+            "DEFAULT_HELPER_RELATIVE_PATH": helper,
+            "DEFAULT_HELPER_RELATIVE_PATHS": helpers,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH": widget,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MSVC": widget,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATH_MINGW": mingw_widget,
+            "DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS": (widget, mingw_widget),
+            "SDK_HELPER_RELATIVE_PATHS": () if platform == "win32" else (sdk_root / helper.name,),
+            "SDK_NATIVE_WIDGET_RELATIVE_PATHS": () if platform == "win32" else (
+                sdk_root / widget.name, sdk_root / mingw_widget.name
+            ),
+        }
+        for name, value in values.items():
+            monkeypatch.setattr(map_sources, name, value)
+        return platform
+
+    return configure

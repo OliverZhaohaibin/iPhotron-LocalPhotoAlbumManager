@@ -12,26 +12,45 @@ from ...people import (
     initial_face_status,
     normalize_face_status,
 )
+from ...pets import (
+    PET_STATUS_DONE,
+    PET_STATUS_SKIPPED,
+    initial_pet_status,
+    normalize_pet_status,
+)
 
 _PRESERVED_SCAN_STATE_FIELDS = (
     "is_favorite",
     "original_rel_path",
     "original_album_id",
     "original_album_subpath",
-    "live_role",
-    "live_partner_rel",
     "is_deleted",
+)
+_THUMBNAIL_STATE_FIELDS = (
+    "thumbnail_state",
+    "micro_thumbnail",
+    "thumb_cache_key",
+    "thumb_updated_at",
+    "thumb_error",
+    "thumb_revision",
+    "thumb_refresh_pending",
 )
 
 
 def merge_scan_rows(
     scanned_rows: Iterable[dict[str, Any]],
     existing_rows_by_rel: Mapping[str, dict[str, Any]],
+    *,
+    current_thumbnail_revisions: Mapping[str, str | None],
 ) -> list[dict[str, Any]]:
     """Merge freshly scanned rows with persisted library-managed state."""
 
     return [
-        merge_scan_row(row, existing_rows_by_rel.get(str(row.get("rel") or "")))
+        merge_scan_row(
+            row,
+            existing_rows_by_rel.get(str(row.get("rel") or "")),
+            current_thumbnail_revision=current_thumbnail_revisions.get(str(row.get("rel") or "")),
+        )
         for row in scanned_rows
     ]
 
@@ -39,23 +58,47 @@ def merge_scan_rows(
 def merge_scan_row(
     scanned_row: dict[str, Any],
     existing_row: dict[str, Any] | None,
+    *,
+    current_thumbnail_revision: str | None,
 ) -> dict[str, Any]:
     """Merge one scanned row with an existing persisted row."""
 
     merged = dict(scanned_row)
+    identity_unchanged = existing_row is not None and _asset_identity_unchanged(existing_row, merged)
+    # Pairing is computed from the indexed media. Cached scan rows can carry
+    # old links, and a replacement must be visible even if pairing is skipped.
+    if identity_unchanged and existing_row is not None:
+        merged["live_role"] = existing_row.get("live_role", 0)
+        merged["live_partner_rel"] = existing_row.get("live_partner_rel")
+    else:
+        merged["live_role"] = 0
+        merged["live_partner_rel"] = None
 
     if existing_row is not None:
+        # Cached scan rows can contain state captured before a user edit.
         for field in _PRESERVED_SCAN_STATE_FIELDS:
-            if field in existing_row and (field not in merged or merged.get(field) in (None, "")):
+            if field in existing_row:
                 merged[field] = existing_row.get(field)
         _preserve_location_state(merged, existing_row)
+        _preserve_current_thumbnail_revision(
+            merged, existing_row, current_thumbnail_revision
+        )
+        # The stat cache can predate a concurrent thumbnail commit. Preserve
+        # its row version and advance it if this merge replaces thumbnail facts.
+        previous_revision = int(existing_row.get("index_revision") or 0)
+        refresh_changed = bool(merged.get("thumb_refresh_pending")) != bool(existing_row.get("thumb_refresh_pending"))
+        thumbnail_changed = any(
+            merged.get(field) != existing_row.get(field)
+            for field in _THUMBNAIL_STATE_FIELDS
+            if field != "thumb_refresh_pending"
+        ) or refresh_changed
+        merged["index_revision"] = previous_revision + int(not identity_unchanged or thumbnail_changed)
 
-    identity_unchanged = (
-        existing_row is not None and _asset_identity_unchanged(existing_row, merged)
-    )
     existing_face_status = None
+    existing_pet_status = None
     if existing_row is not None:
         existing_face_status = normalize_face_status(existing_row.get("face_status"))
+        existing_pet_status = normalize_pet_status(existing_row.get("pet_status"))
 
     if (
         existing_face_status is not None
@@ -64,14 +107,88 @@ def merge_scan_row(
     ):
         merged["face_status"] = existing_face_status
     else:
-        merged["face_status"] = initial_face_status(
-            _row_for_face_status(
-                merged,
-                preserve_live_state=identity_unchanged,
-            )
-        )
+        merged["face_status"] = initial_face_status(merged)
+
+    if (
+        existing_pet_status is not None
+        and existing_pet_status in {PET_STATUS_DONE, PET_STATUS_SKIPPED}
+        and identity_unchanged
+    ):
+        merged["pet_status"] = existing_pet_status
+    else:
+        merged["pet_status"] = initial_pet_status(merged)
 
     return merged
+
+
+def conflicting_thumbnail_revisions(
+    rows: Iterable[dict[str, Any]],
+    existing_rows: Mapping[str, dict[str, Any]],
+) -> dict[str, tuple[str, int]]:
+    """Identify rows that need input validation and the DB versions read for them."""
+
+    conflicts = {}
+    for row in rows:
+        rel = str(row.get("rel") or "")
+        existing = existing_rows.get(rel)
+        if existing is None:
+            continue
+        revision = _thumbnail_revision(existing)
+        if revision and revision != _thumbnail_revision(row):
+            conflicts[rel] = revision, int(existing.get("index_revision") or 0)
+    return conflicts
+
+
+def _thumbnail_revision(row: Mapping[str, Any]) -> str:
+    return str(row.get("thumb_revision") or "").strip()
+
+
+def _preserve_current_thumbnail_revision(
+    merged: dict[str, Any],
+    existing_row: dict[str, Any],
+    current_revision: str | None,
+) -> None:
+    """Resolve conflicting versions against the current render inputs."""
+
+    existing_revision = _thumbnail_revision(existing_row)
+    incoming_revision = _thumbnail_revision(merged)
+    if existing_revision == incoming_revision:
+        late_failure = (
+            merged.get("thumbnail_state") != "ready"
+            and int(merged.get("index_revision") or 0) < int(existing_row.get("index_revision") or 0)
+        )
+        if (
+            (merged.get("thumb_refresh_pending") or late_failure)
+            and not existing_row.get("thumb_refresh_pending")
+            and existing_row.get("thumbnail_state") == "ready"
+            and existing_revision
+            and _asset_identity_unchanged(existing_row, merged)
+        ):
+            for field in _THUMBNAIL_STATE_FIELDS:
+                merged[field] = existing_row.get(field)
+        return
+    if not existing_revision:
+        return
+    if current_revision is not None:
+        if current_revision == incoming_revision:
+            return
+        if current_revision != existing_revision:
+            merged.update(
+                thumb_revision=current_revision,
+                thumbnail_state="stale",
+                thumb_refresh_pending=False,
+                micro_thumbnail=None,
+                thumb_cache_key=(
+                    merged.get("thumb_cache_key") or existing_row.get("thumb_cache_key")
+                ),
+                thumb_error=None,
+            )
+            return
+    for field in _THUMBNAIL_STATE_FIELDS:
+        if field in existing_row:
+            merged[field] = existing_row[field]
+        else:
+            merged.pop(field, None)
 
 
 def _preserve_location_state(
@@ -147,17 +264,3 @@ def _asset_identity_unchanged(
     if existing_id is None or scanned_id is None:
         return False
     return str(existing_id) == str(scanned_id)
-
-
-def _row_for_face_status(
-    merged_row: dict[str, Any],
-    *,
-    preserve_live_state: bool,
-) -> dict[str, Any]:
-    if preserve_live_state:
-        return merged_row
-
-    row = dict(merged_row)
-    row.pop("live_role", None)
-    row.pop("live_partner_rel", None)
-    return row

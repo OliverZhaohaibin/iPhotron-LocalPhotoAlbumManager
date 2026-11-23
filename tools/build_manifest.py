@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Generate a canonical packaged-build manifest for startup A/B evidence."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+from typing import Any
+
+SCHEMA_VERSION = 1
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_path(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    if path.is_file():
+        return _sha256_file(path)
+    digest = hashlib.sha256()
+    root_mode = stat.S_IMODE(path.lstat().st_mode)
+    digest.update(f"D\0{root_mode:o}\0.\0".encode("utf-8"))
+    for item in sorted(path.rglob("*"), key=lambda candidate: candidate.as_posix()):
+        item_stat = item.lstat()
+        relative = item.relative_to(path).as_posix()
+        mode = stat.S_IMODE(item_stat.st_mode)
+        if stat.S_ISLNK(item_stat.st_mode):
+            kind = "L"
+            payload = os.readlink(item).encode("utf-8", errors="surrogateescape")
+        elif stat.S_ISREG(item_stat.st_mode):
+            kind = "F"
+            payload = _sha256_file(item).encode("ascii")
+        elif stat.S_ISDIR(item_stat.st_mode):
+            kind = "D"
+            payload = b""
+        else:
+            kind = "O"
+            payload = b""
+        digest.update(kind.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(f"{mode:o}".encode("ascii"))
+        digest.update(b"\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _installed_distributions() -> list[str]:
+    entries = {
+        f"{distribution.metadata['Name'].casefold()}=={distribution.version}"
+        for distribution in importlib.metadata.distributions()
+        if distribution.metadata.get("Name")
+    }
+    return sorted(entries)
+
+
+def _package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "missing"
+
+
+def _git_revision(root: Path) -> str:
+    git = shutil.which("git")
+    if git is None:
+        return "unknown"
+    try:
+        result = subprocess.run(  # noqa: S603 - resolved trusted git executable
+            [git, "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+def _canonical_hash(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _build_host() -> dict[str, str]:
+    distro_id = ""
+    distro_version_id = ""
+    if platform.system() == "Linux":
+        try:
+            os_release = platform.freedesktop_os_release()
+        except OSError:
+            os_release = {}
+        distro_id = str(os_release.get("ID") or "").strip().lower()
+        distro_version_id = str(os_release.get("VERSION_ID") or "").strip()
+    libc_name, libc_version = platform.libc_ver()
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "platform_release": platform.release(),
+        "distro_id": distro_id,
+        "distro_version_id": distro_version_id,
+        "libc_name": str(libc_name or ""),
+        "libc_version": str(libc_version or ""),
+    }
+
+
+def create_manifest(
+    *,
+    root: Path,
+    artifact: Path,
+    build_driver: Path,
+    build_flags: list[str],
+    native_runtime: Path | None,
+    assets: list[Path],
+    artifact_tree: Path | None = None,
+) -> dict[str, Any]:
+    dependencies = _installed_distributions()
+
+    def _asset_label(path: Path) -> str:
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return path.name
+
+    environment = {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "pyside6_version": _package_version("PySide6"),
+        "qt_version": _package_version("PySide6_Essentials"),
+        "nuitka_version": _package_version("Nuitka"),
+        "build_host": _build_host(),
+        "build_driver_sha256": _sha256_path(build_driver),
+        "build_flags": sorted(str(flag) for flag in build_flags),
+        "dependency_snapshot_sha256": _canonical_hash(dependencies),
+        "native_runtime_sha256": (
+            _sha256_path(native_runtime) if native_runtime is not None else "not-included"
+        ),
+        "assets_sha256": _canonical_hash(
+            {
+                _asset_label(path): _sha256_path(path)
+                for path in sorted(assets, key=_asset_label)
+            }
+        ),
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "source_revision": _git_revision(root),
+        "artifact_path": artifact.name,
+        "artifact_sha256": _sha256_path(artifact),
+        "artifact_tree_path": artifact_tree.name if artifact_tree is not None else None,
+        "artifact_tree_sha256": (
+            _sha256_path(artifact_tree) if artifact_tree is not None else None
+        ),
+        "environment": environment,
+        "environment_fingerprint": _canonical_hash(environment),
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--artifact-tree", type=Path)
+    parser.add_argument("--build-driver", type=Path, required=True)
+    parser.add_argument("--build-flag", action="append", default=[])
+    parser.add_argument("--native-runtime", type=Path)
+    parser.add_argument("--asset", type=Path, action="append", default=[])
+    parser.add_argument("--output", type=Path, required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    root = args.root.expanduser().resolve()
+    artifact = args.artifact.expanduser().resolve()
+    build_driver = args.build_driver.expanduser().resolve()
+    if not artifact.exists():
+        raise SystemExit(f"build manifest error: artifact does not exist: {artifact}")
+    if not build_driver.is_file():
+        raise SystemExit(f"build manifest error: build driver does not exist: {build_driver}")
+    manifest = create_manifest(
+        root=root,
+        artifact=artifact,
+        build_driver=build_driver,
+        build_flags=args.build_flag,
+        native_runtime=(
+            args.native_runtime.expanduser().resolve() if args.native_runtime else None
+        ),
+        assets=[path.expanduser().resolve() for path in args.asset],
+        artifact_tree=(
+            args.artifact_tree.expanduser().resolve() if args.artifact_tree else None
+        ),
+    )
+    output = args.output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

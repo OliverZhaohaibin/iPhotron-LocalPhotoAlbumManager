@@ -237,6 +237,70 @@
             <source>Zoom</source>
             <translation>缩放</translation>
         </message>
+        <message>
+            <source>The photo library could not be opened during startup: %1</source>
+            <translation>启动时无法打开照片图库：%1</translation>
+        </message>
+        <message>
+            <source>The photo library database is in use by another process. Close other iPhotron versions and retry.</source>
+            <translation>照片图库数据库正被其他进程使用。请关闭其他 iPhotron 版本后重试。</translation>
+        </message>
+        <message>
+            <source>Windows or security software is temporarily using a migration file. Close other programs or retry shortly.</source>
+            <translation>Windows 或安全软件正在暂时占用迁移文件。请关闭其他程序或稍后重试。</translation>
+        </message>
+        <message>
+            <source>The photo library database is damaged. The original file has been preserved.</source>
+            <translation>照片图库数据库已损坏，原始文件已保留。</translation>
+        </message>
+        <message>
+            <source>The photo library database is read-only. Remove its read-only attribute or grant modify access.</source>
+            <translation>照片图库数据库为只读。请移除只读属性或授予修改权限。</translation>
+        </message>
+        <message>
+            <source>The .iPhoto work folder cannot be updated. Check that folder's permissions.</source>
+            <translation>无法更新 .iPhoto 工作文件夹。请检查该文件夹的权限。</translation>
+        </message>
+        <message>
+            <source>There is not enough free disk space to prepare the photo library.</source>
+            <translation>可用磁盘空间不足，无法准备照片图库。</translation>
+        </message>
+        <message>
+            <source>The photo library database could not be opened. Check the path, drive, and security software.</source>
+            <translation>无法打开照片图库数据库。请检查路径、磁盘连接和安全软件。</translation>
+        </message>
+        <message>
+            <source>A safety backup could not be created. Migration did not start and the original database was preserved.</source>
+            <translation>无法创建安全备份。迁移尚未开始，原数据库已保留。</translation>
+        </message>
+        <message>
+            <source>The photo library database update failed. The original database and backup were preserved.</source>
+            <translation>照片图库数据库更新失败。原数据库和备份均已保留。</translation>
+        </message>
+        <message>
+            <source>This photo library was created by a newer app version. Open it with the same or a newer version.</source>
+            <translation>此照片图库由更新的应用版本创建。请使用相同或更新版本打开。</translation>
+        </message>
+        <message>
+            <source>The photo library index was restored after an interrupted update.</source>
+            <translation>照片图库索引已从中断的更新中恢复。</translation>
+        </message>
+        <message>
+            <source>The photo library was recovered and opened, but temporary migration files could not be removed. They will be cleaned up later.</source>
+            <translation>照片图库已恢复并打开，但无法移除临时迁移文件。系统稍后会再次清理。</translation>
+        </message>
+        <message>
+            <source>The photo library opened, but temporary migration files could not be removed. They will be cleaned up on a later start.</source>
+            <translation>照片图库已打开，但无法移除临时迁移文件。系统将在后续启动时再次清理。</translation>
+        </message>
+        <message>
+            <source>Dismiss</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Download People &amp; Pets Extension…</source>
+            <translation>下载 People &amp; Pets 扩展…</translation>
+        </message>
     </context>
     <context>
         <name>MapExtension</name>
@@ -320,6 +384,156 @@
             <source>Failed to relaunch the application automatically. Please restart it manually.</source>
             <translation>无法自动重新启动应用。请手动重启。</translation>
         </message>
+        <message>
+            <source>Install from File...</source>
+            <translation>从文件安装…</translation>
+        </message>
+        <message>
+            <source>Choose how to install the map extension.</source>
+            <translation>选择地图扩展的安装方式。</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>在浏览器中下载</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>下载完成后，选择安装包继续安装。</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>无法打开浏览器。请复制下方链接并在浏览器中下载安装包。</translation>
+        </message>
+        <message>
+            <source>Could not download the map extension from GitHub.</source>
+            <translation>无法从 GitHub 下载地图扩展。</translation>
+        </message>
+        <message>
+            <source>Check your VPN or network proxy settings, or download the archive in your browser and install it from a file.</source>
+            <translation>请检查 VPN 或网络代理设置，或使用浏览器下载压缩包后从文件安装。</translation>
+        </message>
+        <message>
+            <source>Install Map Extension</source>
+            <translation>安装地图扩展</translation>
+        </message>
+        <message>
+            <source>Map extension archives (*.zip *.tar.xz)</source>
+            <translation>地图扩展压缩包 (*.zip *.tar.xz)</translation>
+        </message>
+        <message>
+            <source>Map extension is ready. Restart now to activate it?</source>
+            <translation>地图扩展已准备就绪。现在重启以启用？</translation>
+        </message>
+        <message>
+            <source>Map extension is staged and waiting for restart. Restart now?</source>
+            <translation>地图扩展已暂存，等待重启后完成安装。现在重启？</translation>
+        </message>
+        <message>
+            <source>The map extension folder is not writable or its files are in use. Check the folder shown in Details.</source>
+            <translation>地图扩展文件夹无法写入，或文件正在使用。请检查“详细信息”中的文件夹。</translation>
+        </message>
+        <message>
+            <source>There is not enough disk space to install the map extension.</source>
+            <translation>磁盘空间不足，无法安装地图扩展。</translation>
+        </message>
+        <message>
+            <source>Another map extension installation is running. Try again when it finishes.</source>
+            <translation>另一个地图扩展安装正在进行，请在完成后重试。</translation>
+        </message>
+        <message>
+            <source>This is not a supported map extension package. Download the official package for this app version.</source>
+            <translation>不支持此地图扩展压缩包。请下载适用于当前应用版本的官方包。</translation>
+        </message>
+        <message>
+            <source>This map extension package is incompatible with this app or platform.</source>
+            <translation>此地图扩展压缩包与当前应用或平台不兼容。</translation>
+        </message>
+        <message>
+            <source>The map extension package is damaged or incomplete. Download it again.</source>
+            <translation>地图扩展压缩包损坏或不完整，请重新下载。</translation>
+        </message>
+        <message>
+            <source>The map extension is missing required map, search or runtime files.</source>
+            <translation>地图扩展缺少必要的地图、搜索或运行文件。</translation>
+        </message>
+        <message>
+            <source>The map extension archive contains an unsafe path.</source>
+            <translation>地图扩展压缩包包含不安全的路径。</translation>
+        </message>
+        <message>
+            <source>The selected map extension archive could not be found.</source>
+            <translation>找不到所选的地图扩展压缩包。</translation>
+        </message>
+        <message>
+            <source>Map extension installation failed. Try again or install a downloaded archive.</source>
+            <translation>地图扩展安装失败。请重试，或安装已下载的压缩包。</translation>
+        </message>
+        <message>
+            <source>Retry</source>
+            <translation>重试</translation>
+        </message>
+        <message>
+            <source>Downloading map extension...</source>
+            <translation>正在下载地图扩展...</translation>
+        </message>
+        <message>
+            <source>Extracting map extension...</source>
+            <translation>正在解压地图扩展...</translation>
+        </message>
+        <message>
+            <source>Validating map extension...</source>
+            <translation>正在验证地图扩展...</translation>
+        </message>
+        <message>
+            <source>Installing map extension...</source>
+            <translation>正在安装地图扩展...</translation>
+        </message>
+        <message>
+            <source>On macOS, the map extension is included with the app and prepared automatically the first time you use maps.</source>
+            <translation>在 macOS 上，地图扩展随应用提供，并会在首次使用地图时自动准备。</translation>
+        </message>
+        <message>
+            <source>Manual map extension installation is not available on this platform.</source>
+            <translation>此平台不支持手动安装地图扩展。</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
+        </message>
+        <message>
+            <source>Details</source>
+            <translation>详细信息</translation>
+        </message>
+        <message>
+            <source>Restart</source>
+            <translation>重启</translation>
+        </message>
+    </context>
+    <context>
+        <name>QMessageBox</name>
+        <message>
+            <source>Show Details...</source>
+            <translation>显示详细信息…</translation>
+        </message>
+        <message>
+            <source>Hide Details...</source>
+            <translation>隐藏详细信息…</translation>
+        </message>
+    </context>
+    <context>
+        <name>QPlatformTheme</name>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
+        </message>
     </context>
     <context>
         <name>StatusBar</name>
@@ -362,6 +576,10 @@
         <message>
             <source>Thumbnails updated.</source>
             <translation>缩略图已更新。</translation>
+        </message>
+        <message>
+            <source>Thumbnail update failed.</source>
+            <translation>缩略图更新失败。</translation>
         </message>
         <message>
             <source>Loading items…</source>
@@ -444,7 +662,11 @@
         </message>
         <message>
             <source>Choose Someone Else…</source>
-            <translation>选择其他人…</translation>
+            <translation>选择其他名称…</translation>
+        </message>
+        <message>
+            <source>New Name…</source>
+            <translation>新建名称…</translation>
         </message>
         <message>
             <source>New Person…</source>
@@ -459,8 +681,16 @@
             <translation>不是此人物</translation>
         </message>
         <message>
+            <source>Not This Name</source>
+            <translation>不是此名称</translation>
+        </message>
+        <message>
             <source>Choose Someone Else</source>
-            <translation>选择其他人</translation>
+            <translation>选择其他名称</translation>
+        </message>
+        <message>
+            <source>Assign to</source>
+            <translation>分配给</translation>
         </message>
         <message>
             <source>Assign this face to</source>
@@ -475,8 +705,16 @@
             <translation>新建人物</translation>
         </message>
         <message>
+            <source>New Name</source>
+            <translation>新建名称</translation>
+        </message>
+        <message>
             <source>Person name:</source>
             <translation>人物姓名：</translation>
+        </message>
+        <message>
+            <source>Name:</source>
+            <translation>名称：</translation>
         </message>
         <message>
             <source>Unnamed</source>
@@ -643,6 +881,34 @@
             <translation>无法合并人物</translation>
         </message>
         <message>
+            <source>Merge Failed</source>
+            <translation>合并失败</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. No photos were deleted.</source>
+            <translation>无法合并这些身份。没有删除任何照片。</translation>
+        </message>
+        <message>
+            <source>The identities could not be merged. They may have changed since this view was loaded.</source>
+            <translation>无法合并这些身份。它们可能在当前视图加载后发生了变化。</translation>
+        </message>
+        <message>
+            <source>Recognition Busy</source>
+            <translation>识别任务繁忙</translation>
+        </message>
+        <message>
+            <source>Recognition data is still recovering. Please try again shortly.</source>
+            <translation>识别数据仍在恢复中，请稍后重试。</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Pets</source>
+            <translation>无法合并宠物</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>同一个宠物身份不能包含同一张照片中的两个检测结果。请删除重复检测，不要通过合并绕过此限制。</translation>
+        </message>
+        <message>
             <source>Merge Person</source>
             <translation>合并人物</translation>
         </message>
@@ -713,6 +979,118 @@
         <message>
             <source>People in hidden and visible states cannot be merged. Please make both People cards hidden or visible first.</source>
             <translation>隐藏和可见状态的人物不能合并。请先将两张人物卡片都设为隐藏或可见。</translation>
+        </message>
+        <message>
+            <source>Make both cards visible or both hidden before merging them.</source>
+            <translation>请先将两张卡片都设为可见，或都设为隐藏，再进行合并。</translation>
+        </message>
+        <message>
+            <source>Cannot Merge Cards</source>
+            <translation>无法合并卡片</translation>
+        </message>
+        <message>
+            <source>Name This Pet</source>
+            <translation>命名此宠物</translation>
+        </message>
+        <message>
+            <source>Delete Detection</source>
+            <translation>删除检测结果</translation>
+        </message>
+        <message>
+            <source>Rename Pet</source>
+            <translation>重命名宠物</translation>
+        </message>
+        <message>
+            <source>Merge Pet</source>
+            <translation>合并宠物</translation>
+        </message>
+        <message>
+            <source>Delete This Detection?</source>
+            <translation>删除此检测结果？</translation>
+        </message>
+        <message>
+            <source>Deleting this pet detection will hide this matched crop after future rescans.</source>
+            <translation>删除此宠物检测结果后，今后重新扫描时将隐藏对应的裁剪图像。</translation>
+        </message>
+        <message>
+            <source>Unnamed</source>
+            <translation>未命名</translation>
+        </message>
+        <message>
+            <source>Hide This Pet?</source>
+            <translation>隐藏此宠物？</translation>
+        </message>
+        <message>
+            <source>Hiding {name} will remove this pet from the People &amp; Pets view until you choose Show Hidden People or unhide it.</source>
+            <translation>隐藏 {name} 后，它将从“人物与宠物”视图中消失，直到你选择“显示隐藏人物”或取消隐藏。</translation>
+        </message>
+        <message>
+            <source>Hide Pet</source>
+            <translation>隐藏宠物</translation>
+        </message>
+        <message>
+            <source>Bind a Basic Library to see People &amp; Pets clusters.</source>
+            <translation>绑定基础图库以查看人物与宠物聚类。</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets appear here after a library is bound and scanned.</source>
+            <translation>绑定并扫描图库后，人物与宠物会显示在这里。</translation>
+        </message>
+        <message>
+            <source>Loading People &amp; Pets dashboard…</source>
+            <translation>正在加载人物与宠物面板…</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets is updating in the background. This page will retry shortly.</source>
+            <translation>人物与宠物数据正在后台更新，此页面将稍后重试。</translation>
+        </message>
+        <message>
+            <source>People &amp; Pets could not be loaded. Please try refreshing the page.</source>
+            <translation>无法加载人物与宠物。请尝试刷新页面。</translation>
+        </message>
+        <message>
+            <source>Click a person, pet, or group card to open matching assets.</source>
+            <translation>点击人物、宠物或分组卡片可打开匹配项目。</translation>
+        </message>
+        <message>
+            <source>Scanning faces and pets in the background. This page will fill in as clusters are ready.</source>
+            <translation>正在后台扫描人脸和宠物。识别分组就绪后会陆续显示在此页面。</translation>
+        </message>
+        <message>
+            <source>No People or Pets clusters yet. Run a scan to build groups.</source>
+            <translation>还没有人物或宠物聚类。运行扫描以创建分组。</translation>
+        </message>
+        <message>
+            <source>Pet scanning is disabled.</source>
+            <translation>宠物扫描已禁用。</translation>
+        </message>
+        <message>
+            <source>Pet scanning is unavailable for this library.</source>
+            <translation>此图库无法扫描宠物。</translation>
+        </message>
+        <message>
+            <source>Pet scan consolidation paused: {reason}</source>
+            <translation>宠物扫描结果整合已暂停：{reason}</translation>
+        </message>
+        <message>
+            <source>Pet scanning paused: {reason}</source>
+            <translation>宠物扫描已暂停：{reason}</translation>
+        </message>
+        <message>
+            <source>Some assets need a pet-scan retry.</source>
+            <translation>部分项目需要重新扫描宠物。</translation>
+        </message>
+        <message>
+            <source>Some assets could not be pet scanned and were marked failed.</source>
+            <translation>部分项目未能完成宠物扫描，已标记为失败。</translation>
+        </message>
+        <message>
+            <source>A name is required before pinning this pet.</source>
+            <translation>固定此宠物前需要先填写名称。</translation>
+        </message>
+        <message>
+            <source>Could not save the pet's name. Please try again.</source>
+            <translation>无法保存宠物名称。请重试。</translation>
         </message>
     </context>
     <context>
@@ -832,6 +1210,10 @@
         <message>
             <source>Recently Deleted</source>
             <translation>最近删除</translation>
+        </message>
+        <message>
+            <source>People&amp;pets</source>
+            <translation>人物与宠物</translation>
         </message>
     </context>
     <context>
@@ -1070,6 +1452,22 @@
         <message>
             <source>Writing data, please wait...</source>
             <translation>正在写入数据，请稍候…</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. Please try again.</source>
+            <translation>无法分配该名称，请重试。</translation>
+        </message>
+        <message>
+            <source>The name could not be assigned. The identities may have changed.</source>
+            <translation>无法分配该名称，相关身份可能已经发生变化。</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Delete a duplicate detection instead of merging it.</source>
+            <translation>同一个宠物身份不能包含同一张照片中的两个检测结果。请删除重复检测，不要通过合并绕过此限制。</translation>
+        </message>
+        <message>
+            <source>A pet identity cannot contain two detections from the same photo. Choose another identity for this detection.</source>
+            <translation>同一宠物身份不能包含同一张照片中的两个标记。请为当前标记选择其他身份。</translation>
         </message>
     </context>
     <context>
@@ -1349,6 +1747,10 @@
         <message>
             <source>unnamed</source>
             <translation>未命名</translation>
+        </message>
+        <message>
+            <source>Pending confirmation</source>
+            <translation>待确认</translation>
         </message>
         <message>
             <source>Please enter a name before saving the face.</source>
@@ -1793,6 +2195,131 @@ Select a tile directory to switch back to the legacy backend.</source>
         <message>
             <source>Return to Map</source>
             <translation>返回地图</translation>
+        </message>
+    </context>
+    <context>
+        <name>PetCard</name>
+        <message>
+            <source>Unconfirmed Cat</source>
+            <translation>未确认的猫</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Dog</source>
+            <translation>未确认的狗</translation>
+        </message>
+        <message>
+            <source>Unconfirmed Pet</source>
+            <translation>未确认的宠物</translation>
+        </message>
+        <message>
+            <source>Unconfirmed</source>
+            <translation>未确认</translation>
+        </message>
+    </context>
+    <context>
+        <name>RecognitionExtension</name>
+        <message>
+            <source>People &amp; Pets Extension</source>
+            <translation>People &amp; Pets 扩展</translation>
+        </message>
+        <message>
+            <source>Choose how to install the People &amp; Pets extension.</source>
+            <translation>请选择 People &amp; Pets 扩展的安装方式。</translation>
+        </message>
+        <message>
+            <source>Download</source>
+            <translation>下载</translation>
+        </message>
+        <message>
+            <source>Cancel</source>
+            <translation>取消</translation>
+        </message>
+        <message>
+            <source>Download in Browser</source>
+            <translation>在浏览器中下载</translation>
+        </message>
+        <message>
+            <source>Install from File…</source>
+            <translation>从文件安装…</translation>
+        </message>
+        <message>
+            <source>Later</source>
+            <translation>稍后</translation>
+        </message>
+        <message>
+            <source>Close</source>
+            <translation>关闭</translation>
+        </message>
+        <message>
+            <source>Could not automatically get all People &amp; Pets recognition models. Download the package in your browser, then install it from a file.</source>
+            <translation>未能自动获取完整的 People &amp; Pets 识别模型。请在浏览器中下载安装包，然后从文件安装。</translation>
+        </message>
+        <message>
+            <source>Select the archive after the download finishes.</source>
+            <translation>下载完成后，请选择安装包。</translation>
+        </message>
+        <message>
+            <source>Could not open the browser. Copy this link to download the archive.</source>
+            <translation>无法打开浏览器。请复制此链接下载安装包。</translation>
+        </message>
+        <message>
+            <source>Install People &amp; Pets Extension</source>
+            <translation>安装 People &amp; Pets 扩展</translation>
+        </message>
+        <message>
+            <source>Recognition extension archives (*.zip)</source>
+            <translation>识别扩展安装包 (*.zip)</translation>
+        </message>
+        <message>
+            <source>Preparing recognition extension…</source>
+            <translation>正在准备识别扩展…</translation>
+        </message>
+        <message>
+            <source>Downloading recognition extension…</source>
+            <translation>正在下载识别扩展…</translation>
+        </message>
+        <message>
+            <source>Validating recognition extension…</source>
+            <translation>正在验证识别扩展…</translation>
+        </message>
+        <message>
+            <source>Extracting recognition extension…</source>
+            <translation>正在解压识别扩展…</translation>
+        </message>
+        <message>
+            <source>Installing recognition extension…</source>
+            <translation>正在安装识别扩展…</translation>
+        </message>
+        <message>
+            <source>Could not download the People &amp; Pets extension. Download it in your browser and install it from a file.</source>
+            <translation>无法下载 People &amp; Pets 扩展。请在浏览器中下载，然后从文件安装。</translation>
+        </message>
+        <message>
+            <source>The selected archive is missing, damaged, or unsupported.</source>
+            <translation>所选安装包不存在、已损坏或不受支持。</translation>
+        </message>
+        <message>
+            <source>Another People &amp; Pets extension installation is running.</source>
+            <translation>另一项 People &amp; Pets 扩展安装正在进行。</translation>
+        </message>
+        <message>
+            <source>Could not install the People &amp; Pets extension.</source>
+            <translation>无法安装 People &amp; Pets 扩展。</translation>
+        </message>
+        <message>
+            <source>Face scanning unavailable: '{path}' is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>无法扫描人脸：“{path}”中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
+        </message>
+        <message>
+            <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
+            <translation>IPHOTO_FACE_MODEL_DIR 指定的目录中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
+        </message>
+    </context>
+    <context>
+        <name>NotificationToast</name>
+        <message>
+            <source>Installed</source>
+            <translation>已安装</translation>
         </message>
     </context>
 </TS>

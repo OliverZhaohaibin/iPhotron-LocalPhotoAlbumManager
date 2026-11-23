@@ -1,13 +1,16 @@
 import sqlite3
+import sys
+from contextlib import closing
 from pathlib import Path
+
+import pytest
 
 from maps import map_sources
 from maps.map_sources import (
-    DEFAULT_HELPER_RELATIVE_PATHS,
-    DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS,
     ENV_OSMAND_EXTENSION_ROOT,
     MapSourceSpec,
     apply_pending_osmand_extension_install,
+    bundled_osmand_extension_archive,
     _sdk_roots,
     default_osmand_extension_root,
     default_osmand_download_url,
@@ -23,8 +26,18 @@ from maps.map_sources import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_extension_paths(tmp_path, monkeypatch, map_platform):
+    map_platform(sys.platform)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
+    monkeypatch.delenv("APPIMAGE", raising=False)
+
+
 def _create_extension_assets(package_root: Path) -> Path:
-    extension_root = default_osmand_extension_root(package_root)
+    """Build bundled assets, independently of runtime read/write selection."""
+    extension_root = package_root / "tiles" / "extension"
     _create_extension_assets_at(extension_root)
     return extension_root
 
@@ -42,7 +55,7 @@ def _create_extension_assets_at(extension_root: Path) -> Path:
         encoding="utf-8",
     )
     _create_search_database(extension_root / "search" / "geonames.sqlite3")
-    helper_path = extension_root / DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(
+    helper_path = extension_root / map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(
         Path("tiles") / "extension"
     )
     helper_path.write_bytes(b"helper")
@@ -51,7 +64,7 @@ def _create_extension_assets_at(extension_root: Path) -> Path:
 
 def _create_search_database(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.executescript(
             """
             CREATE TABLE search_index (
@@ -95,9 +108,50 @@ def _create_search_database(path: Path) -> None:
         )
 
 
+def test_macos_app_bundle_reads_large_map_data_from_resources(tmp_path) -> None:
+    contents_root = tmp_path / "iPhotron.app" / "Contents"
+    package_root = contents_root / "MacOS" / "maps"
+    resources_maps_root = contents_root / "Resources" / "maps"
+    package_root.mkdir(parents=True)
+    resources_maps_root.mkdir(parents=True)
+    (package_root / "style.json").write_text("{}", encoding="utf-8")
+    bundled_extension = _create_extension_assets_at(
+        resources_maps_root / "tiles" / "extension"
+    )
+
+    source = MapSourceSpec.default(package_root)
+
+    assert source.kind == "osmand_obf"
+    assert Path(source.data_path) == bundled_extension / "World_basemap_2.obf"
+    assert MapSourceSpec.legacy_default(package_root).data_path == resources_maps_root / "tiles"
+    assert resolve_osmand_helper_command(package_root) == (
+        str(bundled_extension / "bin" / map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0].name),
+    )
+
+
+def test_macos_app_bundle_archive_uses_external_install_root(
+    tmp_path, monkeypatch
+) -> None:
+    contents_root = tmp_path / "iPhotron.app" / "Contents"
+    package_root = contents_root / "MacOS" / "maps"
+    archive_path = contents_root / "Resources" / "maps" / "extension.tar"
+    package_root.mkdir(parents=True)
+    archive_path.parent.mkdir(parents=True)
+    archive_path.write_bytes(b"archive")
+    external_root = tmp_path / "managed" / "tiles" / "extension"
+    monkeypatch.setattr(
+        map_sources,
+        "_default_external_osmand_extension_root",
+        lambda: external_root,
+    )
+
+    assert bundled_osmand_extension_archive(package_root) == archive_path.resolve()
+    assert default_osmand_extension_root(package_root) == external_root.resolve()
+
+
 def _create_search_database_without_prefix_cache(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.executescript(
             """
             CREATE TABLE search_index (
@@ -170,7 +224,7 @@ def test_resolve_osmand_helper_command_prefers_environment(monkeypatch) -> None:
 def test_resolve_osmand_helper_command_discovers_extension_helper(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "src" / "maps"
     package_root.mkdir(parents=True)
-    helper_path = package_root / DEFAULT_HELPER_RELATIVE_PATHS[0]
+    helper_path = package_root / map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0]
     helper_path.parent.mkdir(parents=True)
     helper_path.write_bytes(b"exe")
     monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
@@ -183,7 +237,9 @@ def test_resolve_osmand_helper_command_discovers_extension_helper(tmp_path, monk
 def test_resolve_osmand_helper_command_prefers_external_runtime_root_for_appimage(
     tmp_path,
     monkeypatch,
+    map_platform,
 ) -> None:
+    map_platform("linux")
     package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
     package_root.mkdir(parents=True)
     external_data_home = tmp_path / "xdg-data"
@@ -194,11 +250,10 @@ def test_resolve_osmand_helper_command_prefers_external_runtime_root_for_appimag
         / "tiles"
         / "extension"
         / "bin"
-        / DEFAULT_HELPER_RELATIVE_PATHS[0].name
+        / map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0].name
     )
     helper_path.parent.mkdir(parents=True, exist_ok=True)
     helper_path.write_bytes(b"exe")
-    monkeypatch.setattr(map_sources.sys, "platform", "linux")
     monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
     monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
     monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
@@ -212,7 +267,7 @@ def test_resolve_osmand_helper_command_prefers_external_runtime_root_for_appimag
 def test_resolve_osmand_native_widget_library_prefers_extension_bin_output(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "src" / "maps"
     package_root.mkdir(parents=True)
-    local_dll = package_root / DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS[0]
+    local_dll = package_root / map_sources.DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS[0]
     local_dll.parent.mkdir(parents=True)
     local_dll.write_bytes(b"dll")
     monkeypatch.delenv(map_sources.ENV_OSMAND_NATIVE_WIDGET_LIBRARY, raising=False)
@@ -222,16 +277,36 @@ def test_resolve_osmand_native_widget_library_prefers_extension_bin_output(tmp_p
     assert resolved == local_dll.resolve()
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_selected_extension_falls_back_to_sdk_if_widget_is_missing(
+    tmp_path, monkeypatch, map_platform, platform
+):
+    map_platform(platform)
+    package_root = tmp_path / "repo" / "src" / "maps"
+    extension = _create_extension_assets(package_root)
+    monkeypatch.setenv(ENV_OSMAND_EXTENSION_ROOT, str(extension))
+    monkeypatch.delenv(map_sources.ENV_OSMAND_NATIVE_WIDGET_LIBRARY, raising=False)
+    sdk = tmp_path / "PySide6-OsmAnd-SDK"
+    sdk_widget = sdk / map_sources.SDK_NATIVE_WIDGET_RELATIVE_PATHS[0]
+    sdk_widget.parent.mkdir(parents=True)
+    sdk_widget.write_bytes(b"sdk widget")
+    assert resolve_osmand_native_widget_library(package_root) == sdk_widget.resolve()
+
+    extension_widget = extension / "bin" / map_sources.DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS[0].name
+    extension_widget.write_bytes(b"extension widget")
+    assert resolve_osmand_native_widget_library(package_root) == extension_widget.resolve()
+
+
 def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> None:
     package_root = tmp_path / "maps"
     tiles_dir = package_root / "tiles"
     tiles_dir.mkdir(parents=True)
     extension_root = _create_extension_assets(package_root)
-    helper_path = extension_root / DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(Path("tiles") / "extension")
+    helper_path = extension_root / map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0].relative_to(Path("tiles") / "extension")
     helper_path.unlink()
     monkeypatch.delenv(map_sources.ENV_OSMAND_HELPER, raising=False)
     if map_sources.os.name == "nt":
-        monkeypatch.setenv("APPDATA", str(tmp_path / "empty-appdata"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty-appdata"))
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
     monkeypatch.delenv("APPIMAGE", raising=False)
@@ -239,7 +314,7 @@ def test_has_usable_osmand_default_requires_helper(tmp_path, monkeypatch) -> Non
 
     assert has_usable_osmand_default(package_root) is False
 
-    helper_path = package_root / DEFAULT_HELPER_RELATIVE_PATHS[0]
+    helper_path = package_root / map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0]
     helper_path.parent.mkdir(parents=True, exist_ok=True)
     helper_path.write_bytes(b"exe")
 
@@ -258,7 +333,8 @@ def test_default_osmand_download_url_matches_platform_variants() -> None:
     assert default_osmand_download_url("darwin") is None
 
 
-def test_darwin_runtime_candidates_prefer_extension_before_sdk(tmp_path, monkeypatch) -> None:
+def test_darwin_runtime_candidates_prefer_extension_before_sdk(tmp_path, monkeypatch, map_platform) -> None:
+    map_platform("darwin")
     package_root = tmp_path / "repo" / "src" / "maps"
     package_root.mkdir(parents=True)
     (tmp_path / "PySide6-OsmAnd-SDK").mkdir()
@@ -275,7 +351,6 @@ def test_darwin_runtime_candidates_prefer_extension_before_sdk(tmp_path, monkeyp
         / "osmand_native_widget.dylib"
     )
 
-    monkeypatch.setattr(map_sources.sys, "platform", "darwin")
     monkeypatch.setattr(map_sources, "DEFAULT_HELPER_RELATIVE_PATHS", (helper_rel,))
     monkeypatch.setattr(map_sources, "SDK_HELPER_RELATIVE_PATHS", (sdk_helper_rel,))
     monkeypatch.setattr(map_sources, "DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS", (widget_rel,))
@@ -295,7 +370,8 @@ def test_darwin_runtime_candidates_prefer_extension_before_sdk(tmp_path, monkeyp
     )
 
 
-def test_linux_runtime_candidates_keep_sdk_before_extension(tmp_path, monkeypatch) -> None:
+def test_linux_runtime_candidates_keep_sdk_before_extension(tmp_path, monkeypatch, map_platform) -> None:
+    map_platform("linux")
     package_root = tmp_path / "repo" / "src" / "maps"
     package_root.mkdir(parents=True)
     (tmp_path / "PySide6-OsmAnd-SDK").mkdir()
@@ -309,7 +385,6 @@ def test_linux_runtime_candidates_keep_sdk_before_extension(tmp_path, monkeypatc
         Path("tools") / "osmand_render_helper_native" / "dist-linux" / "osmand_native_widget.so"
     )
 
-    monkeypatch.setattr(map_sources.sys, "platform", "linux")
     monkeypatch.setattr(map_sources, "DEFAULT_HELPER_RELATIVE_PATHS", (helper_rel,))
     monkeypatch.setattr(map_sources, "SDK_HELPER_RELATIVE_PATHS", (sdk_helper_rel,))
     monkeypatch.setattr(map_sources, "DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS", (widget_rel,))
@@ -332,7 +407,9 @@ def test_linux_runtime_candidates_keep_sdk_before_extension(tmp_path, monkeypatc
 def test_win32_runtime_candidates_ignore_sdk_and_keep_windows_filenames(
     tmp_path,
     monkeypatch,
+    map_platform,
 ) -> None:
+    map_platform("win32")
     package_root = tmp_path / "repo" / "src" / "maps"
     package_root.mkdir(parents=True)
     (tmp_path / "PySide6-OsmAnd-SDK").mkdir()
@@ -346,7 +423,6 @@ def test_win32_runtime_candidates_ignore_sdk_and_keep_windows_filenames(
         Path("tiles") / "extension" / "bin" / "libosmand_native_widget.dll",
     )
 
-    monkeypatch.setattr(map_sources.sys, "platform", "win32")
     monkeypatch.setattr(map_sources, "DEFAULT_HELPER_RELATIVE_PATHS", helper_rels)
     monkeypatch.setattr(map_sources, "SDK_HELPER_RELATIVE_PATHS", ())
     monkeypatch.setattr(map_sources, "DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS", widget_rels)
@@ -376,7 +452,7 @@ def test_has_installed_osmand_extension_requires_search_database_and_helper(
     package_root = tmp_path / "maps"
     _create_extension_assets(package_root)
     if map_sources.os.name == "nt":
-        monkeypatch.setenv("APPDATA", str(tmp_path / "empty-appdata"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty-appdata"))
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
     monkeypatch.delenv("APPIMAGE", raising=False)
@@ -403,7 +479,7 @@ def test_osmand_search_extension_rejects_lfs_pointer_database(
         encoding="utf-8",
     )
     if map_sources.os.name == "nt":
-        monkeypatch.setenv("APPDATA", str(tmp_path / "empty-appdata"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty-appdata"))
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data-home"))
     monkeypatch.delenv("APPIMAGE", raising=False)
@@ -426,7 +502,9 @@ def test_osmand_search_extension_accepts_optimized_database_without_prefix_cache
 def test_has_installed_osmand_extension_detects_external_runtime_when_bundled_exists(
     tmp_path,
     monkeypatch,
+    map_platform,
 ) -> None:
+    map_platform("linux")
     package_root = tmp_path / "maps"
     bundled_root = package_root / "tiles" / "extension"
     (bundled_root / "rendering_styles").mkdir(parents=True, exist_ok=True)
@@ -435,13 +513,8 @@ def test_has_installed_osmand_extension_detects_external_runtime_when_bundled_ex
         encoding="utf-8",
     )
     external_data_home = tmp_path / "xdg-data"
-    if map_sources.os.name == "nt":
-        monkeypatch.setenv("APPDATA", str(external_data_home))
-        external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
-    else:
-        monkeypatch.setattr(map_sources.sys, "platform", "linux")
-        monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
-        external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
+    monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
+    external_root = external_data_home / "iPhoto" / "maps" / "tiles" / "extension"
     _create_extension_assets_at(external_root)
     monkeypatch.delenv("APPIMAGE", raising=False)
     monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
@@ -453,11 +526,12 @@ def test_has_installed_osmand_extension_detects_external_runtime_when_bundled_ex
 def test_default_osmand_extension_root_uses_external_runtime_path_for_appimage(
     tmp_path,
     monkeypatch,
+    map_platform,
 ) -> None:
+    map_platform("linux")
     package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
     package_root.mkdir(parents=True)
     external_data_home = tmp_path / "xdg-data"
-    monkeypatch.setattr(map_sources.sys, "platform", "linux")
     monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
     monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
     monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
@@ -501,12 +575,13 @@ def test_default_osmand_extension_root_falls_back_to_valid_bundled_extension_whe
 def test_default_pending_osmand_extension_root_uses_external_runtime_path_for_appimage_when_bundled_exists(
     tmp_path,
     monkeypatch,
+    map_platform,
 ) -> None:
+    map_platform("linux")
     package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
     bundled_root = package_root / "tiles" / "extension"
     bundled_root.mkdir(parents=True, exist_ok=True)
     external_data_home = tmp_path / "xdg-data"
-    monkeypatch.setattr(map_sources.sys, "platform", "linux")
     monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
     monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
     monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
@@ -520,11 +595,11 @@ def test_default_pending_osmand_extension_root_uses_external_runtime_path_for_ap
     assert default_osmand_extension_root(package_root) == bundled_root.resolve()
 
 
-def test_windows_map_components_use_versioned_local_app_data(monkeypatch, tmp_path) -> None:
+def test_windows_map_components_use_versioned_local_app_data(monkeypatch, tmp_path, map_platform) -> None:
+    map_platform("win32")
     local_app_data = tmp_path / "LocalAppData"
     package_root = tmp_path / "package" / "maps"
     package_root.mkdir(parents=True)
-    monkeypatch.setattr("maps.map_sources.sys.platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
 
     pending_root = default_pending_osmand_extension_root(package_root)
@@ -542,7 +617,8 @@ def test_windows_map_components_use_versioned_local_app_data(monkeypatch, tmp_pa
 
 def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_path) -> None:
     package_root = tmp_path / "maps"
-    extension_root = _create_extension_assets(package_root)
+    extension_root = map_sources.managed_osmand_extension_root(package_root)
+    _create_extension_assets_at(extension_root)
     (extension_root / "marker.txt").write_text("old", encoding="utf-8")
 
     pending_root = default_pending_osmand_extension_root(package_root)
@@ -556,7 +632,7 @@ def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_pa
     (pending_root / "search").mkdir()
     _create_search_database(pending_root / "search" / "geonames.sqlite3")
     (pending_root / "bin").mkdir()
-    helper_name = DEFAULT_HELPER_RELATIVE_PATHS[0].name
+    helper_name = map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0].name
     (pending_root / "bin" / helper_name).write_bytes(b"helper")
     (pending_root / "marker.txt").write_text("new", encoding="utf-8")
 
@@ -568,12 +644,13 @@ def test_apply_pending_osmand_extension_install_promotes_staged_directory(tmp_pa
 def test_apply_pending_osmand_extension_install_promotes_to_external_runtime_for_appimage(
     tmp_path,
     monkeypatch,
+    map_platform,
 ) -> None:
+    map_platform("linux")
     package_root = tmp_path / "AppDir" / "opt" / "iPhotron" / "maps"
     bundled_root = _create_extension_assets(package_root)
     (bundled_root / "marker.txt").write_text("bundled", encoding="utf-8")
     external_data_home = tmp_path / "xdg-data"
-    monkeypatch.setattr(map_sources.sys, "platform", "linux")
     monkeypatch.setenv("APPIMAGE", str(tmp_path / "iPhotron.AppImage"))
     monkeypatch.setenv("XDG_DATA_HOME", str(external_data_home))
     monkeypatch.delenv(ENV_OSMAND_EXTENSION_ROOT, raising=False)
@@ -589,7 +666,7 @@ def test_apply_pending_osmand_extension_install_promotes_to_external_runtime_for
     (pending_root / "search").mkdir()
     _create_search_database(pending_root / "search" / "geonames.sqlite3")
     (pending_root / "bin").mkdir()
-    (pending_root / "bin" / DEFAULT_HELPER_RELATIVE_PATHS[0].name).write_bytes(b"helper")
+    (pending_root / "bin" / "osmand_render_helper").write_bytes(b"helper")
     (pending_root / "marker.txt").write_text("external", encoding="utf-8")
 
     assert apply_pending_osmand_extension_install(package_root) is True
@@ -642,3 +719,53 @@ def test_sdk_roots_returns_empty_when_neither_exists(tmp_path) -> None:
     roots = _sdk_roots(repo_root)
 
     assert roots == ()
+
+
+@pytest.mark.parametrize("builder", [_create_search_database, _create_search_database_without_prefix_cache])
+@pytest.mark.parametrize("fail", [False, True])
+def test_search_database_fixture_closes_connection_before_filesystem_changes(tmp_path, monkeypatch, builder, fail):
+    connections = []
+    connect = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def executescript(self, script):
+            if fail:
+                raise sqlite3.OperationalError("fixture failure")
+            return super().executescript(script)
+
+    def tracked(*args, **kwargs):
+        conn = connect(*args, factory=Connection, **kwargs)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", tracked)
+    folder = tmp_path / "source"
+    path = folder / "search.sqlite3"
+    try:
+        if fail:
+            with pytest.raises(sqlite3.OperationalError, match="fixture failure"):
+                builder(path)
+        else:
+            builder(path)
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connections[0].execute("SELECT 1")
+        path.unlink()
+        folder.rename(tmp_path / "renamed")
+    finally:
+        for connection in connections:
+            connection.close()
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_map_platform_fixture_is_complete_and_does_not_change_python_host(map_platform, platform):
+    original_platform = sys.platform
+    map_platform(platform)
+    assert sys.platform == original_platform
+    assert map_sources.sys.platform == platform
+    helper_suffix = ".exe" if platform == "win32" else ""
+    assert map_sources.DEFAULT_HELPER_RELATIVE_PATHS[0].name == "osmand_render_helper" + helper_suffix
+    assert map_sources.DEFAULT_NATIVE_WIDGET_RELATIVE_PATHS[0].suffix == {
+        "win32": ".dll", "darwin": ".dylib", "linux": ".so"
+    }[platform]
+    assert bool(map_sources.SDK_HELPER_RELATIVE_PATHS) == (platform != "win32")

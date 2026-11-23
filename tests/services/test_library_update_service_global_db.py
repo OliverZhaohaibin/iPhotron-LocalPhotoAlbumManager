@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
+import pytest
+
 import iPhoto.gui.services.library_update_service as lus
 from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
 
@@ -24,7 +26,7 @@ class DummyLibrary:
         self._root = Path(root) if root is not None else None
         self.scan_service = scan_service
         self.asset_lifecycle_service = lifecycle_service
-        self.started: list[tuple[Path, list[str], list[str]]] = []
+        self.started: list[tuple[Path, list[str], list[str], bool, bool]] = []
         self._is_scanning = is_scanning
 
     def root(self) -> Path | None:
@@ -33,11 +35,10 @@ class DummyLibrary:
     def is_scanning_path(self, _path: Path) -> bool:
         return self._is_scanning
 
-    def start_scanning(self, root: Path, include, exclude) -> None:
-        self.started.append((Path(root), list(include), list(exclude)))
-
-    def start_session_scan(self, root: Path, *, include, exclude) -> None:
-        self.start_scanning(root, include, exclude)
+    def start_session_scan(
+        self, root: Path, *, include, exclude, startup: bool = False, retry_recognition: bool = False
+    ) -> None:
+        self.started.append((Path(root), list(include), list(exclude), startup, retry_recognition))
 
 
 class FakeScanService:
@@ -311,7 +312,41 @@ def test_rescan_album_async_routes_bound_library_scans_via_library_manager(
 
     assert runner.calls == []
     assert library.started == [
-        (album_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE))
+        (album_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), False, False)
+    ]
+
+
+@pytest.mark.parametrize("startup,retry_recognition", [(True, False), (False, True)])
+def test_scan_root_async_forwards_scan_policy_to_library_session(
+    tmp_path: Path,
+    startup: bool,
+    retry_recognition: bool,
+) -> None:
+    lib_root = tmp_path / "library"
+    album_root = lib_root / "Album"
+    lib_root.mkdir()
+    album_root.mkdir()
+    scan_service = FakeScanService(lib_root)
+    library = DummyLibrary(
+        lib_root,
+        scan_service=scan_service,
+    )
+    service = lus.LibraryUpdateService(
+        task_manager=DummyTaskManager(),
+        current_album_getter=lambda: None,
+        library_manager_getter=lambda: library,
+    )
+
+    service.scan_root_async(
+        album_root,
+        include=DEFAULT_INCLUDE,
+        exclude=DEFAULT_EXCLUDE,
+        startup=startup,
+        retry_recognition=retry_recognition,
+    )
+
+    assert library.started == [
+        (album_root, list(DEFAULT_INCLUDE), list(DEFAULT_EXCLUDE), startup, retry_recognition)
     ]
 
 

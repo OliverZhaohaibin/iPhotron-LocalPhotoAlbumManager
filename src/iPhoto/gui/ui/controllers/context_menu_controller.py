@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QUrl,
+    Signal,
 )
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMenu
@@ -24,6 +25,7 @@ from iPhoto.gui.i18n import tr
 from iPhoto.gui.ui.menus.core import MenuContext, populate_menu
 from iPhoto.gui.ui.menus.gallery_menu import GalleryMenuHandlers, gallery_action_specs
 from iPhoto.gui.ui.menus.style import apply_menu_style
+from iPhoto.utils.pathutils import normalise_for_compare
 
 from ...facade import AppFacade
 from ...services.people_service_resolver import resolve_people_service
@@ -34,12 +36,16 @@ from .selection_controller import SelectionController
 from .status_bar_controller import StatusBarController
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from iPhoto.pets.service import PetService
+
     from ...coordinators.navigation_coordinator import NavigationCoordinator
     from ...viewmodels.gallery_viewmodel import GalleryViewModel
 
 
 class ContextMenuController(QObject):
     """Manage the asset grid context menu and related clipboard interactions."""
+
+    petCoverUpdated = Signal()
 
     def __init__(
         self,
@@ -340,13 +346,24 @@ class ContextMenuController(QObject):
 
         try:
             self._prepare_file_mutation(paths)
-            queued_move = self._facade.move_assets(paths, target)
-            if not queued_move:
+            move_plan = self._facade.move_assets_with_plan(paths, target)
+            if move_plan is None:
                 return
+            accepted_paths = list(move_plan.sources)
             if selected_indexes and not self._apply_optimistic_move(
-                paths, destination_root=target
+                accepted_paths, destination_root=move_plan.destination_root
             ):
-                self._remove_selection_rows(selected_indexes)
+                accepted_keys = {normalise_for_compare(path) for path in accepted_paths}
+                accepted_indexes = []
+                for index in selected_indexes:
+                    raw_path = index.data(Roles.ABS)
+                    if (
+                        isinstance(raw_path, (str, Path))
+                        and raw_path
+                        and normalise_for_compare(Path(raw_path)) in accepted_keys
+                    ):
+                        accepted_indexes.append(index)
+                self._remove_selection_rows(accepted_indexes)
         except Exception:
             rollback = getattr(
                 self._current_asset_model(),
@@ -443,7 +460,7 @@ class ContextMenuController(QObject):
         )
 
     def _collect_move_targets(self) -> list[tuple[str, Path]]:
-        """Build a list of (label, path) destinations excluding the currently open album."""
+        """List destinations, excluding an album only when every source is already in it."""
 
         if self._navigation is None:
             return []
@@ -458,13 +475,15 @@ class ContextMenuController(QObject):
             entries = list(iter_album_entries())
         except TypeError:
             return []
-        current_album = self._facade.current_album
-        current_root: Path | None = None
-        if current_album is not None:
+        # Aggregate galleries can retain a stale facade album. Filter only the
+        # shared source directory, keeping valid targets for mixed selections.
+        source_parents = {path.parent for path in self._selected_asset_paths()}
+        source_root = next(iter(source_parents)) if len(source_parents) == 1 else None
+        if source_root is not None:
             try:
-                current_root = current_album.root.resolve()
+                source_root = source_root.resolve()
             except OSError:
-                current_root = current_album.root
+                pass
 
         destinations: list[tuple[str, Path]] = []
         for label, path in entries:
@@ -472,7 +491,7 @@ class ContextMenuController(QObject):
                 resolved = path.resolve()
             except OSError:
                 continue
-            if current_root is not None and resolved == current_root:
+            if source_root is not None and resolved == source_root:
                 continue
             destinations.append((label, path))
         return destinations
@@ -493,6 +512,12 @@ class ContextMenuController(QObject):
                 )
                 is not None
             )
+        if context.entity_kind == "pet" and context.entity_id:
+            service = self._pet_service_for_context(context)
+            return (
+                service is not None
+                and service.resolve_pet_cover_detection(context.entity_id, asset.id) is not None
+            )
         if context.entity_kind == "group" and context.entity_id:
             service = self._people_service_for_context(context)
             return bool(
@@ -507,7 +532,7 @@ class ContextMenuController(QObject):
 
     def _set_as_cover(self, context: MenuContext) -> None:
         asset = context.selected_asset
-        if asset is None:
+        if asset is None or context.is_recently_deleted:
             return
 
         success = False
@@ -518,6 +543,13 @@ class ContextMenuController(QObject):
             if service is not None:
                 face_id = service.resolve_cluster_cover_face(context.entity_id, asset.id)
                 success = bool(face_id) and service.set_cluster_cover(context.entity_id, face_id)
+        elif context.entity_kind == "pet" and context.entity_id:
+            service = self._pet_service_for_context(context)
+            if service is not None:
+                detection_id = service.resolve_pet_cover_detection(context.entity_id, asset.id)
+                success = bool(detection_id) and service.set_pet_cover(
+                    context.entity_id, detection_id
+                )
         elif context.entity_kind == "group" and context.entity_id:
             service = self._people_service_for_context(context)
             if service is not None:
@@ -528,6 +560,8 @@ class ContextMenuController(QObject):
                 )
 
         if success:
+            if context.entity_kind == "pet":
+                self.petCoverUpdated.emit()
             self._toast.show_toast(tr("GalleryContextMenu", "Cover Updated"))
             return
         self._status_bar.show_message(
@@ -551,6 +585,23 @@ class ContextMenuController(QObject):
             self._facade.library_manager,
             library_root=context.active_root,
         )
+
+    def _pet_service_for_context(self, context: MenuContext) -> PetService | None:
+        manager = self._facade.library_manager
+        if manager is None or context.active_root is None:
+            return None
+        service = manager.pet_service
+        if service is None and manager.library_session is not None:
+            service = manager.library_session.pets
+        if service is None:
+            return None
+        root = service.library_root()
+        if (
+            not isinstance(root, Path)
+            or normalise_for_compare(root) != normalise_for_compare(context.active_root)
+        ):
+            return None
+        return service
 
     def _remove_selection_rows(self, selected_indexes: list) -> None:
         if not selected_indexes:

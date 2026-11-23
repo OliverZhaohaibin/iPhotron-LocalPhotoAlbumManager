@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=iPhotron
+Comment=Local-first photo album manager
+Exec=iphoto
+Icon=iphoto
+Categories=Graphics;Photography;
+Terminal=false
+StartupNotify=true

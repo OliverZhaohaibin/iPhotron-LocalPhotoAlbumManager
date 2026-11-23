@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from iPhoto.config import RECENTLY_DELETED_DIR_NAME
+from iPhoto.config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, RECENTLY_DELETED_DIR_NAME
 from iPhoto.cache.index_store import get_global_repository, reset_global_repository
 from iPhoto.domain.models.core import MediaType
 from iPhoto.people.index_coordinator import PeopleSnapshotEvent, reset_people_index_coordinators
@@ -224,15 +224,17 @@ def test_items_for_rows_loads_sparse_rows_before_returning_assets(tmp_path: Path
     store.ensure_row_loaded.assert_called_once_with(360)
 
 
-def test_open_location_map_requests_assets_through_navigation_service(tmp_path: Path) -> None:
+def test_open_location_map_requests_assets_before_routing_to_the_view(tmp_path: Path) -> None:
     vm, _store, context, _facade, _asset_service, nav_service = _make_vm(
         library_root=tmp_path,
         return_service=True,
     )
 
+    request_counts_at_route = []
+    vm.route_requested.connect(lambda _view: request_counts_at_route.append(nav_service.location_requests))
     vm.open_location_map()
 
-    assert nav_service.location_requests == 1
+    assert request_counts_at_route == [1]
     assert vm.location_session.request_serial == 1
     context.library.get_geotagged_assets.assert_not_called()
 
@@ -657,19 +659,22 @@ def test_album_context_menu_state_exposes_album_semantics(tmp_path: Path) -> Non
     assert context.is_recently_deleted is False
 
 
-def test_people_context_menu_state_exposes_person_gallery_semantics(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("kind", "entity_id"), [("person", "person-a"), ("pet", "pet-a")])
+def test_people_context_menu_state_exposes_identity_gallery_semantics(
+    tmp_path: Path, kind: str, entity_id: str
+) -> None:
     vm, _store, _context, _facade, _asset_service = _make_vm(library_root=tmp_path)
 
     vm.open_people_cluster_gallery(
         AssetQuery(asset_ids=["asset-1"]),
-        kind="person",
-        entity_id="person-a",
+        kind=kind,
+        entity_id=entity_id,
     )
 
     context = vm.context_menu_state()
     assert context.gallery_section == "people_cluster_gallery"
-    assert context.entity_kind == "person"
-    assert context.entity_id == "person-a"
+    assert context.entity_kind == kind
+    assert context.entity_id == entity_id
     assert context.active_root == tmp_path
     assert context.is_cluster_gallery is True
 
@@ -968,3 +973,14 @@ def test_rescan_current_uses_async_scan_for_open_album(tmp_path: Path) -> None:
 
     facade.rescan_current_async.assert_called_once_with()
     facade.scan_root_async.assert_not_called()
+
+
+def test_rescan_current_retries_recognition_for_library_root(tmp_path: Path) -> None:
+    vm, _store, _context, facade, _asset_service = _make_vm(library_root=tmp_path)
+    facade.current_album = None
+
+    vm.rescan_current()
+
+    facade.scan_root_async.assert_called_once_with(
+        tmp_path, include=DEFAULT_INCLUDE, exclude=DEFAULT_EXCLUDE, retry_recognition=True
+    )

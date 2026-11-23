@@ -41,6 +41,7 @@ class ThumbnailReadyResult:
     micro_thumbnail: bytes | None = None
     thumb_cache_key: str | None = None
     thumb_error: str | None = None
+    thumb_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ class WindowResult:
     rows: list[dict]
     total_count: int
     collection_revision: int
+    order_revision: int | None = None
 
 @dataclass
 class AssetQuery:

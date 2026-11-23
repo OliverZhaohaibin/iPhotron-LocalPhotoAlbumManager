@@ -11,6 +11,7 @@ from typing import Final
 # collection, mirroring the behaviour users expect from other photo managers.
 RECENTLY_DELETED_DIR_NAME: Final[str] = ".Trash"
 WORK_DIR_NAME: Final[str] = ".iPhoto"
+GLOBAL_INDEX_DB_NAME: Final[str] = "global_index.db"
 LEGACY_WORK_DIR_NAMES: Final[tuple[str, ...]] = (".iphoto",)
 ALL_WORK_DIR_NAMES: Final[tuple[str, ...]] = (WORK_DIR_NAME, *LEGACY_WORK_DIR_NAMES)
 

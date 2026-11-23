@@ -16,7 +16,6 @@ as satisfying Flathub submission requirements.
   dependencies from Flathub.
 - A synchronized `dist/entrypoint.dist` and its `dist/build-manifest.json` from
   the same Ubuntu 24.04 invocation of `scripts/build_nuitka_fast.sh`.
-- A valid 256×256 PNG application icon.
 
 The tracked manifest is
 `packaging/flatpak/io.github.oliverzhaohaibin.iPhotron.yml` and the application
@@ -32,9 +31,11 @@ VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml",
 bash scripts/build_flatpak.sh \
   --standalone-dir dist/entrypoint.dist \
   --standalone-manifest dist/build-manifest.json \
-  --icon /absolute/path/to/iphotron-256.png \
   --output "dist/io.github.oliverzhaohaibin.iPhotron-${VERSION}-x86_64.flatpak"
 ```
+
+The builder uses the repository's `logo.png` as the desktop icon. Pass `--icon`
+with a different 256×256 PNG to override it.
 
 Before staging, the builder verifies that the standalone manifest records an
 Ubuntu 24.04 x86-64 build and that its artifact hash matches the selected ELF
@@ -76,7 +77,7 @@ python3 tools/check_flatpak_elf_abi.py \
   --expected-source-revision "$SOURCE_REVISION" \
   --expected-project-version "$VERSION" \
   --expected-build-driver scripts/build_nuitka_fast.sh \
-  --icon /absolute/path/to/iphotron-256.png \
+  --icon logo.png \
   --max-glibc 2.42 \
   --max-glibcxx 3.4.34 \
   --max-cxxabi 1.3.15 \

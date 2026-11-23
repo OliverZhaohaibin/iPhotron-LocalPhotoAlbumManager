@@ -15,6 +15,7 @@ from PySide6.QtCore import (
     Qt,
     QThreadPool,
     QTimer,
+    Slot,
 )
 from PySide6.QtGui import QAction
 
@@ -757,9 +758,9 @@ class DesktopCoordinatorRuntime(QObject):
         self._facade.moveFinished.connect(self._handle_move_finished_pending_cleanup)
         self._facade.moveCompletedDetailed.connect(self._handle_move_completed_pending_cleanup)
 
-        # Error Reporting
-        self._facade.errorRaised.connect(self._dialog.show_error)
-        self._context.library.errorRaised.connect(self._dialog.show_error)
+        # Keep queued error delivery owned by the window's QObject tree.
+        self._facade.errorRaised.connect(self._show_runtime_error)
+        self._context.library.errorRaised.connect(self._show_runtime_error)
 
         # Theme Switching (Restored)
         ui.theme_system.triggered.connect(lambda: self._context.settings.set("ui.theme", "system"))
@@ -1206,7 +1207,17 @@ class DesktopCoordinatorRuntime(QObject):
             second_resolved = second
         return first_resolved == second_resolved
 
+    @Slot(str)
+    def _show_runtime_error(self, message: str) -> None:
+        if self._is_shutting_down or self._shutdown_complete:
+            return
+        self._dialog.show_error(message)
+
+    @Slot(object, str)
     def _handle_media_load_failed(self, path: Path, message: str) -> None:
+        if self._is_shutting_down or self._shutdown_complete:
+            return
+
         path_key = str(path)
         if path_key in self._media_failure_cleanup_paths:
             return
@@ -1214,6 +1225,9 @@ class DesktopCoordinatorRuntime(QObject):
         self._media_failure_cleanup_paths.add(path_key)
         try:
             self._dialog.show_error(f"File not found or unreadable: {path.name}\n\n{message}")
+            # The modal dialog processes Qt events while it is open.
+            if self._is_shutting_down or self._shutdown_complete:
+                return
             facade = getattr(self, "_facade", None)
             updates = getattr(facade, "library_updates", None)
             if updates is None:

@@ -38,6 +38,7 @@ python -m nuitka \
   --include-module=_pillow_heif \
   --noinclude-data-files=torch/include \
   "${optional_model_args[@]}" \
+  --include-data-file=logo.png=logo.png \
   --include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n \
   --include-data-file=src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json \
   --include-data-dir=src/maps/tiles=maps/tiles \

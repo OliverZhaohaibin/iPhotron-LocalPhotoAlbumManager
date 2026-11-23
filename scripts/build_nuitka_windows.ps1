@@ -169,7 +169,7 @@ $nativeBuildScript = Join-Path $repoRoot 'tools\osmand_render_helper_native\buil
 $nativeDistDir = Join-Path $repoRoot 'tools\osmand_render_helper_native\dist-msvc'
 $extensionBinDir = Join-Path $srcRoot 'maps\tiles\extension\bin'
 $faceModelDir = Join-Path $srcRoot 'extension\models'
-$defaultIcon = Join-Path $repoRoot 'docs\picture\logo_new.ico'
+$defaultIcon = Join-Path $repoRoot 'logo.png'
 
 Assert-Exists $repoRoot
 Assert-Exists $srcRoot
@@ -185,10 +185,13 @@ if (-not $IconPath) {
 elseif (-not [IO.Path]::IsPathRooted($IconPath)) {
     $IconPath = Join-Path $repoRoot $IconPath
 }
-Assert-Exists $IconPath
+if (-not (Test-Path -LiteralPath $IconPath -PathType Leaf)) {
+    throw "Application icon does not exist: $IconPath"
+}
 $IconPath = (Get-Item -LiteralPath $IconPath).FullName
-if ([IO.Path]::GetExtension($IconPath) -ine '.ico') {
-    throw "Windows Nuitka icon must be an .ico file: $IconPath"
+$iconExtension = [IO.Path]::GetExtension($IconPath)
+if ($iconExtension -notin '.png', '.ico') {
+    throw "Windows Nuitka icon must be a .png or .ico file: $IconPath"
 }
 
 $pythonInvocation = Resolve-BuildPython -RequestedPython $PythonExe -RepositoryRoot $repoRoot
@@ -206,6 +209,25 @@ Write-Host "Python interpreter: $($pythonInvocation.PythonPath)"
 Write-Host "Python version: $($pythonInvocation.Version)"
 Write-Host "Nuitka output directory: $OutputDir"
 Write-Host "Application icon: $IconPath"
+
+if ($iconExtension -ieq '.png') {
+    $icoPath = Join-Path $OutputDir 'iphotron-build.ico'
+    $pngToIcon = @'
+from sys import argv
+
+from PIL import Image
+
+with Image.open(argv[1], formats=('PNG',)) as source:
+    if min(source.size) < 16:
+        raise SystemExit('The application icon must be at least 16 pixels on each side.')
+    source.convert('RGBA').save(argv[2], format='ICO')
+'@
+    & $PythonExe @pythonPrefixArgs -B -c $pngToIcon $IconPath $icoPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to convert Windows application icon: $IconPath"
+    }
+    $IconPath = $icoPath
+}
 
 if ($RebuildNativeRuntime) {
     & $nativeBuildScript -BuildType Release -Jobs $Jobs

@@ -50,6 +50,8 @@
   旧结果不得绑定；validated credential 不能重复消费。
 - helper 普通超时、迁移超时与关闭终止后，主窗口保持正确终态，不遗留进程或
   重新启动已取消的工作。记录实际 revision、artifact 和通过/失败结果。
+- 在图库或媒体错误回调已入队时关闭窗口。确认关窗时和关窗后均无错误弹窗，
+  且已关闭的图库不会被刷新。
 
 ## macOS Apple Silicon / Intel
 

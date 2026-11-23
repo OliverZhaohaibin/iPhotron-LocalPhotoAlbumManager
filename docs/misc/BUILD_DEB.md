@@ -32,8 +32,8 @@ AI runtime inclusion is configured and verified at the Nuitka stage described in
 
 ## Directory Structure
 
-Create a staging directory that keeps the standalone bundle intact and exposes
-an `iPhotron` launcher on `PATH`:
+Create a staging directory that keeps the standalone bundle intact, exposes
+an `iPhotron` launcher on `PATH`, and installs the desktop entry and icon.
 
 ```
 iphotron_VERSION_amd64/
@@ -54,8 +54,11 @@ iphotron_VERSION_amd64/
 │                   │   └── geonames.sqlite3
 │                   └── bin/
 └── usr/
-    └── bin/
-        └── iPhotron              ← launcher script
+    ├── bin/
+    │   └── iPhotron              ← launcher script
+    └── share/
+        ├── applications/iphoto.desktop
+        └── icons/hicolor/256x256/apps/iphoto.png
 ```
 
 ## The `control` File
@@ -106,13 +109,16 @@ The minimal template does not establish dependency completeness.
 
 ## Build Steps
 
-1. **Prepare the staging tree** — copy the maintained Linux standalone into the correct location inside the staging directory:
+1. **Prepare the staging tree.** Run these commands from the repository root
+   to install the standalone bundle, desktop entry, and repository `logo.png`.
 
    ```bash
    VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
    PKG_ROOT="iphotron_${VERSION}_amd64"
    APP_ROOT="$PKG_ROOT/opt/iPhotron"
    BIN_ROOT="$PKG_ROOT/usr/bin"
+   DESKTOP_ROOT="$PKG_ROOT/usr/share/applications"
+   ICON_ROOT="$PKG_ROOT/usr/share/icons/hicolor/256x256/apps"
    APP_DIST=dist/entrypoint.dist
    APP_EXECUTABLE=""
 
@@ -127,10 +133,13 @@ The minimal template does not establish dependency completeness.
      exit 2
    }
 
-   mkdir -p "$PKG_ROOT/DEBIAN" "$APP_ROOT" "$BIN_ROOT"
+   mkdir -p "$PKG_ROOT/DEBIAN" "$APP_ROOT" "$BIN_ROOT" "$DESKTOP_ROOT" "$ICON_ROOT"
    cp -a "$APP_DIST/." "$APP_ROOT/"
    printf '#!/bin/sh\nexec /opt/iPhotron/%s "$@"\n' "$APP_EXECUTABLE" > "$BIN_ROOT/iPhotron"
    chmod 755 "$BIN_ROOT/iPhotron"
+   sed 's/^Exec=iphoto$/Exec=iPhotron/' packaging/appimage/iphoto.desktop > "$DESKTOP_ROOT/iphoto.desktop"
+   chmod 644 "$DESKTOP_ROOT/iphoto.desktop"
+   install -m 644 logo.png "$ICON_ROOT/iphoto.png"
    ```
 
    `scripts/build_nuitka_fast.sh` produces `dist/entrypoint.dist`; the loop
@@ -198,12 +207,15 @@ The minimal template does not establish dependency completeness.
    ```bash
    dpkg-deb --info "${PKG_ROOT}.deb"
    dpkg-deb --contents "${PKG_ROOT}.deb"
+   dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'usr/share/applications/iphoto.desktop'
+   dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'usr/share/icons/hicolor/256x256/apps/iphoto.png'
    dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'maps/tiles/extension'
    # If this build ships offline-ready People/Pets scanning:
    dpkg-deb --contents "${PKG_ROOT}.deb" | grep 'extension/models'
    ```
 
-   After installing on a clean test machine, open a small image library and
+   After installing on a clean test machine, check the iPhotron icon in the
+   app menu and launch iPhotron from there. Open a small image library and
    verify that the People & Pets page can create each enabled cluster type. For
    a fuller smoke test, name an identity, set a cover, create a group, restart
    iPhotron, and confirm those user decisions persist.

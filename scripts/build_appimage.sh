@@ -2,12 +2,13 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: scripts/build_appimage.sh --standalone-dir DIR --icon PNG --output FILE [--appimagetool PATH]"
+  echo "Usage: scripts/build_appimage.sh --standalone-dir DIR --output FILE [--icon PNG] [--appimagetool PATH]"
+  echo "The default icon is the repository logo.png."
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STANDALONE_DIR=""
-ICON_PATH=""
+ICON_PATH="$ROOT_DIR/logo.png"
 OUTPUT_PATH=""
 APPIMAGETOOL="${APPIMAGETOOL:-appimagetool}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -44,7 +45,7 @@ done
 
 [[ "$(uname -s)" == "Linux" ]] || { echo "error: AppImage builds require Linux" >&2; exit 2; }
 [[ -n "$STANDALONE_DIR" && -d "$STANDALONE_DIR" ]] || { echo "error: invalid --standalone-dir" >&2; exit 2; }
-[[ -n "$ICON_PATH" && -f "$ICON_PATH" ]] || { echo "error: --icon must name an existing PNG" >&2; exit 2; }
+[[ -f "$ICON_PATH" ]] || { echo "error: icon file not found: $ICON_PATH" >&2; exit 2; }
 [[ "$ICON_PATH" == *.png ]] || { echo "error: AppImage icon must be a PNG" >&2; exit 2; }
 [[ -n "$OUTPUT_PATH" ]] || { echo "error: --output is required" >&2; exit 2; }
 command -v "$APPIMAGETOOL" >/dev/null 2>&1 || { echo "error: appimagetool not found" >&2; exit 2; }

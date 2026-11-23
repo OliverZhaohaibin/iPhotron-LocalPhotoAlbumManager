@@ -206,6 +206,16 @@ Run the maintained script from the repository root:
 powershell -ExecutionPolicy Bypass -File scripts\build_nuitka_windows.ps1 -OutputDir build
 ```
 
+The default is a fast-starting base package: it omits the map extension's
+roughly 45,000 files and optional staged People/Pets models. The runtime uses
+its platform-specific search roots and can install both model sets through the
+combined People & Pets extension. This still requires the corresponding Python
+AI runtimes in the frozen app. Pass
+`-IncludeOptionalAssets` when a controlled deployment requires a completely
+offline bundle. Every build writes `nuitka-compilation-report.xml` below the
+output directory for import auditing. The executable icon comes from the
+repository's `logo.png` by default. The build interpreter uses Pillow to create
+`iphotron-build.ico` in the output directory before Nuitka embeds it.
 The script builds `src/entrypoint.py` and writes `entrypoint.dist\entrypoint.exe`
 and `nuitka-compilation-report.xml` under the output directory. The default base
 package leaves the Maps runtime and People/Pets model weights to extension
@@ -287,8 +297,8 @@ Useful flags:
   Set the parallel build job count.
 - `-PythonExe <path>`
   Use a specific Python 3.12+ interpreter with Nuitka installed.
-- `-IconPath <path-to.ico>`
-  Override the default `docs/picture/logo_new.ico` executable icon.
+- `-IconPath <path>`
+  Override the executable icon with a PNG or ICO file.
 
 If you built the runtime in the separate `PySide6-OsmAnd-SDK` checkout, either:
 
@@ -317,14 +327,9 @@ checkout can produce a core standalone build. An offline recognition release
 must stage and validate the intended People/Pets artifacts first, then verify
 that the resulting `dist/entrypoint.dist/extension/models` tree contains them.
 
-This remains a directory-based standalone build. Nuitka's Linux icon option is
-for onefile binaries, so the standalone ELF does not embed an application icon.
-Do not switch this build to onefile just to add an icon. AppImage packaging
-continues to receive its desktop icon separately through
-`scripts/build_appimage.sh --icon <path-to.png>`.
-See [`BUILD_APPIMAGE.md`](BUILD_APPIMAGE.md) for the complete AppImage flow and
-[`BUILD_FLATPAK.md`](BUILD_FLATPAK.md) for the x86_64 standalone-wrapper
-Flatpak flow.
+The directory-based standalone carries `logo.png` alongside the executable.
+The Linux delivery packages use the repository PNG for their desktop launchers.
+[AppImage](BUILD_APPIMAGE.md) · [Flatpak](BUILD_FLATPAK.md) · [Debian](BUILD_DEB.md)
 
 ### Recommended macOS runtime sync
 
@@ -340,10 +345,10 @@ bash scripts/build_nuitka_macos.sh
 The script stages Maps, signs `entrypoint.app`, and records its executable in
 `build-manifest.json` under the selected output directory.
 
-The macOS build defaults to `docs/picture/logo_new.ico` and passes it directly
-to `--macos-app-icon`. Nuitka converts it to ICNS using `imageio`; install
-`imageio` in the selected build interpreter when the preflight reports it
-missing. Pass `--icon <path>` to override the default.
+The macOS build passes the repository's `logo.png` to `--macos-app-icon` by
+default. Nuitka converts the PNG to ICNS using `imageio`. Install `imageio`
+in the selected build interpreter when the preflight reports it missing. Pass
+`--icon <path>` to override the default.
 
 The sync script copies `World_basemap_2.obf`, `search/geonames.sqlite3`, OsmAnd
 resources, `osmand_render_helper`, `osmand_native_widget.dylib`, recursively
@@ -362,8 +367,7 @@ labeled as output from an unchanged maintained script.
 The fast profiles use directory-based standalone output and exclude `numba`
 and `llvmlite` after AOT. `no_site`, LTO, and compiler selection belong to the
 platform script. Keep directory-based output for startup comparisons: onefile
-startup adds extraction cost and is a different performance target. Linux
-standalone icons are supplied at the AppImage/Flatpak stage.
+startup adds extraction cost and is a different performance target.
 
 ### Key flags explained
 

@@ -2,14 +2,15 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: scripts/build_flatpak.sh --standalone-dir DIR --standalone-manifest FILE --icon PNG --output FILE"
+  echo "Usage: scripts/build_flatpak.sh --standalone-dir DIR --standalone-manifest FILE --output FILE [--icon PNG]"
+  echo "The default icon is the repository logo.png."
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 STANDALONE_DIR=""
 STANDALONE_MANIFEST=""
-ICON_PATH=""
+ICON_PATH="$ROOT_DIR/logo.png"
 OUTPUT_PATH=""
 FLATPAK_BIN="${FLATPAK_BIN:-flatpak}"
 FLATPAK_BUILDER_BIN="${FLATPAK_BUILDER_BIN:-flatpak-builder}"
@@ -52,7 +53,7 @@ done
 [[ "$(uname -s)" == "Linux" ]] || { echo "error: Flatpak builds require Linux" >&2; exit 2; }
 [[ -n "$STANDALONE_DIR" && -d "$STANDALONE_DIR" ]] || { echo "error: invalid --standalone-dir" >&2; exit 2; }
 [[ -n "$STANDALONE_MANIFEST" && -f "$STANDALONE_MANIFEST" ]] || { echo "error: invalid --standalone-manifest" >&2; exit 2; }
-[[ -n "$ICON_PATH" && -f "$ICON_PATH" ]] || { echo "error: --icon must name an existing PNG" >&2; exit 2; }
+[[ -f "$ICON_PATH" ]] || { echo "error: icon file not found: $ICON_PATH" >&2; exit 2; }
 [[ "$ICON_PATH" == *.png ]] || { echo "error: Flatpak icon must be a PNG" >&2; exit 2; }
 [[ -n "$OUTPUT_PATH" ]] || { echo "error: --output is required" >&2; exit 2; }
 [[ "$OUTPUT_PATH" == *.flatpak ]] || { echo "error: Flatpak output must use the .flatpak suffix" >&2; exit 2; }

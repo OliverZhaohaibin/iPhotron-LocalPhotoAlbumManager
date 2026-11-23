@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from iPhoto.domain.models.query import AssetQuery
 from iPhoto.gui.coordinators import (
     desktop_coordinator_runtime as main_coordinator_module,
@@ -474,24 +476,39 @@ def test_handle_move_finished_toast_skips_delete_and_restore(
     toast.show_toast.assert_not_called()
 
 
-def test_handle_media_load_failed_prunes_row_and_refreshes_collection(tmp_path: Path) -> None:
+@pytest.mark.parametrize("close_during_dialog", [False, True], ids=["open", "closing"])
+def test_handle_media_load_failed_updates_only_an_open_collection(
+    tmp_path: Path, close_during_dialog: bool
+) -> None:
     coordinator = MainCoordinator.__new__(MainCoordinator)
     failed_path = tmp_path / "library" / "Album" / "motion.mov"
     failed_path.parent.mkdir(parents=True)
     updates = MagicMock()
     updates.handle_media_load_failure.return_value = failed_path.parent
 
+    coordinator._is_shutting_down = False
+    coordinator._shutdown_complete = False
     coordinator._media_failure_cleanup_paths = set()
     coordinator._dialog = MagicMock()
     coordinator._gallery_store = MagicMock()
     coordinator._logger = MagicMock()
     coordinator._facade = MagicMock(library_updates=updates)
 
+    def show_error(_message: str) -> None:
+        if close_during_dialog:
+            coordinator._shutdown_complete = True
+
+    coordinator._dialog.show_error.side_effect = show_error
     coordinator._handle_media_load_failed(failed_path, "decoder failed")
 
     coordinator._dialog.show_error.assert_called_once()
-    updates.handle_media_load_failure.assert_called_once_with(failed_path)
-    coordinator._gallery_store.reload_current_selection.assert_called_once_with()
+    if close_during_dialog:
+        updates.handle_media_load_failure.assert_not_called()
+        coordinator._gallery_store.reload_current_selection.assert_not_called()
+    else:
+        updates.handle_media_load_failure.assert_called_once_with(failed_path)
+        coordinator._gallery_store.reload_current_selection.assert_called_once_with()
+    assert not coordinator._media_failure_cleanup_paths
 
 
 def test_asset_reload_request_reloads_current_target_album(tmp_path: Path) -> None:

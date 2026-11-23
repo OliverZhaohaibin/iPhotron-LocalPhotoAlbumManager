@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from threading import Thread
 from time import monotonic, sleep
 
 import pytest
 
 pytest.importorskip("PySide6", reason="PySide6 is required for desktop tests", exc_type=ImportError)
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSize, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QSignalSpy
+from shiboken6 import isValid
 
 from iPhoto.bootstrap.runtime_context import RuntimeContext
 from iPhoto.core.adjustment_mapping import VIDEO_TRIM_IN_KEY, VIDEO_TRIM_OUT_KEY
@@ -20,6 +22,7 @@ from iPhoto.gui.coordinators.desktop_coordinator_runtime import DesktopCoordinat
 from iPhoto.gui.ui.main_window import MainWindow
 from iPhoto.gui.ui.media import MediaRestoreRequest
 from iPhoto.gui.ui.ui_main_window import FeatureKind
+from iPhoto.gui.ui.widgets import dialogs
 from iPhoto.infrastructure.services.thumbnail_artifact import thumbnail_revision
 from iPhoto.infrastructure.services.thumbnail_cache_keys import (
     thumbnail_cache_file_for_key,
@@ -67,7 +70,7 @@ def _finish_transition(qapp, manager, completion, direction, *, realtime) -> Non
 
 
 @pytest.fixture
-def desktop(qapp, qtbot, tmp_path, request):
+def desktop(qapp, tmp_path, request):
     stylesheet, palette = qapp.styleSheet(), qapp.palette()
     request.addfinalizer(lambda: qapp.setStyleSheet(stylesheet))
     request.addfinalizer(lambda: qapp.setPalette(palette))
@@ -75,7 +78,16 @@ def desktop(qapp, qtbot, tmp_path, request):
     settings.set("ui.theme", "light")
     context = RuntimeContext.create(defer_startup=True, settings=settings)
     window = MainWindow(context)
-    qtbot.addWidget(window)
+
+    def destroy_window() -> None:
+        if isValid(window):
+            window.close()
+            window.deleteLater()
+            # The shared application could otherwise delete it in a later test.
+            QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
+
+    request.addfinalizer(destroy_window)
     window.ui.prepare_detail_native_hierarchy()
     window.show()
     qapp.processEvents()
@@ -87,11 +99,46 @@ def desktop(qapp, qtbot, tmp_path, request):
     runtime = DesktopCoordinatorRuntime(window, context)
     window.bind_coordinators(runtime, runtime.gallery, runtime.detail)
     runtime.start()
-    try:
-        yield window, runtime, library
-    finally:
-        window.close()
-        qapp.processEvents()
+    return window, runtime, library
+
+
+@pytest.mark.parametrize("error_source", ["facade", "library"])
+def test_queued_runtime_errors_follow_the_main_window_lifetime(
+    qapp, desktop, monkeypatch, error_source
+) -> None:
+    window, runtime, _library = desktop
+    source = getattr(runtime._context, error_source)
+    shown: list[str] = []
+    monkeypatch.setattr(dialogs, "show_error", lambda _parent, message: shown.append(message))
+
+    def queue_error(message: str) -> None:
+        worker = Thread(target=source.errorRaised.emit, args=(message,))
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    queue_error("window open")
+    assert shown == []
+    qapp.processEvents()
+    assert shown == ["window open"]
+
+    shutdown_playback = runtime._playback.shutdown
+
+    def deliver_during_shutdown() -> None:
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.MetaCall)
+        shutdown_playback()
+
+    monkeypatch.setattr(runtime._playback, "shutdown", deliver_during_shutdown)
+    queue_error("window closing")
+    assert window.close()
+    queue_error("window closed")
+    qapp.processEvents()
+    queue_error("window destroyed")
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+    assert not isValid(window)
+    qapp.processEvents()
+    assert shown == ["window open"]
 
 
 def _prepare_asset(qapp, runtime, library, ui, *, video, monkeypatch):

@@ -24,7 +24,11 @@ from iPhoto.gui.ui.widgets.notification_toast import NotificationToast
 
 class RecognitionExtensionController(QObject):
     def __init__(
-        self, window: QWidget, context: RuntimeEntryContract, *, notification_toast: NotificationToast
+        self,
+        window: QWidget,
+        context: RuntimeEntryContract,
+        *,
+        notification_toast: NotificationToast,
     ):
         super().__init__(window)
         self._window = window
@@ -52,7 +56,11 @@ class RecognitionExtensionController(QObject):
         self._show_popup(
             self._tr("Choose how to install the People & Pets extension."),
             (
-                (self._tr("Download"), self._start),
+                *(
+                    ((self._tr("Download"), self._start),)
+                    if self._context.recognition_extensions.download_url
+                    else ()
+                ),
                 *self._recovery_actions(self._tr("Cancel")),
             ),
         )
@@ -87,9 +95,8 @@ class RecognitionExtensionController(QObject):
         if self._closing or self._choosing_archive or self._worker is not None:
             return
         failure = self._pending_recovery
-        if (
-            failure is not None
-            and not self._context.library.recognition_model_failure_is_current(failure)
+        if failure is not None and not self._context.library.recognition_model_failure_is_current(
+            failure
         ):
             self._pending_recovery = None
             failure = None
@@ -100,7 +107,7 @@ class RecognitionExtensionController(QObject):
             self._visible_recovery is None or self._visible_recovery.reason != "invalid_override"
         ):
             return
-        if not self._automatic_attempted:
+        if not self._automatic_attempted and self._context.recognition_extensions.download_url:
             self._automatic_attempted = True
             self._start(silent=True)
             return
@@ -112,7 +119,9 @@ class RecognitionExtensionController(QObject):
             self._tr(
                 "Could not automatically get all People & Pets recognition models. "
                 "Download the package in your browser, then install it from a file."
-            ),
+            )
+            if self._context.recognition_extensions.download_url
+            else self._unpublished_message(),
             self._recovery_actions(self._tr("Later")),
             recovery=failure,
         )
@@ -136,7 +145,11 @@ class RecognitionExtensionController(QObject):
 
     def _recovery_actions(self, close_label):
         return (
-            (self._tr("Download in Browser"), self._open_browser),
+            *(
+                ((self._tr("Download in Browser"), self._open_browser),)
+                if self._context.recognition_extensions.download_url
+                else ()
+            ),
             (self._tr("Install from File…"), self._install_from_file),
             (close_label, None),
         )
@@ -160,10 +173,14 @@ class RecognitionExtensionController(QObject):
 
     def _open_browser(self) -> None:
         url = self._context.recognition_extensions.download_url
-        if QDesktopServices.openUrl(QUrl(url)):
+        if not url:
+            message = self._unpublished_message()
+        elif QDesktopServices.openUrl(QUrl(url)):
             message = self._tr("Select the archive after the download finishes.")
         else:
-            message = self._tr("Could not open the browser. Copy this link to download the archive.")
+            message = self._tr(
+                "Could not open the browser. Copy this link to download the archive."
+            )
             message = f"{message}\n\n{url}"
         self._show_popup(
             message,
@@ -245,13 +262,19 @@ class RecognitionExtensionController(QObject):
             return
 
         self._pending_recovery = None
-        if result.stage == "download":
+        if result.category == "unpublished":
+            message = self._unpublished_message()
+        elif result.stage == "download":
             message = self._tr(
                 "Could not download the People & Pets extension. "
                 "Download it in your browser and install it from a file."
             )
         elif result.category in {
-            "missing_file", "unknown_package", "integrity", "incomplete", "unsafe_archive",
+            "missing_file",
+            "unknown_package",
+            "integrity",
+            "incomplete",
+            "unsafe_archive",
         }:
             message = self._tr("The selected archive is missing, damaged, or unsupported.")
         elif result.category == "busy":
@@ -259,6 +282,13 @@ class RecognitionExtensionController(QObject):
         else:
             message = self._tr("Could not install the People & Pets extension.")
         self._show_popup(f"{message}\n\n{result}", self._recovery_actions(self._tr("Close")))
+
+    def _unpublished_message(self) -> str:
+        return tr(
+            "RecognitionExtension",
+            "The new People & Pets package is not available for download yet. "
+            "Install a verified package from a file.",
+        )
 
     @staticmethod
     def _tr(message: str) -> str:

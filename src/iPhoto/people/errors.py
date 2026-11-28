@@ -4,7 +4,7 @@ from iPhoto.application.ports.recognition_extension import ModelFailureReason
 
 
 class FaceRuntimeUnavailableError(RuntimeError):
-    """The optional runtime could not initialize."""
+    """The optional runtime could not initialize or continue inference."""
 
 
 class FaceModelUnavailableError(RuntimeError):

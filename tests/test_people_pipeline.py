@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sys
 import builtins
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -15,9 +15,9 @@ from iPhoto.people.manual_faces import (
 )
 from iPhoto.people.pipeline import (
     FaceClusterPipeline,
-    build_person_records_from_faces,
     _install_insightface_mask_renderer_stubs,
     _install_runtime_typing_compat,
+    build_person_records_from_faces,
     resolve_canonical_person_id,
 )
 from iPhoto.people.repository import FaceRecord, PersonProfile, PersonRecord
@@ -103,33 +103,39 @@ def local_insightface(monkeypatch):
             pytest.fail("InsightFace's downloading constructor was called")
 
         def prepare(self, *, ctx_id, det_size):
-            assert (ctx_id, det_size) == (-1, (640, 640))
+            assert (ctx_id, det_size) == (0, (640, 640))
 
-    def get_model(path, *, download, providers):
-        assert download is False
-        assert providers == ["CPUExecutionProvider"]
+    def create_session(_runtime, path):
         model_path = Path(path)
         assert model_path.is_file()
         calls.append(model_path)
-        taskname = "detection" if model_path.name == "det_500m.onnx" else "recognition"
-        return SimpleNamespace(taskname=taskname)
+        image_size = {
+            "1k3d68.onnx": 192,
+            "2d106det.onnx": 192,
+            "genderage.onnx": 96,
+        }.get(model_path.name, 112)
+        return SimpleNamespace(
+            get_inputs=lambda: [SimpleNamespace(shape=[1, 3, image_size, image_size])],
+            get_outputs=lambda: [None] * (9 if model_path.name == "det_500m.onnx" else 1),
+        )
+
+    monkeypatch.setattr("iPhoto.people.pipeline.RecognitionOnnxRuntime.create_session", create_session)
 
     insightface = ModuleType("insightface")
     app = ModuleType("insightface.app")
     face_analysis = ModuleType("insightface.app.face_analysis")
     face_analysis.FaceAnalysis = FakeFaceAnalysis
     model_zoo = ModuleType("insightface.model_zoo")
-    model_zoo.get_model = get_model
+    arcface = ModuleType("insightface.model_zoo.arcface_onnx")
+    retinaface = ModuleType("insightface.model_zoo.retinaface")
+    arcface.ArcFaceONNX = lambda **kw: SimpleNamespace(taskname="recognition", **kw)
+    retinaface.RetinaFace = lambda **kw: SimpleNamespace(taskname="detection", **kw)
     onnx_state = ModuleType("onnxruntime.capi.onnxruntime_pybind11_state")
     for name in ("InvalidGraph", "InvalidProtobuf", "NoSuchFile"):
         setattr(onnx_state, name, type(name, (Exception,), {}))
-    for module in (insightface, app, face_analysis, model_zoo, onnx_state):
+    for module in (insightface, app, face_analysis, model_zoo, arcface, retinaface, onnx_state):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
-    monkeypatch.setattr(
-        "iPhoto.people.pipeline._resolve_execution_providers",
-        lambda: ["CPUExecutionProvider"],
-    )
     return calls
 
 
@@ -148,6 +154,33 @@ def test_face_pipeline_loads_only_local_models(local_insightface, tmp_path, fold
     assert app is pipeline._ensure_face_analysis()
     assert app.det_model is app.models["detection"]
     assert local_insightface == [path.resolve() for path in paths]
+
+
+@pytest.mark.parametrize("with_recognition", [True, False])
+def test_custom_face_pack_excludes_landmark_and_attribute_models(
+    local_insightface, tmp_path, with_recognition
+):
+    from iPhoto.people.errors import FaceModelUnavailableError
+
+    pack = tmp_path / "custom_pack"
+    pack.mkdir()
+    names = ["1k3d68.onnx", "2d106det.onnx", "det_500m.onnx", "genderage.onnx"]
+    if with_recognition:
+        names.append("w600k_mbf.onnx")
+    for name in names:
+        (pack / name).write_bytes(b"model")
+    pipeline = FaceClusterPipeline(model_root=tmp_path, model_pack=pack.name)
+    try:
+        if with_recognition:
+            app = pipeline._ensure_face_analysis()
+            assert set(app.models) == {"detection", "recognition"}
+            assert Path(app.models["recognition"].model_file) == pack / "w600k_mbf.onnx"
+        else:
+            with pytest.raises(FaceModelUnavailableError) as exc:
+                pipeline._ensure_face_analysis()
+            assert exc.value.reason == "incomplete"
+    finally:
+        pipeline.close()
 
 
 @pytest.mark.parametrize("reason", ["missing", "incomplete"])
@@ -180,13 +213,13 @@ def test_face_pipeline_distinguishes_damaged_models_from_runtime_errors(
     pack.mkdir()
     for name in ("det_500m.onnx", "w600k_mbf.onnx"):
         (pack / name).write_bytes(b"nonempty")
-    onnx_state = sys.modules["onnxruntime.capi.onnxruntime_pybind11_state"]
-    error_type = getattr(onnx_state, error_name, RuntimeError)
+    from iPhoto.recognition.onnx_runtime import RecognitionModelError
+    error_type = RecognitionModelError if error_name == "InvalidProtobuf" else RuntimeError
 
     def broken_model(*args, **kwargs):
         raise error_type("could not load")
 
-    monkeypatch.setattr(sys.modules["insightface.model_zoo"], "get_model", broken_model)
+    monkeypatch.setattr("iPhoto.people.pipeline.RecognitionOnnxRuntime.create_session", broken_model)
     expected = FaceRuntimeUnavailableError if error_type is RuntimeError else FaceModelUnavailableError
     with pytest.raises(expected) as failed:
         FaceClusterPipeline(model_root=tmp_path)._ensure_face_analysis()
@@ -337,6 +370,74 @@ def test_face_pipeline_reports_unreadable_image_without_error_traceback(
     assert results[0].error
     assert "Skipping face detection for unreadable image" in caplog.text
     assert "Face detection failed" not in caplog.text
+
+
+@pytest.mark.parametrize("fallback", ["v2-backup", "v1", "v1-backup", "cache", "bundled"])
+@pytest.mark.parametrize("damage", ["corrupt", "incomplete"])
+def test_invalid_active_people_models_use_verified_fallback(tmp_path, monkeypatch, fallback, damage):
+    import hashlib
+    import json
+    from iPhoto.people import model_paths
+
+    active = tmp_path / "v2/models"
+    roots = {
+        "v2-backup": tmp_path / "v2/.backup/models",
+        "v1": tmp_path / "v1/models",
+        "v1-backup": tmp_path / "v1/.backup/models",
+        "cache": tmp_path / "cache",
+        "bundled": tmp_path / "bundled",
+    }
+    identities = {}
+    for name in model_paths.BUFFALO_S_FILES:
+        content = f"verified {name}".encode()
+        identities[f"buffalo_s/{name}"] = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        good = roots[fallback] / "buffalo_s" / name
+        good.parent.mkdir(parents=True, exist_ok=True)
+        good.write_bytes(content)
+        bad = active / "buffalo_s" / name
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_bytes(b"x" * len(content))
+    if damage == "incomplete":
+        (active / "buffalo_s" / model_paths.BUFFALO_S_FILES[0]).unlink()
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps({"files": identities}))
+    monkeypatch.setattr(model_paths, "_FACE_CONTRACT_PATH", contract)
+    monkeypatch.setattr(model_paths, "installed_recognition_model_roots", lambda: (active, roots["v2-backup"]))
+    monkeypatch.setattr(model_paths, "legacy_recognition_model_roots", lambda: (roots["v1"], roots["v1-backup"]))
+    monkeypatch.setattr(model_paths, "bundled_face_model_dir", lambda: roots["bundled"])
+    assert model_paths.resolve_face_model_dir(tmp_path / "cache") == roots[fallback]
+
+
+@pytest.mark.parametrize("damage", ["missing", "empty", "same-size-corrupt", "wrong-size", "incomplete"])
+def test_no_verified_face_models_never_returns_unverified_cache(tmp_path, monkeypatch, damage):
+    import hashlib
+    import json
+    from iPhoto.people import model_paths
+
+    cache = tmp_path / "cache"
+    files = {}
+    for name in model_paths.BUFFALO_S_FILES:
+        content = f"official {name}".encode()
+        files[f"buffalo_s/{name}"] = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        if damage == "missing":
+            continue
+        path = cache / "buffalo_s" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes({
+            "empty": b"", "same-size-corrupt": b"x" * len(content),
+            "wrong-size": b"x", "incomplete": content,
+        }[damage])
+    if damage == "incomplete":
+        (cache / "buffalo_s" / model_paths.BUFFALO_S_FILES[0]).unlink()
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps({"files": files}))
+    monkeypatch.setattr(model_paths, "_FACE_CONTRACT_PATH", contract)
+    monkeypatch.setattr(model_paths, "installed_recognition_model_roots", lambda: ())
+    monkeypatch.setattr(model_paths, "legacy_recognition_model_roots", lambda: ())
+    monkeypatch.setattr(model_paths, "bundled_face_model_dir", lambda: tmp_path / "missing-bundle")
+    before = {path: path.read_bytes() for path in cache.rglob("*") if path.is_file()}
+    assert model_paths.resolve_face_model_dir(cache) is None
+    assert before == {path: path.read_bytes() for path in cache.rglob("*") if path.is_file()}
 
 
 def test_build_manual_face_record_saves_requested_box_without_face_detection(

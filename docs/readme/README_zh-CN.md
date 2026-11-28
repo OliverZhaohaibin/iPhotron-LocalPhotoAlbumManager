@@ -283,11 +283,11 @@ ExifTool 可用，iPhotron 还会尽力把 GPS 写回原始媒体文件，写回
 | **ExifTool** | 读取 EXIF、GPS、QuickTime 和实况照片元数据；在用户执行 Assign Location 时写入 GPS 元数据。 |
 | **FFmpeg / FFprobe** | 生成视频缩略图并解析视频信息。 |
 | **InsightFace / ONNXRuntime + `buffalo_s` 模型** | 可选的 People 人脸扫描；模型来自可写 cache、显式 override 或预置/随包模型。 |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | 可选的 Pets 扫描；模型来自平台用户 cache、显式 override 或预置/随包模型。YOLOX 可在完整性校验下下载，当前 DINOv2 artifact 必须预先提供。 |
+| **YOLOX + DINOv2 / ONNX Runtime** | 可选的 Pets 扫描；模型来自平台用户 cache、显式 override 或预置/随包模型。YOLOX 可在完整性校验下下载，当前 DINOv2 artifact 必须预先提供。 |
 
 > 请确保 FFmpeg/FFprobe 已加入系统 `PATH`；如果需要把指定地点的 GPS 写回原始媒体文件，
 > 也请安装 ExifTool。
-> AI 识别运行时是可选功能；源码安装可使用 `pip install -e ".[ai-demo,pets-ai]"`，
+> AI 识别运行时是可选功能；源码安装可使用 `pip install -e ".[recognition]"`，
 > 离线打包版本需要保留 `extension/models`。
 
 Python 依赖（例如 `Pillow`、`reverse-geocoder`）会通过 `pyproject.toml` 自动安装。

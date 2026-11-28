@@ -237,7 +237,9 @@ def test_cluster_pet_records_clusters_same_unknown_species() -> None:
     assert {item.pet_id for item in clustered} == {pets[0].pet_id}
 
 
-def test_build_pet_records_rejects_mixed_known_species_for_one_identity() -> None:
+def test_build_pet_records_accepts_mixed_species_without_notices(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     cat = _detection(
         detection_id="cat",
         pet_id="pet-a",
@@ -250,8 +252,43 @@ def test_build_pet_records_rejects_mixed_known_species_for_one_identity() -> Non
         species_label="dog",
     )
 
-    with pytest.raises(ValueError, match="mixes incompatible species labels"):
-        pet_pipeline.build_pet_records_from_detections([cat, dog])
+    caplog.set_level("INFO", logger="iPhoto.pets.pipeline")
+    pets = pet_pipeline.build_pet_records_from_detections([cat, dog])
+
+    assert len(pets) == 1
+    assert pets[0].pet_id == "pet-a"
+    assert pets[0].detection_count == pets[0].evidence_asset_count == 2
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("contract_change", ["pipeline", "dimension", "generation"])
+def test_build_pet_records_keeps_all_members_with_mixed_contracts(
+    contract_change: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first = _detection(detection_id="first", pet_id="pet-a")
+    second = replace(first, detection_id="second", asset_id="asset-b")
+    other = replace(first, detection_id="other", asset_id="asset-c")
+    if contract_change == "pipeline":
+        other = replace(other, embedding_pipeline_version="embedding-v2")
+    elif contract_change == "dimension":
+        other = replace(other, embedding=np.asarray([0.0, 1.0]), embedding_dim=2)
+    else:
+        other = replace(other, generation_id=1)
+    caplog.set_level("INFO", logger="iPhoto.pets.pipeline")
+
+    pets = pet_pipeline.build_pet_records_from_detections([first, second, other])
+
+    assert len(pets) == 1
+    pet = pets[0]
+    assert pet.pet_id == "pet-a"
+    assert pet.detection_count == pet.sample_count == pet.evidence_asset_count == 3
+    assert pet.embedding_pipeline_version == first.embedding_pipeline_version
+    assert pet.embedding_dim == first.embedding_dim
+    assert pet.generation_id == first.generation_id
+    np.testing.assert_allclose(pet.center_embedding, first.embedding)
+    assert len(pet.boundary_embeddings) == 2
+    assert not caplog.records
 
 
 def test_cluster_pet_records_default_clusters_small_similar_pet_samples() -> None:
@@ -919,6 +956,96 @@ def test_canonicalize_pet_identities_prefers_pet_key_vote(tmp_path: Path) -> Non
     assert detections[0].pet_id == "pet-stable"
     assert pets[0].pet_id == "pet-stable"
     assert pets[0].name == "Miso"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "difference", ["species", "distance", "pipeline", "dimension", "generation"]
+)
+def test_snapshot_restores_key_anchors_across_model_differences(
+    tmp_path: Path,
+    difference: str,
+    reverse: bool,
+) -> None:
+    repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+    first = _detection(detection_id="first", pet_id="pet-a", species_label="dog")
+    second = replace(
+        first, detection_id="second", pet_key="key-second", asset_id="asset-b"
+    )
+    if difference == "species":
+        second = replace(second, species_label="cat")
+    elif difference == "distance":
+        second = replace(second, embedding=np.asarray([0.0, 1.0, 0.0]))
+    elif difference == "pipeline":
+        second = replace(second, embedding_pipeline_version="embedding-v2")
+    elif difference == "dimension":
+        second = replace(second, embedding=np.asarray([1.0, 0.0]), embedding_dim=2)
+    else:
+        second = replace(second, generation_id=1)
+    members = [first, second]
+    pets = pet_pipeline.build_pet_records_from_detections(
+        members, names_by_pet_id={"pet-a": "Miso"}
+    )
+    repository.replace_all(members, pets)
+
+    for _ in range(2):
+        detections, pets = PetScanSession().build_snapshot_from_detections(
+            repository,
+            detections=list(reversed(members)) if reverse else members,
+            distance_threshold=0.1,
+        )
+        assert {detection.pet_id for detection in detections} == {"pet-a"}
+        assert {detection.pet_key for detection in detections} == {"key-first", "key-second"}
+        assert len(pets) == 1
+        assert pets[0].detection_count == 2
+        assert pets[0].name == "Miso"
+        PetScanSession().commit(repository, detections=detections, pets=pets)
+        repository = PetRepository(tmp_path / "pet_index.db", tmp_path / "pet_state.db")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_canonicalization_reserves_exact_key_before_fuzzy_matches(
+    tmp_path: Path,
+    reverse: bool,
+) -> None:
+    state = PetStateRepository(tmp_path / "pet_state.db")
+    originals = [
+        _detection(detection_id="old-a", pet_id="pet-a", species_label="dog"),
+        _detection(
+            detection_id="old-b", asset_id="asset-b", pet_id="pet-a", species_label="dog"
+        ),
+    ]
+    state.sync_scan_results(pet_pipeline.build_pet_records_from_detections(originals), originals)
+    anchor = replace(
+        originals[0], detection_id="z-anchor", embedding=np.asarray([0.0, 1.0, 0.0])
+    )
+    fuzzy = _detection(detection_id="a-fuzzy", asset_id="asset-c", species_label="dog")
+    detections, pets = cluster_pet_records([fuzzy, anchor], distance_threshold=0.1)
+    pets.sort(key=lambda pet: pet.key_detection_id, reverse=reverse)
+
+    detections, _ = canonicalize_pet_identities(
+        detections, pets, state, distance_threshold=0.1
+    )
+
+    assignments = {detection.detection_id: detection.pet_id for detection in detections}
+    assert assignments["z-anchor"] == "pet-a"
+    assert assignments["a-fuzzy"] != "pet-a"
+
+
+def test_canonicalization_still_separates_same_asset_key_conflicts(tmp_path: Path) -> None:
+    state = PetStateRepository(tmp_path / "pet_state.db")
+    first = _detection(detection_id="first", pet_id="pet-a", species_label="cat")
+    second = _detection(detection_id="second", pet_id="pet-a", species_label="dog")
+    members = [first, second]
+    state.sync_scan_results(pet_pipeline.build_pet_records_from_detections(members), members)
+    detections, pets = cluster_pet_records(members, distance_threshold=0.1)
+
+    detections, pets = canonicalize_pet_identities(
+        detections, pets, state, distance_threshold=0.1
+    )
+
+    assert len(pets) == 2
+    assert len({detection.pet_id for detection in detections}) == 2
 
 
 def test_pet_repository_state_persists_name_hidden_and_rejected_key(tmp_path: Path) -> None:
@@ -2732,58 +2859,25 @@ def test_installed_pet_detector_uses_official_digest(tmp_path, monkeypatch, prev
         ensure_pet_detector_model(official, allow_model_download=False)
 
 
-def test_dinov2_runtime_downloads_only_the_fixed_torchscript_artifact(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    class FakeModel:
-        def eval(self):
-            return self
-
-        def to(self, _device):
-            return self
-
-    class FakeJit:
-        @staticmethod
-        def load(path: str, *, map_location: str):
-            assert Path(path).read_bytes() == b"fixed-torchscript"
-            assert map_location == "cpu"
-            return FakeModel()
-
+def test_dinov2_runtime_downloads_only_the_verified_onnx_artifact(tmp_path, monkeypatch):
     embedder = _DinoV2Embedder.__new__(_DinoV2Embedder)
-    embedder._torch = SimpleNamespace(jit=FakeJit())
-    embedder._device = "cpu"
     embedder._model_name = "dinov2_vits14"
     monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_url",
-        "https://models.example.test/dinov2_vits14.pt",
-    )
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_sha256",
-        hashlib.sha256(b"fixed-torchscript").hexdigest(),
-    )
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_size",
-        len(b"fixed-torchscript"),
-    )
+    monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "onnx_url", "https://models.example.test/dinov2_vits14.onnx")
+    monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "onnx_sha256", hashlib.sha256(b"fixed-onnx").hexdigest())
+    monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "onnx_size", len(b"fixed-onnx"))
 
     def fake_download(url, path, **kwargs):
-        assert url == "https://models.example.test/dinov2_vits14.pt"
-        assert kwargs["expected_sha256"] == hashlib.sha256(b"fixed-torchscript").hexdigest()
-        assert kwargs["max_bytes"] == len(b"fixed-torchscript")
+        assert url == "https://models.example.test/dinov2_vits14.onnx"
+        assert kwargs["expected_sha256"] == hashlib.sha256(b"fixed-onnx").hexdigest()
+        assert kwargs["max_bytes"] == len(b"fixed-onnx")
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_bytes(b"fixed-torchscript")
+        Path(path).write_bytes(b"fixed-onnx")
 
     monkeypatch.setattr(pet_pipeline, "_download_file", fake_download)
-    model_path = tmp_path / "dinov2_vits14.pt"
-    model = embedder._download_dinov2_model(model_path)
-
-    assert isinstance(model, FakeModel)
-    assert model_path.read_bytes() == b"fixed-torchscript"
+    model_path = tmp_path / "dinov2_vits14.onnx"
+    embedder._download_dinov2_model(model_path)
+    assert model_path.read_bytes() == b"fixed-onnx"
     assert pet_pipeline._dinov2_metadata_path(model_path).is_file()
 
 
@@ -2805,8 +2899,8 @@ def test_pet_model_manifest_is_the_runtime_contract_source() -> None:
         "shape": [1, 3, 416, 416],
     }
     embedder = PET_MODEL_MANIFEST["embedder"]
-    assert len(embedder["torchscript_sha256"]) == 64
-    assert embedder["torchscript_size"] > 0
+    assert len(embedder["onnx_sha256"]) == 64
+    assert embedder["onnx_size"] > 0
 
 
 def test_pet_detector_pipeline_version_includes_hybrid_deduplication() -> None:
@@ -2944,14 +3038,15 @@ def test_pet_scan_worker_queues_clustering_upgrade_without_resetting_assets(
     assert repository.get_scan_metadata("clustering_pipeline_version") == "old-clustering"
     assert repository.get_scan_metadata("clustering_consolidation_state") == "pending"
 
-    assert worker._consolidate_pending_clustering(pipeline) is True
+    # Consolidation completes without changing the durable identity assignments.
+    assert worker._consolidate_pending_clustering(pipeline) is False
 
     assert repository.get_scan_metadata("clustering_pipeline_version") == (
         PET_CLUSTERING_PIPELINE_VERSION
     )
     assert repository.get_scan_metadata("clustering_consolidation_state") == "clean"
     detections = repository.get_all_detections()
-    assert len({detection.pet_id for detection in detections}) == 2
+    assert {detection.pet_id for detection in detections} == {"pet-old"}
     retained = next(
         summary
         for summary in repository.get_pet_summaries(include_hidden=True)
@@ -2962,7 +3057,7 @@ def test_pet_scan_worker_queues_clustering_upgrade_without_resetting_assets(
     assert retained.key_detection_id == "det-cat"
 
 
-def test_pet_scan_worker_consolidation_does_not_let_old_key_votes_remerge_split_cats(
+def test_pet_scan_worker_consolidation_preserves_keys_beyond_automatic_distance_bounds(
     tmp_path: Path,
 ) -> None:
     asset_repo = _FakePetAssetRepository(
@@ -3009,12 +3104,12 @@ def test_pet_scan_worker_consolidation_does_not_let_old_key_votes_remerge_split_
     )
 
     assert worker._prepare_clustering_pipeline() is True
-    assert worker._consolidate_pending_clustering(pipeline) is True
+    assert worker._consolidate_pending_clustering(pipeline) is False
 
     detections = repository.get_all_detections()
     pet_ids = {detection.pet_id for detection in detections}
-    assert len(pet_ids) == 2
-    assert "pet-old" in pet_ids
+    assert pet_ids == {"pet-old"}
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "clean"
 
 
 def test_pet_scan_worker_missing_runtime_keeps_pending(tmp_path: Path, monkeypatch) -> None:

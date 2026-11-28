@@ -45,7 +45,8 @@ Install optional runtimes in the same environment when needed:
 
 ```bash
 python -m pip install -e ".[ai-demo]"  # People: InsightFace and ONNX Runtime
-python -m pip install -e ".[pets-ai]"  # Pets: ONNX Runtime, Torch, torchvision, USearch
+python -m pip install -e ".[pets-ai]"  # Pets: ONNX Runtime and USearch
+python -m pip install -e ".[recognition]"  # Shared People + Pets ONNX runtime
 ```
 
 Model files are installed separately from Python runtimes. The Settings action

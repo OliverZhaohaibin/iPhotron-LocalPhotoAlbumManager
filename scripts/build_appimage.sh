@@ -79,6 +79,10 @@ find "$STANDALONE_DIR" -type f -path '*/platforms/libqxcb.so' -print -quit | gre
   exit 2
 }
 
+"$PYTHON_BIN" "$ROOT_DIR/tools/recognition_packaging.py" artifact \
+  --profile "${IPHOTO_ORT_PROFILE:-cpu}" --tree "$STANDALONE_DIR" \
+  --output "${OUTPUT_PATH}.recognition-artifact.json"
+
 OUTPUT_PATH="$(cd "$(dirname "$OUTPUT_PATH")" && pwd)/$(basename "$OUTPUT_PATH")"
 APPDIR="$(dirname "$OUTPUT_PATH")/iPhotron.AppDir"
 [[ ! -e "$APPDIR" ]] || { echo "error: refusing to overwrite existing $APPDIR" >&2; exit 2; }
@@ -89,6 +93,9 @@ install -m 0644 "$ROOT_DIR/packaging/appimage/iphoto.desktop" "$APPDIR/iphoto.de
 install -m 0644 "$ICON_PATH" "$APPDIR/iphoto.png"
 
 ARCH="${ARCH:-$(uname -m)}" "$APPIMAGETOOL" "$APPDIR" "$OUTPUT_PATH"
+"$PYTHON_BIN" "$ROOT_DIR/tools/recognition_packaging.py" artifact \
+  --profile "${IPHOTO_ORT_PROFILE:-cpu}" --tree "$STANDALONE_DIR" \
+  --artifact "$OUTPUT_PATH" --output "${OUTPUT_PATH}.recognition-artifact.json"
 "$PYTHON_BIN" "$ROOT_DIR/tools/build_manifest.py" \
   --root "$ROOT_DIR" \
   --artifact "$OUTPUT_PATH" \

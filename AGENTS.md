@@ -21,6 +21,14 @@ remain binding when referenced here.
   hidden/trash state, pinned items, album order, manual metadata, People/Pets
   names, covers, hidden flags, shared card order, groups and group order, group
   covers and caches, manual faces, rejected pet detections, and identity redirects.
+- **User control of identities.** Species, similarity, embedding contracts, and
+  model generations are internal automatic recognition signals, never a validity
+  policy for user identities. Species is not a user-facing identity category or
+  control. Do not reject merges, assignments, moves, or names,
+  or undo saved user choices, because of those signals. Mixed identity members
+  are valid by default and survive consolidation, rescans, rebuilds, and recovery
+  without composition warnings or routine preservation notices. Keep same-asset
+  conflict, hidden-state, reference-integrity, and transaction guards.
 - **Cross-platform desktop.** macOS, Windows, and Linux remain supported.
   Platform rendering, maps, external tools, and AI runtime choices belong
   behind adapters and runtime discovery.
@@ -118,8 +126,9 @@ app settings keyed by library root. The complete layout is in the
   separate integration surface.
 - Missing People/Pets dependencies or models must preserve pending work and
   keep other workflows usable. Keep workers and their failures independent.
-  Production Pets loads verified local TorchScript artifacts; Torch Hub is
-  restricted to release conversion tooling.
+  Production People/Pets loads verified local ONNX models through the shared
+  recognition runtime. PyTorch/TorchScript is restricted to isolated release
+  conversion and equivalence tooling, never application or build environments.
 - Gallery reads are SQL-first and windowed. Normal visible rows are
   thumbnail-ready with a non-empty `thumb_cache_key`; old no-key rows require
   repair/backfill. Paint, model access, and thumbnail peeks are memory-only.

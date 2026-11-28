@@ -34,17 +34,21 @@ The builder refuses to continue unless the standalone contains:
 - an executable entry point;
 - QRhi `.qsb` shaders;
 - `maps/tiles` and the native OsmAnd render helper; and
-- Qt's `libqxcb.so` platform plugin.
+- Qt's `libqxcb.so` platform plugin;
+- the ONNX Runtime native binding and no forbidden Torch/default CUDA payload.
 
 It also refuses to overwrite an existing sibling `iPhotron.AppDir`. The output
 is accompanied by `dist/iPhotron-x86_64.AppImage.build-manifest.json`, which
 records the source revision, artifact hash, build driver, dependency
-fingerprint, native Maps runtime, and required assets.
+fingerprint, native Maps runtime, and required assets. A separate
+`.recognition-artifact.json` records measured release/component sizes and the
+Torch-free native contract.
 
 The ignored `src/extension/models` staging directory is optional. A clean
 checkout produces an AppImage without bundled recognition models. If an
 offline-recognition artifact is required, stage and validate the models before
-running `build_nuitka_fast.sh`, then verify them inside
+running `build_nuitka_fast.sh` and set `IPHOTO_RECOGNITION_BUNDLE_MODELS` to
+the verified v2 root, then verify them inside
 `dist/entrypoint.dist/extension/models` before packaging.
 
 ## Verification

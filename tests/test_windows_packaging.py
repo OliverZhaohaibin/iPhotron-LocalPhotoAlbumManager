@@ -11,6 +11,15 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 DIAGNOSTIC_LAUNCHER = SCRIPTS / "run_packaged_diagnostic.ps1"
 
 
+def test_native_inspector_preflight_precedes_staging_and_compilation():
+    script = (SCRIPTS / "build_nuitka_windows.ps1").read_text(encoding="utf-8")
+    preflight = script.index("--require-complete --check-native-inspector")
+    guard = script.index("if ($LASTEXITCODE -ne 0)", preflight)
+    assert "throw 'Recognition build preflight failed" in script[guard:script.index('$stagedModels = ""')]
+    for later in ('$stagedModels = ""', "if ($RebuildNativeRuntime)", "& $PythonExe @pythonArguments"):
+        assert preflight < guard < script.index(later)
+
+
 @pytest.mark.parametrize("optimization", [None, "PYTHONOPTIMIZE", "-O"])
 @pytest.mark.parametrize(
     ("from_selected_checkout", "profile_code", "error"),

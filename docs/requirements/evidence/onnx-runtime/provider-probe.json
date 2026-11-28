@@ -1,0 +1,46 @@
+{
+  "ort_version": "1.25.1",
+  "scope": "macOS arm64 sandbox initialization; accelerator execution did not pass",
+  "sessions": {
+    "buffalo_s/det_500m.onnx": {
+      "requested": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "actual": [
+        "CPUExecutionProvider"
+      ],
+      "fallback_reason": "Fail: [ONNXRuntimeError] : 1 : FAIL : Error compiling model: Failed to create a working directory appropriate for URL: file:///var/folders/dz/q114b03n4tqf49lxrm6q32hm0000gn/T/"
+    },
+    "buffalo_s/w600k_mbf.onnx": {
+      "requested": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "actual": [
+        "CPUExecutionProvider"
+      ],
+      "fallback_reason": "Fail: [ONNXRuntimeError] : 1 : FAIL : Error compiling model: Failed to create a working directory appropriate for URL: file:///var/folders/dz/q114b03n4tqf49lxrm6q32hm0000gn/T/"
+    },
+    "pets/detector/yolox_nano_coco.onnx": {
+      "requested": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "actual": [
+        "CPUExecutionProvider"
+      ],
+      "fallback_reason": "Fail: [ONNXRuntimeError] : 1 : FAIL : Error compiling model: Failed to create a working directory appropriate for URL: file:///var/folders/dz/q114b03n4tqf49lxrm6q32hm0000gn/T/"
+    },
+    "pets/embedding/dinov2_vits14/dinov2_vits14.onnx": {
+      "requested": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "actual": [
+        "CPUExecutionProvider"
+      ],
+      "fallback_reason": "Fail: [ONNXRuntimeError] : 1 : FAIL : Error compiling model: Failed to create a working directory appropriate for URL: file:///var/folders/dz/q114b03n4tqf49lxrm6q32hm0000gn/T/"
+    }
+  }
+}

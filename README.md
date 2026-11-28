@@ -314,12 +314,12 @@ For deeper technical details, see the following docs:
 | **ExifTool** | Reads EXIF, GPS, QuickTime, and Live Photo metadata; writes GPS metadata for explicit Assign Location actions. |
 | **FFmpeg / FFprobe** | Generates video thumbnails & parses video info. |
 | **InsightFace / ONNXRuntime + `buffalo_s` models** | Optional People face scanning. The People & Pets extension supplies the verified models. |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optional Pets scanning. The People & Pets extension includes both the YOLOX detector and DINOv2 embedder. |
+| **YOLOX + DINOv2 / ONNX Runtime** | Optional local Pets scanning through the shared People & Pets runtime. |
 
 > Ensure FFmpeg/FFprobe are available in your system `PATH`; install ExifTool if
 > you want assigned GPS coordinates written back into original media files.
 > Recognition runtimes are optional; install them with
-> `pip install -e ".[ai-demo,pets-ai]"` for source builds, and keep
+> `pip install -e ".[recognition]"` for source builds, and keep
 > `extension/models` bundled for offline packaged builds.
 
 Python dependencies (e.g., `Pillow`, `reverse-geocoder`) are auto-installed via `pyproject.toml`.

@@ -1,0 +1,27 @@
+{
+  "scope": "macOS arm64 source CoreML inference outside the restricted execution sandbox; no Nuitka or application packaging",
+  "requested": [
+    "CoreMLExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "actual": [
+    "CoreMLExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "fallback_reason": null,
+  "samples": [
+    {
+      "fixture": "yolox-dog.jpg",
+      "raw_max_abs_error": 0.046169281005859375,
+      "normalized_embedding_cosine": 0.9999757203589921,
+      "inference_ms": 51.09074991196394
+    },
+    {
+      "fixture": "chelsea.png",
+      "raw_max_abs_error": 0.05009031295776367,
+      "normalized_embedding_cosine": 0.9999776415534133,
+      "inference_ms": 33.23866706341505
+    }
+  ],
+  "gpu_utilization": "not measured; provider registration does not prove every operator executes on GPU"
+}

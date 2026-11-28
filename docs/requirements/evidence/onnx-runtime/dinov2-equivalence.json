@@ -1,0 +1,59 @@
+{
+  "cpu_inference_ms": [
+    31.014875043183565,
+    38.5659160092473,
+    31.502292025834322,
+    36.53062484227121,
+    38.25199999846518,
+    37.0412920601666,
+    37.25674981251359,
+    39.065083023160696,
+    37.49004099518061,
+    37.192999850958586,
+    37.159041967242956,
+    43.76041702926159
+  ],
+  "historical_library_validation": "Pending Manual Validation",
+  "minimum_embedding_cosine": 0.9999999605882302,
+  "normalized_max_abs_error": 1.1324882507324219e-06,
+  "onnx_checker": "passed",
+  "onnx_sha256": "51f35f4a30a06dfa789eef2df2dcb82ecf0d8b071a3b88ce32dc9686819f452e",
+  "onnx_size": 88314078,
+  "opset": 17,
+  "pairwise_distance_max_abs_error": 1.0728836059570312e-06,
+  "production_cluster_decisions_equal": true,
+  "providers": [
+    "CPUExecutionProvider"
+  ],
+  "raw_max_abs_error": 5.1021575927734375e-05,
+  "real_image_sha256": {
+    "chelsea.png": "596aa1e7cb875eb79f437e310381d26b338a81c2da23439704a73c4651e8c4bb",
+    "yolox-dog.jpg": "5a9522051c3cec2bbd2f6323fccba32e8fbf3ddcc2b3e2fd46b04c720bc6f866"
+  },
+  "sample_count": 12,
+  "samples": [
+    "seeded-normal",
+    "black",
+    "white",
+    "seeded-rgb",
+    "yolox-dog.jpg:original",
+    "yolox-dog.jpg:mirror",
+    "yolox-dog.jpg:brightness",
+    "yolox-dog.jpg:crop",
+    "chelsea.png:original",
+    "chelsea.png:mirror",
+    "chelsea.png:brightness",
+    "chelsea.png:crop"
+  ],
+  "source_revision": "7764ea0f912e53c92e82eb78a2a1631e92725fc8",
+  "source_sha256": "36e01591cfd52d194845d5b23b870dcb698f79c33f6140144180568f2155ab94",
+  "threshold_guard_band": 1e-05,
+  "thresholds_checked": 134,
+  "versions": {
+    "Pillow": "12.3.0",
+    "numpy": "2.4.6",
+    "onnx": "1.21.0",
+    "onnxruntime": "1.25.1",
+    "torch": "2.12.1"
+  }
+}

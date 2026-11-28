@@ -35,10 +35,13 @@ durable-state synchronization, and thumbnail cleanup path.
 Install the optional runtime with:
 
 ```bash
-pip install -e ".[pets-ai]"
+pip install -e ".[recognition]"
 ```
 
-The extra provides `onnxruntime`, `torch`, `torchvision`, and `usearch`.
+The shared extra provides InsightFace, ONNX Runtime and USearch. `pets-ai` and
+`ai-demo` remain compatible narrower entry points. Production never executes
+PyTorch, TorchVision or TorchScript. Export dependencies live only in
+`tools/model-dev/requirements.txt`, outside application/build environments.
 Model lookup follows this order:
 
 ```text
@@ -70,15 +73,22 @@ fallback with this layout:
 extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
 └── embedding/dinov2_vits14/
-    ├── dinov2_vits14.pt
-    └── dinov2_vits14.pt.metadata.json
+    ├── dinov2_vits14.onnx
+    └── dinov2_vits14.onnx.metadata.json
 ```
 
 Desktop workers load local models. InsightFace uses local ONNX sessions, and
 the Pets worker obtains model files through the shared extension installation.
 DINOv2 stays bound to the size, checksum, and metadata declared in
-`iPhoto/pets/model_manifest.json`. The manifest's `torchscript_url` is currently `null`.
-The People & Pets ZIP supplies the verified TorchScript file and its metadata.
+`iPhoto/pets/model_manifest.json` (schema 2). The fixed source revision, opset 17,
+FP32 RGB/ImageNet input `[1,3,224,224]`, output `[1,384]`, names, metadata,
+SHA-256 and byte size are checked. `image_to_chw_float()` and final L2
+normalization retain the original behavior. The model ZIP uses extension v2;
+legacy `.pt` files are ignored and never converted on a user's computer.
+The verified [v2 ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip)
+is published for direct/browser download and offline installation. The individual
+DINOv2 `onnx_url` is null because the combined ZIP provisions it. See the
+[release and validation protocol](../requirements/UNIFIED_ONNX_RUNTIME_VALIDATION.md).
 `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`
 suppresses silent installation triggered by the Pets worker. The combined
 package installs both model sets whenever installed through People or Settings.
@@ -94,7 +104,7 @@ library state remain usable.
 ## Detection And Clustering Contract
 
 The first production pipeline supports cats and dogs. YOLOX runs through the
-available ONNX Runtime providers and uses full-image detection with tiled
+shared ONNX Runtime policy and uses full-image detection with tiled
 fallback for small subjects. Accepted boxes must meet the configured confidence
 and minimum-size thresholds.
 
@@ -122,13 +132,22 @@ Each accepted crop receives:
 - a cropped PNG under `.iPhoto/pets/thumbnails/`;
 - model, image-size, confidence, and species metadata.
 
-Clustering uses `species-bounded-single-link-v3` with a default cosine link
+The DINOv2 migration preserves `dinov2-vits14-imagenet-normalized-v1`.
+The original verified v1 release model was exported without changing weights
+or its output layer. Real-image/raw-output/distance/production-cluster evidence
+is recorded in the [equivalence report](../requirements/evidence/onnx-runtime/dinov2-equivalence.json).
+Generation assignment/activation, USearch compatibility keys, thresholds and
+all durable identity/recovery semantics remain in their current repositories
+and mutation coordinator. Historical production-library acceptance is still
+Pending Manual Validation; use an isolated copy.
+
+Automatic clustering uses `species-bounded-single-link-v3` with a default cosine link
 threshold of `0.42`. A candidate merge needs at least one cross-cluster link at
 or below that threshold, while the resulting cluster diameter must remain at or
 below `0.42 × 1.5`. Compatibility includes species, embedding pipeline version,
 embedding dimension, and generation. Detections from the same asset have a
 cannot-link constraint and cannot enter one automatic cluster. Stable detection
-member keys provide deterministic merge tie-breaking. Incremental identity
+member keys provide deterministic merge tie-breaking. Incremental automatic
 matching applies the same compatibility and cluster-wide bounds when comparing
 persisted members. Stable state uses `pet_key` mappings and profile distance to
 preserve canonical `pet_id` values across rebuilds.
@@ -151,6 +170,34 @@ Processing the asset consumes the record, so ordinary one-sample profiles never
 become general embedding candidates. Outstanding records follow explicit Pet
 merges and advance to the newest target contract if another embedding upgrade
 starts before the previous drain finishes.
+
+### User Control Of Identity Membership
+
+Species stays internal to recognition and is not a user-facing identity
+category, control, or confirmation requirement. Users can merge, move, assign, and name
+identities across species and model contracts without seeing a species-based
+restriction. Species, similarity, embedding version/dimension, and generation
+are automatic inference criteria, not validity checks for user identities.
+Same-asset conflicts, hidden-state protection, reference integrity, and
+transaction/recovery guards still apply.
+
+`build_pet_records_from_detections()` accepts mixed members by default, without
+an opt-in or strict identity mode. The profile center and boundaries use one
+compatible embedding-contract subset; identity counts and cover selection
+include all members. Automatic clustering partitions comparable model contracts
+before computing distances, including when a snapshot contains multiple vector
+dimensions. This arithmetic separation must not split a saved identity.
+
+Exact durable `pet_key` assignments and merge redirects take precedence over
+model heuristics in consolidation, rescans, rebuilds, and restart recovery.
+Reserve exact key anchors before fuzzy matches so input order cannot displace
+them. Mixing species or contracts, or exceeding automatic distance bounds,
+must not reject or undo those assignments or pause consolidation. Mixed
+identities produce no composition warning or routine preservation notice.
+Malformed model data and genuine persistence/recovery failures keep their
+existing error handling. Pending consolidation continues through its existing
+journal and queue after restart, without clearing library state or requiring a
+full rescan. Embedding upgrades retain the migration bookkeeping above.
 
 ## Scan Scheduling And Status
 
@@ -182,6 +229,13 @@ The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies and models pause recognition while preserving pending
 rows. Recovery prompts and successful-install resumption follow the
 [shared lifecycle contract](../architecture.md#recognition-extension-installation).
+The same rule applies when a running ORT session fails and its one CPU recovery
+cannot complete. Detector and embedder wrappers preserve runtime/model errors;
+the pipeline aborts the batch before the coordinator receives any asset failure.
+The worker releases its runtime and uncommitted thumbnail staging. Pending and
+retry rows, including successful detections from the unfinished batch, remain
+eligible after restart. Native graph/input contract failures pause the worker;
+ordinary unreadable images retain the individual retry/failed transition.
 
 Standard Pet scan notices carry a status code and optional technical detail.
 The dashboard translates the notice when it is shown and refreshes it on a
@@ -246,6 +300,7 @@ coerced into a face or person record.
 
 ```bash
 .venv/bin/python -m pytest -q tests/test_pet_service.py
+.venv/bin/python -m pytest -q tests/test_pet_remediation_contracts.py
 .venv/bin/python -m pytest -q tests/test_people_service.py tests/test_people_repository.py
 .venv/bin/python -m pytest -q tests/gui/widgets/test_people_dashboard_widget.py
 .venv/bin/python -m pytest -q tests/test_navigation_coordinator_cluster_gallery.py \

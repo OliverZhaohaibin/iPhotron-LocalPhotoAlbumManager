@@ -444,4 +444,7 @@ def test_recognition_extension_service_is_lazy_and_process_scoped():
     assert not hasattr(context, "_recognition_extensions")
     service = context.recognition_extensions
     assert context.recognition_extensions is service
-    assert service.download_url.endswith("/pet-models-v1/iphotron-recognition-models-v1.zip")
+    from iPhoto.infrastructure.services.recognition_extension_installer import RecognitionPackage
+    package = RecognitionPackage()
+    assert package.filename == "iphotron-recognition-models-v2.zip"
+    assert service.download_url == package.url

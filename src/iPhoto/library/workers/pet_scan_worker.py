@@ -97,86 +97,91 @@ class PetScanWorker(QThread):
         paths = pet_library_paths(self._library_root)
         self._cleanup_stale_thumbnail_staging(paths.thumbnail_dir)
         pipeline = PetClusterPipeline(model_root=paths.model_dir)
-        if self._cancelled:
-            return
-        self._prepare_detector_migration()
-        if self._cancelled:
-            return
-        self._prepare_clustering_pipeline()
-        self._prime_pending_rows()
-        if self._cancelled:
-            return
-
-        coordinator = self._pet_service.coordinator
-        if coordinator is None:
-            self.statusChanged.emit(PetScanStatus(PetScanStatusCode.UNAVAILABLE))
-            return
-
-        while not self._cancelled:
-            self._top_up_pending_rows()
-            batch = self._next_batch()
-            if not batch:
-                if self._input_closed:
-                    self._top_up_pending_rows()
-                    if self._queue.empty():
-                        self._mark_backfill_complete_if_drained()
-                        if not self._cancelled and self._has_pending_clustering_consolidation():
-                            try:
-                                if self._consolidate_pending_clustering(pipeline):
-                                    self.petIndexUpdated.emit()
-                            except PetSnapshotCommittedError as exc:
-                                LOGGER.error(
-                                    "Pet scan consolidation bookkeeping failed after commit: %s",
-                                    exc,
-                                    exc_info=True,
-                                )
-                                self.statusChanged.emit(str(exc))
-                                return
-                            except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
-                                self._report_unavailable(exc)
-                                return
-                            except Exception as exc:  # noqa: BLE001  # pragma: no cover
-                                LOGGER.warning(
-                                    "Pet scan consolidation failed: %s", exc, exc_info=True
-                                )
-                                reason = str(exc).strip() or exc.__class__.__name__
-                                self.statusChanged.emit(
-                                    PetScanStatus(PetScanStatusCode.CONSOLIDATION_PAUSED, reason)
-                                )
-                                return
-                        return
-                continue
-
-            try:
-                committed = self._process_batch(
-                    batch,
-                    coordinator,
-                    pipeline,
-                    paths.thumbnail_dir,
-                )
-                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
-                    self._queued_ids.discard(asset_id)
-                if committed:
-                    self.petIndexUpdated.emit()
-                time.sleep(self.CPU_BACKOFF_SECONDS)
-            except PetSnapshotCommittedError as exc:
-                LOGGER.error("Pet scan bookkeeping failed after commit: %s", exc, exc_info=True)
-                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
-                    self._queued_ids.discard(asset_id)
-                self.statusChanged.emit(str(exc))
+        try:
+            if self._cancelled:
                 return
-            except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
-                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
-                    self._queued_ids.discard(asset_id)
-                self._report_unavailable(exc)
+            self._prepare_detector_migration()
+            if self._cancelled:
                 return
-            except Exception as exc:  # noqa: BLE001  # pragma: no cover
-                LOGGER.warning("Pet scan batch failed: %s", exc, exc_info=True)
-                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
-                    self._queued_ids.discard(asset_id)
-                reason = str(exc).strip() or exc.__class__.__name__
-                self.statusChanged.emit(PetScanStatus(PetScanStatusCode.PAUSED, reason))
+            self._prepare_clustering_pipeline()
+            self._prime_pending_rows()
+            if self._cancelled:
                 return
+
+            coordinator = self._pet_service.coordinator
+            if coordinator is None:
+                self.statusChanged.emit(PetScanStatus(PetScanStatusCode.UNAVAILABLE))
+                return
+
+            while not self._cancelled:
+                self._top_up_pending_rows()
+                batch = self._next_batch()
+                if not batch:
+                    if self._input_closed:
+                        self._top_up_pending_rows()
+                        if self._queue.empty():
+                            self._mark_backfill_complete_if_drained()
+                            if not self._cancelled and self._has_pending_clustering_consolidation():
+                                try:
+                                    if self._consolidate_pending_clustering(pipeline):
+                                        self.petIndexUpdated.emit()
+                                except PetSnapshotCommittedError as exc:
+                                    LOGGER.error(
+                                        "Pet scan consolidation bookkeeping failed after commit: %s",
+                                        exc,
+                                        exc_info=True,
+                                    )
+                                    self.statusChanged.emit(str(exc))
+                                    return
+                                except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
+                                    self._report_unavailable(exc)
+                                    return
+                                except Exception as exc:  # noqa: BLE001  # pragma: no cover
+                                    LOGGER.warning(
+                                        "Pet scan consolidation failed: %s", exc, exc_info=True
+                                    )
+                                    reason = str(exc).strip() or exc.__class__.__name__
+                                    self.statusChanged.emit(
+                                        PetScanStatus(PetScanStatusCode.CONSOLIDATION_PAUSED, reason)
+                                    )
+                                    return
+                            return
+                    continue
+
+                try:
+                    committed = self._process_batch(
+                        batch,
+                        coordinator,
+                        pipeline,
+                        paths.thumbnail_dir,
+                    )
+                    for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                        self._queued_ids.discard(asset_id)
+                    if committed:
+                        self.petIndexUpdated.emit()
+                    time.sleep(self.CPU_BACKOFF_SECONDS)
+                except PetSnapshotCommittedError as exc:
+                    LOGGER.error("Pet scan bookkeeping failed after commit: %s", exc, exc_info=True)
+                    for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                        self._queued_ids.discard(asset_id)
+                    self.statusChanged.emit(str(exc))
+                    return
+                except (PetRuntimeUnavailableError, PetModelUnavailableError) as exc:
+                    for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                        self._queued_ids.discard(asset_id)
+                    self._report_unavailable(exc)
+                    return
+                except Exception as exc:  # noqa: BLE001  # pragma: no cover
+                    LOGGER.warning("Pet scan batch failed: %s", exc, exc_info=True)
+                    for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                        self._queued_ids.discard(asset_id)
+                    reason = str(exc).strip() or exc.__class__.__name__
+                    self.statusChanged.emit(PetScanStatus(PetScanStatusCode.PAUSED, reason))
+                    return
+        finally:
+            close = getattr(pipeline, "close", None)
+            if close is not None:
+                close()
 
     def _report_unavailable(
         self, failure: PetRuntimeUnavailableError | PetModelUnavailableError
@@ -236,16 +241,20 @@ class PetScanWorker(QThread):
         batch_asset_ids = [str(row.get("id") or "") for row in batch if row.get("id")]
         people_boxes = self._pet_service.people_boxes_by_asset_ids(batch_asset_ids)
         staging_dir = thumbnail_dir / ".staging" / uuid.uuid4().hex
-        detected = list(
-            pipeline.detect_pets_for_rows(
-                batch,
-                library_root=self._library_root,
-                thumbnail_dir=staging_dir,
-                published_thumbnail_dir=thumbnail_dir,
-                is_cancelled=lambda: self._cancelled,
-                people_boxes_by_asset_id=people_boxes,
+        try:
+            detected = list(
+                pipeline.detect_pets_for_rows(
+                    batch,
+                    library_root=self._library_root,
+                    thumbnail_dir=staging_dir,
+                    published_thumbnail_dir=thumbnail_dir,
+                    is_cancelled=lambda: self._cancelled,
+                    people_boxes_by_asset_id=people_boxes,
+                )
             )
-        )
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
         if self._cancelled:
             shutil.rmtree(staging_dir, ignore_errors=True)
             self._mark_rows_retry(batch)

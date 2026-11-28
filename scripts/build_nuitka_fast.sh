@@ -5,9 +5,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 PROJECT_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 
+ORT_PROFILE="${IPHOTO_ORT_PROFILE:-cpu}"
+mkdir -p dist
+python tools/recognition_packaging.py environment --require-complete --profile "$ORT_PROFILE" \
+  --output dist/recognition-dependencies.json
 optional_model_args=()
-if [[ -d "$ROOT_DIR/src/extension/models" ]]; then
-  optional_model_args+=("--include-data-dir=src/extension/models=extension/models")
+if [[ -n "${IPHOTO_RECOGNITION_BUNDLE_MODELS:-}" ]]; then
+  MODEL_STAGE="$(mktemp -d "$ROOT_DIR/dist/.recognition-models.XXXXXX")/models"
+  python tools/recognition_packaging.py stage-models \
+    --source "$IPHOTO_RECOGNITION_BUNDLE_MODELS" --output "$MODEL_STAGE"
+  optional_model_args+=("--include-data-dir=$MODEL_STAGE=extension/models")
 fi
 
 python -m nuitka \
@@ -36,11 +43,17 @@ python -m nuitka \
   --include-package=exiftool \
   --include-package=pillow_heif \
   --include-module=_pillow_heif \
-  --noinclude-data-files=torch/include \
+  --include-package=onnxruntime \
+  --nofollow-import-to=onnxruntime.tools,onnxruntime.quantization,onnxruntime.transformers,onnxruntime.training \
+  --include-package=usearch \
+  --nofollow-import-to=torch,torchvision,torchaudio,triton \
+  --user-package-configuration-file=packaging/recognition.nuitka-package.config.yml \
+  --report=dist/nuitka-compilation-report.xml \
   "${optional_model_args[@]}" \
   --include-data-file=logo.png=logo.png \
   --include-data-dir=src/iPhoto/resources/i18n=iPhoto/resources/i18n \
   --include-data-file=src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json \
+  --include-data-file=src/iPhoto/recognition/recognition_package.json=iPhoto/recognition/recognition_package.json \
   --include-data-dir=src/maps/tiles=maps/tiles \
   --include-data-file=src/maps/style.json=maps/style.json \
   --include-data-dir=src/maps/map_widget/qml=maps/map_widget/qml \
@@ -70,6 +83,9 @@ for candidate in dist/entrypoint.dist/entrypoint.bin dist/entrypoint.dist/entryp
   fi
 done
 [[ -n "$ARTIFACT_PATH" ]] || { echo "error: built entrypoint not found" >&2; exit 2; }
+python tools/recognition_packaging.py artifact --profile "$ORT_PROFILE" \
+  --tree dist/entrypoint.dist --nuitka-report dist/nuitka-compilation-report.xml \
+  --output dist/recognition-artifact.json
 python tools/build_manifest.py \
   --root "$ROOT_DIR" \
   --artifact "$ARTIFACT_PATH" \
@@ -78,6 +94,7 @@ python tools/build_manifest.py \
   --build-flag "profile=fast" \
   --build-flag "project_version=$PROJECT_VERSION" \
   --build-flag "lto=yes" \
+  --build-flag "recognition_runtime=onnx-$ORT_PROFILE" \
   --build-flag "compiler=clang" \
   --native-runtime "$ROOT_DIR/src/maps/tiles/extension/bin" \
   --asset "$ROOT_DIR/src/maps/tiles" \

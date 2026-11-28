@@ -1,0 +1,31 @@
+{
+  "filename": "iphotron-recognition-models-v2.zip",
+  "files": {
+    "buffalo_s/det_500m.onnx": {
+      "sha256": "5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a",
+      "size": 2524817
+    },
+    "buffalo_s/w600k_mbf.onnx": {
+      "sha256": "9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f",
+      "size": 13616099
+    },
+    "pets/detector/yolox_nano_coco.onnx": {
+      "sha256": "c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d",
+      "size": 3659407
+    },
+    "pets/embedding/dinov2_vits14/dinov2_vits14.onnx": {
+      "sha256": "51f35f4a30a06dfa789eef2df2dcb82ecf0d8b071a3b88ce32dc9686819f452e",
+      "size": 88314078
+    },
+    "pets/embedding/dinov2_vits14/dinov2_vits14.onnx.metadata.json": {
+      "sha256": "7e034294ff8b563f9508fb0f6c693ad4be674c6bae84d2f63051d9b96307c579",
+      "size": 811
+    }
+  },
+  "release_status": "published",
+  "schema_version": 1,
+  "sha256": "a8ac03fb0b60b44c6187defadf3311c08440a7a306cc4b9bee10b0f1cb2b8d5c",
+  "size": 100318770,
+  "url": "https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip",
+  "version": 2
+}

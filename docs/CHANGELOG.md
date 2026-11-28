@@ -4,6 +4,19 @@ All notable changes to **iPhotron** are documented in this file.
 
 ---
 
+## Unreleased — Unified ONNX Recognition Runtime
+
+- Run People, YOLOX and DINOv2 through one lazy, worker-owned ONNX Runtime
+  policy with bounded CPU recovery and thread budgets; preserve InsightFace
+  alignment and the compatible historical embedding space.
+- Remove Torch/TorchVision from production extras and distribution collection.
+  Add isolated export/equivalence tooling and measured, verified ONNX model ZIP v2.
+- Preserve v1 People model reuse and all library state. The published v2 ZIP
+  supports verified direct download and offline installation.
+- Add CPU inference/packaging CI contracts for Windows, Linux and Apple Silicon
+  macOS. Actual platform release execution/size acceptance remains
+  pending; macOS Nuitka and signing are Pending Manual Validation.
+
 ## Unreleased — Windows Packaging Diagnostics
 
 - Put the selected checkout's `src` first for Windows Nuitka compilation and
@@ -93,8 +106,8 @@ the existing People dashboard, gallery, groups, pins, and media annotations.*
 - Added tiled fallback detection for small cats/dogs, stable `pet_key`
   canonicalization, detector/clustering pipeline versioning, and graceful
   pending-state recovery when optional dependencies or models are unavailable.
-- Switched DINOv2 production loading to a fixed TorchScript artifact verified
-  by exact SHA-256 and byte size; Torch Hub is restricted to the release
+- Pinned DINOv2 production loading to a fixed ONNX artifact verified
+  by exact SHA-256 and byte size; legacy export is restricted to the release
   conversion workflow. Optional offline model staging uses
   `src/extension/models/pets/`; those ignored files are not fresh-clone assets.
 

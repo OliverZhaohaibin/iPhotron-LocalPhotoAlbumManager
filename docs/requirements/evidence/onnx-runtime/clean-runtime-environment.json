@@ -1,0 +1,131 @@
+{
+  "distributions": {
+    "flatbuffers": {
+      "requires": [],
+      "version": "25.12.19"
+    },
+    "iniconfig": {
+      "requires": [],
+      "version": "2.3.1"
+    },
+    "numkong": {
+      "requires": [],
+      "version": "7.8.7"
+    },
+    "numpy": {
+      "requires": [],
+      "version": "2.4.6"
+    },
+    "onnxruntime": {
+      "requires": [
+        "flatbuffers",
+        "ml_dtypes; extra == \"quantization\"",
+        "numpy>=1.21.6",
+        "packaging",
+        "protobuf",
+        "sympy; extra == \"symbolic\""
+      ],
+      "version": "1.25.1"
+    },
+    "packaging": {
+      "requires": [],
+      "version": "26.4"
+    },
+    "pillow": {
+      "requires": [
+        "arro3-compute; extra == \"test-arrow\"",
+        "arro3-core; extra == \"test-arrow\"",
+        "coverage>=7.4.2; extra == \"tests\"",
+        "defusedxml; extra == \"tests\"",
+        "defusedxml; extra == \"xmp\"",
+        "furo; extra == \"docs\"",
+        "markdown2; extra == \"tests\"",
+        "nanoarrow; extra == \"test-arrow\"",
+        "olefile; extra == \"docs\"",
+        "olefile; extra == \"fpx\"",
+        "olefile; extra == \"mic\"",
+        "olefile; extra == \"tests\"",
+        "packaging; extra == \"tests\"",
+        "pyarrow; extra == \"test-arrow\"",
+        "pytest-cov; extra == \"tests\"",
+        "pytest-timeout; extra == \"tests\"",
+        "pytest-xdist; extra == \"tests\"",
+        "pytest; extra == \"tests\"",
+        "setuptools; extra == \"tests\"",
+        "sphinx-autobuild; extra == \"docs\"",
+        "sphinx-copybutton; extra == \"docs\"",
+        "sphinx-inline-tabs; extra == \"docs\"",
+        "sphinx>=8.2; extra == \"docs\"",
+        "sphinxext-opengraph; extra == \"docs\"",
+        "trove-classifiers>=2024.10.12; extra == \"tests\""
+      ],
+      "version": "12.3.0"
+    },
+    "pip": {
+      "requires": [],
+      "version": "25.0.1"
+    },
+    "pluggy": {
+      "requires": [],
+      "version": "1.7.0"
+    },
+    "protobuf": {
+      "requires": [],
+      "version": "7.36.2"
+    },
+    "pygments": {
+      "requires": [
+        "colorama>=0.4.6; extra == 'windows-terminal'"
+      ],
+      "version": "2.21.0"
+    },
+    "pytest": {
+      "requires": [
+        "argcomplete; extra == \"dev\"",
+        "asynctest; python_version < \"3.11\" and extra == \"dev\"",
+        "attrs>=23.1; extra == \"dev\"",
+        "colorama>=0.4; sys_platform == \"win32\"",
+        "coverage>=7.5; extra == \"dev\"",
+        "exceptiongroup>=1; python_version < \"3.11\"",
+        "hypothesis>=6.75; extra == \"dev\"",
+        "iniconfig>=2",
+        "mock; extra == \"dev\"",
+        "numpy>=1.26; extra == \"dev\"",
+        "packaging>=24",
+        "pexpect>=4.9; extra == \"dev\"",
+        "pluggy<2,>=1.6",
+        "pygments>=2.15",
+        "pytest-xdist>=3.5; extra == \"dev\"",
+        "pyyaml; extra == \"dev\"",
+        "requests; extra == \"dev\"",
+        "setuptools; extra == \"dev\"",
+        "tomli>=2; python_version < \"3.11\"",
+        "xmlschema; extra == \"dev\""
+      ],
+      "version": "9.2.0"
+    },
+    "tqdm": {
+      "requires": [
+        "colorama; platform_system == \"Windows\"",
+        "envwrap; extra == \"discord\"",
+        "envwrap; extra == \"slack\"",
+        "envwrap; extra == \"telegram\"",
+        "ipywidgets>=6; extra == \"notebook\"",
+        "requests; extra == \"discord\"",
+        "requests; extra == \"telegram\"",
+        "slack-sdk; extra == \"slack\""
+      ],
+      "version": "4.70.1"
+    },
+    "usearch": {
+      "requires": [
+        "numkong",
+        "numpy",
+        "tqdm"
+      ],
+      "version": "2.26.0"
+    }
+  },
+  "profile": "cpu",
+  "torch_free": true
+}

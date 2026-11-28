@@ -8,7 +8,10 @@ param(
     [string]$ConsoleMode = "disable",
     [switch]$RebuildNativeRuntime,
     [switch]$SkipNativeRuntimeSync,
-    [switch]$IncludeOptionalAssets
+    [switch]$IncludeOptionalAssets,
+    [string]$RecognitionModelDir = "",
+    [ValidateSet("cpu", "cuda", "directml", "openvino")]
+    [string]$OrtProfile = "cpu"
 )
 
 $ErrorActionPreference = "Stop"
@@ -168,16 +171,12 @@ $mainScript = Join-Path $srcRoot 'entrypoint.py'
 $nativeBuildScript = Join-Path $repoRoot 'tools\osmand_render_helper_native\build_native_widget_msvc.ps1'
 $nativeDistDir = Join-Path $repoRoot 'tools\osmand_render_helper_native\dist-msvc'
 $extensionBinDir = Join-Path $srcRoot 'maps\tiles\extension\bin'
-$faceModelDir = Join-Path $srcRoot 'extension\models'
 $defaultIcon = Join-Path $repoRoot 'logo.png'
 
 Assert-Exists $repoRoot
 Assert-Exists $srcRoot
 Assert-Exists $mainScript
 Assert-Exists $nativeBuildScript
-if ($IncludeOptionalAssets) {
-    Assert-Exists $faceModelDir
-}
 
 if (-not $IconPath) {
     $IconPath = $defaultIcon
@@ -204,6 +203,19 @@ if (-not [IO.Path]::IsPathRooted($OutputDir)) {
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $OutputDir = (Get-Item -LiteralPath $OutputDir).FullName
 $compilationReport = Join-Path $OutputDir 'nuitka-compilation-report.xml'
+
+& $PythonExe @pythonPrefixArgs (Join-Path $repoRoot 'tools\recognition_packaging.py') environment `
+    --require-complete --check-native-inspector --profile $OrtProfile --output (Join-Path $OutputDir 'recognition-dependencies.json')
+if ($LASTEXITCODE -ne 0) {
+    throw 'Recognition build preflight failed. Check the PyTorch-free venv and native dependency inspector.'
+}
+$stagedModels = ""
+if ($RecognitionModelDir) {
+    $stagedModels = Join-Path $OutputDir ('.recognition-models-' + [guid]::NewGuid().ToString())
+    & $PythonExe @pythonPrefixArgs (Join-Path $repoRoot 'tools\recognition_packaging.py') stage-models `
+        --source $RecognitionModelDir --output $stagedModels
+    if ($LASTEXITCODE -ne 0) { throw 'Recognition model staging failed.' }
+}
 
 Write-Host "Python interpreter: $($pythonInvocation.PythonPath)"
 Write-Host "Python version: $($pythonInvocation.Version)"
@@ -286,10 +298,15 @@ $arguments = @(
     # Python package and native extension explicitly.
     '--include-package=pillow_heif',
     '--include-module=_pillow_heif',
-    '--noinclude-data-files=torch/include',
+    '--include-package=onnxruntime',
+    '--nofollow-import-to=onnxruntime.tools,onnxruntime.quantization,onnxruntime.transformers,onnxruntime.training',
+    '--include-package=usearch',
+    '--nofollow-import-to=torch,torchvision,torchaudio,triton',
+    "--user-package-configuration-file=$(Join-Path $repoRoot 'packaging\recognition.nuitka-package.config.yml')",
     "--output-dir=$OutputDir",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\resources\i18n')=iPhoto/resources/i18n",
     "--include-data-file=$(Join-Path $srcRoot 'iPhoto\pets\model_manifest.json')=iPhoto/pets/model_manifest.json",
+    "--include-data-file=$(Join-Path $srcRoot 'iPhoto\recognition\recognition_package.json')=iPhoto/recognition/recognition_package.json",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\schemas')=iPhoto/schemas",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\icon')=iPhoto/gui/ui/icon",
     "--include-data-dir=$(Join-Path $srcRoot 'iPhoto\gui\ui\qml')=iPhoto/gui/ui/qml",
@@ -312,8 +329,11 @@ $arguments = @(
 )
 
 if ($IncludeOptionalAssets) {
-    $arguments += "--include-data-dir=$faceModelDir=extension/models"
     $arguments += "--include-data-dir=$(Join-Path $srcRoot 'maps\tiles')=maps/tiles"
+}
+
+if ($stagedModels) {
+    $arguments += "--include-data-dir=$stagedModels=extension/models"
 }
 
 $arguments += "--windows-icon-from-ico=$IconPath"
@@ -374,14 +394,21 @@ finally {
 
 $builtExecutable = Join-Path $OutputDir 'entrypoint.dist\entrypoint.exe'
 Assert-Exists $builtExecutable
+& $PythonExe @pythonPrefixArgs (Join-Path $repoRoot 'tools\recognition_packaging.py') artifact `
+    --profile $OrtProfile --tree (Join-Path $OutputDir 'entrypoint.dist') `
+    --nuitka-report $compilationReport --output (Join-Path $OutputDir 'recognition-artifact.json')
+if ($LASTEXITCODE -ne 0) { throw 'Recognition standalone contract failed.' }
 $manifestTool = Join-Path $repoRoot 'tools\build_manifest.py'
 $manifestOutput = Join-Path $OutputDir 'build-manifest.json'
 $manifestArguments = @(
     $manifestTool,
     '--root', $repoRoot,
     '--artifact', $builtExecutable,
+    '--artifact-tree', (Join-Path $OutputDir 'entrypoint.dist'),
     '--build-driver', $PSCommandPath,
     '--build-flag', 'profile=windows',
+    '--build-flag', 'lto=yes',
+    '--build-flag', "recognition_runtime=onnx-$OrtProfile",
     '--build-flag', "jobs=$Jobs",
     '--build-flag', "console=$ConsoleMode",
     '--build-flag', "optional_assets=$([bool]$IncludeOptionalAssets)",

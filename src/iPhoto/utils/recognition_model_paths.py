@@ -12,7 +12,7 @@ def installed_recognition_model_root() -> Path:
         base = Path.home() / "Library" / "Application Support"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / "iPhoto" / "extensions" / "recognition" / "v1" / "models"
+    return base / "iPhoto" / "extensions" / "recognition" / "v2" / "models"
 
 
 def previous_recognition_model_root(target: Path) -> Path:
@@ -22,4 +22,10 @@ def previous_recognition_model_root(target: Path) -> Path:
 def installed_recognition_model_roots() -> tuple[Path, ...]:
     target = installed_recognition_model_root()
     # The previous directory remains usable across an interrupted promotion.
+    return target, previous_recognition_model_root(target)
+
+
+def legacy_recognition_model_roots() -> tuple[Path, ...]:
+    """Only People may reuse v1 ONNX files; Pets never resolves legacy .pt files."""
+    target = installed_recognition_model_root().parent.parent / "v1" / "models"
     return target, previous_recognition_model_root(target)

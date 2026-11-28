@@ -1,10 +1,11 @@
 # ONNX Runtime's built-in Nuitka rule collects its capi provider libraries.
 # DirectML is the optional wheel's additional native dependency. Retain it
 # beside the binding; never collect it in the default onnxruntime CPU build.
-- module-name: 'onnxruntime'
+# Use a separate module entry: Nuitka does not merge duplicate DLL rules.
+- module-name: 'onnxruntime.capi'
   dlls:
     - from_filenames:
-        relative_path: 'capi'
+        relative_path: '.'
         prefixes:
           - 'DirectML'
       when: 'win32'

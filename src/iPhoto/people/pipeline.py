@@ -324,6 +324,8 @@ class FaceClusterPipeline:
                         len(inputs) == 1 and len(inputs[0].shape) == 4
                         and isinstance(inputs[0].shape[2], int)
                         and inputs[0].shape[2] == inputs[0].shape[3]
+                        # InsightFace reserves 192x192 inputs for landmark models.
+                        and inputs[0].shape[2] != 192
                         and inputs[0].shape[2] >= 112 and inputs[0].shape[2] % 16 == 0
                     ):
                         model = ArcFaceONNX(model_file=str(path), session=session)

@@ -109,8 +109,13 @@ def local_insightface(monkeypatch):
         model_path = Path(path)
         assert model_path.is_file()
         calls.append(model_path)
+        image_size = {
+            "1k3d68.onnx": 192,
+            "2d106det.onnx": 192,
+            "genderage.onnx": 96,
+        }.get(model_path.name, 112)
         return SimpleNamespace(
-            get_inputs=lambda: [SimpleNamespace(shape=[1, 3, 112, 112])],
+            get_inputs=lambda: [SimpleNamespace(shape=[1, 3, image_size, image_size])],
             get_outputs=lambda: [None] * (9 if model_path.name == "det_500m.onnx" else 1),
         )
 
@@ -149,6 +154,33 @@ def test_face_pipeline_loads_only_local_models(local_insightface, tmp_path, fold
     assert app is pipeline._ensure_face_analysis()
     assert app.det_model is app.models["detection"]
     assert local_insightface == [path.resolve() for path in paths]
+
+
+@pytest.mark.parametrize("with_recognition", [True, False])
+def test_custom_face_pack_excludes_landmark_and_attribute_models(
+    local_insightface, tmp_path, with_recognition
+):
+    from iPhoto.people.errors import FaceModelUnavailableError
+
+    pack = tmp_path / "custom_pack"
+    pack.mkdir()
+    names = ["1k3d68.onnx", "2d106det.onnx", "det_500m.onnx", "genderage.onnx"]
+    if with_recognition:
+        names.append("w600k_mbf.onnx")
+    for name in names:
+        (pack / name).write_bytes(b"model")
+    pipeline = FaceClusterPipeline(model_root=tmp_path, model_pack=pack.name)
+    try:
+        if with_recognition:
+            app = pipeline._ensure_face_analysis()
+            assert set(app.models) == {"detection", "recognition"}
+            assert Path(app.models["recognition"].model_file) == pack / "w600k_mbf.onnx"
+        else:
+            with pytest.raises(FaceModelUnavailableError) as exc:
+                pipeline._ensure_face_analysis()
+            assert exc.value.reason == "incomplete"
+    finally:
+        pipeline.close()
 
 
 @pytest.mark.parametrize("reason", ["missing", "incomplete"])

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +21,49 @@ def load_tool(name):
 
 packaging = load_tool("recognition_packaging")
 repair = load_tool("repair_macos_onnx")
+
+
+def test_nuitka_loads_recognition_rules_without_replacing_builtin_dlls(tmp_path):
+    pytest.importorskip("nuitka")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+from nuitka.Tracing import general
+from nuitka.utils import Yaml
+
+Yaml.getUserProvidedYamlFiles = lambda: [sys.argv[1]]
+config = Yaml.getYamlPackageConfiguration(general, False, False)
+print(json.dumps({
+    "builtin": config.get("onnxruntime", "dlls"),
+    "additional": config.get("onnxruntime.capi", "dlls"),
+}))
+""",
+            str(ROOT / "packaging/recognition.nuitka-package.config.yml"),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rules = json.loads(result.stdout)
+    builtin_prefixes = {
+        prefix
+        for rule in rules["builtin"]
+        for prefix in rule.get("from_filenames", {}).get("prefixes", [])
+    }
+    assert {"onnxruntime", "libonnxruntime"} <= builtin_prefixes
+    directml = next(
+        rule
+        for rule in rules["additional"]
+        if "DirectML" in rule.get("from_filenames", {}).get("prefixes", [])
+    )
+    assert directml["when"] == "win32"
+    assert directml["from_filenames"].get("relative_path", ".") == "."
 
 
 @pytest.mark.parametrize(

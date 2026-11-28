@@ -2314,6 +2314,10 @@ Select a tile directory to switch back to the legacy backend.</source>
             <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
             <translation>IPHOTO_FACE_MODEL_DIR 指定的目录中缺少可用的人脸模型。请修正或取消设置 IPHOTO_FACE_MODEL_DIR，然后重新扫描。</translation>
         </message>
+        <message>
+            <source>The new People &amp; Pets package is not available for download yet. Install a verified package from a file.</source>
+            <translation>新版人物与宠物扩展包暂未开放下载。请从文件安装已验证的扩展包。</translation>
+        </message>
     </context>
     <context>
         <name>NotificationToast</name>

@@ -1,0 +1,32 @@
+{
+  "command": "QT_QPA_PLATFORM=offscreen IPHOTO_RUN_PETS_SCALE_CONTRACT=1 IPHOTO_RUN_PETS_PRODUCTION_SHAPE_CONTRACT=1 NUMBA_DISABLE_JIT=1 .venv/bin/python -m pytest -q -s tests/contracts/test_pets_scale_contract.py",
+  "result": "4 passed in 198.52s",
+  "metrics": {
+    "production_shape_50k": {
+      "seconds": 88.07189587503672,
+      "rss_bytes": 612499456,
+      "full_profile_reads": 1,
+      "assignment_seconds": 9.414977940963581,
+      "state_sync_seconds": 32.66121762781404,
+      "index_update_seconds": 6.309548701858148,
+      "synthetic_seconds": 0.4970415800344199,
+      "runtime_mutation_seconds": 39.18911002436653,
+      "cold_restart_seconds": 8.768439041916281,
+      "mutation_seconds": 14.192913332954049,
+      "incremental_wal_delta": 0
+    },
+    "fallback_shape_1k": {
+      "seconds": 1.1749257501214743,
+      "rss_bytes": 1933131776,
+      "full_profile_reads": 1,
+      "assignment_seconds": 0.17670708242803812,
+      "state_sync_seconds": 0.37032475392334163,
+      "index_update_seconds": 0.011637162882834673,
+      "synthetic_seconds": 0.011286668945103884,
+      "runtime_mutation_seconds": 0.604970081942156,
+      "cold_restart_seconds": 0.043443207861855626,
+      "mutation_seconds": 0.21595079195685685,
+      "incremental_wal_delta": 0
+    }
+  }
+}

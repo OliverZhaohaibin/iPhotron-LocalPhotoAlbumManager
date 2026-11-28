@@ -2314,6 +2314,10 @@ Wählen Sie ein Kachelverzeichnis aus, um zurück zum alten Backend zu wechseln.
             <source>The directory set in IPHOTO_FACE_MODEL_DIR is missing usable face models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.</source>
             <translation>Im Verzeichnis aus IPHOTO_FACE_MODEL_DIR fehlen verwendbare Gesichtsmodelle. Korrigieren oder entfernen Sie IPHOTO_FACE_MODEL_DIR und starten Sie den Scan erneut.</translation>
         </message>
+        <message>
+            <source>The new People &amp; Pets package is not available for download yet. Install a verified package from a file.</source>
+            <translation>Das neue People-&amp;-Pets-Paket steht noch nicht zum Download bereit. Installieren Sie ein geprüftes Paket aus einer Datei.</translation>
+        </message>
     </context>
     <context>
         <name>NotificationToast</name>

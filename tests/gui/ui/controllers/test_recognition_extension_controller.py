@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import QCoreApplication, QThreadPool, Qt
+from PySide6.QtCore import QCoreApplication, Qt, QThreadPool
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMainWindow, QPushButton
 
@@ -60,6 +60,20 @@ def test_menu_is_next_to_maps_and_opens_three_choices_without_library(desktop):
         "Download", "Download in Browser", "Install from File…", "Cancel"
     ]
     context.recognition_extensions.execute.assert_not_called()
+
+
+def test_unpublished_v2_only_offers_offline_install_and_preserves_pending_work(desktop, tmp_path):
+    _, controller, context = desktop
+    context.recognition_extensions.download_url = ""
+    controller.show_options()
+    assert [button.text() for button in controller._popup.findChildren(QPushButton)] == ["Install from File…", "Cancel"]
+    controller._popup.close()
+    QCoreApplication.processEvents()
+    context.library.recognition_model_failure_is_current.return_value = True
+    controller.model_unavailable(RecognitionModelFailure(tmp_path, 1, "pet", "missing"))
+    assert "not available for download yet" in controller._popup.message()
+    context.recognition_extensions.execute.assert_not_called()
+    context.library.recognition_extension_installed.assert_not_called()
 
 
 @pytest.mark.parametrize("opened", [True, False])

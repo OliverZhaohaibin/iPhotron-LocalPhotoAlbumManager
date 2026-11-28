@@ -35,10 +35,13 @@ durable-state synchronization, and thumbnail cleanup path.
 Install the optional runtime with:
 
 ```bash
-pip install -e ".[pets-ai]"
+pip install -e ".[recognition]"
 ```
 
-The extra provides `onnxruntime`, `torch`, `torchvision`, and `usearch`.
+The shared extra provides InsightFace, ONNX Runtime and USearch. `pets-ai` and
+`ai-demo` remain compatible narrower entry points. Production never executes
+PyTorch, TorchVision or TorchScript. Export dependencies live only in
+`tools/model-dev/requirements.txt`, outside application/build environments.
 Model lookup follows this order:
 
 ```text
@@ -70,15 +73,22 @@ fallback with this layout:
 extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
 └── embedding/dinov2_vits14/
-    ├── dinov2_vits14.pt
-    └── dinov2_vits14.pt.metadata.json
+    ├── dinov2_vits14.onnx
+    └── dinov2_vits14.onnx.metadata.json
 ```
 
 Desktop workers load local models. InsightFace uses local ONNX sessions, and
 the Pets worker obtains model files through the shared extension installation.
 DINOv2 stays bound to the size, checksum, and metadata declared in
-`iPhoto/pets/model_manifest.json`. The manifest's `torchscript_url` is currently `null`.
-The People & Pets ZIP supplies the verified TorchScript file and its metadata.
+`iPhoto/pets/model_manifest.json` (schema 2). The fixed source revision, opset 17,
+FP32 RGB/ImageNet input `[1,3,224,224]`, output `[1,384]`, names, metadata,
+SHA-256 and byte size are checked. `image_to_chw_float()` and final L2
+normalization retain the original behavior. The model ZIP uses extension v2;
+legacy `.pt` files are ignored and never converted on a user's computer.
+The verified [v2 ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip)
+is published for direct/browser download and offline installation. The individual
+DINOv2 `onnx_url` is null because the combined ZIP provisions it. See the
+[release and validation protocol](../requirements/UNIFIED_ONNX_RUNTIME_VALIDATION.md).
 `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0`
 suppresses silent installation triggered by the Pets worker. The combined
 package installs both model sets whenever installed through People or Settings.
@@ -94,7 +104,7 @@ library state remain usable.
 ## Detection And Clustering Contract
 
 The first production pipeline supports cats and dogs. YOLOX runs through the
-available ONNX Runtime providers and uses full-image detection with tiled
+shared ONNX Runtime policy and uses full-image detection with tiled
 fallback for small subjects. Accepted boxes must meet the configured confidence
 and minimum-size thresholds.
 
@@ -121,6 +131,15 @@ Each accepted crop receives:
   dimensions;
 - a cropped PNG under `.iPhoto/pets/thumbnails/`;
 - model, image-size, confidence, and species metadata.
+
+The DINOv2 migration preserves `dinov2-vits14-imagenet-normalized-v1`.
+The original verified v1 release model was exported without changing weights
+or its output layer. Real-image/raw-output/distance/production-cluster evidence
+is recorded in the [equivalence report](../requirements/evidence/onnx-runtime/dinov2-equivalence.json).
+Generation assignment/activation, USearch compatibility keys, thresholds and
+all durable identity/recovery semantics remain in their current repositories
+and mutation coordinator. Historical production-library acceptance is still
+Pending Manual Validation; use an isolated copy.
 
 Clustering uses `species-bounded-single-link-v3` with a default cosine link
 threshold of `0.42`. A candidate merge needs at least one cross-cluster link at

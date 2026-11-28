@@ -1489,35 +1489,21 @@ def test_model_resolver_skips_empty_cache_for_complete_bundled_embedder(
     (cache / relative).mkdir(parents=True)
     bundled_dir = bundled / relative
     bundled_dir.mkdir(parents=True)
-    model_path = bundled_dir / "dinov2_vits14.pt"
-    model_path.write_bytes(b"verified-torchscript")
+    model_path = bundled_dir / "dinov2_vits14.onnx"
+    model_path.write_bytes(b"verified-onnx")
     manifest = pet_pipeline.PET_MODEL_MANIFEST["embedder"]
     monkeypatch.setitem(
         manifest,
-        "torchscript_sha256",
+        "onnx_sha256",
         hashlib.sha256(model_path.read_bytes()).hexdigest(),
     )
-    monkeypatch.setitem(manifest, "torchscript_size", model_path.stat().st_size)
-    model_path.with_suffix(".pt.metadata.json").write_text(
-        json.dumps(
-            {
-                "model_name": "dinov2_vits14",
-                "source_repository": manifest["source_repository"],
-                "source_revision": manifest["source_revision"],
-                "torchscript_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
-                "torchscript_size": model_path.stat().st_size,
-                "input_shape": manifest["input_shape"],
-                "output_shape": manifest["output_shape"],
-            }
-        ),
-        encoding="utf-8",
+    monkeypatch.setitem(manifest, "onnx_size", model_path.stat().st_size)
+    from iPhoto.pets.model_contract import dinov2_metadata
+    model_path.with_suffix(".onnx.metadata.json").write_text(
+        json.dumps(dinov2_metadata(manifest, "dinov2_vits14")), encoding="utf-8"
     )
     monkeypatch.setattr(pet_pipeline, "user_pet_model_cache_dir", lambda: cache)
-    monkeypatch.setattr(
-        pet_pipeline,
-        "pet_model_search_roots",
-        lambda: (cache, bundled),
-    )
+    monkeypatch.setattr(pet_pipeline, "pet_model_search_roots", lambda: (cache, bundled))
 
     assert pet_pipeline.resolve_pet_model_path(relative, directory=True) == bundled_dir
 

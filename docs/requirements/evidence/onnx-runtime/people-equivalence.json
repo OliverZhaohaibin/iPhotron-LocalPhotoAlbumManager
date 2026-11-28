@@ -1,0 +1,17 @@
+{
+  "fixture": "astronaut.png",
+  "face_count": 1,
+  "providers": [
+    "CPUExecutionProvider"
+  ],
+  "detection_nms_alignment_embedding_equal_within_tolerance": true,
+  "faces": [
+    {
+      "bbox_max_abs_error": 0.0,
+      "landmark_max_abs_error": 0.0,
+      "raw_embedding_max_abs_error": 0.0,
+      "normalized_embedding_cosine": 1.0000001192092896
+    }
+  ],
+  "production_runtime_imported_torch": false
+}

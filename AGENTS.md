@@ -118,8 +118,9 @@ app settings keyed by library root. The complete layout is in the
   separate integration surface.
 - Missing People/Pets dependencies or models must preserve pending work and
   keep other workflows usable. Keep workers and their failures independent.
-  Production Pets loads verified local TorchScript artifacts; Torch Hub is
-  restricted to release conversion tooling.
+  Production People/Pets loads verified local ONNX models through the shared
+  recognition runtime. PyTorch/TorchScript is restricted to isolated release
+  conversion and equivalence tooling, never application or build environments.
 - Gallery reads are SQL-first and windowed. Normal visible rows are
   thumbnail-ready with a non-empty `thumb_cache_key`; old no-key rows require
   repair/backfill. Paint, model access, and thumbnail peeks are memory-only.

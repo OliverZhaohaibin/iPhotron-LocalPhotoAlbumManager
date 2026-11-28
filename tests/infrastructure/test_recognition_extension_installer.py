@@ -26,7 +26,7 @@ def _archive(path: Path, files: dict):
     with zipfile.ZipFile(path, "w") as archive:
         for name, content in files.items():
             archive.writestr(name, content)
-    return module.RecognitionPackage(**_identity(path.read_bytes()))
+    return module.RecognitionPackage(**_identity(path.read_bytes()), url="https://models.example.test/models-v2.zip")
 
 
 @pytest.fixture
@@ -38,8 +38,8 @@ def package(tmp_path, monkeypatch):
     detector = runtime["detector"]
     embedder = runtime["embedder"]
     detector["sha256"] = _identity(b"detector")["sha256"]
-    embedder["torchscript_sha256"] = _identity(b"embedder")["sha256"]
-    embedder["torchscript_size"] = len(b"embedder")
+    embedder["onnx_sha256"] = _identity(b"embedder")["sha256"]
+    embedder["onnx_size"] = len(b"embedder")
     people = {f"buffalo_s/{name}": b"face-model" for name in BUFFALO_S_FILES}
     pets = {
         f"pets/{detector['filename']}": b"detector",
@@ -52,7 +52,7 @@ def package(tmp_path, monkeypatch):
     manifest = {
         "package": "iphotron-recognition-models",
         "schema_version": 1,
-        "version": 1,
+        "version": 2,
         "components": {"people": {"files": list(people)}, "pets": {"files": list(pets)}},
         "files": {name: _identity(content) for name, content in files.items()},
     }
@@ -169,3 +169,50 @@ def test_cancelled_download_removes_partial_and_releases_lock(package, monkeypat
     assert not target.exists()
     installer.execute(RecognitionExtensionRequest(path), lambda *_: None)
     assert target.is_dir()
+
+
+def test_v1_remains_usable_for_people_and_is_untouched_by_failed_v2_upgrade(package, monkeypatch):
+    from iPhoto.people import model_paths
+    from iPhoto.utils import recognition_model_paths
+
+    path, target, files = package
+    # Mirror the production v1/v2 siblings under a disposable application root.
+    target = target.parent / "v2" / "models"
+    legacy = target.parent.parent / "v1" / "models"
+    for name in BUFFALO_S_FILES:
+        model = legacy / "buffalo_s" / name
+        model.parent.mkdir(parents=True, exist_ok=True)
+        model.write_bytes(b"valid legacy People ONNX")
+    old_pet = legacy / "pets/embedding/dinov2_vits14/dinov2_vits14.pt"
+    old_pet.parent.mkdir(parents=True)
+    old_pet.write_bytes(b"legacy TorchScript is never executed")
+    before = {item.relative_to(legacy): item.read_bytes() for item in legacy.rglob("*") if item.is_file()}
+    monkeypatch.setattr(recognition_model_paths, "installed_recognition_model_root", lambda: target)
+    monkeypatch.setattr(module, "installed_recognition_model_root", lambda: target)
+    assert model_paths.resolve_face_model_dir(target / "missing") == legacy
+    path.write_bytes(b"interrupted ZIP")
+    with pytest.raises(ExtensionInstallError):
+        module.RecognitionExtensionInstaller().execute(RecognitionExtensionRequest(path), lambda *_: None)
+    assert before == {item.relative_to(legacy): item.read_bytes() for item in legacy.rglob("*") if item.is_file()}
+    assert model_paths.resolve_face_model_dir(target / "missing") == legacy
+    assert not target.exists()
+
+
+def test_v1_archive_is_not_accepted_as_v2_even_when_outer_identity_is_trusted(package):
+    path, target, files = package
+    manifest = json.loads(files["manifest.json"])
+    manifest["version"] = 1
+    files["manifest.json"] = json.dumps(manifest)
+    installer = module.RecognitionExtensionInstaller(_archive(path, files))
+    with pytest.raises(ExtensionInstallError, match="incomplete"):
+        installer.execute(RecognitionExtensionRequest(path), lambda *_: None)
+    assert not target.exists()
+
+
+def test_unpublished_release_does_not_attempt_network_or_create_fake_url(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "installed_recognition_model_root", lambda: tmp_path / "v2/models")
+    monkeypatch.setattr(module, "download_archive", lambda *_args, **_kwargs: pytest.fail("unexpected network"))
+    installer = module.RecognitionExtensionInstaller(module.RecognitionPackage(url=""))
+    assert installer.download_url == ""
+    with pytest.raises(ExtensionInstallError, match="unpublished"):
+        installer.execute(RecognitionExtensionRequest(), lambda *_: None)

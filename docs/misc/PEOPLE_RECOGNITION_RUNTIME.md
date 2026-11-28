@@ -44,11 +44,16 @@ debugging, override the model root with:
 $env:IPHOTO_FACE_MODEL_DIR = "D:\tmp\iphoto-models"
 ```
 
-The production pipeline loads local ONNX files with `get_model(...,
-download=False)`. It attaches those sessions to `FaceAnalysis` without calling
+The production pipeline creates local sessions through the shared recognition
+ONNX runtime and injects them into the unchanged InsightFace `RetinaFace` and
+`ArcFaceONNX` wrappers. It attaches those wrappers to `FaceAnalysis` without calling
 the upstream constructor that can download a pack. Missing or damaged models
 are typed availability failures handled by the shared extension workflow;
 do not reintroduce InsightFace downloads or writes into read-only package data.
+The router keeps the original detection/recognition selection, NMS, landmarks,
+alignment and embedding behavior. `prepare(ctx_id=0)` preserves the injected
+provider policy even on CPU: a negative context would recreate upstream CPU
+sessions. v1 People ONNX models remain readable during a v2 Pets upgrade.
 An offline-ready release must supply both the runtime and usable model files.
 
 ## InsightFace import rules

@@ -17,7 +17,7 @@ runtime depends on the helper binary plus the shared libraries under
 
 Builds that ship People/Pets recognition must also preserve the selected AI
 runtimes from the standalone bundle. People needs `insightface` and
-`onnxruntime`; Pets needs `onnxruntime`, `torch`, `torchvision`, `usearch`, and
+`onnxruntime`; Pets needs `onnxruntime`, `usearch`, and
 `certifi`. Offline builds also retain any explicitly staged
 `extension/models` artifacts.
 AI runtime inclusion is configured and verified at the Nuitka stage described in
@@ -167,7 +167,8 @@ The minimal template does not establish dependency completeness.
    ```bash
    find "$APP_ROOT" -path '*insightface*' -o -path '*onnxruntime*'
    find "$APP_ROOT/extension/models" -name 'det_500m.onnx' -o -name 'w600k_mbf.onnx'
-   find "$APP_ROOT" -path '*torch*' -o -path '*torchvision*' -o -path '*usearch*'
+   find "$APP_ROOT" -path '*usearch*'
+   python tools/recognition_packaging.py artifact --tree "$APP_ROOT" --output "${PKG_ROOT}.recognition-artifact.json"
    find "$APP_ROOT/extension/models/pets" -name 'yolox_nano_coco.onnx' -o -name 'dinov2_vits14.pt'
    find "$APP_ROOT/extension/models/pets" -name 'dinov2_vits14.pt.metadata.json'
    ```

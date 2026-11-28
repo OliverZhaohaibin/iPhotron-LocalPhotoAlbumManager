@@ -10,6 +10,8 @@ Build the macOS Nuitka app bundle for iPhotron.
 Options:
   --python PATH                 Python executable to use.
   --output-dir DIR              Nuitka output directory. Defaults to dist.
+  --recognition-model-dir DIR   Bundle the verified v2 ONNX model set (otherwise install models separately).
+  --ort-profile NAME            cpu (default), cuda, directml, or openvino; requires its matching isolated venv.
   --jobs N                      Parallel Nuitka jobs. Defaults to half the CPU count.
   --low-memory                  Use one compiler job, disable LTO, and enable Nuitka low-memory mode.
   --sdk-root DIR                PySide6-OsmAnd-SDK checkout. Defaults to ../PySide6-OsmAnd-SDK.
@@ -148,19 +150,6 @@ archive_staged_map_extension() {
   /usr/bin/shasum -a 256 "$archive_path" | cut -d " " -f 1 > "$archive_path.sha256"
 }
 
-prune_packaged_development_files() {
-  local app_bundle="$1"
-  local torch_headers="$app_bundle/Contents/MacOS/torch/include"
-
-  # PyTorch headers are only used to compile C++ extensions. They add roughly
-  # 10k files to the app resource seal and are never read by iPhotron at
-  # runtime, so retaining them directly taxes dyld verification and disk use.
-  if [[ -d "$torch_headers" ]]; then
-    echo "Removing packaged PyTorch development headers..."
-    rm -rf "$torch_headers"
-  fi
-}
-
 resign_app_bundle() {
   local app_bundle="$1"
 
@@ -193,6 +182,8 @@ RUN_MAP_RUNTIME_SYNC=1
 FIX_MAP_DEPENDENCIES=1
 LOW_MEMORY=0
 LTO_MODE="yes"
+ORT_PROFILE="${IPHOTO_ORT_PROFILE:-cpu}"
+RECOGNITION_MODEL_DIR="${IPHOTO_RECOGNITION_BUNDLE_MODELS:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -204,6 +195,16 @@ while [[ $# -gt 0 ]]; do
     --output-dir)
       [[ $# -ge 2 ]] || die "--output-dir requires a value"
       OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --recognition-model-dir)
+      [[ $# -ge 2 ]] || die "--recognition-model-dir requires a value"
+      RECOGNITION_MODEL_DIR="$2"
+      shift 2
+      ;;
+    --ort-profile)
+      [[ $# -ge 2 ]] || die "--ort-profile requires a value"
+      ORT_PROFILE="$2"
       shift 2
       ;;
     --jobs)
@@ -314,6 +315,10 @@ fi
 "$PYTHON_BIN" -c 'import exiftool, pillow_heif, _pillow_heif' >/dev/null 2>&1 || die \
   "PyExifTool, pillow-heif, and its native extension are required; install them with: $PYTHON_BIN -m pip install pyexiftool pillow-heif"
 
+mkdir -p "$OUTPUT_DIR"
+"$PYTHON_BIN" "$ROOT_DIR/tools/recognition_packaging.py" environment \
+  --require-complete --profile "$ORT_PROFILE" --output "$OUTPUT_DIR/recognition-dependencies.json"
+
 if [[ "$RUN_AOT" -eq 1 ]]; then
   echo "Building AOT filter extension..."
   "$PYTHON_BIN" "$ROOT_DIR/src/iPhoto/core/filters/build_jit.py"
@@ -394,9 +399,15 @@ nuitka_args=(
   "--include-package=exiftool"
   "--include-package=pillow_heif"
   "--include-module=_pillow_heif"
-  "--noinclude-data-files=torch/include"
+  "--include-package=onnxruntime"
+  "--nofollow-import-to=onnxruntime.tools,onnxruntime.quantization,onnxruntime.transformers,onnxruntime.training"
+  "--include-package=usearch"
+  "--nofollow-import-to=torch,torchvision,torchaudio,triton"
+  "--user-package-configuration-file=$ROOT_DIR/packaging/recognition.nuitka-package.config.yml"
+  "--report=$OUTPUT_DIR/nuitka-compilation-report.xml"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/resources/i18n=iPhoto/resources/i18n"
   "--include-data-file=$ROOT_DIR/src/iPhoto/pets/model_manifest.json=iPhoto/pets/model_manifest.json"
+  "--include-data-file=$ROOT_DIR/src/iPhoto/recognition/recognition_package.json=iPhoto/recognition/recognition_package.json"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/schemas=iPhoto/schemas"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/icon=iPhoto/gui/ui/icon"
   "--include-data-dir=$ROOT_DIR/src/iPhoto/gui/ui/qml=iPhoto/gui/ui/qml"
@@ -427,10 +438,11 @@ if [[ "$LOW_MEMORY" -eq 1 ]]; then
   nuitka_args+=("--low-memory")
 fi
 
-if [[ -d "$ROOT_DIR/src/extension/models" ]]; then
-  nuitka_args+=("--include-data-dir=$ROOT_DIR/src/extension/models=extension/models")
-else
-  warn "face model cache not found; continuing without bundled extension/models"
+if [[ -n "$RECOGNITION_MODEL_DIR" ]]; then
+  MODEL_STAGE="$(mktemp -d "$OUTPUT_DIR/.recognition-models.XXXXXX")/models"
+  "$PYTHON_BIN" "$ROOT_DIR/tools/recognition_packaging.py" stage-models \
+    --source "$RECOGNITION_MODEL_DIR" --output "$MODEL_STAGE"
+  nuitka_args+=("--include-data-dir=$MODEL_STAGE=extension/models")
 fi
 
 nuitka_args+=("--macos-app-icon=$ICON_PATH")
@@ -447,14 +459,21 @@ stage_map_tiles_into_app "$APP_BUNDLE"
 "$PYTHON_BIN" "$ROOT_DIR/scripts/sync_macos_map_extension.py" --repair-app-bundle "$APP_BUNDLE"
 resign_staged_map_runtime "$APP_BUNDLE"
 archive_staged_map_extension "$APP_BUNDLE"
-prune_packaged_development_files "$APP_BUNDLE"
+"$PYTHON_BIN" "$ROOT_DIR/tools/repair_macos_onnx.py" --app-bundle "$APP_BUNDLE"
 resign_app_bundle "$APP_BUNDLE"
+"$PYTHON_BIN" "$ROOT_DIR/tools/recognition_packaging.py" artifact \
+  --profile "$ORT_PROFILE" --tree "$APP_BUNDLE" \
+  --nuitka-report "$OUTPUT_DIR/nuitka-compilation-report.xml" \
+  --output "$OUTPUT_DIR/recognition-artifact.json"
 "$PYTHON_BIN" "$ROOT_DIR/tools/build_manifest.py" \
   --root "$ROOT_DIR" \
   --artifact "$APP_BUNDLE/Contents/MacOS/iPhotron" \
+  --artifact-tree "$APP_BUNDLE" \
   --build-driver "$ROOT_DIR/scripts/build_nuitka_macos.sh" \
   --build-flag "profile=macos" \
   --build-flag "low_memory=$LOW_MEMORY" \
+  --build-flag "lto=$LTO_MODE" \
+  --build-flag "recognition_runtime=onnx-$ORT_PROFILE" \
   --native-runtime "$ROOT_DIR/src/maps/tiles/extension/bin" \
   --asset "$ROOT_DIR/src/maps/tiles" \
   --asset "$ROOT_DIR/src/iPhoto/resources/i18n" \

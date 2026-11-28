@@ -66,8 +66,11 @@ def test_pets_runtime_documentation_tracks_production_constants_and_manifest() -
     assert "cannot-link" in pet_doc
     assert "People view" in pet_doc
     assert "350 ms" in pet_doc
-    assert manifest["embedder"]["torchscript_url"] is None
-    assert "`torchscript_url` is currently `null`" in pet_doc
+    assert manifest["schema_version"] == 2
+    assert manifest["embedder"]["onnx_url"] is None
+    assert "`onnx_url` is null" in pet_doc
+    assert "ONNX" in pet_doc
+    assert _constant(source, "PET_EMBEDDING_PIPELINE_VERSION") in pet_doc
 
 
 def test_current_readmes_share_release_xcb_and_overlap_semantics() -> None:
@@ -111,7 +114,7 @@ def test_security_docs_separate_model_storage_and_download_contracts() -> None:
     assert "Packaged `extension/models/`" in security
     assert "Explicit `IPHOTO_*_MODEL_DIR` override" in security
     assert "YOLOX detector download" in security
-    assert "`torchscript_url` is `null`" in security
+    assert "`onnx_url` is `null`" in security
 
 
 def test_flatpak_docs_separate_current_identity_from_v668_legacy_bundle() -> None:

@@ -87,67 +87,72 @@ class FaceScanWorker(QThread):
         pipeline = FaceClusterPipeline(
             model_root=model_override or resolve_face_model_dir(paths.model_dir)
         )
-        coordinator = self._people_service.coordinator
-        if coordinator is None:
-            self.statusChanged.emit("Face scanning is unavailable for this library.")
-            return
-
-        while not self._cancelled:
-            self._top_up_pending_rows()
-            batch = self._next_batch()
-            if not batch:
-                if self._input_closed:
-                    self._top_up_pending_rows()
-                    if self._queue.empty():
-                        return
-                continue
-
-            try:
-                committed = self._process_batch(
-                    batch,
-                    coordinator,
-                    pipeline,
-                    paths.thumbnail_dir,
-                )
-                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
-                    self._queued_ids.discard(asset_id)
-                if committed:
-                    self.peopleIndexUpdated.emit()
-            except PeopleSnapshotCommittedError as exc:
-                LOGGER.error("Face scan bookkeeping failed after commit: %s", exc, exc_info=True)
-                for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
-                    self._queued_ids.discard(asset_id)
-                self.statusChanged.emit(str(exc))
+        try:
+            coordinator = self._people_service.coordinator
+            if coordinator is None:
+                self.statusChanged.emit("Face scanning is unavailable for this library.")
                 return
-            except FaceModelUnavailableError as exc:
-                if not self._cancelled:
-                    if model_override is not None:
-                        self.statusChanged.emit(
-                            QCoreApplication.translate(
-                                "RecognitionExtension",
-                                "Face scanning unavailable: '{path}' is missing usable face "
-                                "models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.",
-                            ).format(path=model_override)
-                        )
-                        self.modelUnavailable.emit("invalid_override")
-                    else:
+
+            while not self._cancelled:
+                self._top_up_pending_rows()
+                batch = self._next_batch()
+                if not batch:
+                    if self._input_closed:
+                        self._top_up_pending_rows()
+                        if self._queue.empty():
+                            return
+                    continue
+
+                try:
+                    committed = self._process_batch(
+                        batch,
+                        coordinator,
+                        pipeline,
+                        paths.thumbnail_dir,
+                    )
+                    for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                        self._queued_ids.discard(asset_id)
+                    if committed:
+                        self.peopleIndexUpdated.emit()
+                except PeopleSnapshotCommittedError as exc:
+                    LOGGER.error("Face scan bookkeeping failed after commit: %s", exc, exc_info=True)
+                    for asset_id in [str(row.get("id") or "") for row in batch if row.get("id")]:
+                        self._queued_ids.discard(asset_id)
+                    self.statusChanged.emit(str(exc))
+                    return
+                except FaceModelUnavailableError as exc:
+                    if not self._cancelled:
+                        if model_override is not None:
+                            self.statusChanged.emit(
+                                QCoreApplication.translate(
+                                    "RecognitionExtension",
+                                    "Face scanning unavailable: '{path}' is missing usable face "
+                                    "models. Fix or unset IPHOTO_FACE_MODEL_DIR, then rescan.",
+                                ).format(path=model_override)
+                            )
+                            self.modelUnavailable.emit("invalid_override")
+                        else:
+                            self.statusChanged.emit(str(exc))
+                            self.modelUnavailable.emit(exc.reason)
+                    return
+                except FaceRuntimeUnavailableError as exc:
+                    if not self._cancelled:
                         self.statusChanged.emit(str(exc))
-                        self.modelUnavailable.emit(exc.reason)
-                return
-            except FaceRuntimeUnavailableError as exc:
-                if not self._cancelled:
-                    self.statusChanged.emit(str(exc))
-                return
-            except RuntimeError as exc:
-                if not self._cancelled:
-                    self.statusChanged.emit(str(exc))
-                return
-            except Exception as exc:
-                LOGGER.warning("Face scan batch failed: %s", exc, exc_info=True)
-                if not self._cancelled:
-                    reason = str(exc).strip() or exc.__class__.__name__
-                    self.statusChanged.emit(f"Face scanning paused: {reason}")
-                return
+                    return
+                except RuntimeError as exc:
+                    if not self._cancelled:
+                        self.statusChanged.emit(str(exc))
+                    return
+                except Exception as exc:
+                    LOGGER.warning("Face scan batch failed: %s", exc, exc_info=True)
+                    if not self._cancelled:
+                        reason = str(exc).strip() or exc.__class__.__name__
+                        self.statusChanged.emit(f"Face scanning paused: {reason}")
+                    return
+        finally:
+            close = getattr(pipeline, "close", None)
+            if close is not None:
+                close()
 
     def _prime_pending_rows(self) -> None:
         self._top_up_pending_rows()

@@ -17,9 +17,21 @@ root, model archive SHA-256, and pass or fail for each scenario.
 | English, German, and Simplified Chinese with light and dark app themes | Menu labels and prompts are translated, buttons fit, and popups center over the main window. |
 
 Use a fresh user profile or isolated model directories for the empty-cache
-cases. The official ZIP is 100,497,212 bytes with SHA-256
-`73819048dcf2d9352758a544a751be67512c18e0be458c295551b7142e91fa28`.
-[Official People & Pets ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/pet-models-v1/iphotron-recognition-models-v1.zip)
+cases. The generated v2 ONNX ZIP is **100,318,770 bytes**, SHA-256
+`a8ac03fb0b60b44c6187defadf3311c08440a7a306cc4b9bee10b0f1cb2b8d5c`.
+Its release contract has `release_status: published` and the verified
+[official v2 ZIP download](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip).
+The actual HTTPS attachment matched the recorded byte size and SHA-256.
+Packaged online/browser scenarios above still require target-OS validation.
+Old v1 clients retain their original ZIP.
+
+Add upgrade cases: install v2 beside v1, corrupt/cancel the v2 upgrade and verify
+People still reads v1, reject a v1 ZIP as v2, and verify `.pt` alone cannot make
+Pets ready. Preserve all library DBs, covers, redirects and pending journal work.
+macOS real Nuitka, signed-app and release-size checks are
+**Pending Manual Validation**, by maintainer instruction. Source and fixture
+Packaging Contract Tests do not establish packaged acceptance. See the
+[complete ONNX matrix and commands](UNIFIED_ONNX_RUNTIME_VALIDATION.md).
 
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q \

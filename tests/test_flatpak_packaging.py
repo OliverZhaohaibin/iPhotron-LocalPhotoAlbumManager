@@ -53,6 +53,8 @@ def _fake_standalone(root: Path) -> Path:
     (standalone / "iPhoto/gui/ui/widgets").mkdir(parents=True)
     (standalone / "maps/tiles/extension/bin").mkdir(parents=True)
     (standalone / "PySide6/Qt/plugins/platforms").mkdir(parents=True)
+    (standalone / "onnxruntime/capi").mkdir(parents=True)
+    (standalone / "onnxruntime/capi/onnxruntime_pybind11_state.so").write_bytes(_elf64_header())
     entrypoint = standalone / "entrypoint.bin"
     entrypoint.write_bytes(_elf64_header() + b"flatpak-test")
     entrypoint.chmod(0o755)

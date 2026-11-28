@@ -40,6 +40,9 @@ def test_postbuild_signs_the_entrypoint_bundle_when_main_app_already_exists(tmp_
         check=True,
     )
     shutil.copy2(binary, native / "osmand_render_helper")
+    ort = bundle / "Contents/MacOS/onnxruntime/capi/onnxruntime_pybind11_state.so"
+    ort.parent.mkdir(parents=True)
+    shutil.copy2(binary, ort)
     subprocess.run(
         ["clang", "-dynamiclib", "-x", "c", "-o", str(native / "osmand_native_widget.dylib"), "-"],
         input=b"int map_fixture(void) { return 0; }",
@@ -59,8 +62,12 @@ def test_postbuild_signs_the_entrypoint_bundle_when_main_app_already_exists(tmp_
     recorded_args = tmp_path / "nuitka-args.txt"
     python_driver.write_text(
         '#!/bin/sh\ncase "$1" in\n'
-        '  -m) test "$2" = nuitka && printf "%s\\n" "$@" > "$PACKAGING_TEST_NUITKA_ARGS" ;;\n'
+        '  -m) test "$2" = nuitka && printf "%s\\n" "$@" > "$PACKAGING_TEST_NUITKA_ARGS"; '
+        'for argument in "$@"; do case "$argument" in --report=*) '
+        'echo "<nuitka-report/>" > "${argument#--report=}" ;; esac; done ;;\n'
         '  -c) echo "$0.fixture" ;;\n'
+        '  */recognition_packaging.py) if [ "$2" = environment ]; then exit 0; '
+        'else exec "$PACKAGING_TEST_PYTHON" "$@"; fi ;;\n'
         '  *) exec "$PACKAGING_TEST_PYTHON" "$@" ;;\nesac\n',
         encoding="utf-8",
     )

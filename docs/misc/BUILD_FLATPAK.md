@@ -84,15 +84,15 @@ python3 tools/check_flatpak_elf_abi.py \
   --output dist/flatpak-abi-report.json
 ```
 
-Recognition models follow the standalone build posture: omitted by default,
-or copied from the ignored `src/extension/models` staging directory when that
-directory was populated before the Nuitka build. With the corresponding AI
-runtime included, the app can also install both model sets from the official
-People & Pets ZIP after recognition activation or through Settings. The ZIP
-includes verified DINOv2 TorchScript and metadata; the individual manifest's
-missing URL does not prevent this combined installation. See the
+Recognition models are omitted by default. The standalone builder accepts
+`IPHOTO_RECOGNITION_BUNDLE_MODELS` and stages only the verified v2 ONNX whitelist.
+With the shared runtime included, Settings can download the published
+[v2 model ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip)
+or import it without network access. The installer does not reuse the
+incompatible v1 ZIP. The wrapper audits the standalone for ORT native
+bindings and forbidden Torch/GPU payloads and records actual component sizes in
+`.recognition-artifact.json`. See the
 [shared installation contract](../architecture.md#recognition-extension-installation).
-Copying models alone does not prove frozen Pets runtime availability.
 
 ## Sandbox Contract
 

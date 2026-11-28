@@ -38,20 +38,19 @@ from .extension_archives import (
 from .recognition_download import download_archive
 
 _LOG = logging.getLogger(__name__)
+_RELEASE_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "recognition" / "recognition_package.json").read_text(encoding="utf-8")
+)
 
 
 @dataclass(frozen=True)
 class RecognitionPackage:
-    filename: str = "iphotron-recognition-models-v1.zip"
-    size: int = 100497212
-    sha256: str = "73819048dcf2d9352758a544a751be67512c18e0be458c295551b7142e91fa28"
-
-    @property
-    def url(self) -> str:
-        return (
-            "https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/"
-            f"releases/download/pet-models-v1/{self.filename}"
-        )
+    filename: str = _RELEASE_CONTRACT["filename"]
+    size: int = _RELEASE_CONTRACT["size"]
+    sha256: str = _RELEASE_CONTRACT["sha256"]
+    # A measured local ZIP is installable offline before publication. Never
+    # manufacture a download attachment URL or reuse the incompatible v1 ZIP.
+    url: str = _RELEASE_CONTRACT["url"] or ""
 
 
 class RecognitionExtensionInstaller:
@@ -102,6 +101,11 @@ class RecognitionExtensionInstaller:
                         self._install_archive(archive, target, backup, progress, check_cancelled)
                 else:
                     stage = "download"
+                    if not self._package.url:
+                        raise ExtensionInstallError(
+                            "unpublished", "download",
+                            detail="The verified v2 ONNX model ZIP is pending publication; install it from a file.",
+                        )
                     archive = cached_download(
                         target.parent,
                         self._package,
@@ -193,10 +197,10 @@ class RecognitionExtensionInstaller:
             if (
                 manifest["package"] != "iphotron-recognition-models"
                 or manifest["schema_version"] != 1
-                or manifest["version"] != 1
+                or manifest["version"] != 2
                 or set(components["people"]["files"]) != people_paths
                 or set(components["pets"]["files"]) != pets_paths
-                or not (people_paths | pets_paths) <= files.keys()
+                or (people_paths | pets_paths) != files.keys()
             ):
                 raise ExtensionInstallError("incomplete", "verify")
 
@@ -215,8 +219,8 @@ class RecognitionExtensionInstaller:
             if (
                 files[detector_path]["sha256"] != detector["sha256"]
                 or not 0 < files[detector_path]["size"] <= detector["max_bytes"]
-                or files[embedding_path]["size"] != embedder["torchscript_size"]
-                or files[embedding_path]["sha256"] != embedder["torchscript_sha256"]
+                or files[embedding_path]["size"] != embedder["onnx_size"]
+                or files[embedding_path]["sha256"] != embedder["onnx_sha256"]
                 or metadata != dinov2_metadata(embedder, embedder["model_name"])
             ):
                 raise ExtensionInstallError("integrity", "verify")

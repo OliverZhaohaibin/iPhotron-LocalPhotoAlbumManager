@@ -53,13 +53,34 @@ dev = [
 ]
 ai-demo = [
     "insightface>=0.7.3,<1.0",
-    "onnxruntime>=1.18,<2",
+    "onnxruntime>=1.23.2,<2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "onnxruntime>=1.23.2,<1.24; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+recognition = [
+    "insightface>=0.7.3,<1.0",
+    "onnxruntime>=1.23.2,<2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "onnxruntime>=1.23.2,<1.24; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "usearch>=2.26,<3",
 ]
 pets-ai = [
-    "onnxruntime>=1.18,<2",
-    "torch",
-    "torchvision",
+    "onnxruntime>=1.23.2,<2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "onnxruntime>=1.23.2,<1.24; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "usearch>=2.26,<3",
+]
+recognition-cuda = [
+    "insightface>=0.7.3,<1.0",
+    "usearch>=2.26,<3",
+    "onnxruntime-gpu>=1.23.2,<2; sys_platform == 'win32' or sys_platform == 'linux'",
+]
+recognition-directml = [
+    "insightface>=0.7.3,<1.0",
+    "usearch>=2.26,<3",
+    "onnxruntime-directml>=1.23.2,<2; sys_platform == 'win32'",
+]
+recognition-openvino = [
+    "insightface>=0.7.3,<1.0",
+    "usearch>=2.26,<3",
+    "onnxruntime-openvino>=1.23.0,<2; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -95,6 +116,7 @@ markers = [
     "maps_scale_contract: large synthetic map marker clustering contract",
     "pets_model_contract: real official YOLOX model and image contract",
     "pets_scale_contract: large synthetic Pets incremental-index contract",
+    "dinov2_model_contract: verified DINOv2 ONNX CPU inference contract",
 ]
 pythonpath = ["src"]
 

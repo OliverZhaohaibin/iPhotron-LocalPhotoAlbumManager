@@ -98,6 +98,10 @@ find "$STANDALONE_DIR" -type f -path '*/platforms/libqxcb.so' -print -quit | gre
   exit 2
 }
 
+"$PYTHON_BIN" "$ROOT_DIR/tools/recognition_packaging.py" artifact \
+  --profile "${IPHOTO_ORT_PROFILE:-cpu}" --tree "$STANDALONE_DIR" \
+  --output "${OUTPUT_PATH}.recognition-artifact.json"
+
 ARCH="$($FLATPAK_BIN --default-arch)"
 [[ "$ARCH" == "x86_64" ]] || {
   echo "error: the maintained Flatpak release contract currently supports x86_64 only" >&2
@@ -158,6 +162,9 @@ cp "$ROOT_DIR/packaging/flatpak/iphotron-launcher" "$CONTEXT_DIR/"
   "$APP_ID" \
   "$FLATPAK_BRANCH"
 
+"$PYTHON_BIN" "$ROOT_DIR/tools/recognition_packaging.py" artifact \
+  --profile "${IPHOTO_ORT_PROFILE:-cpu}" --tree "$STANDALONE_DIR" \
+  --artifact "$OUTPUT_PATH" --output "${OUTPUT_PATH}.recognition-artifact.json"
 "$PYTHON_BIN" "$ROOT_DIR/tools/build_manifest.py" \
   --root "$ROOT_DIR" \
   --artifact "$OUTPUT_PATH" \

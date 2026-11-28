@@ -342,6 +342,24 @@ Current public boundary names include:
 
 ### Recognition Coordination
 
+People and Pets share the lazy, worker-owned policy in
+`recognition/onnx_runtime.py`: capability candidates are confirmed by session
+initialization, each model owns its own session, and recognized provider/device
+failures receive at most one CPU recovery. Model/input failures never trigger
+device recovery. Session pools use sequential execution, at most two intra-op
+threads per worker (one on small CPUs), one inter-op thread, and no idle
+spinning. Face/Pet workers retain their existing gate, priority, batches and
+cancellation; each releases its runtime in `finally`, including failed scans
+and library switching. No ONNX import or model initialization occurs on binding.
+
+Default distributions use one CPU `onnxruntime` wheel. Separate CUDA, DirectML
+and OpenVINO extras/build profiles replace that wheel in isolated environments;
+they are never installed alongside it. macOS defaults to CPU because the tested
+DINOv2 CoreML partition path was slower. CoreML remains explicitly selectable
+through `IPHOTO_RECOGNITION_PROVIDERS` and is used only when its wheel
+advertises it and initialization succeeds. Intel Mac uses the 1.23 wheel
+series. See the [ONNX validation and release protocol](requirements/UNIFIED_ONNX_RUNTIME_VALIDATION.md).
+
 `LibrarySession.recognition_queries`, `recognition_merges`, and
 `recognition_edits` compose reads and identity workflows across People and Pets.
 Each context retains ownership of its own detections, embeddings, canonical
@@ -907,15 +925,19 @@ root selected by `utils/recognition_model_paths.py`:
 
 | Platform | Combined model root |
 | --- | --- |
-| macOS | `~/Library/Application Support/iPhoto/extensions/recognition/v1/models` |
-| Windows | `%LOCALAPPDATA%/iPhoto/extensions/recognition/v1/models` |
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/iPhoto/extensions/recognition/v1/models` |
+| macOS | `~/Library/Application Support/iPhoto/extensions/recognition/v2/models` |
+| Windows | `%LOCALAPPDATA%/iPhoto/extensions/recognition/v2/models` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/iPhoto/extensions/recognition/v2/models` |
 
 People reads `buffalo_s/` and Pets reads `pets/`. Explicit model overrides take
 precedence; existing context-specific caches and bundled models remain readable.
 Local lookup also retains the previous installation under `.backup/models`
 while an interrupted promotion is recoverable. Bundled model data is a read-only
 fallback, not the installer target.
+People also reuses intact v1 `buffalo_s/` models and its recovery backup.
+The installer never modifies v1; old clients retain their v1 archive and root.
+Pets only accepts the verified ONNX contract, so an old `.pt` never makes Pets
+ready. Upgrading models does not clear or migrate library databases.
 
 The desktop controller permits one automatic ZIP installation attempt per app
 run, shared by both workers and triggered only after the recognition activation
@@ -925,8 +947,12 @@ has a separate fix/unset warning and does not consume that download attempt.
 by Pets; it does not disable installation through People or Settings.
 
 Workers load local models; the People pipeline disables InsightFace downloads.
-The ZIP supplies YOLOX and verified DINOv2 TorchScript plus its metadata even
-though the DINOv2 manifest's individual `torchscript_url` is `null`.
+The v2 ZIP supplies YOLOX and verified FP32 DINOv2 ONNX (opset 17) plus its
+metadata. Its measured release identity lives in `recognition_package.json`.
+The published [v2 ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip)
+was downloaded over HTTPS and matched the recorded size and SHA-256.
+Settings/recovery supports direct download, browser download and offline import.
+The individual DINOv2 `onnx_url` remains null; the combined ZIP supplies it.
 Promotion verifies archive and model contents under the shared installer lock.
 Keep the previous usable installation recoverable on failure. On shutdown,
 cancel acquisition and suppress late callbacks; after success, resume only

@@ -11,6 +11,76 @@ permissions:
   contents: read
 
 jobs:
+  dinov2-export-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/model-dev/requirements.txt
+      - name: Install isolated model-development dependencies
+        run: python -m pip install -r tools/model-dev/requirements.txt scikit-image
+      - name: Fetch verified v1 export input
+        run: python tools/fetch_dinov2_export_source.py --output model-source/dinov2_vits14.pt
+      - name: Export, check and compare the fixed FP32 model
+        shell: bash
+        run: |
+          python -c "from skimage import data; from PIL import Image; Image.fromarray(data.chelsea()).save('model-source/cat.png')"
+          python tools/export_dinov2_onnx.py --torchscript model-source/dinov2_vits14.pt --output model-contract/dinov2_vits14.onnx --image model-source/cat.png --report model-contract/equivalence.json --reference-output model-contract/torchscript-reference.npz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-dinov2-onnx
+          path: model-contract/
+
+  recognition-onnx-cpu:
+    needs: dinov2-export-contract
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux Qt libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libpulse0
+      - name: Install PyTorch-free production CPU runtime
+        run: python -m pip install -c packaging/recognition-cpu-constraints.txt -e ".[test,recognition]"
+      - name: Check installed production dependency closure
+        run: python tools/recognition_packaging.py environment --require-complete --output recognition-dependencies.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-dinov2-onnx
+          path: model-contract
+      - name: Run actual CPU inference and packaging contracts
+        env:
+          QT_QPA_PLATFORM: offscreen
+          IPHOTO_RUN_DINOV2_MODEL_CONTRACT: "1"
+          IPHOTO_DINOV2_CONTRACT_DIR: model-contract
+          IPHOTO_RECOGNITION_PROVIDERS: CPUExecutionProvider
+        run: >-
+          python -m pytest -q tests/contracts/test_dinov2_onnx_contract.py
+          tests/test_recognition_onnx_runtime.py tests/test_dinov2_onnx.py
+          tests/test_recognition_packaging.py tests/test_pet_packaging_contract.py
+          tests/test_windows_packaging.py tests/test_macos_packaging.py
+          tests/infrastructure/test_recognition_extension_installer.py
+          tests/gui/ui/controllers/test_recognition_extension_controller.py
+          tests/gui/test_startup_import_boundary.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recognition-cpu-${{ matrix.os }}
+          path: recognition-dependencies.json
+
   map-extension-install:
     strategy:
       fail-fast: false

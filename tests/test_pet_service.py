@@ -2732,58 +2732,25 @@ def test_installed_pet_detector_uses_official_digest(tmp_path, monkeypatch, prev
         ensure_pet_detector_model(official, allow_model_download=False)
 
 
-def test_dinov2_runtime_downloads_only_the_fixed_torchscript_artifact(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    class FakeModel:
-        def eval(self):
-            return self
-
-        def to(self, _device):
-            return self
-
-    class FakeJit:
-        @staticmethod
-        def load(path: str, *, map_location: str):
-            assert Path(path).read_bytes() == b"fixed-torchscript"
-            assert map_location == "cpu"
-            return FakeModel()
-
+def test_dinov2_runtime_downloads_only_the_verified_onnx_artifact(tmp_path, monkeypatch):
     embedder = _DinoV2Embedder.__new__(_DinoV2Embedder)
-    embedder._torch = SimpleNamespace(jit=FakeJit())
-    embedder._device = "cpu"
     embedder._model_name = "dinov2_vits14"
     monkeypatch.setattr(pet_pipeline, "_install_certifi_environment", lambda: None)
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_url",
-        "https://models.example.test/dinov2_vits14.pt",
-    )
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_sha256",
-        hashlib.sha256(b"fixed-torchscript").hexdigest(),
-    )
-    monkeypatch.setitem(
-        pet_pipeline._EMBEDDER_MANIFEST,
-        "torchscript_size",
-        len(b"fixed-torchscript"),
-    )
+    monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "onnx_url", "https://models.example.test/dinov2_vits14.onnx")
+    monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "onnx_sha256", hashlib.sha256(b"fixed-onnx").hexdigest())
+    monkeypatch.setitem(pet_pipeline._EMBEDDER_MANIFEST, "onnx_size", len(b"fixed-onnx"))
 
     def fake_download(url, path, **kwargs):
-        assert url == "https://models.example.test/dinov2_vits14.pt"
-        assert kwargs["expected_sha256"] == hashlib.sha256(b"fixed-torchscript").hexdigest()
-        assert kwargs["max_bytes"] == len(b"fixed-torchscript")
+        assert url == "https://models.example.test/dinov2_vits14.onnx"
+        assert kwargs["expected_sha256"] == hashlib.sha256(b"fixed-onnx").hexdigest()
+        assert kwargs["max_bytes"] == len(b"fixed-onnx")
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_bytes(b"fixed-torchscript")
+        Path(path).write_bytes(b"fixed-onnx")
 
     monkeypatch.setattr(pet_pipeline, "_download_file", fake_download)
-    model_path = tmp_path / "dinov2_vits14.pt"
-    model = embedder._download_dinov2_model(model_path)
-
-    assert isinstance(model, FakeModel)
-    assert model_path.read_bytes() == b"fixed-torchscript"
+    model_path = tmp_path / "dinov2_vits14.onnx"
+    embedder._download_dinov2_model(model_path)
+    assert model_path.read_bytes() == b"fixed-onnx"
     assert pet_pipeline._dinov2_metadata_path(model_path).is_file()
 
 
@@ -2805,8 +2772,8 @@ def test_pet_model_manifest_is_the_runtime_contract_source() -> None:
         "shape": [1, 3, 416, 416],
     }
     embedder = PET_MODEL_MANIFEST["embedder"]
-    assert len(embedder["torchscript_sha256"]) == 64
-    assert embedder["torchscript_size"] > 0
+    assert len(embedder["onnx_sha256"]) == 64
+    assert embedder["onnx_size"] > 0
 
 
 def test_pet_detector_pipeline_version_includes_hybrid_deduplication() -> None:

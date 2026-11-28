@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sys
 import builtins
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -15,9 +15,9 @@ from iPhoto.people.manual_faces import (
 )
 from iPhoto.people.pipeline import (
     FaceClusterPipeline,
-    build_person_records_from_faces,
     _install_insightface_mask_renderer_stubs,
     _install_runtime_typing_compat,
+    build_person_records_from_faces,
     resolve_canonical_person_id,
 )
 from iPhoto.people.repository import FaceRecord, PersonProfile, PersonRecord
@@ -103,33 +103,34 @@ def local_insightface(monkeypatch):
             pytest.fail("InsightFace's downloading constructor was called")
 
         def prepare(self, *, ctx_id, det_size):
-            assert (ctx_id, det_size) == (-1, (640, 640))
+            assert (ctx_id, det_size) == (0, (640, 640))
 
-    def get_model(path, *, download, providers):
-        assert download is False
-        assert providers == ["CPUExecutionProvider"]
+    def create_session(_runtime, path):
         model_path = Path(path)
         assert model_path.is_file()
         calls.append(model_path)
-        taskname = "detection" if model_path.name == "det_500m.onnx" else "recognition"
-        return SimpleNamespace(taskname=taskname)
+        return SimpleNamespace(
+            get_inputs=lambda: [SimpleNamespace(shape=[1, 3, 112, 112])],
+            get_outputs=lambda: [None] * (9 if model_path.name == "det_500m.onnx" else 1),
+        )
+
+    monkeypatch.setattr("iPhoto.people.pipeline.RecognitionOnnxRuntime.create_session", create_session)
 
     insightface = ModuleType("insightface")
     app = ModuleType("insightface.app")
     face_analysis = ModuleType("insightface.app.face_analysis")
     face_analysis.FaceAnalysis = FakeFaceAnalysis
     model_zoo = ModuleType("insightface.model_zoo")
-    model_zoo.get_model = get_model
+    arcface = ModuleType("insightface.model_zoo.arcface_onnx")
+    retinaface = ModuleType("insightface.model_zoo.retinaface")
+    arcface.ArcFaceONNX = lambda **kw: SimpleNamespace(taskname="recognition", **kw)
+    retinaface.RetinaFace = lambda **kw: SimpleNamespace(taskname="detection", **kw)
     onnx_state = ModuleType("onnxruntime.capi.onnxruntime_pybind11_state")
     for name in ("InvalidGraph", "InvalidProtobuf", "NoSuchFile"):
         setattr(onnx_state, name, type(name, (Exception,), {}))
-    for module in (insightface, app, face_analysis, model_zoo, onnx_state):
+    for module in (insightface, app, face_analysis, model_zoo, arcface, retinaface, onnx_state):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr("iPhoto.people.pipeline._patch_insightface_alignment_estimate", lambda: None)
-    monkeypatch.setattr(
-        "iPhoto.people.pipeline._resolve_execution_providers",
-        lambda: ["CPUExecutionProvider"],
-    )
     return calls
 
 
@@ -180,13 +181,13 @@ def test_face_pipeline_distinguishes_damaged_models_from_runtime_errors(
     pack.mkdir()
     for name in ("det_500m.onnx", "w600k_mbf.onnx"):
         (pack / name).write_bytes(b"nonempty")
-    onnx_state = sys.modules["onnxruntime.capi.onnxruntime_pybind11_state"]
-    error_type = getattr(onnx_state, error_name, RuntimeError)
+    from iPhoto.recognition.onnx_runtime import RecognitionModelError
+    error_type = RecognitionModelError if error_name == "InvalidProtobuf" else RuntimeError
 
     def broken_model(*args, **kwargs):
         raise error_type("could not load")
 
-    monkeypatch.setattr(sys.modules["insightface.model_zoo"], "get_model", broken_model)
+    monkeypatch.setattr("iPhoto.people.pipeline.RecognitionOnnxRuntime.create_session", broken_model)
     expected = FaceRuntimeUnavailableError if error_type is RuntimeError else FaceModelUnavailableError
     with pytest.raises(expected) as failed:
         FaceClusterPipeline(model_root=tmp_path)._ensure_face_analysis()

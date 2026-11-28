@@ -59,20 +59,16 @@ that promises People scanning must include its Python dependencies even when
 models are provisioned later: standalone/no-site output will not read packages
 from the user's Python environment after packaging.
 
-Required Python packages for the face runtime are:
+Use a fresh build environment with the shared ONNX-only runtime:
 
-```toml
-ai-demo = [
-  "insightface>=0.7.3,<1.0",
-  "onnxruntime>=1.18,<2",
-]
+```bash
+python -m pip install -c packaging/recognition-cpu-constraints.txt -e ".[recognition]"
+python tools/recognition_packaging.py environment --output recognition-dependencies.json
 ```
 
-Install them into the build environment before running Nuitka:
-
-```powershell
-python -m pip install -e ".[ai-demo]"
-```
+`ai-demo` and `pets-ai` remain compatible source extras. Model export tools and
+PyTorch must stay in a separate environment. Intel Mac uses the 1.23 ORT wheel
+series and Python 3.12/3.13; the default Apple Silicon baseline is ORT 1.25.1.
 
 People loads local ONNX models with InsightFace downloads disabled. The
 [shared extension contract](../architecture.md#recognition-extension-installation)
@@ -82,7 +78,7 @@ bundle models from the ignored `src/extension/models/` staging directory, with
 the People ONNX files under `src/extension/models/buffalo_s/`.
 
 On Windows the extension is installed into
-`%LOCALAPPDATA%\iPhoto\extensions\recognition\v1\models`. The Face model
+`%LOCALAPPDATA%\iPhoto\extensions\recognition\v2\models`. The Face model
 directory can be overridden for debugging:
 
 ```powershell
@@ -124,49 +120,37 @@ Nuitka command, include the equivalent flags:
 
 ## Pets Recognition in Release Builds
 
-Pets is a separate optional runtime; including People dependencies alone does
-not enable it. Build environments that promise Pets support must install:
+People and Pets use the same ONNX Runtime policy and distinct model sessions.
+The maintained scripts explicitly include `onnxruntime` and `usearch`, retain
+native provider dependencies, refuse polluted build environments, and produce
+`nuitka-compilation-report.xml`, `recognition-dependencies.json` and
+`recognition-artifact.json`. They preserve the existing LTO, AOT, Qt, multimedia,
+RAW, Maps and OpenGL settings.
 
-```powershell
-python -m pip install -e ".[pets-ai]"
-```
-
-The standalone bundle must retain `onnxruntime`, `torch`, `torchvision`,
-`usearch`, and `certifi`. An offline-ready build must also include the complete
-verified model layout:
+Models are separate from the runtime. To make an offline-ready package, pass
+`--recognition-model-dir dist/onnx-migration/models` on macOS,
+`-RecognitionModelDir dist\onnx-migration\models` on Windows, or set
+`IPHOTO_RECOGNITION_BUNDLE_MODELS=dist/onnx-migration/models` on Linux.
+The staging tool checks the release hashes and copies only the required
+`buffalo_s` ONNX files, YOLOX ONNX, DINOv2 ONNX and its metadata. It never copies
+legacy `.pt`, unused face models, conversion fixtures or a whole developer cache.
 
 ```text
 extension/models/pets/
 ├── detector/yolox_nano_coco.onnx
 └── embedding/dinov2_vits14/
-    ├── dinov2_vits14.pt
-    └── dinov2_vits14.pt.metadata.json
+    ├── dinov2_vits14.onnx
+    └── dinov2_vits14.onnx.metadata.json
 ```
 
-The platform build scripts copy `src/extension/models` to `extension/models`
-only when optional assets have been staged. Manual Nuitka builds that enable
-Pets should also include the optional runtime explicitly:
-
-```bash
---include-package=onnxruntime
---include-package=torch
---include-package=torchvision
---include-package=usearch
---include-package=certifi
---include-data-dir=src/extension/models=extension/models
-```
-
-The current platform build scripts explicitly include the People runtime but do
-not yet add `torch`, `torchvision`, or `usearch` flags. Therefore a stock script
-build must not be advertised as Pets-enabled merely because the model directory
-was copied; add the flags above (or update the script) and perform the Pets smoke
-test before release.
-
-If models are intentionally omitted, the official ZIP installs YOLOX and DINOv2
-together with the People models. Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` to suppress
-silent installation triggered by the Pets worker. See
-[`PETS_RECOGNITION_RUNTIME.md`](PETS_RECOGNITION_RUNTIME.md) for the runtime and
-persistence contract.
+Without bundled models, download or import the verified
+[v2 ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip)
+from Settings. The published attachment matches the measured local artifact.
+Default builds use the CPU wheel. Optional `cuda`, `directml` and `openvino`
+profiles require their matching exclusive extra/wheel in separate environments.
+Never install several ORT distributions together or bundle GPU SDKs by default.
+The [ONNX release protocol](../requirements/UNIFIED_ONNX_RUNTIME_VALIDATION.md)
+contains export, dependency, platform and manual acceptance commands.
 
 ## Step 1: AOT Compilation
 
@@ -290,7 +274,7 @@ Useful flags:
   Skip the copy into `src/maps/tiles/extension/bin` if you already staged the
   runtime manually.
 - `-IncludeOptionalAssets`
-  Bundle the staged map extension and recognition models; verify the required AI runtime and complete models before claiming offline support.
+  Bundle the staged map extension. Use `-RecognitionModelDir` separately for verified recognition models.
 - `-ConsoleMode disable|attach|force`
   Select the Windows console mode. `disable` is the default for the packaged GUI.
 - `-Jobs <n>`
@@ -321,11 +305,10 @@ layout is bundled automatically. The Linux maps runtime is picked up from
 `src/maps/tiles/extension/bin`, and the native widget expects Qt's XCB desktop
 OpenGL path when it is selected at runtime.
 
-The ignored `src/extension/models` directory is optional. The script adds its
-Nuitka data-directory argument only when that directory exists, so a clean
-checkout can produce a core standalone build. An offline recognition release
-must stage and validate the intended People/Pets artifacts first, then verify
-that the resulting `dist/entrypoint.dist/extension/models` tree contains them.
+Recognition models are omitted by default. Set
+`IPHOTO_RECOGNITION_BUNDLE_MODELS` to the verified v2 model root to bundle them;
+staging is explicit and copies only the release whitelist. A populated ignored
+`src/extension/models` developer cache is never copied implicitly.
 
 The directory-based standalone carries `logo.png` alongside the executable.
 The Linux delivery packages use the repository PNG for their desktop launchers.
@@ -473,4 +456,4 @@ default output directory.
 | `Face scanning paused: name 'Literal' is not defined` | A third-party annotation was evaluated at runtime inside the packaged app | Rebuild with the current People pipeline, which installs runtime typing compatibility before importing InsightFace |
 | `Face scanning paused: name 'NDArray' is not defined` | Same runtime annotation issue, usually from numpy typing annotations | Rebuild with the current People pipeline; do not remove the runtime typing compatibility helper |
 | `Some assets could not be face scanned and will be retried after a rescan` | Asset-level face detection failed twice; check `%LOCALAPPDATA%\iPhoto\iPhoto.log` for the real traceback | Confirm the packaged build loads the detection and recognition ONNX models, then rescan. Full library rescan resets `retry`/`failed` face statuses |
-| Packaged People scan downloads models but never clusters faces | The downloaded model cache is incomplete, unwritable, or an InsightFace dependency failed during scan | Ensure Nuitka includes `insightface` and `onnxruntime`; verify `%LOCALAPPDATA%\iPhoto\extensions\recognition\v1\models` is writable and complete, or rebuild with `-IncludeOptionalAssets`; exclude unused albumentations/pydantic packages and keep InsightFace limited to detection and recognition |
+| Packaged People scan downloads models but never clusters faces | The downloaded model cache is incomplete, unwritable, or an InsightFace dependency failed during scan | Ensure Nuitka includes `insightface` and `onnxruntime`; verify `%LOCALAPPDATA%\iPhoto\extensions\recognition\v2\models` is writable and complete, or rebuild with `-RecognitionModelDir`; exclude unused albumentations/pydantic packages and keep InsightFace limited to detection and recognition |

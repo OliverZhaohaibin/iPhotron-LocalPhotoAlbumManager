@@ -4,7 +4,10 @@ import os
 import sys
 from pathlib import Path
 
-from iPhoto.utils.recognition_model_paths import installed_recognition_model_roots
+from iPhoto.utils.recognition_model_paths import (
+    installed_recognition_model_roots,
+    legacy_recognition_model_roots,
+)
 
 BUFFALO_S_FILES = ("det_500m.onnx", "w600k_mbf.onnx")
 
@@ -44,7 +47,7 @@ def face_pack_available(model_dir: Path, pack: str) -> bool:
 
 
 def resolve_face_model_dir(cache: Path) -> Path:
-    for root in (*installed_recognition_model_roots(), cache, bundled_face_model_dir()):
+    for root in (*installed_recognition_model_roots(), *legacy_recognition_model_roots(), cache, bundled_face_model_dir()):
         if face_pack_available(root, "buffalo_s"):
             return root
     return cache

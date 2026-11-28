@@ -144,6 +144,8 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv-build-recognition/
+.venv-model-export/
 env/
 venv/
 ENV/

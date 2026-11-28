@@ -17,6 +17,10 @@ from typing import Callable, Sequence
 
 import numpy as np
 
+from iPhoto.recognition.onnx_runtime import (
+    RecognitionModelError,
+    RecognitionOnnxRuntime,
+)
 from iPhoto.recognition.promotion import (
     PROMOTION_CONFIRMED,
     PROMOTION_LEGACY_VISIBLE,
@@ -99,6 +103,11 @@ class FaceClusterPipeline:
         self._relative_area_ratio = float(relative_area_ratio)
         self._analysis_app = None
         self._last_scan_metrics = FaceScanMetrics()
+        self._runtime = RecognitionOnnxRuntime()
+
+    def close(self) -> None:
+        self._analysis_app = None
+        self._runtime.close()
 
     @property
     def distance_threshold(self) -> float:
@@ -279,12 +288,8 @@ class FaceClusterPipeline:
             _install_runtime_typing_compat()
             _install_insightface_mask_renderer_stubs()
             from insightface.app.face_analysis import FaceAnalysis
-            from insightface.model_zoo import get_model
-            from onnxruntime.capi.onnxruntime_pybind11_state import (
-                InvalidGraph,
-                InvalidProtobuf,
-                NoSuchFile,
-            )
+            from insightface.model_zoo.arcface_onnx import ArcFaceONNX
+            from insightface.model_zoo.retinaface import RetinaFace
         except (ImportError, OSError) as exc:
             raise FaceRuntimeUnavailableError(
                 "Face scanning unavailable: install the optional AI dependencies and rescan."
@@ -306,12 +311,25 @@ class FaceClusterPipeline:
         )
         try:
             _patch_insightface_alignment_estimate()
-            providers = _resolve_execution_providers()
             models = {}
             for path in model_paths:
                 try:
-                    model = get_model(str(path), download=False, providers=providers)
-                except (InvalidGraph, InvalidProtobuf, NoSuchFile, OSError) as exc:
+                    session = self._runtime.create_session(path)
+                    inputs, outputs = session.get_inputs(), session.get_outputs()
+                    # Keep InsightFace's existing router semantics for the two
+                    # required tasks, injecting our independently owned sessions.
+                    if len(outputs) >= 5:
+                        model = RetinaFace(model_file=str(path), session=session)
+                    elif (
+                        len(inputs) == 1 and len(inputs[0].shape) == 4
+                        and isinstance(inputs[0].shape[2], int)
+                        and inputs[0].shape[2] == inputs[0].shape[3]
+                        and inputs[0].shape[2] >= 112 and inputs[0].shape[2] % 16 == 0
+                    ):
+                        model = ArcFaceONNX(model_file=str(path), session=session)
+                    else:
+                        continue
+                except (RecognitionModelError, OSError) as exc:
                     raise FaceModelUnavailableError(
                         f"Face scanning unavailable: model file '{path}' is damaged or unreadable.",
                         "incomplete",
@@ -332,7 +350,9 @@ class FaceClusterPipeline:
             app.models = models
             app.det_model = models["detection"]
             app.prepare(
-                ctx_id=0 if "CUDAExecutionProvider" in providers else -1, det_size=(640, 640)
+                # Negative ctx_id makes InsightFace recreate CPU sessions and
+                # discard provider policy. The injected runtime already chose.
+                ctx_id=0, det_size=(640, 640)
             )
         except FaceModelUnavailableError:
             raise
@@ -699,21 +719,6 @@ def _key_face_sort_key(face: FaceRecord) -> tuple[float, int]:
 
 def _quantize_value(value: float, step: int) -> int:
     return int(round(float(value) / float(step)) * step)
-
-
-def _resolve_execution_providers() -> list[str]:
-    try:
-        import onnxruntime as ort
-    except ImportError:
-        return ["CPUExecutionProvider"]
-
-    available = ort.get_available_providers()
-    providers: list[str] = []
-    if "CUDAExecutionProvider" in available:
-        providers.append("CUDAExecutionProvider")
-    if "CPUExecutionProvider" in available:
-        providers.append("CPUExecutionProvider")
-    return providers or ["CPUExecutionProvider"]
 
 
 def _patch_insightface_alignment_estimate() -> None:

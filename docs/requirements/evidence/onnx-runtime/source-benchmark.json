@@ -1,0 +1,48 @@
+{
+  "scope": "source DINOv2 model microbenchmark; not packaged app startup or full-library throughput",
+  "platform": "darwin",
+  "machine": "arm64",
+  "results": [
+    {
+      "runtime": "onnx",
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "threads_per_session": 2,
+      "source_import_ms": 59.026666916906834,
+      "model_initialization_ms": 205.7363751810044,
+      "first_inference_ms": 18.959749955683947,
+      "iterations": 50,
+      "inference_p50_ms": 17.643375555053353,
+      "inference_p95_ms": 18.246929382439703,
+      "images_per_second": 56.42963224278748,
+      "process_cpu_seconds": 1.6446290000000001,
+      "wall_seconds": 0.886059292126447,
+      "mean_cpu_cores_used": 1.8561161929164667,
+      "peak_rss_bytes": 195510272,
+      "gpu_utilization": "not measured",
+      "fresh_process_wall_ms": 1240.0302081368864
+    },
+    {
+      "runtime": "torchscript",
+      "providers": [
+        "TorchScript:CPU"
+      ],
+      "threads_per_session": 2,
+      "source_import_ms": 48.737999983131886,
+      "model_initialization_ms": 536.4102500025183,
+      "first_inference_ms": 66.3771249819547,
+      "iterations": 50,
+      "inference_p50_ms": 22.05506293103099,
+      "inference_p95_ms": 28.300535480957468,
+      "images_per_second": 44.07694233825542,
+      "process_cpu_seconds": 1.463676,
+      "wall_seconds": 1.1343799580354244,
+      "mean_cpu_cores_used": 1.2902872530777667,
+      "peak_rss_bytes": 350011392,
+      "gpu_utilization": "not measured",
+      "fresh_process_wall_ms": 1949.702541809529
+    }
+  ],
+  "packaged_validation": "Pending Manual Validation"
+}

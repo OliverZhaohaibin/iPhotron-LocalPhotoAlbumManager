@@ -22,6 +22,11 @@ from urllib.parse import urlparse
 import numpy as np
 from PIL import Image
 
+from iPhoto.recognition.onnx_runtime import (
+    RecognitionModelError,
+    RecognitionOnnxRuntime,
+    RecognitionRuntimeUnavailableError,
+)
 from iPhoto.utils.pathutils import LibraryAssetPathError, resolve_library_asset_path
 from iPhoto.utils.recognition_model_paths import installed_recognition_model_roots
 
@@ -50,7 +55,6 @@ from .repository_utils import (
     utc_now_iso,
 )
 from .state_repository import PetStateRepository
-
 
 _DETECTOR_MANIFEST = PET_MODEL_MANIFEST["detector"]
 _EMBEDDER_MANIFEST = PET_MODEL_MANIFEST["embedder"]
@@ -201,6 +205,12 @@ class PetClusterPipeline:
         self._detector: _YoloxOnnxPetDetector | None = None
         self._embedder: _DinoV2Embedder | None = None
         self._last_scan_metrics = PetScanMetrics()
+        self._runtime = RecognitionOnnxRuntime()
+
+    def close(self) -> None:
+        self._runtime.close()
+        self._detector = None
+        self._embedder = None
 
     @property
     def distance_threshold(self) -> float:
@@ -465,6 +475,7 @@ class PetClusterPipeline:
                     enable_tiled_detection=self._enable_tiled_detection,
                     tile_scan_min_confidence=self._tile_scan_min_confidence,
                     tile_species=self._supported_species,
+                    runtime=self._runtime,
                 )
             except (
                 PetRuntimeUnavailableError,
@@ -487,6 +498,7 @@ class PetClusterPipeline:
                     model_dir,
                     model_name=self._embedding_model_name,
                     allow_model_download=self._allow_model_download,
+                    runtime=self._runtime,
                 )
             except (
                 PetRuntimeUnavailableError,
@@ -1129,6 +1141,7 @@ class _YoloxOnnxPetDetector:
         tile_scan_min_confidence: float | None = None,
         tile_species: frozenset[str] = SUPPORTED_DEFAULT_SPECIES,
         execution_providers: Sequence[str] | None = None,
+        runtime: RecognitionOnnxRuntime | None = None,
     ) -> None:
         self._model_path = Path(model_path)
         self._score_threshold = float(score_threshold)
@@ -1139,24 +1152,23 @@ class _YoloxOnnxPetDetector:
             else float(tile_scan_min_confidence)
         )
         self._tile_species = frozenset(tile_species)
+        self._runtime = runtime or RecognitionOnnxRuntime()
         try:
-            import onnxruntime as ort
-        except ImportError as exc:
-            raise PetRuntimeUnavailableError(
-                "Pet scanning unavailable: missing onnxruntime. Install the optional "
-                'Pets AI runtime with: pip install -e ".[pets-ai]"'
-            ) from exc
+            self._runtime.ensure_available()
+        except RecognitionRuntimeUnavailableError as exc:
+            raise PetRuntimeUnavailableError(str(exc)) from exc
         ensure_pet_detector_model(
             self._model_path,
             allow_model_download=allow_model_download,
         )
         try:
-            providers = list(execution_providers or _resolve_execution_providers(ort))
-            self._session = ort.InferenceSession(str(self._model_path), providers=providers)
+            self._session = self._runtime.create_session(self._model_path, providers=execution_providers)
             self._input_name = self._session.get_inputs()[0].name
             shape = self._session.get_inputs()[0].shape
             self._input_size = _input_size_from_shape(shape)
             _validate_yolox_session_contract(self._session)
+        except RecognitionRuntimeUnavailableError as exc:
+            raise PetRuntimeUnavailableError(str(exc)) from exc
         except Exception as exc:
             if isinstance(exc, PetPipelineInvariantError):
                 raise
@@ -1240,113 +1252,102 @@ class _DinoV2Embedder:
         *,
         model_name: str,
         allow_model_download: bool = True,
+        runtime: RecognitionOnnxRuntime | None = None,
+        execution_providers: Sequence[str] | None = None,
     ) -> None:
         self._model_dir = Path(model_dir)
         self._model_name = model_name
+        self._runtime = runtime or RecognitionOnnxRuntime()
         try:
-            import torch
-        except ImportError as exc:
-            raise PetRuntimeUnavailableError(
-                "Pet scanning unavailable: missing torch for DINOv2 pet embeddings. "
-                'Install the optional Pets AI runtime with: pip install -e ".[pets-ai]"'
-            ) from exc
-        self._torch = torch
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model_path = self._model_dir / f"{model_name}.pt"
-        if model_path.is_file():
-            try:
-                _validate_dinov2_cache_metadata(model_path, model_name=model_name)
-            except (OSError, RuntimeError) as exc:
-                raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
-            self._model = torch.jit.load(str(model_path), map_location=self._device)
-        elif allow_model_download:
-            self._model = self._download_dinov2_model(model_path)
-        else:
-            raise PetModelUnavailableError(
-                "Pet scanning unavailable: missing DINOv2 TorchScript model at "
-                f"{model_path}. Install the People & Pets extension or set IPHOTO_PET_MODEL_DIR.",
-                reason="missing",
-            )
-        self._model.eval()
+            self._runtime.ensure_available()
+        except RecognitionRuntimeUnavailableError as exc:
+            raise PetRuntimeUnavailableError(str(exc)) from exc
+        model_path = self._model_dir / f"{model_name}.onnx"
+        if not model_path.is_file():
+            if allow_model_download:
+                self._download_dinov2_model(model_path)
+            else:
+                raise PetModelUnavailableError(
+                    "Pet scanning unavailable: missing DINOv2 ONNX model at "
+                    f"{model_path}. Install the People & Pets v2 extension or set IPHOTO_PET_MODEL_DIR.",
+                    reason="missing",
+                )
+        try:
+            _validate_dinov2_cache_metadata(model_path, model_name=model_name)
+        except (OSError, RuntimeError) as exc:
+            raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
+        try:
+            self._session = self._runtime.create_session(model_path, providers=execution_providers)
+        except RecognitionModelError as exc:
+            raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
+        except RecognitionRuntimeUnavailableError as exc:
+            raise PetRuntimeUnavailableError(str(exc)) from exc
+        self._validate_session_contract()
+
+    def _validate_session_contract(self) -> None:
+        for nodes, prefix in ((self._session.get_inputs(), "input"), (self._session.get_outputs(), "output")):
+            if (
+                len(nodes) != 1
+                or nodes[0].name != _EMBEDDER_MANIFEST[f"{prefix}_name"]
+                or nodes[0].type != "tensor(float)"
+                or list(nodes[0].shape) != _EMBEDDER_MANIFEST[f"{prefix}_shape"]
+            ):
+                raise PetPipelineInvariantError(f"DINOv2 ONNX {prefix} contract mismatch.")
+        metadata = self._session.get_modelmeta().custom_metadata_map
+        for key in ("source_repository", "source_revision", "source_sha256"):
+            if metadata.get(key) != _EMBEDDER_MANIFEST[key]:
+                raise PetPipelineInvariantError(f"DINOv2 ONNX provenance mismatch: {key}.")
 
     def embed(self, image) -> np.ndarray:
         tensor = image_to_chw_float(image, (224, 224))
-        torch = self._torch
+        if tensor.shape != (1, 3, 224, 224) or tensor.dtype != np.float32 or not np.isfinite(tensor).all():
+            raise PetPipelineInvariantError("DINOv2 input must be finite FP32 RGB NCHW [1,3,224,224].")
         try:
-            with torch.no_grad():
-                input_tensor = torch.from_numpy(tensor).to(self._device)
-                output = self._model(input_tensor)
-                if isinstance(output, (list, tuple)):
-                    output = output[0]
-                vector = output.detach().cpu().numpy().reshape(-1)
-        except Exception as exc:  # noqa: BLE001 - provider failures vary by backend
-            raise PetInferenceError(
-                f"Pet embedding inference failed: {_error_reason(exc)}"
-            ) from exc
-        expected_dimension = int(_EMBEDDER_MANIFEST["output_shape"][-1])
-        if vector.size != expected_dimension:
-            raise PetPipelineInvariantError(
-                "Pet scanning unavailable: DINOv2 output contract mismatch "
-                f"({vector.size} != {expected_dimension})."
+            outputs = self._session.run(
+                [_EMBEDDER_MANIFEST["output_name"]], {_EMBEDDER_MANIFEST["input_name"]: tensor}
             )
-        return normalize_vector(vector.astype(np.float32))
+        except Exception as exc:  # noqa: BLE001 - native provider exceptions vary
+            raise PetInferenceError(f"Pet embedding inference failed: {_error_reason(exc)}") from exc
+        if len(outputs) != 1:
+            raise PetPipelineInvariantError("DINOv2 output count mismatch.")
+        output = np.asarray(outputs[0])
+        if output.shape != (1, 384) or output.dtype != np.float32 or not np.isfinite(output).all():
+            raise PetPipelineInvariantError("DINOv2 output must be finite FP32 [1,384].")
+        vector = output.reshape(-1)
+        norm = float(np.linalg.norm(vector))
+        if not math.isfinite(norm) or norm <= 1e-12:
+            raise PetPipelineInvariantError("DINOv2 returned an invalid embedding norm.")
+        return normalize_vector(vector)
 
-    def _download_dinov2_model(self, model_path: Path):
-        url = str(_EMBEDDER_MANIFEST.get("torchscript_url") or "").strip()
+    def _download_dinov2_model(self, model_path: Path) -> None:
+        url = str(_EMBEDDER_MANIFEST.get("onnx_url") or "").strip()
         if not url:
             raise PetModelUnavailableError(
-                "Pet scanning unavailable: the fixed DINOv2 TorchScript release "
-                "artifact has not been configured. Install a package containing the "
-                "verified model or set IPHOTO_PET_MODEL_DIR.",
+                "Pet scanning unavailable: the verified DINOv2 ONNX release is not published. "
+                "Install the People & Pets v2 ZIP offline or set IPHOTO_PET_MODEL_DIR.",
                 reason="missing",
             )
+        from iPhoto.utils.jsonio import atomic_write_text
+
         try:
             _install_certifi_environment()
             _download_file(
-                url,
-                model_path,
-                label="DINOv2 TorchScript model",
-                expected_sha256=str(_EMBEDDER_MANIFEST["torchscript_sha256"]),
-                max_bytes=int(_EMBEDDER_MANIFEST["torchscript_size"]),
+                url, model_path, label="DINOv2 ONNX model",
+                expected_sha256=str(_EMBEDDER_MANIFEST["onnx_sha256"]),
+                max_bytes=int(_EMBEDDER_MANIFEST["onnx_size"]),
             )
-            _dinov2_metadata_path(model_path).write_text(
-                json.dumps(
-                    dinov2_metadata(_EMBEDDER_MANIFEST, self._model_name),
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-                encoding="utf-8",
+            atomic_write_text(
+                _dinov2_metadata_path(model_path),
+                json.dumps(dinov2_metadata(_EMBEDDER_MANIFEST, self._model_name), indent=2, sort_keys=True) + "\n",
             )
-            _validate_dinov2_cache_metadata(
-                model_path,
-                model_name=self._model_name,
-            )
-            model = self._torch.jit.load(str(model_path), map_location=self._device)
+            _validate_dinov2_cache_metadata(model_path, model_name=self._model_name)
         except Exception as exc:
             model_path.unlink(missing_ok=True)
             _dinov2_metadata_path(model_path).unlink(missing_ok=True)
             raise PetModelUnavailableError(
-                "Pet scanning unavailable: failed to download the verified DINOv2 "
-                f"TorchScript model ({_error_reason(exc)}).",
+                f"Pet scanning unavailable: failed to download DINOv2 ONNX ({_error_reason(exc)}).",
                 reason="download_failed",
             ) from exc
-
-        model.eval()
-        model.to(self._device)
-        return model
-
-
-def _resolve_execution_providers(ort) -> list[str]:
-    available = set(ort.get_available_providers())
-    preferred = [
-        "CUDAExecutionProvider",
-        "CoreMLExecutionProvider",
-        "OpenVINOExecutionProvider",
-        "CPUExecutionProvider",
-    ]
-    providers = [provider for provider in preferred if provider in available]
-    return providers or ["CPUExecutionProvider"]
 
 
 def _input_size_from_shape(shape: Sequence[object]) -> tuple[int, int]:
@@ -1827,7 +1828,10 @@ def ensure_pet_detector_model(
     target = Path(model_path)
     custom_url = str(model_url or os.environ.get(PET_DETECTOR_MODEL_URL_ENV) or "").strip()
     if target.is_file():
-        _validate_pet_detector_model(target, custom_url)
+        try:
+            _validate_pet_detector_model(target, custom_url)
+        except (OSError, RuntimeError) as exc:
+            raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
         return target
     if not allow_model_download or _is_installed_pet_detector(target):
         raise PetModelUnavailableError(
@@ -1902,7 +1906,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
         try:
             if directory:
                 model_name = relative.name
-                model_path = candidate / f"{model_name}.pt"
+                model_path = candidate / f"{model_name}.onnx"
                 if not model_path.is_file():
                     raise RuntimeError("DINOv2 model file is missing")
                 _validate_dinov2_cache_metadata(model_path, model_name=model_name)
@@ -1915,7 +1919,7 @@ def resolve_pet_model_path(relative_path: Path, *, directory: bool = False) -> P
                     f"Pet scanning unavailable: invalid model override artifact at {candidate}."
                 ) from exc
             if root == user_cache:
-                model_path = candidate / f"{relative.name}.pt" if directory else candidate
+                model_path = candidate / f"{relative.name}.onnx" if directory else candidate
                 try:
                     model_path.unlink(missing_ok=True)
                     if directory:
@@ -2022,7 +2026,7 @@ def _validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> Non
     metadata_path = _dinov2_metadata_path(model_path)
     if not metadata_path.is_file():
         raise RuntimeError(
-            "Pet scanning unavailable: DINOv2 TorchScript metadata is missing for "
+            "Pet scanning unavailable: DINOv2 ONNX metadata is missing for "
             f"{model_path}. Remove the incomplete cache so it can be rebuilt."
         )
     try:
@@ -2036,8 +2040,8 @@ def _validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> Non
         raise RuntimeError(
             f"Pet scanning unavailable: DINOv2 metadata contract mismatch at {metadata_path}."
         )
-    size_matches = int(metadata.get("torchscript_size") or -1) == model_path.stat().st_size
-    hash_matches = str(metadata.get("torchscript_sha256") or "").lower() == _file_sha256(model_path)
+    size_matches = int(metadata.get("onnx_size") or -1) == model_path.stat().st_size
+    hash_matches = str(metadata.get("onnx_sha256") or "").lower() == _file_sha256(model_path)
     if not size_matches or not hash_matches:
         raise RuntimeError(
             f"Pet scanning unavailable: DINOv2 cache integrity check failed for {model_path}."

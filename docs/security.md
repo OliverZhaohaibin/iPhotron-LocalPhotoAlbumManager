@@ -50,9 +50,9 @@ extension is installed.
 | **Map rendering** | Offline (bundled OBF/vector map assets) | Render map tiles for the location view |
 | **Reverse geocoding** | Local database lookup | Convert GPS coordinates to place names (offline, via `reverse-geocoder` library) |
 | **Map extension download** | Optional HTTPS download | Fetch a published extension archive only when the user chooses the download path |
-| **People model acquisition** | Optional HTTPS through InsightFace | Populate a missing pack only when the selected People model root is writable |
+| **People & Pets model acquisition** | Optional verified HTTPS ZIP | Install the published [v2 model ZIP](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager/releases/download/People%26Pets-models-v2/iphotron-recognition-models-v2.zip) after size/SHA-256 validation; InsightFace itself never downloads models |
 | **YOLOX detector download** | Optional HTTPS + hash/size validation | Populate the missing detector in the writable Pets cache |
-| **DINOv2 embedder** | No current network path | `torchscript_url` is `null`; load only a pre-provisioned artifact matching the manifest hash and size |
+| **DINOv2 embedder** | Local inference | The individual `onnx_url` is `null`; the verified combined ZIP, explicit override or bundled fallback supplies the artifact matching the manifest hash and size |
 
 > **Note:** No telemetry or cloud sync is performed. A network connection is only
 > needed if the user chooses to download a missing map extension or allows one
@@ -190,7 +190,7 @@ state, are stored in a validated `settings.json` file:
 |---|---|
 | **Threat** | A model or model-loader source changes upstream or is replaced in transit/cache |
 | **Impact** | Recognition failure, unsafe model parsing, or execution of changed loader code |
-| **Mitigation** | Reviewed HTTPS model artifacts; the production DINOv2 TorchScript artifact is pinned by exact SHA-256 and byte size in `model_manifest.json`; production never executes Torch Hub; release conversion is performed separately; explicit model-cache overrides and offline release builds use reviewed files under `extension/models/` |
+| **Mitigation** | Reviewed HTTPS model artifacts; the production DINOv2 ONNX artifact is pinned by exact SHA-256 and byte size in `model_manifest.json`; production executes only ONNX Runtime; TorchScript export/equivalence is performed separately in a model-development environment; explicit model-cache overrides and offline release builds use reviewed files under `extension/models/` |
 | **Operator control** | Set `IPHOTO_PET_MODEL_AUTO_DOWNLOAD=0` to require pre-provisioned Pets models |
 
 ---

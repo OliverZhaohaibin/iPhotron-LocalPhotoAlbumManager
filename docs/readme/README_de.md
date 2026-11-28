@@ -318,13 +318,13 @@ Detaillierte technische Dokumentation (auf Englisch):
 | **ExifTool** | Liest EXIF-, GPS-, QuickTime- und Live-Photo-Metadaten und schreibt GPS-Daten bei expliziten Assign-Location-Aktionen. |
 | **FFmpeg / FFprobe** | Erzeugt Video-Miniaturansichten und analysiert Videoinformationen. |
 | **InsightFace / ONNXRuntime + `buffalo_s`-Modelle** | Optionales People Face Scanning mit einem beschreibbaren Cache, explizitem Override oder bereitgestellten/gebündelten Modellen. |
-| **YOLOX / ONNXRuntime + DINOv2 / Torch** | Optionales Pets-Scanning mit Benutzer-Cache, explizitem Override oder bereitgestellten/gebündelten Modellen. YOLOX kann mit Integritätsprüfung heruntergeladen werden; das aktuelle DINOv2-Artefakt muss vorab bereitgestellt werden. |
+| **YOLOX + DINOv2 / ONNX Runtime** | Optionales Pets-Scanning mit Benutzer-Cache, explizitem Override oder bereitgestellten/gebündelten Modellen. YOLOX kann mit Integritätsprüfung heruntergeladen werden; das aktuelle DINOv2-Artefakt muss vorab bereitgestellt werden. |
 
 > FFmpeg/FFprobe müssen im System-`PATH` verfügbar sein. Installieren Sie
 > ExifTool zusätzlich, wenn zugewiesene GPS-Koordinaten in Originaldateien
 > zurückgeschrieben werden sollen.
 > Die AI-Erkennungslaufzeiten sind optional; für Source-Builds können sie mit
-> `pip install -e ".[ai-demo,pets-ai]"` installiert werden. Offline-Pakete sollten
+> `pip install -e ".[recognition]"` installiert werden. Offline-Pakete sollten
 > `extension/models` mitliefern.
 
 Python-Abhängigkeiten wie `Pillow` und `reverse-geocoder` werden über

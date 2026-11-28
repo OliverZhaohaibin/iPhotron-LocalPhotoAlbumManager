@@ -19,6 +19,8 @@ def test_appimage_builder_stages_and_validates_delivery_bundle(tmp_path, overrid
     (standalone / "iPhoto/gui/ui/widgets").mkdir(parents=True)
     (standalone / "maps/tiles/extension/bin").mkdir(parents=True)
     (standalone / "PySide6/Qt/plugins/platforms").mkdir(parents=True)
+    (standalone / "onnxruntime/capi").mkdir(parents=True)
+    (standalone / "onnxruntime/capi/onnxruntime_pybind11_state.so").write_bytes(b"ORT fixture")
     _executable(standalone / "entrypoint.bin", "#!/bin/sh\nexit 0\n")
     (standalone / "iPhoto/gui/ui/widgets/image.qsb").write_bytes(b"qsb")
     _executable(

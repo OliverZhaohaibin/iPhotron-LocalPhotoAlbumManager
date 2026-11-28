@@ -145,12 +145,25 @@ def test_staging_rejects_unverified_models_without_overwriting_input(tmp_path):
     assert all(path.read_bytes() == b"wrong model" for path in source.rglob("*") if path.is_file())
 
 
-def test_macos_repair_resolves_collected_libraries_and_signs_after_rewrite(tmp_path):
+@pytest.mark.parametrize(
+    ("library_relative", "install_name"),
+    [
+        ("libonnxruntime.1.dylib", "@loader_path/../../libonnxruntime.1.dylib"),
+        (
+            "shared libraries/libonnxruntime.1.dylib",
+            "@loader_path/../../shared libraries/libonnxruntime.1.dylib",
+        ),
+    ],
+)
+def test_macos_repair_resolves_collected_libraries_and_signs_after_rewrite(
+    tmp_path, library_relative, install_name
+):
     bundle = tmp_path / "entrypoint.app"
     binding = bundle / "Contents/MacOS/onnxruntime/capi/onnxruntime_pybind11_state.so"
     binding.parent.mkdir(parents=True)
     binding.write_bytes(b"Mach-O fixture")
-    library = bundle / "Contents/MacOS/libonnxruntime.1.dylib"
+    library = bundle / "Contents/MacOS" / library_relative
+    library.parent.mkdir(parents=True, exist_ok=True)
     library.write_bytes(b"Mach-O fixture")
     calls = []
 
@@ -170,7 +183,7 @@ def test_macos_repair_resolves_collected_libraries_and_signs_after_rewrite(tmp_p
             "install_name_tool",
             "-change",
             "/build/venv/libonnxruntime.1.dylib",
-            "@loader_path/../../libonnxruntime.1.dylib",
+            install_name,
             str(binding),
         ]
     ]

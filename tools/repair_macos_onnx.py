@@ -9,7 +9,7 @@ venv. No libraries are removed, and missing dependencies fail the build.
 from __future__ import annotations
 
 import argparse
-import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -61,7 +61,10 @@ def repair(bundle: Path, *, runner=capture) -> list[Path]:
             if matches[0].resolve() == binary.resolve() and binary.suffix == ".dylib":
                 runner(["install_name_tool", "-id", f"@rpath/{binary.name}", str(binary)])
                 continue
-            replacement = "@loader_path/" + os.path.relpath(matches[0], binary.parent)
+            # Mach-O install names use POSIX separators regardless of the host.
+            replacement = "@loader_path/" + posixpath.relpath(
+                matches[0].as_posix(), binary.parent.as_posix()
+            )
             runner(["install_name_tool", "-change", dependency, replacement, str(binary)])
         runner(["codesign", "--force", "--sign", "-", str(binary)])
     return ort

@@ -117,7 +117,13 @@ def test_forbidden_native_payloads_fail_instead_of_being_deleted(tmp_path, filen
     assert target.read_bytes() == b"forbidden"
 
 
-def test_artifact_inventory_records_actual_component_bytes(tmp_path):
+def test_artifact_inventory_records_actual_component_bytes(tmp_path, monkeypatch):
+    contract = tmp_path / "contract.json"
+    payload = b"model"
+    contract.write_text(json.dumps({"files": {"model.onnx": {
+        "size": len(payload), "sha256": packaging.hashlib.sha256(payload).hexdigest()
+    }}}))
+    monkeypatch.setattr(packaging, "MODEL_CONTRACT", contract)
     files = {
         "onnxruntime/capi/onnxruntime_pybind11_state.so": b"ort",
         "extension/models/model.onnx": b"model",
@@ -127,9 +133,124 @@ def test_artifact_inventory_records_actual_component_bytes(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
     report = packaging.artifact_report(tmp_path, "cpu")
-    assert report["standalone_bytes"] == 8
-    assert report["component_bytes"] == {"onnxruntime": 3, "models": 5}
+    assert report["standalone_bytes"] == 8 + contract.stat().st_size
+    assert report["component_bytes"]["onnxruntime"] == 3
+    assert report["component_bytes"]["models"] == 5
     assert report["torch_free"]
+
+
+@pytest.mark.parametrize("filename", [
+    "libcuda.so.1", "cudart64_12.dll", "libcudadevrt.a", "libcufft.so.11", "libcurand.so.10",
+    "libcusolver.so.11", "libcusparse.so.12", "libcusparseLt.so.0", "libcupti.so.12",
+    "libnvrtc-builtins.so.12.8", "nvJitLink_120_0.dll", "libnvptxcompiler_static.a",
+    "libnvfatbin.so.12", "libnppc.so.12", "nvjpeg64_12.dll", "libnvblas.so.12",
+    "libcufile.so.0", "libnvToolsExt.so.1", "libnvinfer.so.10", "libnvonnxparser.so.10",
+    "libnccl.so.2", "libcutensor.so.2", "libcudss.so.0", "libnvshmem.so.3",
+    "libcustatevec.so.1", "libcutensornet.so.2", "libnvidia-ml.so.1", "libnvvm.so.4",
+    "libnvcomp.so.4", "libnvperf_host.so", "libpcsamplingutil.so", "libnvoptix.so.1",
+    "libcudbg.so.1", "libcuinj64.so.12", "kernel.cubin", "kernel.fatbin", "kernel.ptx",
+])
+def test_complete_cuda_native_families_are_rejected_in_cpu_payloads(tmp_path, filename):
+    target = tmp_path / filename
+    target.write_bytes(b"native fixture")
+    with pytest.raises(ValueError, match="Forbidden"):
+        packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+    assert target.exists()
+    assert not packaging.forbidden_native(filename, "cuda")
+
+
+@pytest.mark.parametrize("name", ["libtorch.so", "torch_python.dll", "c10.dll", "torchvision.dll", "libtorchaudio.so", "libtriton.so"])
+def test_torch_linked_from_an_innocently_named_binary_is_forbidden(name):
+    assert packaging.forbidden_native(name, "cpu")
+    assert packaging.forbidden_native(name, "cuda")
+
+
+@pytest.mark.parametrize("magic,tool,output,expected", [
+    (b"\x7fELF", "readelf", " 0x1 (NEEDED) Shared library: [libcurand.so.10]\n", "libcurand.so.10"),
+    (b"\xcf\xfa\xed\xfe", "otool", "binary:\n\t@rpath/libtorch.dylib (compatibility version 0.0.0, current version 0.0.0)\n", "@rpath/libtorch.dylib"),
+    (b"MZ00", "llvm-readobj", "Import {\n Name: cudnn64_9.dll\n}\nDelayImport {\n Name: nvrtc64_120_0.dll\n}\n", "cudnn64_9.dll"),
+    (b"MZ00", "dumpbin", "  Image has the following dependencies:\n    cublas64_12.dll\n", "cublas64_12.dll"),
+    (b"MZ00", "objdump", " DLL Name: cudart64_12.dll\n", "cudart64_12.dll"),
+])
+def test_actual_import_tables_expose_forbidden_dependencies(tmp_path, monkeypatch, magic, tool, output, expected):
+    binary = tmp_path / "innocent.bin"
+    binary.write_bytes(magic + b"native fixture")
+    monkeypatch.setattr(packaging.shutil, "which", lambda name: tool if name == tool else None)
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        return output
+
+    monkeypatch.setattr(packaging, "_run_inspector", runner)
+    imports = packaging.native_dependencies(binary)
+    assert expected in imports["dependencies"]
+    if tool == "llvm-readobj":
+        assert "nvrtc64_120_0.dll" in imports["dependencies"]
+    assert calls and calls[0][-1] == str(binary)
+    with pytest.raises(ValueError, match="innocent.bin ->"):
+        packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+
+
+def test_native_dependency_audit_fails_closed_without_inspector(tmp_path, monkeypatch):
+    binary = tmp_path / "binary.so"
+    binary.write_bytes(b"\x7fELF fixture")
+    monkeypatch.setattr(packaging.shutil, "which", lambda _: None)
+    with pytest.raises(ValueError, match="Install readelf"):
+        packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+
+
+def test_duplicate_large_files_are_reported_without_deleting_them(tmp_path, monkeypatch):
+    monkeypatch.setattr(packaging, "LARGE_FILE_BYTES", 8)
+    for name in ("first.so", "second.so", "unique.so"):
+        (tmp_path / name).write_bytes(b"duplicate" if name != "unique.so" else b"different")
+    (tmp_path / "alias.so").symlink_to("first.so")
+    report = packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+    assert len(report["duplicate_large_files"]) == 1
+    group = report["duplicate_large_files"][0]
+    assert group["paths"] == ["first.so", "second.so"]
+    assert group["duplicate_bytes"] == 9
+    assert (tmp_path / "second.so").read_bytes() == b"duplicate"
+
+
+@pytest.mark.parametrize("resource", ["unused.onnx", "source.pt", "torchscript-reference.npz", "training.pth", "README.txt"])
+def test_unnecessary_model_resources_are_rejected(tmp_path, resource):
+    target = tmp_path / "extension/models" / resource
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"unexpected")
+    with pytest.raises(ValueError, match="Forbidden"):
+        packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+
+
+def test_omitted_models_are_allowed_but_partial_bundles_are_rejected(tmp_path, monkeypatch):
+    packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps({"files": {name: {
+        "size": 5, "sha256": packaging.hashlib.sha256(b"model").hexdigest()
+    } for name in ("one.onnx", "two.onnx")}}))
+    monkeypatch.setattr(packaging, "MODEL_CONTRACT", contract)
+    target = tmp_path / "extension/models/one.onnx"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"model")
+    with pytest.raises(ValueError, match="Incomplete bundled model set"):
+        packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+
+
+@pytest.mark.parametrize("name", ["onnxruntime/datasets/sample.onnx", "unused/source.pt", "weights.safetensors"])
+def test_models_outside_verified_staging_are_rejected(tmp_path, name):
+    target = tmp_path / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"unnecessary model")
+    with pytest.raises(ValueError, match="unexpected model resource"):
+        packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+
+
+@pytest.mark.parametrize("name", ["torch.nn", "torchvision.ops", "triton", "nvidia.cuda_runtime"])
+def test_compilation_report_rejects_forbidden_modules(tmp_path, name):
+    report = tmp_path / "report.xml"
+    report.write_text(f'<nuitka-report><module name="{name}" /></nuitka-report>')
+    with pytest.raises(ValueError, match="forbidden inference modules"):
+        packaging.check_compilation_report(report)
 
 
 def test_staging_rejects_unverified_models_without_overwriting_input(tmp_path):

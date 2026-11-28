@@ -201,6 +201,13 @@ The Pet worker uses small batches and queue top-up from the asset repository.
 Missing dependencies and models pause recognition while preserving pending
 rows. Recovery prompts and successful-install resumption follow the
 [shared lifecycle contract](../architecture.md#recognition-extension-installation).
+The same rule applies when a running ORT session fails and its one CPU recovery
+cannot complete. Detector and embedder wrappers preserve runtime/model errors;
+the pipeline aborts the batch before the coordinator receives any asset failure.
+The worker releases its runtime and uncommitted thumbnail staging. Pending and
+retry rows, including successful detections from the unfinished batch, remain
+eligible after restart. Native graph/input contract failures pause the worker;
+ordinary unreadable images retain the individual retry/failed transition.
 
 Standard Pet scan notices carry a status code and optional technical detail.
 The dashboard translates the notice when it is shown and refreshes it on a

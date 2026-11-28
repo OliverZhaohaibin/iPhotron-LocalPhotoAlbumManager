@@ -69,7 +69,9 @@ jobs:
           IPHOTO_RECOGNITION_PROVIDERS: CPUExecutionProvider
         run: >-
           python -m pytest -q tests/contracts/test_dinov2_onnx_contract.py
+          tests/contracts/test_recognition_provider_contract.py
           tests/test_recognition_onnx_runtime.py tests/test_dinov2_onnx.py
+          tests/test_recognition_runtime_recovery.py
           tests/test_people_pipeline.py
           tests/test_recognition_packaging.py tests/test_pet_packaging_contract.py
           tests/test_windows_packaging.py tests/test_macos_packaging.py

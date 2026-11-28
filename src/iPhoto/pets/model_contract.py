@@ -13,12 +13,23 @@ def _load_pet_model_manifest() -> dict:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         detector = manifest["detector"]
         embedder = manifest["embedder"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, UnicodeError, KeyError, TypeError) as exc:
         raise PetPipelineInvariantError(f"Invalid Pets model manifest: {manifest_path}") from exc
-    if manifest.get("schema_version") != 2:
+    if not isinstance(detector, dict) or not isinstance(embedder, dict):
+        raise PetPipelineInvariantError(f"Invalid Pets model manifest: {manifest_path}")
+    if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 2:
         raise PetPipelineInvariantError(f"Unsupported Pets model manifest: {manifest_path}")
     if urlparse(str(detector.get("url") or "")).scheme.lower() != "https":
         raise PetPipelineInvariantError("Pets detector manifest URL must use HTTPS.")
+    digest = detector.get("sha256")
+    if (
+        not isinstance(digest, str) or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+        or type(detector.get("max_bytes")) is not int or detector["max_bytes"] <= 0
+        or detector.get("filename") != "detector/yolox_nano_coco.onnx"
+        or detector.get("output_shape") != [1, 3549, 85]
+    ):
+        raise PetPipelineInvariantError("Pets detector manifest artifact contract is invalid.")
     if detector.get("input") != {
         "layout": "NCHW",
         "channel_order": "BGR",
@@ -39,6 +50,7 @@ def _load_pet_model_manifest() -> dict:
         raise PetPipelineInvariantError("Pets embedder ONNX size is invalid.")
     if (
         embedder.get("format") != "onnx"
+        or embedder.get("model_name") != "dinov2_vits14"
         or embedder.get("filename") != "embedding/dinov2_vits14/dinov2_vits14.onnx"
         or embedder.get("opset") != 17
         or embedder.get("input_name") != "image"

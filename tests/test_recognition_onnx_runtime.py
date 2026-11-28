@@ -236,3 +236,42 @@ def test_thread_override_cannot_expand_concurrent_worker_budget(monkeypatch):
     assert runtime.RecognitionRuntimePolicy.from_environment().intra_op_threads <= 2
     monkeypatch.setenv("IPHOTO_RECOGNITION_THREADS", "1")
     assert runtime.RecognitionRuntimePolicy.from_environment().intra_op_threads == 1
+
+
+@pytest.mark.parametrize("fault", ["create", "run"])
+def test_terminal_cpu_recovery_failure_retains_typed_cause_without_reusing_session(monkeypatch, fault):
+    def construct(providers):
+        if providers == [runtime.CPU] and fault == "create":
+            raise RuntimeError("CPU initialization failed")
+        return FakeSession(providers, RuntimeError("CUDA failure" if providers != [runtime.CPU] else "CPU kernel failed"))
+
+    _, _, attempts = fake_ort(monkeypatch, available=["CUDAExecutionProvider", runtime.CPU], construct=construct)
+    session = runtime.RecognitionOnnxRuntime().create_session(Path("model.onnx"), providers=["CUDAExecutionProvider"])
+    for _ in range(3):
+        with pytest.raises(runtime.RecognitionProviderError, match="CPU") as failed:
+            session.run(None, {})
+        assert failed.value.__cause__ is not None
+    assert len(attempts) == 2
+    assert session._session is None
+
+
+@pytest.mark.parametrize("error_name,expected", [
+    ("InvalidArgument", runtime.RecognitionModelError),
+    ("InvalidGraph", runtime.RecognitionModelError),
+    ("Fail", runtime.RecognitionRuntimeUnavailableError),
+    ("RuntimeException", runtime.RecognitionRuntimeUnavailableError),
+])
+def test_native_inference_contract_and_runtime_failures_are_terminal(monkeypatch, error_name, expected):
+    failure = type(error_name, (Exception,), {})("native inference failed")
+    _, _, attempts = fake_ort(monkeypatch, available=[runtime.CPU], construct=lambda p: FakeSession(p, failure))
+    session = runtime.RecognitionOnnxRuntime().create_session(Path("model.onnx"))
+    with pytest.raises(expected):
+        session.run(None, {})
+    assert len(attempts) == 1 and session._session is None
+
+
+@pytest.mark.parametrize("cpus,expected", [(1, 1), (2, 1), (4, 1), (8, 2), (64, 2)])
+def test_default_thread_budget_reserves_headroom_for_two_workers(monkeypatch, cpus, expected):
+    monkeypatch.delenv("IPHOTO_RECOGNITION_THREADS", raising=False)
+    monkeypatch.setattr(runtime.os, "process_cpu_count", lambda: cpus, raising=False)
+    assert runtime.RecognitionRuntimePolicy.from_environment().intra_op_threads == expected

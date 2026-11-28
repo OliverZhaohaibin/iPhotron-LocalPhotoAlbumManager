@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from typing import NoReturn
 
 _LOG = logging.getLogger(__name__)
 CPU = "CPUExecutionProvider"
@@ -37,7 +38,11 @@ _MODEL_ERRORS = {
 
 
 class RecognitionRuntimeUnavailableError(RuntimeError):
-    """The optional ONNX Runtime or its native dependencies cannot initialize."""
+    """The worker's runtime cannot initialize or continue inference."""
+
+
+class RecognitionProviderError(RecognitionRuntimeUnavailableError):
+    """A device failed and its one CPU recovery could not complete."""
 
 
 class RecognitionModelError(RuntimeError):
@@ -128,6 +133,7 @@ class ManagedOnnxSession:
         self._policy = policy
         self._lock = RLock()
         self._session = None
+        self._failure: RecognitionRuntimeUnavailableError | RecognitionModelError | None = None
         self.requested_providers = tuple(providers)
         self.fallback_reason: str | None = None
         self._cpu_retried = providers == [CPU]
@@ -209,50 +215,80 @@ class ManagedOnnxSession:
             self._session = self._create([CPU])
         except Exception as cpu_exc:
             if type(cpu_exc).__name__ in _MODEL_ERRORS:
-                raise RecognitionModelError(
+                self._fail(RecognitionModelError(
                     f"Invalid ONNX model {self._path}: {cpu_exc}"
-                ) from cpu_exc
-            raise RecognitionRuntimeUnavailableError(
+                ), cpu_exc)
+            self._fail(RecognitionProviderError(
                 f"ONNX CPU fallback failed: {cpu_exc}"
-            ) from cpu_exc
+            ), cpu_exc)
+
+    def _fail(
+        self, failure: RecognitionRuntimeUnavailableError | RecognitionModelError, cause: Exception
+    ) -> NoReturn:
+        # A terminal session must never turn later photos into asset failures.
+        # A new worker owns recovery; this worker retains the typed root cause.
+        self._failure = failure
+        self._session = None
+        raise failure from cause
+
+    def _check_open(self) -> None:
+        if self._failure is not None:
+            raise self._failure
+        if self._session is None:
+            raise RecognitionRuntimeUnavailableError("ONNX session is closed")
 
     def run(self, output_names, input_feed, run_options=None):
         # DirectML permits a single Run at a time on each session. The lock also
         # makes close/recovery atomic with respect to native inference.
         with self._lock:
-            if self._session is None:
-                raise RecognitionRuntimeUnavailableError("ONNX session is closed")
+            self._check_open()
             try:
                 return self._session.run(output_names, input_feed, run_options)
             except Exception as exc:
-                if self._cpu_retried or not _provider_failure(exc):
-                    raise
-                self._recover_cpu(exc)
-                return self._session.run(output_names, input_feed, run_options)
+                if type(exc).__name__ in _MODEL_ERRORS:
+                    self._fail(RecognitionModelError(f"ONNX model contract failed: {exc}"), exc)
+                if _provider_failure(exc):
+                    if self._cpu_retried:
+                        self._fail(RecognitionProviderError(f"ONNX provider failed: {exc}"), exc)
+                    self._recover_cpu(exc)
+                    try:
+                        return self._session.run(output_names, input_feed, run_options)
+                    except Exception as cpu_exc:
+                        if type(cpu_exc).__name__ in _MODEL_ERRORS:
+                            self._fail(RecognitionModelError(
+                                f"ONNX model contract failed: {cpu_exc}"
+                            ), cpu_exc)
+                        self._fail(RecognitionProviderError(
+                            f"ONNX CPU fallback inference failed: {cpu_exc}"
+                        ), cpu_exc)
+                if isinstance(exc, (RuntimeError, OSError)) or type(exc).__name__ in {
+                    "Fail", "RuntimeException", "EngineError"
+                }:
+                    self._fail(RecognitionRuntimeUnavailableError(
+                        f"ONNX inference runtime failed: {exc}"
+                    ), exc)
+                raise
 
     def get_inputs(self):
-        if self._session is None:
-            raise RecognitionRuntimeUnavailableError("ONNX session is closed")
+        self._check_open()
         return self._session.get_inputs()
 
     def get_outputs(self):
-        if self._session is None:
-            raise RecognitionRuntimeUnavailableError("ONNX session is closed")
+        self._check_open()
         return self._session.get_outputs()
 
     def get_providers(self):
-        if self._session is None:
-            raise RecognitionRuntimeUnavailableError("ONNX session is closed")
+        self._check_open()
         return self._session.get_providers()
 
     def get_modelmeta(self):
-        if self._session is None:
-            raise RecognitionRuntimeUnavailableError("ONNX session is closed")
+        self._check_open()
         return self._session.get_modelmeta()
 
     def close(self) -> None:
         with self._lock:
             self._session = None
+            self._failure = None
 
 
 class RecognitionOnnxRuntime:

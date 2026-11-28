@@ -3,9 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_pet_model_manifest_is_included_by_all_packaged_builds() -> None:
+def test_recognition_manifests_are_included_by_all_packaged_builds() -> None:
     repository_root = Path(__file__).resolve().parents[1]
-    expected_target = "iPhoto/pets/model_manifest.json"
     build_scripts = (
         repository_root / "scripts" / "build_nuitka_fast.sh",
         repository_root / "scripts" / "build_nuitka_macos.sh",
@@ -14,12 +13,22 @@ def test_pet_model_manifest_is_included_by_all_packaged_builds() -> None:
 
     for build_script in build_scripts:
         contents = build_script.read_text(encoding="utf-8").replace("\\", "/")
-        assert "iPhoto/pets/model_manifest.json" in contents, build_script
-        assert expected_target in contents, build_script
+        for target in ("iPhoto/pets/model_manifest.json", "iPhoto/recognition/recognition_package.json"):
+            matching = [line for line in contents.splitlines() if "--include-data-file=" in line and target in line]
+            assert len(matching) == 1 and matching[0].count(target) == 2, (build_script, target)
 
     pyproject = (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     assert '"iPhoto" = [' in pyproject
     assert '"**/*.json"' in pyproject
+
+
+def test_primary_recognition_builds_keep_release_lto():
+    root = Path(__file__).resolve().parents[1]
+    for name in ("build_nuitka_fast.sh", "build_nuitka_windows.ps1"):
+        assert "--lto=yes" in (root / "scripts" / name).read_text()
+    mac = (root / "scripts/build_nuitka_macos.sh").read_text()
+    assert 'LTO_MODE="yes"' in mac
+    assert '"--lto=$LTO_MODE"' in mac
 
 
 def test_linux_model_staging_is_explicit_and_verified_before_inclusion() -> None:

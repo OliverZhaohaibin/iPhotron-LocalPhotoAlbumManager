@@ -241,16 +241,20 @@ class PetScanWorker(QThread):
         batch_asset_ids = [str(row.get("id") or "") for row in batch if row.get("id")]
         people_boxes = self._pet_service.people_boxes_by_asset_ids(batch_asset_ids)
         staging_dir = thumbnail_dir / ".staging" / uuid.uuid4().hex
-        detected = list(
-            pipeline.detect_pets_for_rows(
-                batch,
-                library_root=self._library_root,
-                thumbnail_dir=staging_dir,
-                published_thumbnail_dir=thumbnail_dir,
-                is_cancelled=lambda: self._cancelled,
-                people_boxes_by_asset_id=people_boxes,
+        try:
+            detected = list(
+                pipeline.detect_pets_for_rows(
+                    batch,
+                    library_root=self._library_root,
+                    thumbnail_dir=staging_dir,
+                    published_thumbnail_dir=thumbnail_dir,
+                    is_cancelled=lambda: self._cancelled,
+                    people_boxes_by_asset_id=people_boxes,
+                )
             )
-        )
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
         if self._cancelled:
             shutil.rmtree(staging_dir, ignore_errors=True)
             self._mark_rows_retry(batch)

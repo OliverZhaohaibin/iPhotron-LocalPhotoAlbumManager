@@ -1,5 +1,7 @@
 """Resolution for existing and automatically acquired InsightFace models."""
 
+import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -10,6 +12,7 @@ from iPhoto.utils.recognition_model_paths import (
 )
 
 BUFFALO_S_FILES = ("det_500m.onnx", "w600k_mbf.onnx")
+_FACE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "recognition" / "recognition_package.json"
 
 
 def bundled_face_model_dir() -> Path:
@@ -48,6 +51,30 @@ def face_pack_available(model_dir: Path, pack: str) -> bool:
 
 def resolve_face_model_dir(cache: Path) -> Path:
     for root in (*installed_recognition_model_roots(), *legacy_recognition_model_roots(), cache, bundled_face_model_dir()):
-        if face_pack_available(root, "buffalo_s"):
+        if face_pack_available(root, "buffalo_s") and _face_pack_matches_release(root):
             return root
     return cache
+
+
+def _face_pack_matches_release(root: Path) -> bool:
+    """Do not let a damaged v2 pack shadow intact v1/backup/local models.
+
+    Explicit overrides bypass this resolver and retain custom model support.
+    Verification runs only when a worker loads models, never during GUI binding.
+    """
+    try:
+        files = json.loads(_FACE_CONTRACT_PATH.read_text(encoding="utf-8"))["files"]
+        for name in BUFFALO_S_FILES:
+            path = root / "buffalo_s" / name
+            expected = files[f"buffalo_s/{name}"]
+            if path.stat().st_size != expected["size"]:
+                return False
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected["sha256"]:
+                return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False

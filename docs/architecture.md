@@ -352,6 +352,16 @@ spinning. Face/Pet workers retain their existing gate, priority, batches and
 cancellation; each releases its runtime in `finally`, including failed scans
 and library switching. No ONNX import or model initialization occurs on binding.
 
+An exhausted provider recovery or native inference runtime failure terminates
+only the owning scan worker. Shared runtime/model errors must retain their
+typed category through the People/Pets wrappers and pipelines; they must never
+be returned as an individual asset's `error`. A model contract failure pauses
+the worker and uses model recovery where repairable. Unfinished batches keep
+their original `pending`/`retry` state and do not enter the IndexCoordinator's
+failure journal or consume an asset retry. A fresh worker/session can resume
+that persisted work. Image/path/decode failures retain the existing individual
+asset retry policy.
+
 Default distributions use one CPU `onnxruntime` wheel. Separate CUDA, DirectML
 and OpenVINO extras/build profiles replace that wheel in isolated environments;
 they are never installed alongside it. macOS defaults to CPU because the tested

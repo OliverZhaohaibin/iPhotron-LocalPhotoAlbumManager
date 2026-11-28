@@ -283,7 +283,7 @@ class PetClusterPipeline:
                     )
                 )
                 continue
-            except PetPipelineInvariantError:
+            except (PetRuntimeUnavailableError, PetModelUnavailableError, PetPipelineInvariantError):
                 raise
             except Exception as exc:  # noqa: BLE001
                 if cancellation_requested():
@@ -384,9 +384,12 @@ class PetClusterPipeline:
                     embedding = embedder.embed(crop)
                     save_pet_thumbnail(image, bbox, thumbnail_path, padding_ratio=0.08)
                     created_thumbnail_paths.append(thumbnail_path)
-                except PetPipelineInvariantError:
+                except (PetRuntimeUnavailableError, PetModelUnavailableError, PetPipelineInvariantError):
                     for created_path in created_thumbnail_paths:
-                        created_path.unlink(missing_ok=True)
+                        try:
+                            created_path.unlink(missing_ok=True)
+                        except OSError:
+                            _LOGGER.warning("Failed to roll back pet thumbnail %s", created_path, exc_info=True)
                     raise
                 except Exception as exc:  # noqa: BLE001
                     for created_path in created_thumbnail_paths:
@@ -1169,13 +1172,16 @@ class _YoloxOnnxPetDetector:
             _validate_yolox_session_contract(self._session)
         except RecognitionRuntimeUnavailableError as exc:
             raise PetRuntimeUnavailableError(str(exc)) from exc
+        except RecognitionModelError as exc:
+            raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
         except Exception as exc:
             if isinstance(exc, PetPipelineInvariantError):
                 raise
             raise PetModelUnavailableError(
                 "Pet scanning unavailable: failed to initialize YOLOX detector model at "
                 f"{self._model_path} ({_error_reason(exc)}). Check the model cache, "
-                "disable unsupported execution providers, or reinstall the Pets AI runtime."
+                "disable unsupported execution providers, or reinstall the Pets AI runtime.",
+                reason="incomplete",
             ) from exc
 
     def detect(self, image) -> list[_DetectedPetBox]:
@@ -1210,6 +1216,10 @@ class _YoloxOnnxPetDetector:
         )
         try:
             outputs = self._session.run(None, {self._input_name: preprocessed.tensor})
+        except RecognitionRuntimeUnavailableError as exc:
+            raise PetRuntimeUnavailableError(str(exc)) from exc
+        except RecognitionModelError as exc:
+            raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures vary by backend
             raise PetInferenceError(f"Pet detector inference failed: {_error_reason(exc)}") from exc
         predictions = _flatten_predictions(outputs)
@@ -1306,6 +1316,10 @@ class _DinoV2Embedder:
             outputs = self._session.run(
                 [_EMBEDDER_MANIFEST["output_name"]], {_EMBEDDER_MANIFEST["input_name"]: tensor}
             )
+        except RecognitionRuntimeUnavailableError as exc:
+            raise PetRuntimeUnavailableError(str(exc)) from exc
+        except RecognitionModelError as exc:
+            raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
         except Exception as exc:  # noqa: BLE001 - native provider exceptions vary
             raise PetInferenceError(f"Pet embedding inference failed: {_error_reason(exc)}") from exc
         if len(outputs) != 1:
@@ -2031,16 +2045,20 @@ def _validate_dinov2_cache_metadata(model_path: Path, *, model_name: str) -> Non
         )
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         raise RuntimeError(
             f"Pet scanning unavailable: invalid DINOv2 metadata at {metadata_path}."
         ) from exc
     expected = dinov2_metadata(_EMBEDDER_MANIFEST, model_name)
-    if any(metadata.get(key) != value for key, value in expected.items()):
+    if (
+        not isinstance(metadata, dict)
+        or type(metadata.get("onnx_size")) is not int
+        or any(metadata.get(key) != value for key, value in expected.items())
+    ):
         raise RuntimeError(
             f"Pet scanning unavailable: DINOv2 metadata contract mismatch at {metadata_path}."
         )
-    size_matches = int(metadata.get("onnx_size") or -1) == model_path.stat().st_size
+    size_matches = metadata["onnx_size"] == model_path.stat().st_size
     hash_matches = str(metadata.get("onnx_sha256") or "").lower() == _file_sha256(model_path)
     if not size_matches or not hash_matches:
         raise RuntimeError(

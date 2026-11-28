@@ -294,6 +294,75 @@ Windows and Linux full native release runs, GUI/device performance and final
 sizes are also pending on their target hosts; policy or fixture tests do not
 establish those outcomes.
 
+## PR #953 risk regressions and release audit
+
+The [risk regression ledger](evidence/onnx-runtime/pr953-risk-regressions.md)
+records the failure propagation fix, persistent queue tests, model recovery
+edges, real CPU provider/legacy-space tests and remaining acceptance gaps.
+Every accelerator remains **Pending Manual Validation** for the complete
+hardware/GUI/packaged workflow. The existing two-image CoreML source probe and
+simulated provider tests do not qualify it for that workflow.
+
+All three Nuitka drivers explicitly collect both required contracts:
+`iPhoto/pets/model_manifest.json` and
+`iPhoto/recognition/recognition_package.json`. Models remain optional; an
+omitted model set uses extension provisioning and preserves recognition work.
+A bundled model set must match the complete release whitelist and identities.
+The artifact gate rejects extra models, training weights and reference tensors,
+including model files accidentally included from dependency sample directories.
+Production LTO remains enabled.
+
+`recognition_packaging.py artifact` now records native import dependencies and
+duplicate files of at least 1 MiB (content hash, paths and duplicate bytes).
+Duplicates require release review; the audit preserves the files. It rejects
+Torch libraries and CPU-profile CUDA payloads or linked CUDA dependencies,
+including cuFFT, cuRAND, cuSolver, cuSparse/Lt, NVRTC/builtins, nvJitLink,
+nvPTXCompiler, nvFatbin, NPP, nvJPEG, CUPTI, NCCL, cuFile, cuTensor, TensorRT,
+profiling and driver libraries. Non-CUDA profiles also reject CUDA native
+families. Ordinary CPU/CoreML system framework dependencies remain permitted.
+
+Before building, provide the static native inspector on PATH: macOS `otool`,
+Linux `readelf` or `llvm-readelf`, Windows `llvm-readobj`, `dumpbin` or
+`objdump`. The gate fails if it cannot inspect a detected native format.
+It reads [ELF dynamic entries](https://sourceware.org/binutils/docs/binutils/readelf.html)
+and [PE import tables](https://llvm.org/docs/CommandGuide/llvm-readobj.html#coff-imports)
+without executing the inspected program. System-transitive dependencies and
+libraries loaded only through runtime APIs still need target-host validation.
+The audit is not a substitute for signed native application acceptance.
+
+The default thread policy remains at most two intra-op threads per worker,
+one inter-op thread, sequential model calls and disabled idle spinning.
+`IPHOTO_RECOGNITION_THREADS` can lower that budget. A product high-throughput
+profile is deferred: qualifying it requires dedicated single- and dual-worker
+1/2/4-thread comparisons, CPU/RSS and end-to-end scan throughput, Gallery/Detail
+frame latency under load, and startup/recognition-gate timing. The existing
+explicit `RecognitionRuntimePolicy` can support isolated headless experiments;
+no desktop profile, activation gate or startup timing changes in this fix.
+
+Run the real CPU/legacy and mixed persistence checks against local verified
+models and previously exported reference tensors (no Torch import required):
+
+```bash
+IPHOTO_RUN_DINOV2_MODEL_CONTRACT=1 \
+IPHOTO_DINOV2_CONTRACT_DIR=dist/onnx-migration/models/pets/embedding/dinov2_vits14 \
+IPHOTO_RECOGNITION_CONTRACT_MODEL_ROOT=dist/onnx-migration/models \
+.venv/bin/python -m pytest -q \
+  tests/contracts/test_dinov2_onnx_contract.py \
+  tests/contracts/test_recognition_provider_contract.py
+```
+
+On a real target device, add
+`IPHOTO_DINOV2_CONTRACT_PROVIDERS=CUDAExecutionProvider` (or CoreML, DML,
+OpenVINO's full provider name). Unavailable requested providers fail; CPU
+fallback cannot qualify an accelerator. Inspect actual device execution and
+performance separately: registration with some CPU graph partitions does not
+prove GPU execution. Tests cover four model outputs, normalized embedding
+cosine, pairwise distance, unchanged 0.42/0.63 clustering decisions with mixed
+legacy/new vectors, and persisted generation/name/cover/hidden/card order.
+The 1e-3 numeric test tolerance is a qualification gate, not a changed
+production clustering threshold. A disposable copy of a representative
+historical library remains part of manual acceptance.
+
 ## Actual source measurements and verification
 
 [Source DINOv2 microbenchmark](evidence/onnx-runtime/source-benchmark.json),

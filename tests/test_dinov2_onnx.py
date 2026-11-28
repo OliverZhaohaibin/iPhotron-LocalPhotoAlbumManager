@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from types import SimpleNamespace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -172,3 +173,88 @@ def test_missing_runtime_is_reported_before_missing_models_or_download(tmp_path,
     with pytest.raises(PetRuntimeUnavailableError):
         pipeline._DinoV2Embedder(tmp_path, model_name="dinov2_vits14")
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("metadata", [None, [], "text", 42, True, {"onnx_size": "wrong"}])
+def test_well_formed_json_with_wrong_types_uses_model_recovery(model, metadata):
+    model.with_suffix(".onnx.metadata.json").write_text(json.dumps(metadata))
+    with pytest.raises(PetModelUnavailableError) as failed:
+        embedder(model)
+    assert failed.value.reason == "incomplete"
+
+
+def test_invalid_metadata_encoding_is_a_typed_model_failure(model):
+    model.with_suffix(".onnx.metadata.json").write_bytes(b"\xff\xfe")
+    with pytest.raises(PetModelUnavailableError) as failed:
+        embedder(model)
+    assert failed.value.reason == "incomplete"
+
+
+@pytest.mark.parametrize("fault", ["empty", "json_type", "metadata_missing", "corrupt"])
+def test_bad_active_embedding_directory_does_not_shadow_recovery_backup(model, tmp_path, monkeypatch, fault):
+    import shutil
+
+    relative = Path("embedding/dinov2_vits14")
+    active, backup = tmp_path / "active", tmp_path / "backup"
+    good_dir, bad_dir = backup / relative, active / relative
+    good_dir.mkdir(parents=True)
+    bad_dir.mkdir(parents=True)
+    for source in (model, model.with_suffix(".onnx.metadata.json")):
+        shutil.copyfile(source, good_dir / source.name)
+        if fault != "empty":
+            shutil.copyfile(source, bad_dir / source.name)
+    if fault == "json_type":
+        (bad_dir / "dinov2_vits14.onnx.metadata.json").write_text("[]")
+    elif fault == "metadata_missing":
+        (bad_dir / "dinov2_vits14.onnx.metadata.json").unlink()
+    elif fault == "corrupt":
+        (bad_dir / model.name).write_bytes(b"bad ONNX")
+    monkeypatch.delenv("IPHOTO_PET_MODEL_DIR", raising=False)
+    monkeypatch.setattr(pipeline, "pet_model_search_roots", lambda: (active, backup))
+    monkeypatch.setattr(pipeline, "user_pet_model_cache_dir", lambda: tmp_path / "cache")
+    assert pipeline.resolve_pet_model_path(relative, directory=True) == good_dir
+    assert (good_dir / model.name).read_bytes() == model.read_bytes()
+
+
+@pytest.mark.parametrize("section", ["root", "detector", "embedder"])
+@pytest.mark.parametrize("value", [None, [], "text", 17, True])
+def test_manifest_json_types_raise_contract_error(monkeypatch, section, value):
+    from copy import deepcopy
+    from iPhoto.pets import model_contract
+
+    manifest = deepcopy(model_contract.PET_MODEL_MANIFEST)
+    if section == "root":
+        manifest = value
+    else:
+        manifest[section] = value
+    manifest_path = Path(model_contract.__file__).with_name("model_manifest.json")
+    original = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **kw:
+                        json.dumps(manifest) if self == manifest_path else original(self, *a, **kw))
+    with pytest.raises(PetPipelineInvariantError):
+        model_contract._load_pet_model_manifest()
+
+
+@pytest.mark.parametrize("component", ["detector", "embedder"])
+@pytest.mark.parametrize("failure,expected", [
+    (RecognitionRuntimeUnavailableError("runtime stopped"), PetRuntimeUnavailableError),
+    (RecognitionModelError("model contract"), PetModelUnavailableError),
+])
+def test_inference_preserves_terminal_error_categories(model, component, failure, expected):
+    session = Session()
+
+    def fail(*_):
+        raise failure
+
+    session.run = fail
+    if component == "embedder":
+        value = embedder(model, session)
+        infer = value.embed
+    else:
+        value = pipeline._YoloxOnnxPetDetector.__new__(pipeline._YoloxOnnxPetDetector)
+        value._session = session
+        value._input_name = "image"
+        value._input_size = (416, 416)
+        infer = value._detect_single_image
+    with pytest.raises(expected):
+        infer(Image.new("RGB", (128, 128)))

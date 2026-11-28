@@ -20,6 +20,7 @@ import numpy as np
 from iPhoto.recognition.onnx_runtime import (
     RecognitionModelError,
     RecognitionOnnxRuntime,
+    RecognitionRuntimeUnavailableError,
 )
 from iPhoto.recognition.promotion import (
     PROMOTION_CONFIRMED,
@@ -155,6 +156,12 @@ class FaceClusterPipeline:
                 image = load_image_rgb(image_path)
                 image_bgr = pil_image_to_bgr(image)
                 detected_faces = face_app.get(image_bgr)
+            except RecognitionRuntimeUnavailableError as exc:
+                raise FaceRuntimeUnavailableError(str(exc)) from exc
+            except RecognitionModelError as exc:
+                raise FaceModelUnavailableError(str(exc), "incomplete") from exc
+            except (FaceRuntimeUnavailableError, FaceModelUnavailableError):
+                raise
             except PeopleImageLoadError as exc:
                 if cancellation_requested():
                     break
@@ -176,7 +183,7 @@ class FaceClusterPipeline:
             except Exception as exc:
                 if cancellation_requested():
                     break
-                _LOGGER.exception("Face detection failed for %s", image_path)
+                _LOGGER.exception("Face detection failed for %s", asset_rel)
                 results.append(
                     DetectedAssetFaces(
                         asset_id=asset_id,

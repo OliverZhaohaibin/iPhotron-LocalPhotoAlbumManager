@@ -13,6 +13,7 @@ import importlib.metadata
 import json
 import re
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
@@ -25,6 +26,19 @@ ORT_DISTRIBUTIONS = {
     "openvino": "onnxruntime-openvino",
 }
 FORBIDDEN = {"torch", "torchvision", "torchaudio", "triton", "pytorch-triton"}
+MODEL_CONTRACT = ROOT / "src/iPhoto/recognition/recognition_package.json"
+# Match native family names, including versioned Linux SONAMEs and Windows
+# suffixes. Looking only for cudart/cublas/cudnn misses most CUDA payloads.
+CUDA_NATIVE = re.compile(
+    r"^(?:lib)?(?:cuda|cudart|cudadevrt|cudnn|cublas|cufft|curand|cusolver|cusparse|"
+    r"cupti|cufile|cudss|cutensor|cuquantum|custatevec|cutensornet|nccl|nvshmem|"
+    r"nvrtc|nvjitlink|nvptxcompiler|nvfatbin|nvblas|nvjpeg|npp|nvtoolsext|nvtx|"
+    r"nvinfer|nvonnxparser|nvparsers|nvidia|nvcuvid|nvencodeapi|nvml|nvvm|nvcomp|"
+    r"nvperf|nvoptix|pcsamplingutil|accinj|cuinj|cudbg)"
+    r"[a-z0-9_.-]*\.(?:so(?:\.[0-9.]+)?|dll|dylib|a|lib)$",
+    re.IGNORECASE,
+)
+LARGE_FILE_BYTES = 1024 * 1024
 
 
 def canonical(name: str) -> str:
@@ -79,7 +93,7 @@ def environment_report(profile: str, *, require_complete: bool = False) -> dict:
 
 
 def stage_models(source: Path, output: Path) -> dict:
-    contract = json.loads((ROOT / "src/iPhoto/recognition/recognition_package.json").read_text())
+    contract = json.loads(MODEL_CONTRACT.read_text())
     files = contract["files"]
     # Validate all input bytes before touching the destination. Only explicitly
     # whitelisted ONNX artifacts and metadata enter frozen bundles.
@@ -109,8 +123,102 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
+def forbidden_native(name: str, profile: str) -> bool:
+    normalized = name.replace("\\", "/").lower()
+    basename = normalized.rsplit("/", 1)[-1]
+    return (
+        forbidden(basename.split(".")[0], profile)
+        or basename.startswith(
+            ("libtorch", "torch_", "libc10", "c10", "libtorchvision", "libtorchaudio", "libtriton")
+        )
+        or (profile != "cuda" and bool(CUDA_NATIVE.fullmatch(basename)))
+        or (profile != "cuda" and Path(basename).suffix in {".cubin", ".fatbin", ".ptx"})
+        or (
+            profile == "cpu"
+            and any(
+                token in basename
+                for token in (
+                    "providers_cuda",
+                    "providers_tensorrt",
+                    "directml.dll",
+                    "providers_openvino",
+                )
+            )
+        )
+    )
+
+
+def _run_inspector(args: list[str]) -> str:
+    try:
+        return subprocess.run(
+            args,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"Native dependency inspection failed: {args}: {exc}") from exc
+
+
+def native_dependencies(path: Path, *, runner=None) -> dict | None:
+    """Read import tables without loading/executing the inspected binary."""
+    runner = runner or _run_inspector
+    with path.open("rb") as stream:
+        magic = stream.read(4)
+    if magic == b"\x7fELF":
+        tool = shutil.which("readelf") or shutil.which("llvm-readelf")
+        if not tool:
+            raise ValueError("Install readelf or llvm-readelf to audit ELF dependencies")
+        output = runner([tool, "--dynamic", "--wide", str(path)])
+        dependencies = re.findall(r"\(NEEDED\).*?\[([^\]]+)\]", output)
+        kind = "ELF"
+    elif magic in {
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xca\xfe\xba\xbf",
+        b"\xbf\xba\xfe\xca",
+    }:
+        tool = shutil.which("otool")
+        if not tool:
+            raise ValueError("Install otool to audit Mach-O dependencies")
+        output = runner([tool, "-L", str(path)])
+        dependencies = re.findall(r"^\s+(.+?)\s+\(compatibility version", output, re.MULTILINE)
+        # otool also prints a dylib's LC_ID_DYLIB, which is not a dependency.
+        dependencies = [name for name in dependencies if Path(name).name != path.name]
+        kind = "Mach-O"
+    elif magic[:2] == b"MZ":
+        tool = shutil.which("llvm-readobj") or shutil.which("dumpbin") or shutil.which("objdump")
+        if not tool:
+            raise ValueError("Install llvm-readobj, dumpbin or objdump to audit PE imports")
+        if "llvm-readobj" in Path(tool).name.lower():
+            output = runner([tool, "--coff-imports", str(path)])
+            dependencies = re.findall(
+                r"^\s*Name:\s*(.+?\.dll)\s*$", output, re.MULTILINE | re.IGNORECASE
+            )
+        elif "dumpbin" in Path(tool).name.lower():
+            output = runner([tool, "/DEPENDENTS", str(path)])
+            dependencies = re.findall(r"^\s*(\S+\.dll)\s*$", output, re.MULTILINE | re.IGNORECASE)
+        else:
+            output = runner([tool, "-p", str(path)])
+            dependencies = re.findall(r"DLL Name:\s*(\S+)", output, re.IGNORECASE)
+        kind = "PE"
+    else:
+        return None
+    return {"format": kind, "inspector": Path(tool).name, "dependencies": sorted(set(dependencies))}
+
+
 def artifact_report(tree: Path, profile: str, *, require_runtime: bool = True) -> dict:
     entries, bad, components = [], [], defaultdict(int)
+    native_imports, models = {}, {}
+    large_by_size = defaultdict(list)
+    model_contract = json.loads(MODEL_CONTRACT.read_text())["files"]
     ort_native = False
     for path in sorted(tree.rglob("*")):
         if not path.is_file():
@@ -125,20 +233,38 @@ def artifact_report(tree: Path, profile: str, *, require_runtime: bool = True) -
             for part in lower.split("/")
         ) or ("extension/models/" in lower and path.suffix.lower() in {".pt", ".pth"}):
             bad.append(relative)
-        if profile == "cpu" and any(
-            token in lower
-            for token in (
-                "providers_cuda",
-                "providers_tensorrt",
-                "cudnn",
-                "cublas",
-                "cudart",
-                "directml.dll",
-                "providers_openvino",
-            )
-        ):
+        if forbidden_native(relative, profile):
             bad.append(relative)
+        if "extension/models/" not in relative and path.suffix.lower() in {
+            ".onnx",
+            ".pt",
+            ".pth",
+            ".ckpt",
+            ".safetensors",
+        }:
+            bad.append(f"unexpected model resource: {relative}")
+        if not path.is_symlink():
+            imports = native_dependencies(path)
+            if imports is not None:
+                native_imports[relative] = imports
+                bad.extend(
+                    f"{relative} -> {name}"
+                    for name in imports["dependencies"]
+                    if forbidden_native(name, profile)
+                )
+        if "extension/models/" in relative:
+            name = relative.split("extension/models/", 1)[1]
+            expected = model_contract.get(name)
+            if (
+                expected is None
+                or path.stat().st_size != expected["size"]
+                or digest(path) != expected["sha256"]
+            ):
+                bad.append(f"unverified model resource: {relative}")
+            models[name] = relative
         size = 0 if path.is_symlink() else path.stat().st_size
+        if size >= LARGE_FILE_BYTES:
+            large_by_size[size].append(path)
         entries.append({"path": relative, "size": size})
         component = (
             "models"
@@ -159,8 +285,29 @@ def artifact_report(tree: Path, profile: str, *, require_runtime: bool = True) -
         }
     if bad:
         raise ValueError(f"Forbidden production payloads: {bad}")
+    if models and models.keys() != model_contract.keys():
+        raise ValueError(
+            f"Incomplete bundled model set: {sorted(model_contract.keys() - models.keys())}"
+        )
     if require_runtime and not ort_native:
         raise ValueError("ONNX Runtime native binding is missing from the standalone tree")
+    duplicates = []
+    for size, paths in large_by_size.items():
+        if len(paths) < 2:
+            continue
+        by_hash = defaultdict(list)
+        for path in paths:
+            by_hash[digest(path)].append(path.relative_to(tree).as_posix())
+        duplicates.extend(
+            {
+                "sha256": sha256,
+                "paths": names,
+                "size_each": size,
+                "duplicate_bytes": size * (len(names) - 1),
+            }
+            for sha256, names in by_hash.items()
+            if len(names) > 1
+        )
     return {
         "profile": profile,
         "standalone_bytes": sum(entry["size"] for entry in entries),
@@ -169,16 +316,20 @@ def artifact_report(tree: Path, profile: str, *, require_runtime: bool = True) -
         "largest_files": sorted(entries, key=lambda entry: (-entry["size"], entry["path"]))[:50],
         "torch_free": True,
         "ort_native_present": ort_native,
+        "native_imports": native_imports,
+        "duplicate_large_files": sorted(
+            duplicates, key=lambda item: (-item["duplicate_bytes"], item["paths"])
+        ),
         "model_files": [entry for entry in entries if "extension/models/" in entry["path"]],
     }
 
 
-def check_compilation_report(path: Path) -> None:
+def check_compilation_report(path: Path, profile: str = "cpu") -> None:
     report = ET.parse(path)
     bad = [
         node.attrib.get("name", "")
         for node in report.iter("module")
-        if node.attrib.get("name", "").split(".")[0] in FORBIDDEN
+        if forbidden(node.attrib.get("name", "").split(".")[0], profile)
     ]
     if bad:
         raise ValueError(f"Nuitka followed forbidden inference modules: {bad}")
@@ -208,14 +359,14 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("artifact requires an existing --tree")
             report = artifact_report(args.tree, args.profile)
             if args.nuitka_report:
-                check_compilation_report(args.nuitka_report)
+                check_compilation_report(args.nuitka_report, args.profile)
                 report["nuitka_report_sha256"] = digest(args.nuitka_report)
             if args.artifact:
                 report["artifact_bytes"] = args.artifact.stat().st_size
                 report["artifact_sha256"] = digest(args.artifact)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, ET.ParseError) as exc:
         parser.exit(2, f"Recognition packaging contract: {exc}\n")
     return 0
 

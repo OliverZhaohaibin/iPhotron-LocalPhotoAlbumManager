@@ -189,6 +189,11 @@ def test_v1_remains_usable_for_people_and_is_untouched_by_failed_v2_upgrade(pack
     before = {item.relative_to(legacy): item.read_bytes() for item in legacy.rglob("*") if item.is_file()}
     monkeypatch.setattr(recognition_model_paths, "installed_recognition_model_root", lambda: target)
     monkeypatch.setattr(module, "installed_recognition_model_root", lambda: target)
+    contract = legacy.parent / "face-contract.json"
+    contract.write_text(json.dumps({"files": {
+        f"buffalo_s/{name}": _identity(b"valid legacy People ONNX") for name in BUFFALO_S_FILES
+    }}))
+    monkeypatch.setattr(model_paths, "_FACE_CONTRACT_PATH", contract)
     assert model_paths.resolve_face_model_dir(target / "missing") == legacy
     path.write_bytes(b"interrupted ZIP")
     with pytest.raises(ExtensionInstallError):
@@ -207,6 +212,32 @@ def test_v1_archive_is_not_accepted_as_v2_even_when_outer_identity_is_trusted(pa
     with pytest.raises(ExtensionInstallError, match="incomplete"):
         installer.execute(RecognitionExtensionRequest(path), lambda *_: None)
     assert not target.exists()
+
+
+@pytest.mark.parametrize("section", ["root", "files", "components", "identity", "metadata"])
+@pytest.mark.parametrize("value", [None, [], "text", 42, True])
+def test_valid_json_with_wrong_types_cannot_replace_an_intact_installation(package, section, value):
+    path, target, files = package
+    module.RecognitionExtensionInstaller(_archive(path, files)).execute(
+        RecognitionExtensionRequest(path), lambda *_: None
+    )
+    before = {item.relative_to(target): item.read_bytes() for item in target.rglob("*") if item.is_file()}
+    manifest = json.loads(files["manifest.json"])
+    if section == "root":
+        manifest = value
+    elif section == "identity":
+        manifest["files"][next(iter(manifest["files"]))] = value
+    elif section == "metadata":
+        name = next(name for name in files if name.endswith(".metadata.json"))
+        files[name] = json.dumps(value).encode()
+        manifest["files"][name] = _identity(files[name])
+    else:
+        manifest[section] = value
+    files["manifest.json"] = json.dumps(manifest)
+    installer = module.RecognitionExtensionInstaller(_archive(path, files))
+    with pytest.raises(ExtensionInstallError):
+        installer.execute(RecognitionExtensionRequest(path), lambda *_: None)
+    assert before == {item.relative_to(target): item.read_bytes() for item in target.rglob("*") if item.is_file()}
 
 
 def test_unpublished_release_does_not_attempt_network_or_create_fake_url(tmp_path, monkeypatch):

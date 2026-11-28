@@ -13,8 +13,8 @@ All notable changes to **iPhotron** are documented in this file.
   Add isolated export/equivalence tooling and measured, verified ONNX model ZIP v2.
 - Preserve v1 People model reuse and all library state. The published v2 ZIP
   supports verified direct download and offline installation.
-- Add CPU inference/packaging CI contracts for Windows, Linux, Apple Silicon
-  and Intel macOS. Actual platform release execution/size acceptance remains
+- Add CPU inference/packaging CI contracts for Windows, Linux and Apple Silicon
+  macOS. Actual platform release execution/size acceptance remains
   pending; macOS Nuitka and signing are Pending Manual Validation.
 
 ## Unreleased — Windows Packaging Diagnostics

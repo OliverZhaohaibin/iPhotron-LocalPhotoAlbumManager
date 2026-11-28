@@ -157,7 +157,7 @@ library-owned state.
 | --- | --- | --- | --- |
 | Windows x64 | `onnxruntime`, CPU | Exclusive DirectML or CUDA build | Policy/native contracts; real OS/device run pending |
 | macOS Apple Silicon | `onnxruntime` 1.25.1, CPU | Explicit CoreML selection if advertised and initialized | Real CPU passed; source CoreML cosine ≥0.9999757 on cat/dog; sandbox cache failure recovered to CPU |
-| macOS Intel | `onnxruntime` 1.23.2, CPU, Python 3.12/3.13 | CoreML only if its wheel/device supports it | Source/packaging contracts; real Intel run pending |
+| macOS Intel | `onnxruntime` 1.23.2, CPU, Python 3.12/3.13 | CoreML only if its wheel/device supports it | Excluded from CI; real Intel manual validation pending |
 | Linux | `onnxruntime`, CPU | Exclusive CUDA or OpenVINO build | Policy/packaging contracts; real OS/device run pending |
 
 CUDA sessions disable TF32 to preserve FP32 computation. OpenVINO keeps one
@@ -316,6 +316,7 @@ frozen executable. No unmeasured cross-platform speed claim is made.
 Commands actually run and final result ledger are recorded in
 [verification results](evidence/onnx-runtime/verification.md). CI now exports
 and checks the exact model once in an isolated development job, then validates
-CPU inference and legacy embeddings without Torch on Linux, Windows, Apple
-Silicon and Intel macOS. Existing official YOLOX and Pets 50k/384-dimensional
-jobs remain. New workflow execution on remote runners is pending.
+CPU inference and legacy embeddings without Torch on Linux, Windows and Apple
+Silicon macOS. Intel macOS is excluded from the CI matrix. Existing official
+YOLOX and Pets 50k/384-dimensional jobs remain. New workflow execution on remote
+runners is pending.

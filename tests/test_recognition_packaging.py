@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -198,6 +199,144 @@ def test_native_dependency_audit_fails_closed_without_inspector(tmp_path, monkey
     monkeypatch.setattr(packaging.shutil, "which", lambda _: None)
     with pytest.raises(ValueError, match="Install readelf"):
         packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+
+
+@pytest.fixture
+def pe_discovery(tmp_path, monkeypatch):
+    packaging._vswhere_dumpbins.cache_clear()
+    for name in ("VCToolsInstallDir", "VSINSTALLDIR", "ProgramFiles(x86)", "ProgramFiles", "PROCESSOR_ARCHITEW6432"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(packaging.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(packaging.shutil, "which", lambda _: None)
+    binary = tmp_path / "build Python.exe"
+    binary.write_bytes(b"MZ00 fixture")
+    yield binary
+    packaging._vswhere_dumpbins.cache_clear()
+
+
+def _dumpbin_fixture(root, version="14.44.123", host="Hostx64", target="x64"):
+    path = root / f"VC/Tools/MSVC/{version}/bin/{host}/{target}/dumpbin.exe"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    return path
+
+
+@pytest.mark.parametrize("variable", ["VCToolsInstallDir", "VSINSTALLDIR"])
+def test_pe_audit_finds_msvc_tools_outside_path(pe_discovery, tmp_path, monkeypatch, variable):
+    root = tmp_path / "Visual Studio with spaces"
+    tool = _dumpbin_fixture(root)
+    _dumpbin_fixture(root, version="14.50.0", host="Hostx86", target="x86")
+    _dumpbin_fixture(root, version="14.9.0")
+    monkeypatch.setenv(variable, str(tool.parents[3] if variable == "VCToolsInstallDir" else root))
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        return "    KERNEL32.dll\n    c10.dll\n"
+
+    monkeypatch.setattr(packaging, "_run_inspector", runner)
+    report = packaging.native_dependencies(pe_discovery)
+    assert report["inspector_path"] == str(tool.resolve())
+    assert calls == [[str(tool.resolve()), "/DEPENDENTS", str(pe_discovery)]]
+    # Discovery must not weaken the existing final dependency gate.
+    with pytest.raises(ValueError, match="build Python.exe -> c10.dll"):
+        packaging.artifact_report(tmp_path, "cpu", require_runtime=False)
+
+
+@pytest.mark.parametrize("location", ["path", "ProgramFiles(x86)", "ProgramFiles"])
+def test_pe_audit_uses_vswhere_build_tools_and_caches_discovery(
+    pe_discovery, tmp_path, monkeypatch, location
+):
+    base = tmp_path / "Program Files with spaces"
+    vswhere = base / "Microsoft Visual Studio/Installer/vswhere.exe"
+    vswhere.parent.mkdir(parents=True)
+    vswhere.touch()
+    if location == "path":
+        monkeypatch.setattr(packaging.shutil, "which", lambda name: str(vswhere) if name == "vswhere" else None)
+    else:
+        monkeypatch.setenv(location, str(base))
+    root = tmp_path / "自定义 Visual Studio Build Tools"
+    old = _dumpbin_fixture(root, version="14.9.0")
+    selected = _dumpbin_fixture(root, version="14.44.123")
+    other_host = _dumpbin_fixture(root, version="14.50.0", host="Hostx86", target="x86")
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        if args[0] == str(vswhere.resolve()):
+            assert args[1:5] == ["-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"]
+            assert args[-1] == "-utf8"
+            return "\n".join(map(str, [old, other_host, selected])) + "\n"
+        assert args == [str(selected.resolve()), "/DEPENDENTS", str(pe_discovery)]
+        return "    KERNEL32.dll\n"
+
+    monkeypatch.setattr(packaging, "_run_inspector", runner)
+    for _ in range(2):
+        assert packaging.native_dependencies(pe_discovery)["inspector_path"] == str(selected.resolve())
+    assert sum(call[0] == str(vswhere.resolve()) for call in calls) == 1
+
+
+@pytest.mark.parametrize("failure", [OSError("cannot execute"), ValueError("inspection failed")])
+def test_pe_audit_continues_after_an_unusable_path_tool(pe_discovery, tmp_path, monkeypatch, failure):
+    broken = tmp_path / "llvm-readobj.exe"
+    tool = _dumpbin_fixture(tmp_path / "VS")
+    monkeypatch.setattr(packaging.shutil, "which", lambda name: str(broken) if name == "llvm-readobj" else None)
+    monkeypatch.setenv("VCToolsInstallDir", str(tool.parents[3]))
+
+    def runner(args):
+        if args[0] == str(broken):
+            raise failure
+        assert args[0] == str(tool)
+        return "    KERNEL32.dll\n"
+
+    assert packaging.native_dependencies(pe_discovery, runner=runner)["inspector_path"] == str(tool)
+
+
+def test_environment_preflight_records_a_working_native_inspector(pe_discovery, tmp_path, monkeypatch):
+    tool = _dumpbin_fixture(tmp_path / "VS")
+    monkeypatch.setenv("VSINSTALLDIR", str(tmp_path / "VS"))
+    monkeypatch.setattr(packaging.sys, "executable", str(pe_discovery))
+    monkeypatch.setattr(packaging, "environment_report", lambda *_a, **_kw: {"torch_free": True})
+    monkeypatch.setattr(packaging, "_run_inspector", lambda _: "    KERNEL32.dll\n")
+    output = tmp_path / "report.json"
+    assert packaging.main(["environment", "--check-native-inspector", "--output", str(output)]) == 0
+    report = json.loads(output.read_text())["native_inspector"]
+    assert report["inspector_path"] == str(tool)
+    assert report["format"] == "PE" and report["dependencies"] == ["KERNEL32.dll"]
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_environment_preflight_fails_closed_before_writing_report(pe_discovery, tmp_path, monkeypatch, unreadable):
+    monkeypatch.setattr(packaging.sys, "executable", str(pe_discovery))
+    monkeypatch.setattr(packaging, "environment_report", lambda *_a, **_kw: {"torch_free": True})
+    if unreadable:
+        monkeypatch.setattr(packaging.shutil, "which", lambda name: "dumpbin.exe" if name == "dumpbin" else None)
+        monkeypatch.setattr(packaging, "_run_inspector", lambda _: "unrecognized output")
+    output = tmp_path / "report.json"
+    with pytest.raises(SystemExit) as failed:
+        packaging.main(["environment", "--check-native-inspector", "--output", str(output)])
+    assert failed.value.code == 2
+    assert not output.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires a real Windows PE and MSVC installation")
+def test_real_windows_pe_audit_without_developer_path(monkeypatch):
+    if not any(
+        (Path(os.environ.get(name, "")) / "Microsoft Visual Studio/Installer/vswhere.exe").is_file()
+        for name in ("ProgramFiles(x86)", "ProgramFiles")
+    ):
+        pytest.skip("Visual Studio Installer is not installed")
+    monkeypatch.setattr(packaging.shutil, "which", lambda _: None)
+    monkeypatch.delenv("VCToolsInstallDir", raising=False)
+    monkeypatch.delenv("VSINSTALLDIR", raising=False)
+    packaging._vswhere_dumpbins.cache_clear()
+    try:
+        report = packaging.check_native_inspector()
+        assert report["format"] == "PE" and report["dependencies"]
+        assert report["inspector"].lower() == "dumpbin.exe"
+        assert Path(report["inspector_path"]).is_absolute()
+    finally:
+        packaging._vswhere_dumpbins.cache_clear()
 
 
 def test_duplicate_large_files_are_reported_without_deleting_them(tmp_path, monkeypatch):

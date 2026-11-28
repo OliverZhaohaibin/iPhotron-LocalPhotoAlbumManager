@@ -49,11 +49,12 @@ def face_pack_available(model_dir: Path, pack: str) -> bool:
         return False
 
 
-def resolve_face_model_dir(cache: Path) -> Path:
+def resolve_face_model_dir(cache: Path) -> Path | None:
+    """Return only verified official models; explicit custom roots bypass lookup."""
     for root in (*installed_recognition_model_roots(), *legacy_recognition_model_roots(), cache, bundled_face_model_dir()):
         if face_pack_available(root, "buffalo_s") and _face_pack_matches_release(root):
             return root
-    return cache
+    return None
 
 
 def _face_pack_matches_release(root: Path) -> bool:

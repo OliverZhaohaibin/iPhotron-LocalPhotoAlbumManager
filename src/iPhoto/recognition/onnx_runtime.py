@@ -6,6 +6,7 @@ There is no process singleton: worker teardown releases every native session.
 
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import logging
@@ -49,9 +50,14 @@ class RecognitionModelError(RuntimeError):
     """An unreadable or unsupported model must be repaired, not retried on a GPU."""
 
 
+def is_resource_exhaustion(exc: Exception) -> bool:
+    """Allocation exhaustion is worker-wide, including NumPy MemoryError subclasses."""
+    return isinstance(exc, MemoryError) or (isinstance(exc, OSError) and exc.errno == errno.ENOMEM)
+
+
 def _provider_failure(exc: Exception) -> bool:
     """Only recognized provider/device failures permit a CPU retry."""
-    if type(exc).__name__ in _MODEL_ERRORS:
+    if is_resource_exhaustion(exc) or type(exc).__name__ in _MODEL_ERRORS:
         return False
     detail = str(exc).casefold()
     return (
@@ -245,6 +251,10 @@ class ManagedOnnxSession:
             try:
                 return self._session.run(output_names, input_feed, run_options)
             except Exception as exc:
+                if is_resource_exhaustion(exc):
+                    self._fail(RecognitionRuntimeUnavailableError(
+                        f"ONNX inference resources exhausted: {exc}"
+                    ), exc)
                 if type(exc).__name__ in _MODEL_ERRORS:
                     self._fail(RecognitionModelError(f"ONNX model contract failed: {exc}"), exc)
                 if _provider_failure(exc):

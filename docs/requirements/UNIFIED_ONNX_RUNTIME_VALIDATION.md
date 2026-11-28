@@ -323,7 +323,18 @@ families. Ordinary CPU/CoreML system framework dependencies remain permitted.
 
 Before building, provide the static native inspector on PATH: macOS `otool`,
 Linux `readelf` or `llvm-readelf`, Windows `llvm-readobj`, `dumpbin` or
-`objdump`. The gate fails if it cannot inspect a detected native format.
+`objdump`. Windows also discovers `dumpbin.exe` through `VCToolsInstallDir`,
+`VSINSTALLDIR`, or `vswhere` on PATH/in the standard Visual Studio Installer
+directory (including standalone Build Tools). Host-native candidates and newer
+toolsets take precedence within each MSVC source; unusable executables fall
+through to the next candidate. All calls use absolute executable paths.
+The Windows driver runs `recognition_packaging.py environment` with
+`--check-native-inspector` before model staging, optional native rebuilds or
+Nuitka. It reads the selected Python executable's actual PE imports and records
+the inspector path and dependencies in `recognition-dependencies.json`.
+Missing/unusable inspectors fail this preflight. The final artifact audit still
+inspects all detected native files and fails closed; preflight never replaces it.
+The gate fails if it cannot inspect a detected native format.
 It reads [ELF dynamic entries](https://sourceware.org/binutils/docs/binutils/readelf.html)
 and [PE import tables](https://llvm.org/docs/CommandGuide/llvm-readobj.html#coff-imports)
 without executing the inspected program. System-transitive dependencies and

@@ -205,9 +205,9 @@ $OutputDir = (Get-Item -LiteralPath $OutputDir).FullName
 $compilationReport = Join-Path $OutputDir 'nuitka-compilation-report.xml'
 
 & $PythonExe @pythonPrefixArgs (Join-Path $repoRoot 'tools\recognition_packaging.py') environment `
-    --require-complete --profile $OrtProfile --output (Join-Path $OutputDir 'recognition-dependencies.json')
+    --require-complete --check-native-inspector --profile $OrtProfile --output (Join-Path $OutputDir 'recognition-dependencies.json')
 if ($LASTEXITCODE -ne 0) {
-    throw 'Recognition build environment contract failed. Use an isolated PyTorch-free venv.'
+    throw 'Recognition build preflight failed. Check the PyTorch-free venv and native dependency inspector.'
 }
 $stagedModels = ""
 if ($RecognitionModelDir) {

@@ -372,7 +372,7 @@ def test_face_pipeline_reports_unreadable_image_without_error_traceback(
     assert "Face detection failed" not in caplog.text
 
 
-@pytest.mark.parametrize("fallback", ["v2-backup", "v1", "v1-backup", "bundled"])
+@pytest.mark.parametrize("fallback", ["v2-backup", "v1", "v1-backup", "cache", "bundled"])
 @pytest.mark.parametrize("damage", ["corrupt", "incomplete"])
 def test_invalid_active_people_models_use_verified_fallback(tmp_path, monkeypatch, fallback, damage):
     import hashlib
@@ -384,6 +384,7 @@ def test_invalid_active_people_models_use_verified_fallback(tmp_path, monkeypatc
         "v2-backup": tmp_path / "v2/.backup/models",
         "v1": tmp_path / "v1/models",
         "v1-backup": tmp_path / "v1/.backup/models",
+        "cache": tmp_path / "cache",
         "bundled": tmp_path / "bundled",
     }
     identities = {}
@@ -405,6 +406,38 @@ def test_invalid_active_people_models_use_verified_fallback(tmp_path, monkeypatc
     monkeypatch.setattr(model_paths, "legacy_recognition_model_roots", lambda: (roots["v1"], roots["v1-backup"]))
     monkeypatch.setattr(model_paths, "bundled_face_model_dir", lambda: roots["bundled"])
     assert model_paths.resolve_face_model_dir(tmp_path / "cache") == roots[fallback]
+
+
+@pytest.mark.parametrize("damage", ["missing", "empty", "same-size-corrupt", "wrong-size", "incomplete"])
+def test_no_verified_face_models_never_returns_unverified_cache(tmp_path, monkeypatch, damage):
+    import hashlib
+    import json
+    from iPhoto.people import model_paths
+
+    cache = tmp_path / "cache"
+    files = {}
+    for name in model_paths.BUFFALO_S_FILES:
+        content = f"official {name}".encode()
+        files[f"buffalo_s/{name}"] = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        if damage == "missing":
+            continue
+        path = cache / "buffalo_s" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes({
+            "empty": b"", "same-size-corrupt": b"x" * len(content),
+            "wrong-size": b"x", "incomplete": content,
+        }[damage])
+    if damage == "incomplete":
+        (cache / "buffalo_s" / model_paths.BUFFALO_S_FILES[0]).unlink()
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps({"files": files}))
+    monkeypatch.setattr(model_paths, "_FACE_CONTRACT_PATH", contract)
+    monkeypatch.setattr(model_paths, "installed_recognition_model_roots", lambda: ())
+    monkeypatch.setattr(model_paths, "legacy_recognition_model_roots", lambda: ())
+    monkeypatch.setattr(model_paths, "bundled_face_model_dir", lambda: tmp_path / "missing-bundle")
+    before = {path: path.read_bytes() for path in cache.rglob("*") if path.is_file()}
+    assert model_paths.resolve_face_model_dir(cache) is None
+    assert before == {path: path.read_bytes() for path in cache.rglob("*") if path.is_file()}
 
 
 def test_build_manual_face_record_saves_requested_box_without_face_detection(

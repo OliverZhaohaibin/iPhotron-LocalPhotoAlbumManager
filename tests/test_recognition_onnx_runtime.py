@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -199,6 +200,43 @@ def test_arbitrary_inference_error_does_not_retry_or_change_providers(monkeypatc
     )
     with pytest.raises(ValueError, match="bad input"):
         session.run(None, {})
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("providers", [[runtime.CPU], ["CUDAExecutionProvider"]])
+@pytest.mark.parametrize("failure", [
+    MemoryError(),
+    type("ArrayMemoryError", (MemoryError,), {})("CUDA failure: allocation exhausted"),
+    OSError(errno.ENOMEM, "cudnn host allocation exhausted"),
+])
+def test_resource_exhaustion_is_terminal_without_cpu_reallocation(monkeypatch, providers, failure):
+    _, _, attempts = fake_ort(
+        monkeypatch, available=[runtime.CPU, "CUDAExecutionProvider"],
+        construct=lambda selected: FakeSession(selected, failure),
+    )
+    owner = runtime.RecognitionOnnxRuntime()
+    session = owner.create_session(Path("model.onnx"), providers=providers)
+    with pytest.raises(runtime.RecognitionRuntimeUnavailableError) as first:
+        session.run(None, {})
+    with pytest.raises(runtime.RecognitionRuntimeUnavailableError) as repeated:
+        session.run(None, {})
+    assert repeated.value is first.value
+    assert first.value.__cause__ is failure
+    assert len(attempts) == 1 and session._session is None
+    assert session.fallback_reason is None
+    owner.close()
+    assert session._failure is None
+
+
+def test_resource_exhaustion_during_creation_does_not_trigger_device_recovery(monkeypatch):
+    def construct(_):
+        raise MemoryError("cudnn host allocation exhausted")
+
+    _, _, attempts = fake_ort(
+        monkeypatch, available=[runtime.CPU, "CUDAExecutionProvider"], construct=construct,
+    )
+    with pytest.raises(runtime.RecognitionRuntimeUnavailableError):
+        runtime.RecognitionOnnxRuntime().create_session(Path("model.onnx"), providers=["CUDAExecutionProvider"])
     assert len(attempts) == 1
 
 

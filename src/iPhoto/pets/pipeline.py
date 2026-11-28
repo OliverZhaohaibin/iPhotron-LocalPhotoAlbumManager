@@ -26,6 +26,7 @@ from iPhoto.recognition.onnx_runtime import (
     RecognitionModelError,
     RecognitionOnnxRuntime,
     RecognitionRuntimeUnavailableError,
+    is_resource_exhaustion,
 )
 from iPhoto.utils.pathutils import LibraryAssetPathError, resolve_library_asset_path
 from iPhoto.utils.recognition_model_paths import installed_recognition_model_roots
@@ -293,6 +294,8 @@ class PetClusterPipeline:
             except (PetRuntimeUnavailableError, PetModelUnavailableError, PetPipelineInvariantError):
                 raise
             except Exception as exc:  # noqa: BLE001
+                if is_resource_exhaustion(exc):
+                    raise PetRuntimeUnavailableError(_error_reason(exc)) from exc
                 if cancellation_requested():
                     break
                 results.append(
@@ -408,6 +411,8 @@ class PetClusterPipeline:
                                 created_path,
                                 exc_info=True,
                             )
+                    if is_resource_exhaustion(exc):
+                        raise PetRuntimeUnavailableError(_error_reason(exc)) from exc
                     results.append(
                         DetectedAssetPets(
                             asset_id=asset_id,
@@ -1221,6 +1226,8 @@ class _YoloxOnnxPetDetector:
         except RecognitionModelError as exc:
             raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
         except Exception as exc:  # noqa: BLE001 - provider failures vary by backend
+            if is_resource_exhaustion(exc):
+                raise PetRuntimeUnavailableError(_error_reason(exc)) from exc
             raise PetInferenceError(f"Pet detector inference failed: {_error_reason(exc)}") from exc
         predictions = _flatten_predictions(outputs)
         boxes: list[_DetectedPetBox] = []
@@ -1321,6 +1328,8 @@ class _DinoV2Embedder:
         except RecognitionModelError as exc:
             raise PetModelUnavailableError(str(exc), reason="incomplete") from exc
         except Exception as exc:  # noqa: BLE001 - native provider exceptions vary
+            if is_resource_exhaustion(exc):
+                raise PetRuntimeUnavailableError(_error_reason(exc)) from exc
             raise PetInferenceError(f"Pet embedding inference failed: {_error_reason(exc)}") from exc
         if len(outputs) != 1:
             raise PetPipelineInvariantError("DINOv2 output count mismatch.")

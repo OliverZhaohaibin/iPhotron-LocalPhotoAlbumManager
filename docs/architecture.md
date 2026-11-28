@@ -353,7 +353,10 @@ cancellation; each releases its runtime in `finally`, including failed scans
 and library switching. No ONNX import or model initialization occurs on binding.
 
 An exhausted provider recovery or native inference runtime failure terminates
-only the owning scan worker. Shared runtime/model errors must retain their
+only the owning scan worker. Explicit allocation exhaustion (`MemoryError`,
+including subclasses, and `OSError` with `ENOMEM`) is a runtime failure, including
+in inference preprocessing/postprocessing; it does not trigger a device retry.
+Shared runtime/model errors must retain their
 typed category through the People/Pets wrappers and pipelines; they must never
 be returned as an individual asset's `error`. A model contract failure pauses
 the worker and uses model recovery where repairable. Unfinished batches keep
@@ -960,6 +963,10 @@ Local lookup also retains the previous installation under `.backup/models`
 while an interrupted promotion is recoverable. Bundled model data is a read-only
 fallback, not the installer target.
 People also reuses intact v1 `buffalo_s/` models and its recovery backup.
+Official People lookup returns only size/SHA-256-verified packs. If none is
+usable, pending work enters the existing model recovery flow; an invalid cache
+is never returned as a fallback. Explicit custom Face overrides remain separate
+from official release identity verification.
 The installer never modifies v1; old clients retain their v1 archive and root.
 Pets only accepts the verified ONNX contract, so an old `.pt` never makes Pets
 ready. Upgrading models does not clear or migrate library databases.

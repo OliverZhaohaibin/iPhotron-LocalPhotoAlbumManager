@@ -11,11 +11,15 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -163,6 +167,91 @@ def _run_inspector(args: list[str]) -> str:
         raise ValueError(f"Native dependency inspection failed: {args}: {exc}") from exc
 
 
+def _ordered_dumpbins(paths) -> list[Path]:
+    host = (os.environ.get("PROCESSOR_ARCHITEW6432") or platform.machine()).casefold()
+    host = {"amd64": "x64", "aarch64": "arm64", "i386": "x86", "i686": "x86"}.get(host, host)
+
+    def priority(path):
+        version = tuple(-int(part) for part in re.findall(r"\d+", path.parents[3].name))
+        return (
+            path.parent.parent.name.casefold() != f"host{host}",
+            path.parent.name.casefold() != host,
+            version,
+            str(path).casefold(),
+        )
+
+    return sorted({path.resolve() for path in paths if path.is_file()}, key=priority)
+
+
+@lru_cache(maxsize=1)
+def _vswhere_dumpbins() -> tuple[Path, ...]:
+    # Ordinary PowerShell does not inherit the Visual Studio developer PATH.
+    # Cache discovery per audit process, rather than launching vswhere per DLL.
+    candidates = []
+    if located := shutil.which("vswhere"):
+        candidates.append(Path(located))
+    for variable in ("ProgramFiles(x86)", "ProgramFiles"):
+        if base := os.environ.get(variable):
+            candidates.append(Path(base) / "Microsoft Visual Studio/Installer/vswhere.exe")
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.is_file():
+            continue
+        try:
+            output = _run_inspector([
+                str(candidate.resolve()), "-products", "*", "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-find",
+                r"VC\Tools\MSVC\**\bin\Host*\*\dumpbin.exe", "-utf8",
+            ])
+        except ValueError:
+            continue
+        tools = _ordered_dumpbins(Path(line.strip()) for line in output.splitlines() if line.strip())
+        if tools:
+            return tuple(tools)
+    return ()
+
+
+def _pe_inspector_candidates():
+    for name in ("llvm-readobj", "dumpbin", "objdump"):
+        if located := shutil.which(name):
+            yield Path(located).resolve()
+    for variable, pattern in (
+        ("VCToolsInstallDir", "bin/Host*/*/dumpbin.exe"),
+        ("VSINSTALLDIR", "VC/Tools/MSVC/*/bin/Host*/*/dumpbin.exe"),
+    ):
+        if root := os.environ.get(variable):
+            yield from _ordered_dumpbins(Path(root).glob(pattern))
+    yield from _vswhere_dumpbins()
+
+
+def _inspect_pe(path: Path, runner) -> tuple[str, list[str]]:
+    failures, seen = [], set()
+    for tool in _pe_inspector_candidates():
+        if tool in seen:
+            continue
+        seen.add(tool)
+        name = tool.name.lower()
+        if "llvm-readobj" in name:
+            arguments = [str(tool), "--coff-imports", str(path)]
+            pattern = r"^\s*Name:\s*(.+?\.dll)\s*$"
+        elif "dumpbin" in name:
+            arguments = [str(tool), "/DEPENDENTS", str(path)]
+            pattern = r"^\s*(\S+\.dll)\s*$"
+        else:
+            arguments = [str(tool), "-p", str(path)]
+            pattern = r"DLL Name:\s*(\S+)"
+        try:
+            output = runner(arguments)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            failures.append(f"{tool}: {exc}")
+            continue
+        return str(tool), re.findall(pattern, output, re.MULTILINE | re.IGNORECASE)
+    raise ValueError(
+        "Install a working llvm-readobj, dumpbin or objdump to audit PE imports. "
+        "MSVC tools are also discovered through VCToolsInstallDir, VSINSTALLDIR and vswhere. "
+        + "; ".join(failures)
+    )
+
+
 def native_dependencies(path: Path, *, runner=None) -> dict | None:
     """Read import tables without loading/executing the inspected binary."""
     runner = runner or _run_inspector
@@ -194,24 +283,23 @@ def native_dependencies(path: Path, *, runner=None) -> dict | None:
         dependencies = [name for name in dependencies if Path(name).name != path.name]
         kind = "Mach-O"
     elif magic[:2] == b"MZ":
-        tool = shutil.which("llvm-readobj") or shutil.which("dumpbin") or shutil.which("objdump")
-        if not tool:
-            raise ValueError("Install llvm-readobj, dumpbin or objdump to audit PE imports")
-        if "llvm-readobj" in Path(tool).name.lower():
-            output = runner([tool, "--coff-imports", str(path)])
-            dependencies = re.findall(
-                r"^\s*Name:\s*(.+?\.dll)\s*$", output, re.MULTILINE | re.IGNORECASE
-            )
-        elif "dumpbin" in Path(tool).name.lower():
-            output = runner([tool, "/DEPENDENTS", str(path)])
-            dependencies = re.findall(r"^\s*(\S+\.dll)\s*$", output, re.MULTILINE | re.IGNORECASE)
-        else:
-            output = runner([tool, "-p", str(path)])
-            dependencies = re.findall(r"DLL Name:\s*(\S+)", output, re.IGNORECASE)
+        tool, dependencies = _inspect_pe(path, runner)
         kind = "PE"
     else:
         return None
-    return {"format": kind, "inspector": Path(tool).name, "dependencies": sorted(set(dependencies))}
+    return {
+        "format": kind,
+        "inspector": Path(tool).name,
+        "inspector_path": str(Path(tool).resolve()),
+        "dependencies": sorted(set(dependencies)),
+    }
+
+
+def check_native_inspector() -> dict:
+    report = native_dependencies(Path(sys.executable))
+    if report is None or (report["format"] == "PE" and not report["dependencies"]):
+        raise ValueError(f"Cannot read native imports from build Python: {sys.executable}")
+    return report
 
 
 def artifact_report(tree: Path, profile: str, *, require_runtime: bool = True) -> dict:
@@ -344,11 +432,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--nuitka-report", type=Path)
     parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--check-native-inspector", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.action == "environment":
             report = environment_report(args.profile, require_complete=args.require_complete)
+            if args.check_native_inspector:
+                report["native_inspector"] = check_native_inspector()
         elif args.action == "stage-models":
             if args.source is None:
                 parser.error("stage-models requires --source")

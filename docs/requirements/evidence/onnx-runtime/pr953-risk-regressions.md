@@ -113,6 +113,102 @@ and dylib with `otool`. It reported Apple system frameworks/libraries and ORT
 install names, with no CUDA or Torch native dependency. This inspected the
 installed source runtime only; no application artifact was built or measured.
 
+## Final merge-readiness follow-up
+
+Baseline: `b6fae045279798c3d4e0af4058f5be6923e7c86f`, retaining its user identity
+protection changes. This follow-up closes three residual paths without changing
+runtime composition, recognition scheduling, retry state machines or embeddings:
+
+- Windows preflight and final PE auditing share PATH/MSVC environment/vswhere
+  discovery. The driver now reads the selected build Python's actual import
+  table before model staging, optional native rebuilds or Nuitka compilation.
+  Discovery includes standalone Build Tools, absolute paths, host-native/newer
+  toolsets and fallback after an unusable candidate. Missing tools remain fatal;
+  final Torch/CUDA dependency inspection is retained. A Windows-only test also
+  probes real MSVC discovery with developer PATH and MSVC environment lookup
+  disabled. It is skipped locally and must run on the Windows CI host.
+- Official Face lookup returns only verified model packs or `None`. A nonempty
+  or same-size/hash-mismatched cache cannot reenter inference after verification
+  fails. A worker with queued work and no verified model requests existing model
+  recovery without constructing a pipeline. An empty queue produces no spurious
+  model-install request. Explicit custom overrides retain priority and the
+  separate invalid-override recovery path.
+- `MemoryError`, its subclasses and `OSError(errno.ENOMEM)` retain typed runtime
+  failure through native sessions and existing inference pipeline catches.
+  These explicit allocation failures take precedence over provider-message
+  matching and do not trigger another device allocation. Native/runtime doubles
+  and direct preprocessing/postprocessing injection cover Face, Pet detector and
+  embedder. Persistent tests verify first-asset and mid-batch failures preserve
+  pending/retry rows, admit no failure journal operation, release sessions and
+  staging, leave the other recognition kind intact and drain after restart.
+
+Commands run locally on macOS arm64, Python 3.12, temporary libraries/settings:
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q \
+  tests/test_recognition_onnx_runtime.py tests/test_recognition_runtime_recovery.py \
+  tests/test_people_pipeline.py tests/test_recognition_packaging.py \
+  tests/test_pet_packaging_contract.py tests/test_windows_packaging.py --tb=short
+```
+
+Result: **245 passed, 2 skipped in 18.46 s**. Both skips require Windows: the
+real PE/MSVC discovery probe and the existing GUI-subsystem diagnostic launcher.
+Packaging tests here use source/inspector doubles; the macOS test that actually
+stages/signs a fixture App Bundle was excluded.
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q \
+  tests/test_dinov2_onnx.py tests/test_face_cluster_pipeline.py \
+  tests/infrastructure/test_recognition_extension_installer.py \
+  tests/gui/ui/controllers/test_recognition_extension_controller.py \
+  tests/test_library_manager.py tests/gui/test_startup_import_boundary.py \
+  tests/application/test_runtime_context.py tests/application/test_library_session.py --tb=short
+```
+
+Result: **172 passed in 2.89 s**.
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q \
+  tests/test_people_service.py tests/test_pet_service.py tests/test_pet_remediation_contracts.py \
+  tests/test_recognition_operation_journal.py tests/test_recognition_merge_service.py \
+  tests/application/test_recognition_query_service.py \
+  tests/application/test_recognition_batch_queries.py \
+  tests/application/test_recognition_edit_service.py --tb=short
+```
+
+Result: **389 passed, 2 warnings in 32.37 s**. The warnings are the existing
+Python 3.12 multithreaded `fork()` warnings in operation-journal tests.
+
+```bash
+python3 tools/check_architecture.py
+.venv/bin/python -m pytest tests/architecture -q --tb=short
+git diff --check
+.venv/bin/ruff check --select F,E9 tools/recognition_packaging.py \
+  src/iPhoto/recognition/onnx_runtime.py src/iPhoto/people/model_paths.py \
+  src/iPhoto/people/pipeline.py src/iPhoto/pets/pipeline.py \
+  src/iPhoto/library/workers/face_scan_worker.py tests/test_recognition_onnx_runtime.py \
+  tests/test_recognition_runtime_recovery.py tests/test_people_pipeline.py \
+  tests/test_recognition_packaging.py tests/test_windows_packaging.py
+```
+
+Architecture checker and diff check passed; architecture pytest: **24 passed**.
+Ruff passed with the existing deprecated top-level configuration warning.
+
+```bash
+QT_QPA_PLATFORM=offscreen IPHOTO_RUN_DINOV2_MODEL_CONTRACT=1 \
+IPHOTO_DINOV2_CONTRACT_DIR=dist/onnx-migration/models/pets/embedding/dinov2_vits14 \
+IPHOTO_RECOGNITION_CONTRACT_MODEL_ROOT=dist/onnx-migration/models \
+.venv/bin/python -m pytest -q tests/contracts/test_dinov2_onnx_contract.py \
+  tests/contracts/test_recognition_provider_contract.py --tb=short
+```
+
+Result: **6 passed, 20 skipped in 1.94 s**. Real CPU inference and persisted
+mixed historical embeddings pass using the existing verified local models and
+frozen reference tensors, without importing Torch. Accelerator cases remain
+Pending Manual Validation. No actual macOS Nuitka build, App Bundle packaging,
+signing or release-size measurement was performed. CI acceptance must be checked
+against the final pushed fix commit; these local results do not claim CI success.
+
 ## Remaining acceptance
 
 - CoreML, CUDA, DirectML and OpenVINO: **Pending Manual Validation** on real

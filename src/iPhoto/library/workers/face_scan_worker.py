@@ -84,9 +84,8 @@ class FaceScanWorker(QThread):
 
         paths = face_library_paths(self._library_root)
         model_override = face_model_override_dir()
-        pipeline = FaceClusterPipeline(
-            model_root=model_override or resolve_face_model_dir(paths.model_dir)
-        )
+        model_root = model_override or resolve_face_model_dir(paths.model_dir)
+        pipeline = FaceClusterPipeline(model_root=model_root) if model_root is not None else None
         try:
             coordinator = self._people_service.coordinator
             if coordinator is None:
@@ -104,6 +103,10 @@ class FaceScanWorker(QThread):
                     continue
 
                 try:
+                    if pipeline is None:
+                        if not self._cancelled:
+                            self.modelUnavailable.emit("missing")
+                        return
                     committed = self._process_batch(
                         batch,
                         coordinator,

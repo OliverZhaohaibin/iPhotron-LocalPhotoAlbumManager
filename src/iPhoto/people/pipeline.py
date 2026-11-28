@@ -21,6 +21,7 @@ from iPhoto.recognition.onnx_runtime import (
     RecognitionModelError,
     RecognitionOnnxRuntime,
     RecognitionRuntimeUnavailableError,
+    is_resource_exhaustion,
 )
 from iPhoto.recognition.promotion import (
     PROMOTION_CONFIRMED,
@@ -181,6 +182,8 @@ class FaceClusterPipeline:
                 )
                 continue
             except Exception as exc:
+                if is_resource_exhaustion(exc):
+                    raise FaceRuntimeUnavailableError(str(exc) or type(exc).__name__) from exc
                 if cancellation_requested():
                     break
                 _LOGGER.exception("Face detection failed for %s", asset_rel)

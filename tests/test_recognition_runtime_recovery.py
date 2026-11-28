@@ -6,6 +6,7 @@ GPU hardware qualification. All photos and library state are disposable.
 
 from __future__ import annotations
 
+import errno
 import sqlite3
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from iPhoto.bootstrap.library_session import create_headless_library_session
 from iPhoto.cache.index_store import get_global_repository
 from iPhoto.library.workers import face_scan_worker, pet_scan_worker
 from iPhoto.people.pipeline import FaceClusterPipeline
+from iPhoto.people.errors import FaceModelUnavailableError, FaceRuntimeUnavailableError
 from iPhoto.pets import pipeline as pets
 from iPhoto.recognition import onnx_runtime as ort
 
@@ -24,6 +26,14 @@ from iPhoto.recognition import onnx_runtime as ort
 class Options:
     def add_session_config_entry(self, *_):
         pass
+
+
+def resource_failure(fault):
+    if fault == "memory":
+        return MemoryError()
+    if fault == "array_memory":
+        return type("ArrayMemoryError", (MemoryError,), {})("array allocation exhausted")
+    return OSError(errno.ENOMEM, "native allocation exhausted")
 
 
 def install_fault(monkeypatch, fault, failure_after=0):
@@ -45,6 +55,8 @@ def install_fault(monkeypatch, fault, failure_after=0):
 
         def run(self, *_args):
             calls.append(self.providers)
+            if fault in {"memory", "array_memory", "enomem"} and len(calls) > failure_after:
+                raise resource_failure(fault)
             if fault != "healthy" and len(calls) > failure_after and self.providers != [ort.CPU]:
                 raise RuntimeError("CUDA failure: device lost")
             if fault == "cpu_run" and self.providers == [ort.CPU]:
@@ -125,7 +137,7 @@ def attach_inference(monkeypatch, kind, stage):
 @pytest.mark.parametrize(
     "kind,stage", [("face", "face"), ("pet", "detector"), ("pet", "embedding")]
 )
-@pytest.mark.parametrize("fault", ["gpu_recovered", "cpu_create", "cpu_run", "model"])
+@pytest.mark.parametrize("fault", ["gpu_recovered", "cpu_create", "cpu_run", "model", "memory", "array_memory", "enomem"])
 @pytest.mark.parametrize("failure_after", [0, 2])
 def test_runtime_failure_preserves_persisted_queue_and_restart_recovers(
     tmp_path, monkeypatch, kind, stage, fault, failure_after
@@ -202,6 +214,8 @@ def test_runtime_failure_preserves_persisted_queue_and_restart_recovers(
         assert messages and not events
         assert failures == (["incomplete"] if fault == "model" else [])
         assert len(calls) == failure_after + (2 if fault in {"cpu_run", "model"} else 1)
+        if fault in {"memory", "array_memory", "enomem"}:
+            assert len(attempts) == 1
         with sqlite3.connect(tmp_path / ".iPhoto/recognition/operations.db") as db:
             assert db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 0
         assert not list((tmp_path / ".iPhoto/pets/thumbnails/.staging").glob("*"))
@@ -210,3 +224,140 @@ def test_runtime_failure_preserves_persisted_queue_and_restart_recovers(
         _, failures, events = run_worker()
         assert not failures and events
         assert all(value == "done" and other == "done" for _, value, other in stored_statuses())
+
+
+@pytest.mark.parametrize("kind,stage", [("face", "face"), ("pet", "detector"), ("pet", "embedding")])
+@pytest.mark.parametrize("fault", ["memory", "array_memory", "enomem"])
+def test_raw_inference_resource_failure_keeps_its_runtime_category(tmp_path, monkeypatch, kind, stage, fault):
+    image = Image.new("RGB", (128, 128))
+    failure = resource_failure(fault)
+
+    def fail(*_a, **_kw):
+        raise failure
+
+    if kind == "face":
+        image.save(tmp_path / "photo.jpg")
+        pipeline = FaceClusterPipeline(model_root=tmp_path / "models")
+        monkeypatch.setattr(pipeline, "_ensure_face_analysis", lambda: SimpleNamespace(get=fail))
+        try:
+            with pytest.raises(FaceRuntimeUnavailableError) as error:
+                pipeline.detect_faces_for_rows(
+                    [{"id": "asset", "rel": "photo.jpg"}], library_root=tmp_path, thumbnail_dir=tmp_path / "thumbs",
+                )
+        finally:
+            pipeline.close()
+    else:
+        native = SimpleNamespace(run=fail)
+        if stage == "detector":
+            wrapper = pets._YoloxOnnxPetDetector.__new__(pets._YoloxOnnxPetDetector)
+            wrapper._session, wrapper._input_name, wrapper._input_size = native, "image", (416, 416)
+            operation = wrapper._detect_single_image
+        else:
+            wrapper = pets._DinoV2Embedder.__new__(pets._DinoV2Embedder)
+            wrapper._session = native
+            operation = wrapper.embed
+        with pytest.raises(pets.PetRuntimeUnavailableError) as error:
+            operation(image)
+    assert error.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("stage,hook", [
+    ("detector", "_preprocess_yolox"), ("detector", "_flatten_predictions"),
+    ("embedding", "image_to_chw_float"), ("embedding", "normalize_vector"),
+])
+@pytest.mark.parametrize("fault", ["memory", "enomem"])
+def test_pet_pre_and_postprocessing_resource_failure_never_becomes_an_asset_error(
+    tmp_path, monkeypatch, stage, hook, fault
+):
+    Image.new("RGB", (128, 128)).save(tmp_path / "photo.jpg")
+    install_fault(monkeypatch, "healthy")
+    managed = attach_inference(monkeypatch, "pet", stage)
+    failure = resource_failure(fault)
+
+    def fail(*_a, **_kw):
+        raise failure
+
+    monkeypatch.setattr(pets, hook, fail)
+    pipeline = pets.PetClusterPipeline(model_root=tmp_path / "models")
+    try:
+        with pytest.raises(pets.PetRuntimeUnavailableError) as error:
+            pipeline.detect_pets_for_rows(
+                [{"id": "asset", "rel": "photo.jpg"}], library_root=tmp_path, thumbnail_dir=tmp_path / "thumbs",
+            )
+        assert error.value.__cause__ is failure
+    finally:
+        pipeline.close()
+    assert all(native._session is None for _, native in managed)
+
+
+@pytest.mark.parametrize("has_work", [True, False])
+def test_no_verified_official_face_model_keeps_queue_without_creating_pipeline(tmp_path, monkeypatch, has_work):
+    from iPhoto.people import model_paths, service
+
+    monkeypatch.delenv("IPHOTO_FACE_MODEL_DIR", raising=False)
+    cache = tmp_path / "models"
+    for name in model_paths.BUFFALO_S_FILES:
+        path = cache / "buffalo_s" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"nonempty but unverified official cache")
+    monkeypatch.setattr(service, "shared_face_model_dir", lambda: cache)
+    monkeypatch.setattr(model_paths, "installed_recognition_model_roots", lambda: ())
+    monkeypatch.setattr(model_paths, "legacy_recognition_model_roots", lambda: ())
+    monkeypatch.setattr(model_paths, "bundled_face_model_dir", lambda: tmp_path / "missing-bundle")
+    monkeypatch.setattr(face_scan_worker, "FaceClusterPipeline", lambda **_kw: pytest.fail("unverified models entered inference"))
+    rows = [
+        {"id": f"asset-{i}", "rel": f"photo-{i}.jpg", "media_type": 0, "face_status": state, "pet_status": "done"}
+        for i, state in enumerate(("pending", "retry"))
+    ] if has_work else []
+    repository = get_global_repository(tmp_path)
+    repository.write_rows(rows)
+    session = create_headless_library_session(tmp_path)
+    failures, events = [], []
+    try:
+        worker = face_scan_worker.FaceScanWorker(tmp_path, people_service=session.people)
+        worker.modelUnavailable.connect(failures.append)
+        worker.peopleIndexUpdated.connect(lambda: events.append(True))
+        worker.finish_input()
+        worker.run()
+    finally:
+        session.shutdown()
+    assert failures == (["missing"] if has_work else []) and not events
+    with sqlite3.connect(tmp_path / ".iPhoto/global_index.db") as db:
+        assert db.execute("SELECT face_status, pet_status FROM assets ORDER BY id").fetchall() == ([
+            ("pending", "done"), ("retry", "done")
+        ] if has_work else [])
+
+
+@pytest.mark.parametrize("usable", [True, False])
+def test_explicit_face_override_bypasses_official_lookup_and_retains_invalid_override_recovery(
+    tmp_path, monkeypatch, usable
+):
+    custom = tmp_path / "custom-models"
+    monkeypatch.setenv("IPHOTO_FACE_MODEL_DIR", str(custom))
+    monkeypatch.setattr(face_scan_worker, "resolve_face_model_dir", lambda _: pytest.fail("custom models entered official lookup"))
+
+    def analysis(pipeline):
+        assert pipeline._model_root == custom
+        if not usable:
+            raise FaceModelUnavailableError("missing custom model", "missing")
+        return SimpleNamespace(get=lambda _: [])
+
+    monkeypatch.setattr(FaceClusterPipeline, "_ensure_face_analysis", analysis)
+    Image.new("RGB", (128, 128)).save(tmp_path / "photo.jpg")
+    get_global_repository(tmp_path).write_rows([
+        {"id": "asset", "rel": "photo.jpg", "media_type": 0, "face_status": "pending", "pet_status": "done"}
+    ])
+    session = create_headless_library_session(tmp_path)
+    failures = []
+    try:
+        worker = face_scan_worker.FaceScanWorker(tmp_path, people_service=session.people)
+        worker.modelUnavailable.connect(failures.append)
+        worker.finish_input()
+        worker.run()
+    finally:
+        session.shutdown()
+    assert failures == ([] if usable else ["invalid_override"])
+    with sqlite3.connect(tmp_path / ".iPhoto/global_index.db") as db:
+        assert db.execute("SELECT face_status, pet_status FROM assets").fetchone() == (
+            "done" if usable else "pending", "done"
+        )

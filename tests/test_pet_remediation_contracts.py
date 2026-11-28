@@ -1097,7 +1097,7 @@ def test_incremental_rescan_preserves_manual_cross_species_identity(
     assert event.operation_id is not None
     assert repository.get_runtime_commit(event.operation_id)["state_synced"] is True  # type: ignore[index]
     assert coordinator._journal.unfinished() == ()
-    assert f"Preserving mixed-species Pet identity {dog_identity}" in caplog.text
+    assert not [record for record in caplog.records if record.name == "iPhoto.pets.pipeline"]
 
     # The non-dominant species member must also keep the durable identity.
     # This is the regression case that previously fell through the species gate.
@@ -1121,7 +1121,100 @@ def test_incremental_rescan_preserves_manual_cross_species_identity(
     assert cat_event.operation_id is not None
     assert repository.get_runtime_commit(cat_event.operation_id)["state_synced"] is True  # type: ignore[index]
     assert coordinator._journal.unfinished() == ()
-    assert f"Preserving mixed-species Pet identity {dog_identity}" in caplog.text
+    assert not [record for record in caplog.records if record.name == "iPhoto.pets.pipeline"]
+
+
+@pytest.mark.parametrize("mutation", ["merge", "move"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_manual_cross_species_identity_survives_consolidation_rescan_and_restart(
+    tmp_path: Path,
+    mutation: str,
+    reverse: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    thumbnail = tmp_path / ".iPhoto" / "pets" / "thumbnails" / "cat.png"
+    thumbnail.parent.mkdir(parents=True, exist_ok=True)
+    thumbnail.write_bytes(b"durable cover")
+    cat = replace(
+        _detection("cat", asset_id="asset-cat"),
+        species_label="cat",
+        thumbnail_path="thumbnails/cat.png",
+    )
+    dog = _detection("dog", asset_id="asset-dog", embedding=np.asarray([0.0, 1.0, 0.0]))
+    detections = [cat, dog]
+    if reverse:
+        detections.reverse()
+    assert coordinator.submit_detected_batch(
+        [DetectedAssetPets(item.asset_id, item.asset_rel, [item]) for item in detections],
+        distance_threshold=0.1,
+    ) is not None
+    cat_id = repository.get_detection("cat").pet_id  # type: ignore[union-attr]
+    dog_id = repository.get_detection("dog").pet_id  # type: ignore[union-attr]
+    assert cat_id is not None and dog_id is not None and cat_id != dog_id
+    if mutation == "merge":
+        assert coordinator.merge_pets(cat_id, dog_id)
+    else:
+        assert coordinator.move_detection_to_pet("cat", dog_id) is not None
+    assert coordinator.rename_pet(dog_id, "Companion")
+    assert coordinator.set_pet_cover(dog_id, "cat")
+    assert coordinator.set_pet_hidden(dog_id, True)
+    state = repository.state_repository
+    assert state is not None
+    redirects = state.get_merge_redirect_map()
+    key_map = state.get_pet_key_map(item.pet_key for item in detections)
+    caplog.clear()
+    caplog.set_level("INFO", logger="iPhoto.pets.pipeline")
+
+    target = pet_pipeline.PET_CLUSTERING_PIPELINE_VERSION
+    assert coordinator.prepare_clustering_pipeline(clustering_pipeline_target=target) > 0
+    for rescan in (False, True):
+        coordinator = PetIndexCoordinator(tmp_path)
+        repository = coordinator._repository()
+        result = coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target=target, distance_threshold=0.1
+        )
+        assert result is not None
+        assert not repository.has_pending_clustering_consolidation(target_version=target)
+        assert repository.get_scan_metadata("clustering_consolidation_state") == "clean"
+        assert coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target=target, distance_threshold=0.1
+        ).processed_seed_count == 0
+        members = repository.get_all_detections()
+        assert len(members) == 2
+        assert {item.pet_id for item in members} == {dog_id}
+        assert {item.pet_key for item in members} == set(key_map)
+        assert {item.detection_id for item in members} == (
+            {"cat-rescan", "dog-rescan"} if rescan else {"cat", "dog"}
+        )
+        summaries = repository.get_pet_summaries(include_hidden=True)
+        assert len(summaries) == 1
+        assert summaries[0].pet_id == dog_id
+        assert summaries[0].name == "Companion"
+        assert summaries[0].is_hidden
+        assert summaries[0].asset_count == 2
+        state = repository.state_repository
+        assert state is not None
+        assert state.get_merge_redirect_map() == redirects
+        assert state.get_pet_key_map(key_map) == key_map
+        cover = state.get_cover(dog_id)
+        assert cover is not None and cover.is_custom
+        assert cover.pet_key == cat.pet_key
+        assert cover.detection_id == ("cat-rescan" if rescan else "cat")
+        assert thumbnail.read_bytes() == b"durable cover"
+        assert coordinator._journal.unfinished() == ()
+        if not rescan:
+            rescanned = [
+                replace(item, detection_id=f"{item.detection_id}-rescan") for item in detections
+            ]
+            assert coordinator.submit_detected_batch(
+                [DetectedAssetPets(item.asset_id, item.asset_rel, [item]) for item in rescanned],
+                distance_threshold=0.1,
+                clustering_pipeline_target=target,
+            ) is not None
+
+    assert not [record for record in caplog.records if record.name == "iPhoto.pets.pipeline"]
 
 
 def test_profile_candidate_index_has_strict_species_parity_with_usearch(
@@ -1864,6 +1957,81 @@ def test_local_consolidation_recovers_state_and_pipeline_metadata(
         ).fetchall()
     assert len(outbox_rows) == 1
     assert json.loads(outbox_rows[0][0])["changed_asset_ids"] == ["asset-a", "asset-b"]
+
+
+@pytest.mark.parametrize("fail_state_sync", [False, True])
+def test_consolidation_keeps_other_contract_members_and_cover_through_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_state_sync: bool,
+) -> None:
+    coordinator = PetIndexCoordinator(tmp_path)
+    repository = coordinator._repository()
+    dogs = [
+        _detection("dog-a", asset_id="asset-dog-a", pet_id="pet-dog"),
+        _detection("dog-b", asset_id="asset-dog-b", pet_id="pet-dog"),
+    ]
+    candidate = _detection("candidate", asset_id="asset-candidate", pet_id="pet-candidate")
+    cat = replace(
+        _detection("cat", asset_id="asset-cat", pet_id="pet-cat"),
+        species_label="cat",
+        embedding=np.asarray([0.0, 1.0]),
+        embedding_dim=2,
+        embedding_pipeline_version="other-embedding",
+        generation_id=1,
+        thumbnail_path="thumbnails/cat.png",
+    )
+    detections = [*dogs, candidate, cat]
+    repository.replace_all(detections, pet_pipeline.build_pet_records_from_detections(detections))
+    repository.activate_embedding_generation(
+        generation_id=dogs[0].generation_id,
+        embedding_pipeline_version=dogs[0].embedding_pipeline_version,
+        embedding_dimension=dogs[0].embedding_dim,
+    )
+    assert coordinator.merge_pets("pet-cat", "pet-dog")
+    assert coordinator.rename_pet("pet-dog", "Companion")
+    assert coordinator.set_pet_cover("pet-dog", "cat")
+    target = pet_pipeline.PET_CLUSTERING_PIPELINE_VERSION
+    coordinator.prepare_clustering_pipeline(clustering_pipeline_target=target)
+    state = repository.state_repository
+    assert state is not None
+
+    if fail_state_sync:
+
+        def fail_sync(*_args, **_kwargs) -> None:
+            raise sqlite3.OperationalError("injected mixed identity state sync failure")
+
+        monkeypatch.setattr(state, "sync_scan_results", fail_sync)
+        with pytest.raises(PetSnapshotCommittedError, match="durable state recovery"):
+            coordinator.consolidate_pending_clustering(
+                clustering_pipeline_target=target, distance_threshold=0.1
+            )
+        assert len(coordinator._journal.unfinished()) == 1
+    else:
+        result = coordinator.consolidate_pending_clustering(
+            clustering_pipeline_target=target, distance_threshold=0.1
+        )
+        assert result is not None and result.changed
+
+    recovered = PetIndexCoordinator(tmp_path)
+    repository = recovered._repository()
+    assert recovered._journal.unfinished() == ()
+    members = repository.get_all_detections()
+    assert {item.detection_id for item in members} == {item.detection_id for item in detections}
+    assert {item.pet_id for item in members} == {"pet-dog"}
+    pets = repository.get_all_pet_records()
+    assert len(pets) == 1
+    assert pets[0].detection_count == pets[0].sample_count == 4
+    assert pets[0].embedding_dim == 3
+    state = repository.state_repository
+    assert state is not None
+    profile = state.get_profile("pet-dog")
+    assert profile is not None and profile.sample_count == profile.evidence_asset_count == 4
+    cover = state.get_cover("pet-dog")
+    assert cover is not None and cover.is_custom and cover.pet_key == cat.pet_key
+    assert profile.name == "Companion"
+    assert state.get_merge_redirect_map() == {"pet-cat": "pet-dog"}
+    assert repository.get_scan_metadata("clustering_consolidation_state") == "clean"
 
 
 def _detection(

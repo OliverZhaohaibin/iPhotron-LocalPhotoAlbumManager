@@ -378,6 +378,21 @@ coordination state in the People state repository, not shared detection tables.
 People, Pets, and cross-kind merge/redirect services must reject identities
 whose hidden states differ, even when a caller bypasses the UI guard.
 
+Users control identity membership. Species is internal recognition metadata,
+not a user-facing identity category, control, or confirmation requirement. It
+must not restrict merging, assigning or moving detections, or naming identities.
+Species, similarity, embedding model/version/dimension,
+and generation may guide automatic inference; they must never reject or undo a
+saved user assignment. Identity record construction accepts mixed members by
+default. Exact durable keys and merge redirects take precedence over automatic
+compatibility checks during consolidation, rescans, snapshot rebuilds, and
+recovery. Profile arithmetic uses a comparable vector subset without dropping
+other members from identity counts or cover selection. Mixed composition is
+normal and produces no warning or routine preservation notice. Same-asset
+conflicts, hidden-state protection, reference integrity, and transaction/recovery
+guards remain binding; malformed model inputs and persistence failures retain
+their error handling.
+
 The dashboard stores one shared card order in `face_state.db` in
 `identity_card_orders`, keyed by identity kind and ID. The default layout
 interleaves cards by photo count while preserving the relative People order from

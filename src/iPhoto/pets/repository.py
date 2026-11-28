@@ -662,7 +662,6 @@ class PetRepository:
                 runtime_detections,
                 names_by_pet_id=names,
                 created_at_by_pet_id=created_at,
-                allow_mixed_identity_members=True,
             )
             for chunk in _chunked(affected_pet_ids, 500):
                 placeholders = ", ".join("?" for _ in chunk)
@@ -2226,27 +2225,51 @@ class PetRepository:
                 raise PetClusteringConsolidationCancelledError()
 
             affected_pet_ids = tuple(sorted(changed_old_pet_ids | changed_new_pet_ids))
-            deduplicated_pets = {
-                pet.pet_id: pet for pet in rebuilt_pets if pet.pet_id in changed_new_pet_ids
-            }
-            rebuilt_pets = [deduplicated_pets[pet_id] for pet_id in sorted(deduplicated_pets)]
             changed_asset_ids_tuple = tuple(dict.fromkeys(changed_asset_ids))
-            added = tuple(sorted(changed_new_pet_ids - changed_old_pet_ids))
-            removed = tuple(sorted(changed_old_pet_ids - changed_new_pet_ids))
-            updated = tuple(sorted(changed_old_pet_ids & changed_new_pet_ids))
-            commit_payload = {
-                "operation_kind": "pet_cluster_consolidate",
-                "clustering_pipeline_target": target,
-                "generation_id": generation_id,
-                "processed_seed_count": len(seed_ids),
-                "affected_pet_ids": list(affected_pet_ids),
-                "changed_pet_ids": list(affected_pet_ids),
-                "changed_asset_ids": list(changed_asset_ids_tuple),
-                "added_pet_ids": list(added),
-                "updated_pet_ids": list(updated),
-                "removed_pet_ids": list(removed),
-            }
             with closing(self._connect()) as conn:
+                # Matching uses the active contract, but an identity's snapshot
+                # and durable state must still include its other-contract members.
+                affected_rows = self._select_detections_by_pet_ids(conn, affected_pet_ids)
+                previous_pet_ids = {str(row["pet_id"]) for row in affected_rows if row["pet_id"]}
+                replacements = {item.detection_id: item for item in changed_detections}
+                runtime_detections = [
+                    replacements.get(str(row["detection_id"])) or self._detection_from_row(row)
+                    for row in affected_rows
+                ]
+                names = {}
+                created = {}
+                for chunk in _chunked(affected_pet_ids, 500):
+                    placeholders = ", ".join("?" for _ in chunk)
+                    for row in conn.execute(
+                        "SELECT pet_id, name, created_at FROM pets "
+                        f"WHERE pet_id IN ({placeholders})",
+                        chunk,
+                    ):
+                        names[str(row["pet_id"])] = row["name"]
+                        created[str(row["pet_id"])] = str(row["created_at"])
+                names.update((pet.pet_id, pet.name) for pet in rebuilt_pets)
+                created.update((pet.pet_id, pet.created_at) for pet in rebuilt_pets)
+                rebuilt_pets = build_pet_records_from_detections(
+                    runtime_detections,
+                    names_by_pet_id=names,
+                    created_at_by_pet_id=created,
+                )
+                surviving_pet_ids = {pet.pet_id for pet in rebuilt_pets}
+                added = tuple(sorted(surviving_pet_ids - previous_pet_ids))
+                removed = tuple(sorted(previous_pet_ids - surviving_pet_ids))
+                updated = tuple(sorted(previous_pet_ids & surviving_pet_ids))
+                commit_payload = {
+                    "operation_kind": "pet_cluster_consolidate",
+                    "clustering_pipeline_target": target,
+                    "generation_id": generation_id,
+                    "processed_seed_count": len(seed_ids),
+                    "affected_pet_ids": list(affected_pet_ids),
+                    "changed_pet_ids": list(affected_pet_ids),
+                    "changed_asset_ids": list(changed_asset_ids_tuple),
+                    "added_pet_ids": list(added),
+                    "updated_pet_ids": list(updated),
+                    "removed_pet_ids": list(removed),
+                }
                 if changed_detections:
                     conn.executemany(
                         "UPDATE pet_detections SET pet_id = ? WHERE detection_id = ?",
@@ -2292,7 +2315,7 @@ class PetRepository:
                 self._sync_runtime_state_payload(
                     commit_payload,
                     rebuilt_pets,
-                    changed_detections,
+                    runtime_detections,
                 )
                 self._mark_runtime_state_synced(conn, operation_id)
                 conn.commit()
@@ -3215,7 +3238,6 @@ class PetRepository:
             detections,
             names_by_pet_id=names,
             created_at_by_pet_id=created_at,
-            allow_mixed_identity_members=True,
         )
         conn.execute("DELETE FROM pets")
         if pets:
@@ -3247,7 +3269,6 @@ class PetRepository:
             detections,
             names_by_pet_id=names,
             created_at_by_pet_id=created_at,
-            allow_mixed_identity_members=True,
         )
         self.replace_all(detections, pets)
 

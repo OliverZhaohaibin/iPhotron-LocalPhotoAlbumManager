@@ -21,6 +21,14 @@ remain binding when referenced here.
   hidden/trash state, pinned items, album order, manual metadata, People/Pets
   names, covers, hidden flags, shared card order, groups and group order, group
   covers and caches, manual faces, rejected pet detections, and identity redirects.
+- **User control of identities.** Species, similarity, embedding contracts, and
+  model generations are internal automatic recognition signals, never a validity
+  policy for user identities. Species is not a user-facing identity category or
+  control. Do not reject merges, assignments, moves, or names,
+  or undo saved user choices, because of those signals. Mixed identity members
+  are valid by default and survive consolidation, rescans, rebuilds, and recovery
+  without composition warnings or routine preservation notices. Keep same-asset
+  conflict, hidden-state, reference-integrity, and transaction guards.
 - **Cross-platform desktop.** macOS, Windows, and Linux remain supported.
   Platform rendering, maps, external tools, and AI runtime choices belong
   behind adapters and runtime discovery.

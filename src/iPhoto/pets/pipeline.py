@@ -124,6 +124,13 @@ class PetIdentityResolution:
     source: PetIdentityResolutionSource
 
     @property
+    def is_key_anchor(self) -> bool:
+        return self.source in {
+            PetIdentityResolutionSource.KEY,
+            PetIdentityResolutionSource.REDIRECT_KEY,
+        }
+
+    @property
     def is_redirect_alias(self) -> bool:
         return self.source in {
             PetIdentityResolutionSource.REDIRECT_KEY,
@@ -606,7 +613,6 @@ def build_pet_records_from_detections(
     *,
     names_by_pet_id: dict[str, str | None] | None = None,
     created_at_by_pet_id: dict[str, str] | None = None,
-    allow_mixed_identity_members: bool = False,
 ) -> list[PetRecord]:
     grouped: dict[str, list[PetDetectionRecord]] = defaultdict(list)
     for detection in detections:
@@ -618,22 +624,8 @@ def build_pet_records_from_detections(
     updated_at = utc_now_iso()
     pets: list[PetRecord] = []
     for pet_id, members in grouped.items():
-        species_labels = {
-            label
-            for label in (_normalize_species_label(member.species_label) for member in members)
-            if label is not None
-        }
-        if len(species_labels) > 1:
-            if not allow_mixed_identity_members:
-                raise ValueError(
-                    f"Pet {pet_id} mixes incompatible species labels: "
-                    f"{sorted(species_labels)}"
-                )
-            _LOGGER.info(
-                "Preserving mixed-species Pet identity %s: species=%s",
-                pet_id,
-                sorted(species_labels),
-            )
+        # Model compatibility selects comparable profile vectors, never the
+        # validity or membership of a user-owned identity.
         contract_groups: dict[tuple[str, int, int], list[PetDetectionRecord]] = defaultdict(list)
         for member in members:
             contract_groups[
@@ -643,17 +635,6 @@ def build_pet_records_from_detections(
                     int(member.generation_id),
                 )
             ].append(member)
-        if len(contract_groups) != 1:
-            if not allow_mixed_identity_members:
-                raise ValueError(
-                    f"Pet {pet_id} mixes incompatible embedding contracts: "
-                    f"{sorted(contract_groups)}"
-                )
-            _LOGGER.info(
-                "Preserving mixed-contract Pet identity %s: contracts=%s",
-                pet_id,
-                sorted(contract_groups),
-            )
         _profile_contract, profile_members = max(
             contract_groups.items(),
             key=lambda item: (
@@ -730,8 +711,8 @@ def canonicalize_pet_identities(
     canonical_members: dict[str, list[PetDetectionRecord]] = defaultdict(list)
     canonical_names: dict[str, str | None] = {}
     canonical_created_at: dict[str, str] = {}
-    direct_anchors: set[str] = set()
 
+    resolved_pets = []
     for pet in pets:
         members = detections_by_pet_id.get(pet.pet_id, [])
         resolution = resolve_canonical_pet_id(
@@ -742,31 +723,34 @@ def canonicalize_pet_identities(
             redirects=redirects,
             distance_threshold=distance_threshold,
         )
+        resolved_pets.append((pet, members, resolution))
+
+    # Reserve durable assignments before fuzzy matches, so input order cannot
+    # let a model guess displace an exact key's canonical identity.
+    resolved_pets.sort(
+        key=lambda item: (
+            not item[2].is_key_anchor,
+            min((member.detection_id for member in item[1]), default=item[0].pet_id),
+        )
+    )
+    for pet, members, resolution in resolved_pets:
         canonical_id = resolution.canonical_pet_id
-        is_incompatible = bool(
-            canonical_members.get(canonical_id)
+        existing_members = canonical_members.get(canonical_id, [])
+        same_asset_conflict = bool(
+            existing_members and _detection_groups_share_asset(existing_members, members)
+        )
+        automatic_conflict = bool(
+            existing_members
+            and not resolution.is_key_anchor
+            and not resolution.is_redirect_alias
             and not _detection_groups_compatible(
-                canonical_members[canonical_id],
+                existing_members,
                 members,
                 distance_threshold=distance_threshold,
             )
         )
-        same_asset_conflict = bool(
-            canonical_members.get(canonical_id)
-            and _detection_groups_share_asset(canonical_members[canonical_id], members)
-        )
-        if is_incompatible and (
-            same_asset_conflict
-            or (not resolution.is_redirect_alias and canonical_id in direct_anchors)
-        ):
+        if same_asset_conflict or automatic_conflict:
             canonical_id = uuid.uuid4().hex
-            resolution = PetIdentityResolution(
-                raw_pet_id=canonical_id,
-                canonical_pet_id=canonical_id,
-                source=PetIdentityResolutionSource.NEW,
-            )
-        if not resolution.is_redirect_alias:
-            direct_anchors.add(canonical_id)
         profile = profiles.get(canonical_id)
         canonical_members[canonical_id].extend(members)
         canonical_names.setdefault(canonical_id, profile.name if profile is not None else None)
@@ -870,24 +854,40 @@ def _cluster_pet_detection_labels(
 ) -> np.ndarray:
     if not detections:
         return np.empty((0,), dtype=np.int32)
-    embeddings = np.stack([detection.embedding for detection in detections], axis=0).astype(
-        np.float32
-    )
-    return _cluster_embeddings_bounded_single_link(
-        embeddings,
-        compatibility_keys=[
+    compatible_indices: dict[tuple[str | None, str, int, int], list[int]] = defaultdict(list)
+    for index, detection in enumerate(detections):
+        compatible_indices[
             (
                 _normalize_species_label(detection.species_label),
                 str(detection.embedding_pipeline_version or ""),
                 int(detection.embedding_dim),
                 int(detection.generation_id),
             )
-            for detection in detections
-        ],
-        member_keys=[detection.detection_id for detection in detections],
-        cannot_link_keys=[detection.asset_id for detection in detections],
-        distance_threshold=distance_threshold,
+        ].append(index)
+
+    # A saved identity may span model contracts, including vector dimensions.
+    # Cluster comparable subsets before restoring the durable identity above.
+    clusters: list[list[int]] = []
+    for compatibility_key, indices in compatible_indices.items():
+        members = [detections[index] for index in indices]
+        labels = _cluster_embeddings_bounded_single_link(
+            np.stack([member.embedding for member in members], axis=0).astype(np.float32),
+            compatibility_keys=[compatibility_key] * len(members),
+            member_keys=[member.detection_id for member in members],
+            cannot_link_keys=[member.asset_id for member in members],
+            distance_threshold=distance_threshold,
+        )
+        grouped: dict[int, list[int]] = defaultdict(list)
+        for index, label in zip(indices, labels.tolist()):
+            grouped[label].append(index)
+        clusters.extend(grouped.values())
+    clusters.sort(
+        key=lambda indices: tuple(sorted(detections[index].detection_id for index in indices))
     )
+    labels = np.empty((len(detections),), dtype=np.int32)
+    for label, indices in enumerate(clusters):
+        labels[indices] = label
+    return labels
 
 
 def _cluster_embeddings_bounded_single_link(

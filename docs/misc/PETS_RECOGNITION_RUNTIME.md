@@ -141,13 +141,13 @@ all durable identity/recovery semantics remain in their current repositories
 and mutation coordinator. Historical production-library acceptance is still
 Pending Manual Validation; use an isolated copy.
 
-Clustering uses `species-bounded-single-link-v3` with a default cosine link
+Automatic clustering uses `species-bounded-single-link-v3` with a default cosine link
 threshold of `0.42`. A candidate merge needs at least one cross-cluster link at
 or below that threshold, while the resulting cluster diameter must remain at or
 below `0.42 × 1.5`. Compatibility includes species, embedding pipeline version,
 embedding dimension, and generation. Detections from the same asset have a
 cannot-link constraint and cannot enter one automatic cluster. Stable detection
-member keys provide deterministic merge tie-breaking. Incremental identity
+member keys provide deterministic merge tie-breaking. Incremental automatic
 matching applies the same compatibility and cluster-wide bounds when comparing
 persisted members. Stable state uses `pet_key` mappings and profile distance to
 preserve canonical `pet_id` values across rebuilds.
@@ -170,6 +170,34 @@ Processing the asset consumes the record, so ordinary one-sample profiles never
 become general embedding candidates. Outstanding records follow explicit Pet
 merges and advance to the newest target contract if another embedding upgrade
 starts before the previous drain finishes.
+
+### User Control Of Identity Membership
+
+Species stays internal to recognition and is not a user-facing identity
+category, control, or confirmation requirement. Users can merge, move, assign, and name
+identities across species and model contracts without seeing a species-based
+restriction. Species, similarity, embedding version/dimension, and generation
+are automatic inference criteria, not validity checks for user identities.
+Same-asset conflicts, hidden-state protection, reference integrity, and
+transaction/recovery guards still apply.
+
+`build_pet_records_from_detections()` accepts mixed members by default, without
+an opt-in or strict identity mode. The profile center and boundaries use one
+compatible embedding-contract subset; identity counts and cover selection
+include all members. Automatic clustering partitions comparable model contracts
+before computing distances, including when a snapshot contains multiple vector
+dimensions. This arithmetic separation must not split a saved identity.
+
+Exact durable `pet_key` assignments and merge redirects take precedence over
+model heuristics in consolidation, rescans, rebuilds, and restart recovery.
+Reserve exact key anchors before fuzzy matches so input order cannot displace
+them. Mixing species or contracts, or exceeding automatic distance bounds,
+must not reject or undo those assignments or pause consolidation. Mixed
+identities produce no composition warning or routine preservation notice.
+Malformed model data and genuine persistence/recovery failures keep their
+existing error handling. Pending consolidation continues through its existing
+journal and queue after restart, without clearing library state or requiring a
+full rescan. Embedding upgrades retain the migration bookkeeping above.
 
 ## Scan Scheduling And Status
 
@@ -272,6 +300,7 @@ coerced into a face or person record.
 
 ```bash
 .venv/bin/python -m pytest -q tests/test_pet_service.py
+.venv/bin/python -m pytest -q tests/test_pet_remediation_contracts.py
 .venv/bin/python -m pytest -q tests/test_people_service.py tests/test_people_repository.py
 .venv/bin/python -m pytest -q tests/gui/widgets/test_people_dashboard_widget.py
 .venv/bin/python -m pytest -q tests/test_navigation_coordinator_cluster_gallery.py \
